@@ -1,0 +1,333 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Light theme (default) — RGB component variables for Tailwind opacity support */
+:root {
+  --md-primary-rgb: 26 26 26;
+  --md-onPrimary-rgb: 255 255 255;
+  --md-primaryContainer-rgb: 227 227 227;
+  --md-onPrimaryContainer-rgb: 26 26 26;
+  --md-secondary-rgb: 66 66 66;
+  --md-onSecondary-rgb: 255 255 255;
+  --md-secondaryContainer-rgb: 224 224 224;
+  --md-onSecondaryContainer-rgb: 66 66 66;
+  --md-tertiary-rgb: 156 39 176;
+  --md-onTertiary-rgb: 255 255 255;
+  --md-tertiaryContainer-rgb: 243 229 245;
+  --md-onTertiaryContainer-rgb: 74 20 140;
+  --md-surface-rgb: 250 250 250;
+  --md-surfaceDim-rgb: 245 245 245;
+  --md-surfaceBright-rgb: 255 255 255;
+  --md-surfaceContainer-rgb: 240 240 240;
+  --md-surfaceContainerHigh-rgb: 232 232 232;
+  --md-surfaceContainerHighest-rgb: 224 224 224;
+  --md-onSurface-rgb: 26 26 26;
+  --md-onSurfaceVariant-rgb: 66 66 66;
+  --md-outline-rgb: 158 158 158;
+  --md-outlineVariant-rgb: 224 224 224;
+  --md-error-rgb: 244 67 54;
+  --md-onError-rgb: 255 255 255;
+  --md-success-rgb: 76 175 80;
+  --md-warning-rgb: 255 152 0;
+  --md-info-rgb: 33 150 243;
+
+  --dark-surface-rgb: 250 250 250;
+  --dark-surfaceDim-rgb: 245 245 245;
+  --dark-surfaceBright-rgb: 255 255 255;
+  --dark-surfaceContainer-rgb: 240 240 240;
+  --dark-surfaceContainerHigh-rgb: 232 232 232;
+  --dark-surfaceContainerHighest-rgb: 224 224 224;
+  --dark-onSurface-rgb: 26 26 26;
+  --dark-onSurfaceVariant-rgb: 66 66 66;
+}
+
+/* Dark theme */
+.dark {
+  --md-primary-rgb: 255 255 255;
+  --md-onPrimary-rgb: 26 26 26;
+  --md-primaryContainer-rgb: 58 58 58;
+  --md-onPrimaryContainer-rgb: 255 255 255;
+  --md-secondary-rgb: 176 176 176;
+  --md-onSecondary-rgb: 26 26 26;
+  --md-secondaryContainer-rgb: 58 58 58;
+  --md-onSecondaryContainer-rgb: 255 255 255;
+  --md-tertiary-rgb: 206 147 216;
+  --md-onTertiary-rgb: 26 26 26;
+  --md-tertiaryContainer-rgb: 74 20 140;
+  --md-onTertiaryContainer-rgb: 243 229 245;
+  --md-surface-rgb: 18 18 18;
+  --md-surfaceDim-rgb: 10 10 10;
+  --md-surfaceBright-rgb: 30 30 30;
+  --md-surfaceContainer-rgb: 26 26 26;
+  --md-surfaceContainerHigh-rgb: 36 36 36;
+  --md-surfaceContainerHighest-rgb: 44 44 44;
+  --md-onSurface-rgb: 255 255 255;
+  --md-onSurfaceVariant-rgb: 176 176 176;
+  --md-outline-rgb: 158 158 158;
+  --md-outlineVariant-rgb: 58 58 58;
+  --md-error-rgb: 242 184 181;
+  --md-onError-rgb: 96 20 16;
+  --md-success-rgb: 165 214 167;
+  --md-warning-rgb: 255 204 128;
+  --md-info-rgb: 144 202 249;
+
+  --dark-surface-rgb: 18 18 18;
+  --dark-surfaceDim-rgb: 10 10 10;
+  --dark-surfaceBright-rgb: 30 30 30;
+  --dark-surfaceContainer-rgb: 26 26 26;
+  --dark-surfaceContainerHigh-rgb: 36 36 36;
+  --dark-surfaceContainerHighest-rgb: 44 44 44;
+  --dark-onSurface-rgb: 255 255 255;
+  --dark-onSurfaceVariant-rgb: 176 176 176;
+}
+
+/* Markdown rendered content styles */
+.markdown-body {
+  @apply text-sm leading-relaxed;
+}
+.markdown-body h1 {
+  @apply text-xl font-bold mt-4 mb-2;
+}
+.markdown-body h2 {
+  @apply text-lg font-bold mt-3 mb-1.5;
+}
+.markdown-body h3 {
+  @apply text-base font-semibold mt-2 mb-1;
+}
+.markdown-body h4, .markdown-body h5, .markdown-body h6 {
+  @apply font-semibold mt-2 mb-1;
+}
+.markdown-body p {
+  @apply mb-2;
+}
+.markdown-body p:last-child {
+  @apply mb-0;
+}
+.markdown-body strong {
+  @apply font-semibold;
+}
+.markdown-body em {
+  @apply italic;
+}
+.markdown-body ul {
+  @apply list-disc pl-5 mb-2 space-y-0.5;
+}
+.markdown-body ol {
+  @apply list-decimal pl-5 mb-2 space-y-0.5;
+}
+.markdown-body li {
+  @apply text-sm;
+}
+.markdown-body blockquote {
+  @apply border-l-2 border-md-primary/30 pl-3 py-1 my-2 text-dark-onSurfaceVariant/80 italic;
+}
+.markdown-body hr {
+  @apply border-dark-onSurfaceVariant/10 my-3;
+}
+.markdown-body a {
+  @apply text-md-primary underline decoration-md-primary/30 hover:decoration-md-primary transition-colors;
+}
+.markdown-body .code-block {
+  @apply my-2 p-3 bg-dark-surfaceContainerHighest rounded-md3-sm overflow-x-auto text-[12px] leading-5;
+}
+.markdown-body .inline-code {
+  @apply px-1.5 py-0.5 bg-dark-surfaceContainerHighest rounded-md3-xs text-[12px];
+}
+.markdown-body del {
+  @apply line-through text-dark-onSurfaceVariant/50;
+}
+.markdown-body table.markdown-table {
+  @apply w-full border-collapse my-3 text-xs rounded-md3-sm overflow-hidden;
+}
+.markdown-body table.markdown-table th,
+.markdown-body table.markdown-table td {
+  @apply border border-dark-onSurfaceVariant/15 px-3 py-2 text-left align-top;
+}
+.markdown-body table.markdown-table thead {
+  @apply bg-dark-surfaceContainerHigh;
+}
+.markdown-body table.markdown-table thead th {
+  @apply font-semibold text-dark-onSurface;
+}
+.markdown-body table.markdown-table tbody tr:nth-child(even) {
+  @apply bg-dark-surfaceContainer/40;
+}
+
+/* VIBE 模式下的 markdown 覆盖：玻璃气泡内用半透明深色块，避免突兀的不透明补丁 */
+.markdown-body.md-vibe .code-block {
+  @apply bg-black/40 border border-white/15 text-white/90;
+}
+.markdown-body.md-vibe .inline-code {
+  @apply bg-black/40 border border-white/10 text-white/90;
+}
+.markdown-body.md-vibe blockquote {
+  @apply border-white/25 text-white/60;
+}
+.markdown-body.md-vibe hr {
+  @apply border-white/15;
+}
+.markdown-body.md-vibe table.markdown-table th,
+.markdown-body.md-vibe table.markdown-table td {
+  @apply border-white/15;
+}
+.markdown-body.md-vibe table.markdown-table thead {
+  @apply bg-black/40;
+}
+.markdown-body.md-vibe table.markdown-table thead th {
+  @apply text-white/90;
+}
+.markdown-body.md-vibe table.markdown-table tbody tr:nth-child(even) {
+  @apply bg-white/5;
+}
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+.thinking-shimmer {
+  background: linear-gradient(
+    90deg,
+    rgba(192, 192, 192, 0.5) 0%,
+    rgba(240, 240, 240, 0.95) 45%,
+    rgba(255, 255, 255, 1) 50%,
+    rgba(240, 240, 240, 0.95) 55%,
+    rgba(192, 192, 192, 0.5) 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer 2.8s linear infinite;
+}
+
+@layer base {
+  html {
+    font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    /* 透明窗口底色：背景由应用容器绘制，配合窗口圆角 */
+    background-color: transparent;
+    color: var(--dark-onSurface);
+    overflow: hidden;
+  }
+
+  /* DOM 全屏（VIBE 全屏模式）时取消窗口圆角 */
+  :root:fullscreen .app-window {
+    border-radius: 0 !important;
+    border: none !important;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: rgb(var(--md-outline-rgb) / 0.3);
+    border-radius: 3px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgb(var(--md-outline-rgb) / 0.5);
+  }
+
+  ::selection {
+    background: rgb(var(--md-primary-rgb) / 0.3);
+    color: inherit;
+  }
+}
+
+@layer components {
+  .md3-surface {
+    @apply bg-dark-surface rounded-md3-md;
+  }
+
+  .md3-elevated {
+    @apply bg-dark-surfaceBright rounded-md3-md shadow-lg;
+  }
+
+  .md3-outline {
+    @apply border border-dark-onSurfaceVariant/20 rounded-md3-md;
+  }
+
+  /* ── VIBE 液态玻璃（Apple Liquid Glass 规范）──
+     四要素：backdrop blur + 饱和度提升、半透明渐变填充、
+     顶部高光描边（镜面反射）、柔和深投影。
+     叠加深色底保证动态背景上的文字可读性。 */
+  .liquid-glass {
+    background: linear-gradient(
+      135deg,
+      rgb(20 22 28 / 0.52) 0%,
+      rgb(20 22 28 / 0.38) 100%
+    );
+    backdrop-filter: blur(40px) saturate(180%);
+    -webkit-backdrop-filter: blur(40px) saturate(180%);
+    border: 1px solid rgb(255 255 255 / 0.22);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.32),
+      inset 0 -1px 0 rgb(255 255 255 / 0.08),
+      0 8px 32px rgb(0 0 0 / 0.32);
+  }
+
+  /* 更厚重的玻璃：用于面板、菜单等需要更高可读性的场景 */
+  .liquid-glass-strong {
+    background: linear-gradient(
+      135deg,
+      rgb(18 20 26 / 0.72) 0%,
+      rgb(18 20 26 / 0.58) 100%
+    );
+    backdrop-filter: blur(48px) saturate(200%);
+    -webkit-backdrop-filter: blur(48px) saturate(200%);
+    border: 1px solid rgb(255 255 255 / 0.28);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.38),
+      inset 0 -1px 0 rgb(255 255 255 / 0.10),
+      0 16px 48px rgb(0 0 0 / 0.42);
+  }
+
+  /* 轻量玻璃：用于消息气泡等大面积重复元素 */
+  .liquid-glass-subtle {
+    background: linear-gradient(
+      135deg,
+      rgb(20 22 28 / 0.42) 0%,
+      rgb(20 22 28 / 0.30) 100%
+    );
+    backdrop-filter: blur(28px) saturate(160%);
+    -webkit-backdrop-filter: blur(28px) saturate(160%);
+    border: 1px solid rgb(255 255 255 / 0.18);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.24),
+      0 4px 20px rgb(0 0 0 / 0.24);
+  }
+
+  /* 可交互玻璃按钮：悬浮增亮、按压下沉 */
+  .liquid-glass-btn {
+    @apply liquid-glass transition-all duration-200;
+  }
+  .liquid-glass-btn:hover {
+    background: linear-gradient(
+      135deg,
+      rgb(28 30 38 / 0.60) 0%,
+      rgb(28 30 38 / 0.46) 100%
+    );
+    border-color: rgb(255 255 255 / 0.32);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.42),
+      inset 0 -1px 0 rgb(255 255 255 / 0.10),
+      0 10px 36px rgb(0 0 0 / 0.38);
+  }
+  .liquid-glass-btn:active {
+    transform: scale(0.97);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.24),
+      0 4px 16px rgb(0 0 0 / 0.28);
+  }
+}

@@ -1,0 +1,305 @@
+import { useState, useRef, useEffect } from 'react'
+import {
+  MessageSquare,
+  Settings,
+  Plus,
+  Trash2,
+  FolderClosed,
+  Zap,
+  Hammer,
+  HelpCircle,
+  ClipboardList,
+  Store,
+  Loader2,
+  AlertTriangle,
+  ShieldAlert,
+} from 'lucide-react'
+import { useChatStore } from '../../stores/chat-store'
+import ConfirmDialog from '../ui/ConfirmDialog'
+
+import APP_ICON from '../../assets/icon.png'
+import NEW_CHAT_ICON from '../../assets/new-chat-icon.png'
+import { useSkillsStore } from '../../stores/skills-store'
+import { useSettingsStore } from '../../stores/settings-store'
+import { useUIStore } from '../../stores/ui-store'
+
+interface SidebarProps {
+  collapsed: boolean
+  onToggle: () => void
+}
+
+const MODE_INFO = {
+  craft: { label: 'Craft', icon: Hammer, desc: '你说我做' },
+  ask: { label: 'Ask', icon: HelpCircle, desc: '只读问答' },
+  plan: { label: 'Plan', icon: ClipboardList, desc: '先计划后执行' },
+} as const
+
+export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
+  const { sessions, activeSessionId, createSession, setActiveSession, deleteSession } = useChatStore()
+  // 订阅 sessionStatus 变化以触发 loading 圈重渲染
+  const sessionStatus = useChatStore((s) => s.sessionStatus)
+  const { skills, sessionSkillIds, toggleSessionSkill } = useSkillsStore()
+  const { permissionMode, updateSettings } = useSettingsStore()
+  const { showSkillStore, setShowSkillStore } = useUIStore()
+  const [showSkillPicker, setShowSkillPicker] = useState(false)
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+  const [hoveredSessionId, setHoveredSessionId] = useState<string | null>(null)
+  const pickerRef = useRef<HTMLDivElement>(null)
+
+  // Close picker on outside click
+  useEffect(() => {
+    if (!showSkillPicker) return
+    const handler = (e: MouseEvent) => {
+      if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) {
+        setShowSkillPicker(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [showSkillPicker])
+
+  const enabledSkills = skills.filter((s) => sessionSkillIds.includes(s.id))
+
+  // Get current session's workingDir for skill sync (user-picked or default)
+  const currentSession = sessions.find((s) => s.id === activeSessionId)
+  const workingDir = currentSession?.workingDir || currentSession?.defaultWorkDir || ''
+
+  const handleToggleSkill = (id: string) => {
+    toggleSessionSkill(id, workingDir)
+  }
+
+  const cycleMode = () => {
+    const modes: Array<'craft' | 'ask' | 'plan'> = ['craft', 'ask', 'plan']
+    const idx = modes.indexOf(permissionMode)
+    const next = modes[(idx + 1) % modes.length]
+    updateSettings({ permissionMode: next })
+  }
+
+  const currentMode = MODE_INFO[permissionMode] || MODE_INFO.craft
+  const ModeIcon = currentMode.icon
+
+  if (collapsed) {
+    return (
+      <div className="w-14 flex flex-col items-center py-3 bg-dark-surfaceDim border-r border-dark-onSurfaceVariant/10">
+        <div className="mb-2" />
+        <img
+          src={APP_ICON}
+          alt="ClerkBox"
+          className="w-8 h-8 rounded-md3-sm mb-2 object-contain"
+          title="ClerkBox"
+        />
+        <button
+          onClick={() => { setShowSkillStore(false); createSession() }}
+          className="w-8 h-8 flex items-center justify-center rounded-md3-sm bg-dark-surfaceContainerHigh mb-2"
+          title="新建会话"
+          aria-label="新建会话"
+        >
+          <Plus size={18} />
+        </button>
+        <button
+          onClick={() => setShowSkillStore(!showSkillStore)}
+          className={`w-8 h-8 flex items-center justify-center rounded-md3-sm transition-colors mb-2 ${
+            showSkillStore ? 'bg-md-primary/15 text-md-primary' : 'hover:bg-dark-surfaceContainerHigh'
+          }`}
+          title="技能商店"
+          aria-label="技能商店"
+          aria-expanded={showSkillStore}
+        >
+          <Store size={18} />
+        </button>
+        <div className="flex-1" />
+        {enabledSkills.length > 0 && (
+          <div className="relative mb-1">
+            <Zap size={16} className="text-md-primary" />
+            <span className="absolute -top-1 -right-1.5 w-3 h-3 bg-md-primary rounded-full text-[7px] flex items-center justify-center text-md-onPrimary font-bold">
+              {enabledSkills.length}
+            </span>
+          </div>
+        )}
+        <button
+          onClick={cycleMode}
+          className={`w-8 h-8 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors mb-1 ${
+            permissionMode === 'plan' ? 'text-md-info' : permissionMode === 'ask' ? 'text-md-success' : ''
+          }`}
+          title={`模式: ${currentMode.label}`}
+        >
+          <ModeIcon size={18} />
+        </button>
+        <button
+          onClick={() => useSettingsStore.getState().updateSettings({ showSettings: true })}
+          className="w-8 h-8 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors"
+        >
+          <Settings size={18} />
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div className="w-64 flex flex-col bg-dark-surfaceDim border-r border-dark-onSurfaceVariant/10">
+      <div className="flex items-center justify-between px-4 py-3">
+        <div className="flex items-center gap-2">
+          <img src={APP_ICON} alt="ClerkBox" className="w-5 h-5 rounded" />
+          <span className="text-sm font-semibold tracking-wide text-dark-onSurfaceVariant">ClerkBox</span>
+        </div>
+      </div>
+
+      {/* New Chat + Skill Store buttons - same size, side by side */}
+      <div className="px-3 pb-2 flex gap-1.5">
+        <button
+          onClick={() => { setShowSkillStore(false); createSession() }}
+          className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-md3-md bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer transition-colors text-sm"
+        >
+          <img src={NEW_CHAT_ICON} alt="" className="w-4 h-4 object-contain" />
+          <span>新会话</span>
+        </button>
+        <button
+          onClick={() => setShowSkillStore(!showSkillStore)}
+          className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-md3-md transition-colors text-sm ${
+            showSkillStore
+              ? 'bg-md-primary/15 text-md-primary hover:bg-md-primary/25'
+              : 'bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant'
+          }`}
+        >
+          <Store size={16} />
+          <span>技能</span>
+        </button>
+      </div>
+
+      {/* Mode selector + Active skills indicator */}
+      <div className="px-3 pb-2 space-y-1.5">
+        {/* Mode toggle */}
+        <button
+          onClick={cycleMode}
+          className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-md3-sm transition-colors text-xs ${
+            permissionMode === 'plan'
+              ? 'bg-md-info/10 text-md-info hover:bg-md-info/20'
+              : permissionMode === 'ask'
+                ? 'bg-md-success/10 text-md-success hover:bg-md-success/20'
+                : 'bg-dark-surfaceContainerHigh text-dark-onSurfaceVariant hover:bg-dark-surfaceContainer'
+          }`}
+        >
+          <ModeIcon size={14} />
+          <span className="font-medium">{currentMode.label}</span>
+          <span className="text-dark-onSurfaceVariant/40">— {currentMode.desc}</span>
+        </button>
+
+        {/* Active skills */}
+        {enabledSkills.length > 0 && (
+          <div className="flex items-center gap-1 flex-wrap">
+            {enabledSkills.map((s) => (
+              <span
+                key={s.id}
+                title={s.description || s.name}
+                className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-md-primary/10 text-md-primary text-[10px] cursor-default"
+              >
+                <span>{s.icon}</span>
+                {s.name}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="flex-1 overflow-y-auto px-2">
+        <div className="space-y-1">
+          {sessions.length === 0 && (
+            <p className="px-3 py-4 text-xs text-dark-onSurfaceVariant/50 text-center">
+              暂无会话，点击上方创建
+            </p>
+          )}
+          {sessions.map((s) => (
+            <div
+              key={s.id}
+              onMouseEnter={() => setHoveredSessionId(s.id)}
+              onMouseLeave={() => setHoveredSessionId(null)}
+              className={`flex items-center gap-2 px-3 py-2 rounded-full text-sm transition-colors ${
+                activeSessionId === s.id
+                  ? 'bg-md-secondaryContainer text-md-onSecondaryContainer'
+                  : 'text-dark-onSurfaceVariant hover:bg-dark-surfaceContainer'
+              }`}
+            >
+              <button
+                onClick={() => { setShowSkillStore(false); setActiveSession(s.id) }}
+                className="flex-1 flex items-center gap-2 text-left min-w-0"
+              >
+                <MessageSquare size={14} className="flex-shrink-0" />
+                <span className="truncate">{s.title}</span>
+              </button>
+              {s.workingDir && (
+                <span title={s.workingDir}>
+                  <FolderClosed size={11} className="flex-shrink-0 text-dark-onSurfaceVariant/40" />
+                </span>
+              )}
+              {/* per-session 工作状态指示器 */}
+              {(() => {
+                const status = sessionStatus[s.id]
+                if (status === 'working') {
+                  return (
+                    <span title="AI 正在工作中" className="flex-shrink-0">
+                      <Loader2 size={13} className="animate-spin text-md-primary" />
+                    </span>
+                  )
+                }
+                if (status === 'error') {
+                  return (
+                    <span title="AI 异常停下" className="flex-shrink-0">
+                      <AlertTriangle size={13} className="text-md-error" />
+                    </span>
+                  )
+                }
+                if (status === 'confirm-danger') {
+                  return (
+                    <span title="等待危险命令确认" className="flex-shrink-0">
+                      <ShieldAlert size={13} className="text-md-warning animate-pulse" />
+                    </span>
+                  )
+                }
+                return null
+              })()}
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  setConfirmDeleteId(s.id)
+                }}
+                className={`w-6 h-6 flex items-center justify-center rounded-md3-xs hover:bg-md-error/20 hover:text-md-error transition-opacity flex-shrink-0 ${
+                  hoveredSessionId === s.id ? 'opacity-100' : 'opacity-0'
+                }`}
+                aria-label="删除会话"
+                title="删除会话"
+              >
+                <Trash2 size={13} />
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="border-t border-dark-onSurfaceVariant/10 px-3 py-2">
+        <button
+          onClick={() => useSettingsStore.getState().updateSettings({ showSettings: true })}
+          className="w-full flex items-center gap-2 px-3 py-2 rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-sm text-dark-onSurfaceVariant"
+        >
+          <Settings size={16} />
+          <span>设置</span>
+        </button>
+      </div>
+
+      {/* Delete confirmation dialog */}
+      {confirmDeleteId && (
+        <ConfirmDialog
+          title="删除会话"
+          message="确定要删除这个会话吗？此操作不可撤销，会话中的所有消息将永久丢失。"
+          confirmText="删除"
+          cancelText="取消"
+          variant="danger"
+          onConfirm={() => {
+            deleteSession(confirmDeleteId)
+            setConfirmDeleteId(null)
+          }}
+          onCancel={() => setConfirmDeleteId(null)}
+        />
+      )}
+    </div>
+  )
+}
