@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { ArrowLeft, Bot, Loader2, CheckCircle, XCircle, Wrench, Brain } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { useAgentRunsStore } from '../../stores/agent-runs-store'
 import type { Message, ToolCall, ToolResult } from '../../types/agent'
 
@@ -10,18 +11,12 @@ interface SubAgentDetailPanelProps {
 
 // 工具调用条（轻量版，不依赖 chat-store）
 function ToolCallBar({ tc, result, vibe }: { tc: ToolCall; result?: ToolResult; vibe?: boolean }) {
+  const { t } = useTranslation()
   const [expanded, setExpanded] = useState(false)
   const isRunning = !result
   const isError = result?.isError
 
-  // 友好名
-  const friendlyName: Record<string, string> = {
-    read_file: '读取文件', write_file: '写入文件', search_replace: '替换内容',
-    list_dir: '列出目录', search_files: '搜索文件', search_content: '搜索内容',
-    execute_command: '执行命令', web_search: '网络搜索', web_fetch: '抓取网页',
-    save_memory: '保存记忆', search_memory: '搜索记忆', spawn_agent: '派生子 Agent',
-  }
-  const name = friendlyName[tc.name] || tc.name
+  const name = t(`tools.${tc.name}`, { defaultValue: tc.name })
 
   // 参数预览
   const argPreview = (() => {
@@ -40,7 +35,7 @@ function ToolCallBar({ tc, result, vibe }: { tc: ToolCall; result?: ToolResult; 
         onClick={() => setExpanded(!expanded)}
         aria-expanded={expanded}
         aria-controls={`sub-tc-detail-${tc.id}`}
-        aria-label={`工具调用：${name}`}
+        aria-label={t('toolPreview.toolCallStatus', { name, status: '' })}
       >
         <Wrench className={`h-3 w-3 ${isRunning ? 'animate-pulse text-md-primary' : isError ? 'text-md-error' : 'text-md-success'}`} />
         <span className={`text-xs font-medium ${vibe ? 'text-white/90' : 'text-md-onSurface'}`}>{name}</span>
@@ -51,11 +46,11 @@ function ToolCallBar({ tc, result, vibe }: { tc: ToolCall; result?: ToolResult; 
       </button>
       {expanded && (
         <div id={`sub-tc-detail-${tc.id}`} className={`border-t px-2 py-1.5 ${vibe ? 'border-white/10' : 'border-md-outlineVariant/20'}`}>
-          <div className={`text-[10px] ${vibe ? 'text-white/50' : 'text-md-onSurfaceVariant'}`}>参数</div>
+          <div className={`text-[10px] ${vibe ? 'text-white/50' : 'text-md-onSurfaceVariant'}`}>{t('chat.toolParamsShort')}</div>
           <pre className={`mt-0.5 max-h-32 overflow-auto rounded p-1.5 text-[11px] ${vibe ? 'bg-black/30 text-white/90' : 'bg-dark-surfaceContainerHigh text-md-onSurface'}`}>{JSON.stringify(tc.arguments, null, 2)}</pre>
           {result && (
             <>
-              <div className={`mt-1.5 text-[10px] ${vibe ? 'text-white/50' : 'text-md-onSurfaceVariant'}`}>结果</div>
+              <div className={`mt-1.5 text-[10px] ${vibe ? 'text-white/50' : 'text-md-onSurfaceVariant'}`}>{t('chat.toolResultShort')}</div>
               <pre className={`mt-0.5 max-h-48 overflow-auto rounded p-1.5 text-[11px] ${isError ? 'bg-md-error/10 text-md-error' : vibe ? 'bg-black/30 text-white/90' : 'bg-dark-surfaceContainerHigh text-md-onSurface'}`}>{result.content.slice(0, 2000)}</pre>
             </>
           )}
@@ -67,6 +62,7 @@ function ToolCallBar({ tc, result, vibe }: { tc: ToolCall; result?: ToolResult; 
 
 // 单条消息渲染（轻量版）
 function SubAgentMessage({ msg, vibe }: { msg: Message; vibe?: boolean }) {
+  const { t } = useTranslation()
   if (msg.role === 'user') {
     // 初始 prompt 不在这里显示（已在头部展示）
     return null
@@ -83,7 +79,7 @@ function SubAgentMessage({ msg, vibe }: { msg: Message; vibe?: boolean }) {
     return (
       <div className={`my-2 flex items-center gap-2 text-xs ${vibe ? 'text-white/50' : 'text-md-onSurfaceVariant'}`}>
         <Loader2 className="h-3 w-3 animate-spin" />
-        思考中...
+        {t('chat.thinkingInProgress')}
       </div>
     )
   }
@@ -94,7 +90,7 @@ function SubAgentMessage({ msg, vibe }: { msg: Message; vibe?: boolean }) {
       {hasThinking && (
         <details className={`mb-1 rounded p-1.5 ${vibe ? 'bg-white/5' : 'bg-md-tertiary/5'}`}>
           <summary className="flex cursor-pointer items-center gap-1 text-[11px] text-md-tertiary">
-            <Brain className="h-3 w-3" /> 思考过程
+            <Brain className="h-3 w-3" /> {t('chat.thinkingProcess')}
           </summary>
           <div className={`mt-1 whitespace-pre-wrap text-[11px] ${vibe ? 'text-white/60' : 'text-md-tertiary/80'}`}>{msg.thinkingContent}</div>
         </details>
@@ -109,7 +105,7 @@ function SubAgentMessage({ msg, vibe }: { msg: Message; vibe?: boolean }) {
           {msg.streamingToolCalls.map((tc) => (
             <div key={tc.id} className="flex items-center gap-1">
               <Loader2 className="h-3 w-3 animate-spin" />
-              正在生成: {tc.name}...
+              {t('chat.generatingToolCall', { name: tc.name })}
             </div>
           ))}
         </div>
@@ -124,6 +120,7 @@ function SubAgentMessage({ msg, vibe }: { msg: Message; vibe?: boolean }) {
 }
 
 export function SubAgentDetailPanel({ sessionId, vibe }: SubAgentDetailPanelProps) {
+  const { t } = useTranslation()
   // 精细化订阅：只拿需要的字段，避免每次 set 都触发面板重渲染
   const selectRun = useAgentRunsStore((s) => s.selectRun)
   const run = useAgentRunsStore((s) => {
@@ -164,18 +161,18 @@ export function SubAgentDetailPanel({ sessionId, vibe }: SubAgentDetailPanelProp
   if (!run) return null
 
   const statusConfig = ({
-    running: { icon: <Loader2 className="h-4 w-4 animate-spin text-md-primary" />, label: '运行中', class: 'text-md-primary' },
-    completed: { icon: <CheckCircle className="h-4 w-4 text-md-success" />, label: '已完成', class: 'text-md-success' },
-    failed: { icon: <XCircle className="h-4 w-4 text-md-error" />, label: '失败', class: 'text-md-error' },
-    aborted: { icon: <XCircle className="h-4 w-4 text-md-onSurfaceVariant" />, label: '已中断', class: 'text-md-onSurfaceVariant' },
-  } as const)[run.status] || { icon: <Loader2 className="h-4 w-4 animate-spin text-md-onSurfaceVariant" />, label: '未知', class: 'text-md-onSurfaceVariant' }
+    running: { icon: <Loader2 className="h-4 w-4 animate-spin text-md-primary" />, label: t('common.running'), class: 'text-md-primary' },
+    completed: { icon: <CheckCircle className="h-4 w-4 text-md-success" />, label: t('common.complete'), class: 'text-md-success' },
+    failed: { icon: <XCircle className="h-4 w-4 text-md-error" />, label: t('common.failed'), class: 'text-md-error' },
+    aborted: { icon: <XCircle className="h-4 w-4 text-md-onSurfaceVariant" />, label: t('common.aborted'), class: 'text-md-onSurfaceVariant' },
+  } as const)[run.status] || { icon: <Loader2 className="h-4 w-4 animate-spin text-md-onSurfaceVariant" />, label: t('common.unknown'), class: 'text-md-onSurfaceVariant' }
 
   return (
     <div
       ref={panelRef}
       tabIndex={-1}
       role="complementary"
-      aria-label={`子代理 ${run.agentName} 详情`}
+      aria-label={t('chat.subAgentDetailAria', { name: run.agentName })}
       className={`flex h-full w-[min(480px,40vw)] min-w-[320px] flex-col border-l focus:outline-none ${vibe ? 'liquid-glass-strong border-white/20' : 'border-md-outlineVariant/30 bg-dark-surfaceContainer'}`}
     >
       {/* 头部 */}
@@ -183,8 +180,8 @@ export function SubAgentDetailPanel({ sessionId, vibe }: SubAgentDetailPanelProp
         <button
           className={`rounded p-1 ${vibe ? 'hover:bg-white/10' : 'hover:bg-md-primaryContainer/20'}`}
           onClick={() => selectRun(null)}
-          title="关闭"
-          aria-label="关闭详情面板"
+          title={t('chat.closePanelTitle')}
+          aria-label={t('chat.closePanelAria')}
         >
           <ArrowLeft className={`h-4 w-4 ${vibe ? 'text-white/60' : 'text-md-onSurfaceVariant'}`} />
         </button>
@@ -195,14 +192,14 @@ export function SubAgentDetailPanel({ sessionId, vibe }: SubAgentDetailPanelProp
 
       {/* 任务摘要 */}
       <div className={`border-b px-3 py-2 ${vibe ? 'border-white/10' : 'border-md-outlineVariant/30'}`}>
-        <div className={`text-[10px] ${vibe ? 'text-white/50' : 'text-md-onSurfaceVariant'}`}>任务</div>
+        <div className={`text-[10px] ${vibe ? 'text-white/50' : 'text-md-onSurfaceVariant'}`}>{t('chat.subAgentTask')}</div>
         <div className={`mt-0.5 text-xs ${vibe ? 'text-white/90' : 'text-md-onSurface'}`}>{run.prompt}</div>
         <div className="mt-1.5 flex items-center gap-2 text-[11px]">
           {statusConfig.icon}
           <span className={statusConfig.class}>{statusConfig.label}</span>
           {run.status === 'running' && elapsed > 0 && <span className={vibe ? 'text-white/50' : 'text-md-onSurfaceVariant'}>{elapsed}s</span>}
           {run.status === 'completed' && run.result && (
-            <span className={vibe ? 'text-white/50' : 'text-md-onSurfaceVariant'}>· {(run.result.length / 1000).toFixed(1)}k 字结果</span>
+            <span className={vibe ? 'text-white/50' : 'text-md-onSurfaceVariant'}>· {t('chat.subAgentCharResult', { count: (run.result.length / 1000).toFixed(1) })}</span>
           )}
         </div>
         {run.status === 'failed' && run.error && (
@@ -213,7 +210,7 @@ export function SubAgentDetailPanel({ sessionId, vibe }: SubAgentDetailPanelProp
       {/* 消息列表 */}
       <div className="flex-1 overflow-y-auto px-3 py-2">
         {run.messages.length === 0 ? (
-          <div className={`text-center text-xs ${vibe ? 'text-white/50' : 'text-md-onSurfaceVariant'}`}>暂无消息</div>
+          <div className={`text-center text-xs ${vibe ? 'text-white/50' : 'text-md-onSurfaceVariant'}`}>{t('chat.subAgentNoMessages')}</div>
         ) : (
           run.messages.map((msg) => <SubAgentMessage key={msg.id} msg={msg} vibe={vibe} />)
         )}
@@ -222,7 +219,7 @@ export function SubAgentDetailPanel({ sessionId, vibe }: SubAgentDetailPanelProp
       {/* 最终结果 */}
       {run.status === 'completed' && run.result && (
         <div className={`border-t px-3 py-2 ${vibe ? 'border-white/10' : 'border-md-outlineVariant/30'}`}>
-          <div className={`text-[10px] ${vibe ? 'text-white/50' : 'text-md-onSurfaceVariant'}`}>最终结果（已返回给主 Agent）</div>
+          <div className={`text-[10px] ${vibe ? 'text-white/50' : 'text-md-onSurfaceVariant'}`}>{t('chat.subAgentFinalResult')}</div>
           <div className={`mt-1 max-h-40 overflow-y-auto rounded p-1.5 text-xs ${vibe ? 'bg-white/5 text-white/90' : 'bg-md-success/5 text-md-onSurface'}`}>{run.result.slice(0, 1000)}{run.result.length > 1000 && '...'}</div>
         </div>
       )}

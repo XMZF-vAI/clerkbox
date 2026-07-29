@@ -16,6 +16,7 @@ import {
   X,
   FileText,
 } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { useSkillsStore } from '../../stores/skills-store'
 import { useChatStore } from '../../stores/chat-store'
 import { useUIStore } from '../../stores/ui-store'
@@ -26,6 +27,7 @@ import type { SkillsMPSkill } from '../../types/skills'
  * Features: recommended skills + search + installed management.
  */
 export default function SkillStore() {
+  const { t } = useTranslation()
   const {
     skills,
     sessionSkillIds,
@@ -150,11 +152,11 @@ export default function SkillStore() {
     const name = file.name
     const ext = name.split('.').pop()?.toLowerCase()
     if (ext !== 'skill' && ext !== 'zip') {
-      setUploadError('仅支持 .skill 或 .zip 文件')
+      setUploadError(t('skillstore.invalidFile'))
       return
     }
     // 拖拽文件无法直接拿到 Electron 主进程需要的绝对路径，提示用户点击选择
-    setUploadError('请通过点击选择文件上传（浏览器安全限制无法获取拖拽文件路径）')
+    setUploadError(t('skillstore.dragDropHint'))
   }
 
   const confirmUpload = async () => {
@@ -166,7 +168,7 @@ export default function SkillStore() {
     if (result.success) {
       closeUploadModal()
     } else {
-      setUploadError(result.error || '安装失败')
+      setUploadError(result.error || t('skillstore.installFailed'))
     }
   }
 
@@ -200,7 +202,7 @@ export default function SkillStore() {
           {showInstall && (
             installed ? (
               <span className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium bg-md-success/15 text-md-success">
-                <Check size={11} /> 已安装
+                <Check size={11} /> {t('common.installed')}
               </span>
             ) : (
               <button
@@ -209,7 +211,7 @@ export default function SkillStore() {
                 className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium bg-md-primary/15 text-md-primary hover:bg-md-primary/25 disabled:opacity-40 transition-all"
               >
                 {installing ? <Loader2 size={11} className="animate-spin" /> : <Download size={11} />}
-                {installing ? '安装中' : '安装'}
+                {installing ? t('common.installing') : t('common.install')}
               </button>
             )
           )}
@@ -218,7 +220,7 @@ export default function SkillStore() {
             target="_blank"
             rel="noopener noreferrer"
             className="p-1.5 rounded-lg hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant/30 hover:text-dark-onSurfaceVariant transition-all"
-            title="在 SkillHub 查看"
+            title={t('skillstore.viewOnSkillHub')}
           >
             <ExternalLink size={12} />
           </a>
@@ -233,8 +235,8 @@ export default function SkillStore() {
       <div className="flex items-center gap-3 px-6 py-4 border-b border-dark-onSurfaceVariant/10">
         <Store size={22} className="text-md-primary" />
         <div className="flex-1">
-          <h1 className="text-lg font-semibold text-dark-onSurface">技能商店</h1>
-          <p className="text-xs text-dark-onSurfaceVariant/50">浏览、安装技能，增强 AI 能力</p>
+          <h1 className="text-lg font-semibold text-dark-onSurface">{t('skillstore.title')}</h1>
+          <p className="text-xs text-dark-onSurfaceVariant/50">{t('skillstore.subtitle')}</p>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -242,14 +244,14 @@ export default function SkillStore() {
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-md3-md bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer transition-colors text-sm text-dark-onSurfaceVariant"
           >
             <Upload size={14} />
-            加载自定义技能
+            {t('skillstore.loadCustom')}
           </button>
           <button
             onClick={handleBack}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-md3-md bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer transition-colors text-sm text-dark-onSurfaceVariant"
           >
             <ArrowLeft size={14} />
-            {view === 'search' ? '返回推荐' : '返回对话'}
+            {view === 'search' ? t('skillstore.backToRecommend') : t('skillstore.backToChat')}
           </button>
         </div>
       </div>
@@ -264,7 +266,7 @@ export default function SkillStore() {
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-              placeholder="搜索在线技能（SkillHub）..."
+              placeholder={t('skillstore.searchPlaceholder')}
               className="w-full pl-9 pr-4 py-2.5 rounded-md3-md bg-dark-surfaceContainerHigh border border-dark-onSurfaceVariant/10 focus:border-md-primary/50 focus:ring-1 focus:ring-md-primary/30 outline-none transition-all text-sm placeholder:text-dark-onSurfaceVariant/30"
             />
           </div>
@@ -274,7 +276,7 @@ export default function SkillStore() {
             className="px-5 py-2.5 rounded-md3-md bg-md-primary hover:bg-md-primary/90 disabled:opacity-40 disabled:cursor-not-allowed transition-colors text-sm text-md-onPrimary font-medium flex items-center gap-1.5"
           >
             {searchLoading ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />}
-            搜索
+            {t('skillstore.search')}
           </button>
         </div>
       </div>
@@ -287,7 +289,7 @@ export default function SkillStore() {
             <div className="mb-6">
               <h3 className="flex items-center gap-2 text-sm font-medium text-md-success mb-3">
                 <Check size={14} />
-                已安装 ({installedSkills.length})
+                {t('skillstore.installedCount', { count: installedSkills.length })}
               </h3>
               <div className="grid gap-2 w-full">
                 {installedSkills.map((skill) => {
@@ -307,7 +309,7 @@ export default function SkillStore() {
                         <p className="text-xs text-dark-onSurfaceVariant/50 truncate">{skill.description}</p>
                         {skill.warnings && skill.warnings.length > 0 && (
                           <p className="text-[10px] text-md-warning/80 mt-0.5 truncate" title={skill.warnings.join('\n')}>
-                            ⚠️ {skill.warnings[0]}{skill.warnings.length > 1 ? ` 等 ${skill.warnings.length} 条提示` : ''}
+                            ⚠️ {skill.warnings[0]}{skill.warnings.length > 1 ? t('skillstore.warningsSuffix', { count: skill.warnings.length }) : ''}
                           </p>
                         )}
                       </div>
@@ -320,12 +322,12 @@ export default function SkillStore() {
                         }`}
                       >
                         {isActive ? <Check size={11} /> : <Zap size={11} />}
-                        {isActive ? '已加载' : '加载'}
+                        {isActive ? t('skillstore.loaded') : t('skillstore.load')}
                       </button>
                       <button
                         onClick={() => handleUninstall(skill.id)}
                         className="p-1.5 rounded-lg hover:bg-md-error/10 text-dark-onSurfaceVariant/40 hover:text-md-error transition-all flex-shrink-0"
-                        title="卸载"
+                        title={t('common.uninstall')}
                       >
                         <Trash2 size={13} />
                       </button>
@@ -341,12 +343,12 @@ export default function SkillStore() {
             <div>
               <h3 className="flex items-center gap-2 text-sm font-medium text-dark-onSurfaceVariant mb-3">
                 <TrendingUp size={14} className="text-md-primary" />
-                推荐技能
+                {t('skillstore.recommended')}
               </h3>
               {recommendedLoading && recommendedSkills.length === 0 ? (
                 <div className="flex items-center justify-center py-12 gap-2 text-dark-onSurfaceVariant/40">
                   <Loader2 size={20} className="animate-spin" />
-                  <span className="text-sm">加载推荐...</span>
+                  <span className="text-sm">{t('skillstore.loadingRecommended')}</span>
                 </div>
               ) : recommendedSkills.length > 0 ? (
                 <div className="grid gap-2 w-full">
@@ -355,9 +357,9 @@ export default function SkillStore() {
               ) : (
                 <div className="text-center py-16">
                   <div className="text-4xl mb-3">🏪</div>
-                  <p className="text-sm text-dark-onSurfaceVariant/40 mb-1">搜索技能开始使用</p>
+                  <p className="text-sm text-dark-onSurfaceVariant/40 mb-1">{t('skillstore.emptyTitle')}</p>
                   <p className="text-xs text-dark-onSurfaceVariant/25">
-                    从 SkillHub 市场搜索 AI 技能
+                    {t('skillstore.emptyHint')}
                   </p>
                 </div>
               )}
@@ -370,7 +372,7 @@ export default function SkillStore() {
               {searchLoading && (
                 <div className="flex items-center justify-center py-12 gap-2 text-dark-onSurfaceVariant/40">
                   <Loader2 size={20} className="animate-spin" />
-                  <span className="text-sm">搜索中...</span>
+                  <span className="text-sm">{t('skillstore.searching')}</span>
                 </div>
               )}
 
@@ -378,7 +380,7 @@ export default function SkillStore() {
                 <div>
                   <h3 className="flex items-center gap-2 text-sm font-medium text-dark-onSurfaceVariant mb-3">
                     <Search size={14} />
-                    搜索结果 {searchTotal > 0 && `(共 ${searchTotal} 个)`}
+                    {t('skillstore.searchResults')} {searchTotal > 0 && t('skillstore.searchTotal', { count: searchTotal })}
                   </h3>
                   <div className="grid gap-2 w-full">
                     {searchResults.map((mpSkill) => renderMPSkill(mpSkill))}
@@ -390,7 +392,7 @@ export default function SkillStore() {
                         onClick={() => searchOnlineSkills(searchQuery, searchPage + 1)}
                         className="flex items-center gap-1.5 px-4 py-2 rounded-md3-md bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer transition-colors text-sm text-dark-onSurfaceVariant"
                       >
-                        加载更多
+                        {t('skillstore.loadMore')}
                       </button>
                     </div>
                   )}
@@ -400,8 +402,8 @@ export default function SkillStore() {
               {!searchLoading && searchResults.length === 0 && searchQuery && (
                 <div className="text-center py-16">
                   <div className="text-4xl mb-3">🤷</div>
-                  <p className="text-sm text-dark-onSurfaceVariant/40 mb-1">未找到 "{searchQuery}" 相关技能</p>
-                  <p className="text-xs text-dark-onSurfaceVariant/25">试试其他关键词</p>
+                  <p className="text-sm text-dark-onSurfaceVariant/40 mb-1">{t('skillstore.noResultsTitle', { query: searchQuery })}</p>
+                  <p className="text-xs text-dark-onSurfaceVariant/25">{t('skillstore.noResultsHint')}</p>
                 </div>
               )}
             </div>
@@ -414,11 +416,11 @@ export default function SkillStore() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
           <div className="w-full max-w-md rounded-xl bg-dark-surfaceContainerHigh border border-dark-onSurfaceVariant/10 shadow-2xl p-5 animate-fade-in">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-base font-semibold text-dark-onSurface">上传技能</h3>
+              <h3 className="text-base font-semibold text-dark-onSurface">{t('skillstore.uploadTitle')}</h3>
               <button
                 onClick={closeUploadModal}
                 className="p-1 rounded-md3-sm hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant/60 transition-colors"
-                aria-label="关闭"
+                aria-label={t('common.close')}
               >
                 <X size={16} />
               </button>

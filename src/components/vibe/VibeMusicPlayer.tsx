@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { Play, Pause, SkipBack, SkipForward, Music } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { useVibeStore, DEFAULT_VIBE_MUSIC } from '../../stores/vibe-store'
 import { ipc } from '../../lib/ipc-client'
 
@@ -11,7 +12,7 @@ interface Track {
 }
 
 function fileNameFromPath(path: string): string {
-  return path.replace(/\\/g, '/').split('/').pop() || '未知音频'
+  return path.replace(/\\/g, '/').split('/').pop() || ''
 }
 
 function ext(path: string): string {
@@ -19,6 +20,7 @@ function ext(path: string): string {
 }
 
 export default function VibeMusicPlayer() {
+  const { t } = useTranslation()
   const music = useVibeStore((s) => s.music)
   const musicFolder = useVibeStore((s) => s.musicFolder)
   const audioRef = useRef<HTMLAudioElement | null>(null)
@@ -155,7 +157,7 @@ export default function VibeMusicPlayer() {
       <Music size={16} className="text-white/70" />
 
       <div className="flex flex-col min-w-[140px]">
-        <span className="text-xs font-medium truncate max-w-[160px]">{currentTrack.name}</span>
+        <span className="text-xs font-medium truncate max-w-[160px]">{currentTrack.name || t('vibe.unknownAudio')}</span>
         <div className="flex items-center gap-2 mt-1">
           <input
             type="range"
@@ -199,7 +201,7 @@ export default function VibeMusicPlayer() {
           onClick={handlePlayPause}
           className="ml-1 text-[10px] px-2 py-0.5 rounded-full bg-white/20 hover:bg-white/30 transition-colors"
         >
-          点击播放
+          {t('vibe.clickToPlay')}
         </button>
       )}
     </div>

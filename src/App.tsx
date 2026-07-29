@@ -12,6 +12,7 @@ import { useSettingsStore, seedCustomModelsIfEmpty } from './stores/settings-sto
 import { useUIStore } from './stores/ui-store'
 import { useVibeStore } from './stores/vibe-store'
 import { applyColorScheme, resolveSeed } from './lib/theme-engine'
+import { I18nProvider } from './components/I18nProvider'
 
 function ThemeProvider({ children }: { children: React.ReactNode }) {
   const theme = useSettingsStore((s) => s.theme)
@@ -112,5 +113,5 @@ export default function App() {
     )
   }
 
-  return <ThemeProvider>{content}</ThemeProvider>
+  return <ThemeProvider><I18nProvider>{content}</I18nProvider></ThemeProvider>
 }

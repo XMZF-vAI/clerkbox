@@ -14,6 +14,7 @@ import {
   AlertTriangle,
   ShieldAlert,
 } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { useChatStore } from '../../stores/chat-store'
 import ConfirmDialog from '../ui/ConfirmDialog'
 
@@ -28,13 +29,16 @@ interface SidebarProps {
   onToggle: () => void
 }
 
-const MODE_INFO = {
-  craft: { label: 'Craft', icon: Hammer, desc: '你说我做' },
-  ask: { label: 'Ask', icon: HelpCircle, desc: '只读问答' },
-  plan: { label: 'Plan', icon: ClipboardList, desc: '先计划后执行' },
-} as const
+type PermissionMode = 'craft' | 'ask' | 'plan'
+
+const MODE_META: Record<PermissionMode, { icon: typeof Hammer; labelKey: string; descKey: string }> = {
+  craft: { icon: Hammer, labelKey: 'sidebar.mode.craftLabel', descKey: 'sidebar.mode.craftDesc' },
+  ask: { icon: HelpCircle, labelKey: 'sidebar.mode.askLabel', descKey: 'sidebar.mode.askDesc' },
+  plan: { icon: ClipboardList, labelKey: 'sidebar.mode.planLabel', descKey: 'sidebar.mode.planDesc' },
+}
 
 export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
+  const { t } = useTranslation()
   const { sessions, activeSessionId, createSession, setActiveSession, deleteSession } = useChatStore()
   // 订阅 sessionStatus 变化以触发 loading 圈重渲染
   const sessionStatus = useChatStore((s) => s.sessionStatus)
@@ -69,14 +73,16 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
   }
 
   const cycleMode = () => {
-    const modes: Array<'craft' | 'ask' | 'plan'> = ['craft', 'ask', 'plan']
+    const modes: Array<PermissionMode> = ['craft', 'ask', 'plan']
     const idx = modes.indexOf(permissionMode)
     const next = modes[(idx + 1) % modes.length]
     updateSettings({ permissionMode: next })
   }
 
-  const currentMode = MODE_INFO[permissionMode] || MODE_INFO.craft
+  const currentMode = MODE_META[permissionMode] || MODE_META.craft
   const ModeIcon = currentMode.icon
+  const currentModeLabel = t(currentMode.labelKey)
+  const currentModeDesc = t(currentMode.descKey)
 
   if (collapsed) {
     return (
@@ -91,8 +97,8 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
         <button
           onClick={() => { setShowSkillStore(false); createSession() }}
           className="w-8 h-8 flex items-center justify-center rounded-md3-sm bg-dark-surfaceContainerHigh mb-2"
-          title="新建会话"
-          aria-label="新建会话"
+          title={t('sidebar.newChatAria')}
+          aria-label={t('sidebar.newChatAria')}
         >
           <Plus size={18} />
         </button>
@@ -101,8 +107,8 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
           className={`w-8 h-8 flex items-center justify-center rounded-md3-sm transition-colors mb-2 ${
             showSkillStore ? 'bg-md-primary/15 text-md-primary' : 'hover:bg-dark-surfaceContainerHigh'
           }`}
-          title="技能商店"
-          aria-label="技能商店"
+          title={t('sidebar.skillStoreAria')}
+          aria-label={t('sidebar.skillStoreAria')}
           aria-expanded={showSkillStore}
         >
           <Store size={18} />
@@ -121,7 +127,7 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
           className={`w-8 h-8 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors mb-1 ${
             permissionMode === 'plan' ? 'text-md-info' : permissionMode === 'ask' ? 'text-md-success' : ''
           }`}
-          title={`模式: ${currentMode.label}`}
+          title={`${t('sidebar.modePrefix')}: ${currentModeLabel}`}
         >
           <ModeIcon size={18} />
         </button>
@@ -151,7 +157,7 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
           className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-md3-md bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer transition-colors text-sm"
         >
           <img src={NEW_CHAT_ICON} alt="" className="w-4 h-4 object-contain" />
-          <span>新会话</span>
+          <span>{t('sidebar.newChat')}</span>
         </button>
         <button
           onClick={() => setShowSkillStore(!showSkillStore)}
@@ -162,7 +168,7 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
           }`}
         >
           <Store size={16} />
-          <span>技能</span>
+          <span>{t('sidebar.skills')}</span>
         </button>
       </div>
 
@@ -180,8 +186,8 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
           }`}
         >
           <ModeIcon size={14} />
-          <span className="font-medium">{currentMode.label}</span>
-          <span className="text-dark-onSurfaceVariant/40">— {currentMode.desc}</span>
+          <span className="font-medium">{currentModeLabel}</span>
+          <span className="text-dark-onSurfaceVariant/40">— {currentModeDesc}</span>
         </button>
 
         {/* Active skills */}
@@ -205,7 +211,7 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
         <div className="space-y-1">
           {sessions.length === 0 && (
             <p className="px-3 py-4 text-xs text-dark-onSurfaceVariant/50 text-center">
-              暂无会话，点击上方创建
+              {t('sidebar.emptySessions')}
             </p>
           )}
           {sessions.map((s) => (
@@ -236,21 +242,21 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
                 const status = sessionStatus[s.id]
                 if (status === 'working') {
                   return (
-                    <span title="AI 正在工作中" className="flex-shrink-0">
+                    <span title={t('sidebar.statusWorking')} className="flex-shrink-0">
                       <Loader2 size={13} className="animate-spin text-md-primary" />
                     </span>
                   )
                 }
                 if (status === 'error') {
                   return (
-                    <span title="AI 异常停下" className="flex-shrink-0">
+                    <span title={t('sidebar.statusError')} className="flex-shrink-0">
                       <AlertTriangle size={13} className="text-md-error" />
                     </span>
                   )
                 }
                 if (status === 'confirm-danger') {
                   return (
-                    <span title="等待危险命令确认" className="flex-shrink-0">
+                    <span title={t('sidebar.statusConfirmDanger')} className="flex-shrink-0">
                       <ShieldAlert size={13} className="text-md-warning animate-pulse" />
                     </span>
                   )
@@ -265,8 +271,8 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
                 className={`w-6 h-6 flex items-center justify-center rounded-md3-xs hover:bg-md-error/20 hover:text-md-error transition-opacity flex-shrink-0 ${
                   hoveredSessionId === s.id ? 'opacity-100' : 'opacity-0'
                 }`}
-                aria-label="删除会话"
-                title="删除会话"
+                aria-label={t('sidebar.deleteSessionAria')}
+                title={t('sidebar.deleteSessionAria')}
               >
                 <Trash2 size={13} />
               </button>
@@ -281,17 +287,17 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
           className="w-full flex items-center gap-2 px-3 py-2 rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-sm text-dark-onSurfaceVariant"
         >
           <Settings size={16} />
-          <span>设置</span>
+          <span>{t('sidebar.settings')}</span>
         </button>
       </div>
 
       {/* Delete confirmation dialog */}
       {confirmDeleteId && (
         <ConfirmDialog
-          title="删除会话"
-          message="确定要删除这个会话吗？此操作不可撤销，会话中的所有消息将永久丢失。"
-          confirmText="删除"
-          cancelText="取消"
+          title={t('sidebar.deleteSessionTitle')}
+          message={t('sidebar.deleteSessionMsg')}
+          confirmText={t('common.delete')}
+          cancelText={t('common.cancel')}
           variant="danger"
           onConfirm={() => {
             deleteSession(confirmDeleteId)

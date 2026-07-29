@@ -1,4 +1,5 @@
 import { useEffect } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useChatStore } from '../../stores/chat-store'
 import { useAgent } from '../../hooks/use-agent'
 import { useSkillsStore } from '../../stores/skills-store'
@@ -17,6 +18,7 @@ interface ChatPageProps {
 }
 
 export default function ChatPage({ vibe = false }: ChatPageProps) {
+  const { t } = useTranslation()
   // 用 selector 精细化订阅，避免 agent-runs-store 流式期间（~20fps set）触发 ChatPage 全树重渲染
   const sessions = useChatStore((s) => s.sessions)
   const activeSessionId = useChatStore((s) => s.activeSessionId)
@@ -98,7 +100,7 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
                     }}
                   />
                   <span className="text-xl font-medium text-dark-onSurface">
-                    Hi there! How can I help you?
+                    {t('chat.emptyWelcome')}
                   </span>
                 </div>
               </>

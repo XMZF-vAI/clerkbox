@@ -1,16 +1,24 @@
 import { useState } from 'react'
 import { ArrowLeft, ArrowRight, Check, Minus, Moon, Monitor, Palette, Sparkles, Sun, X } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { useSettingsStore } from '../../stores/settings-store'
 import { MACARON_PRESETS, schemeSwatches } from '../../lib/theme-engine'
 import ThemeWaves from '../chat/ThemeWaves'
+import { SUPPORTED_LANGUAGES } from '../../i18n'
 
 import APP_ICON from '../../assets/icon.png'
 
 const THEME_OPTIONS = [
-  { value: 'light', label: '浅色', icon: Sun },
-  { value: 'dark', label: '深色', icon: Moon },
-  { value: 'system', label: '跟随系统', icon: Monitor },
+  { value: 'light', icon: Sun },
+  { value: 'dark', icon: Moon },
+  { value: 'system', icon: Monitor },
 ] as const
+
+const THEME_LABEL_KEY: Record<string, string> = {
+  light: 'onboarding.theme.light',
+  dark: 'onboarding.theme.dark',
+  system: 'onboarding.theme.system',
+}
 
 /** 主按钮：MD3 filled 风格，跟随当前种子色实时变化 */
 function PrimaryButton({ onClick, children }: { onClick: () => void; children: React.ReactNode }) {
@@ -26,11 +34,13 @@ function PrimaryButton({ onClick, children }: { onClick: () => void; children: R
 
 /** 首次启动欢迎流程：欢迎 → 主题选择 → 启程 */
 export default function OnboardingFlow() {
+  const { t } = useTranslation()
   const [step, setStep] = useState(0)
   const [leaving, setLeaving] = useState(false)
   const theme = useSettingsStore((s) => s.theme)
   const colorScheme = useSettingsStore((s) => s.colorScheme)
   const customSeedColor = useSettingsStore((s) => s.customSeedColor)
+  const language = useSettingsStore((s) => s.language)
   const updateSettings = useSettingsStore((s) => s.updateSettings)
 
   const finish = () => {
@@ -52,14 +62,14 @@ export default function OnboardingFlow() {
           <button
             onClick={() => window.clerkbox?.windowAction('minimize')}
             className="rounded-md p-1.5 text-dark-onSurfaceVariant/70 transition-colors hover:bg-dark-onSurfaceVariant/10"
-            aria-label="最小化"
+            aria-label={t('common.close')}
           >
             <Minus size={15} />
           </button>
           <button
             onClick={() => window.clerkbox?.windowAction('close')}
             className="rounded-md p-1.5 text-dark-onSurfaceVariant/70 transition-colors hover:bg-md-error hover:text-md-onError"
-            aria-label="关闭"
+            aria-label={t('common.close')}
           >
             <X size={15} />
           </button>
@@ -74,11 +84,35 @@ export default function OnboardingFlow() {
               <div className="absolute inset-0 scale-125 rounded-[28px] bg-md-primary/30 blur-2xl" aria-hidden="true" />
               <img src={APP_ICON} alt="ClerkBox" className="relative h-24 w-24 rounded-[28px] shadow-xl" />
             </div>
-            <h1 className="text-4xl font-bold tracking-wide">ClerkBox</h1>
-            <p className="mt-3 text-sm text-dark-onSurfaceVariant/70">你的 AI 桌面工作台</p>
-            <div className="mt-12">
+            <h1 className="text-4xl font-bold tracking-wide">{t('onboarding.welcome.title')}</h1>
+            <p className="mt-3 text-sm text-dark-onSurfaceVariant/70">{t('onboarding.welcome.subtitle')}</p>
+
+            {/* 语言选择 - 仅首屏 */}
+            <div className="mt-8 flex flex-col items-center">
+              <p className="text-xs text-dark-onSurfaceVariant/60 mb-2.5">
+                {t('onboarding.language.title')} / {t('onboarding.language.subtitle')}
+              </p>
+              <div className="flex gap-2">
+                {SUPPORTED_LANGUAGES.map((lang) => (
+                  <button
+                    key={lang.code}
+                    onClick={() => updateSettings({ language: lang.code })}
+                    className={`px-4 py-1.5 rounded-full text-xs font-medium transition ${
+                      language === lang.code
+                        ? 'bg-md-primary text-md-onPrimary'
+                        : 'bg-dark-surfaceContainerHigh text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHighest'
+                    }`}
+                    aria-pressed={language === lang.code}
+                  >
+                    {lang.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="mt-8">
               <PrimaryButton onClick={() => setStep(1)}>
-                下一步
+                {t('onboarding.welcome.next')}
                 <ArrowRight size={16} />
               </PrimaryButton>
             </div>
@@ -87,12 +121,12 @@ export default function OnboardingFlow() {
 
         {step === 1 && (
           <div className="flex w-full max-w-sm flex-col animate-slide-up">
-            <h2 className="text-center text-2xl font-semibold">选择你喜欢的主题</h2>
-            <p className="mt-2 text-center text-xs text-dark-onSurfaceVariant/60">所选即所得，之后可在设置中随时调整</p>
+            <h2 className="text-center text-2xl font-semibold">{t('onboarding.theme.title')}</h2>
+            <p className="mt-2 text-center text-xs text-dark-onSurfaceVariant/60">{t('onboarding.theme.subtitle')}</p>
 
             {/* 亮暗模式 */}
             <div className="mt-8 flex gap-2">
-              {THEME_OPTIONS.map(({ value, label, icon: Icon }) => (
+              {THEME_OPTIONS.map(({ value, icon: Icon }) => (
                 <button
                   key={value}
                   onClick={() => updateSettings({ theme: value })}
@@ -104,14 +138,14 @@ export default function OnboardingFlow() {
                   }`}
                 >
                   <Icon size={18} />
-                  {label}
+                  {t(THEME_LABEL_KEY[value])}
                 </button>
               ))}
             </div>
 
             {/* MD3 马卡龙色系 */}
             <div className="mt-8">
-              <p className="mb-4 text-center text-xs text-dark-onSurfaceVariant/60">MD3 动态色系</p>
+              <p className="mb-4 text-center text-xs text-dark-onSurfaceVariant/60">{t('onboarding.theme.macaronTitle')}</p>
               <div className="grid grid-cols-4 gap-y-4">
                 {MACARON_PRESETS.map((p) => {
                   const sw = schemeSwatches(p.seed)
@@ -134,7 +168,7 @@ export default function OnboardingFlow() {
                         {selected && <Check size={16} className="text-white drop-shadow" />}
                       </span>
                       <span className={`text-xs ${selected ? 'font-medium text-md-primary' : 'text-dark-onSurfaceVariant'}`}>
-                        {p.label}
+                        {t(`macaron.${p.id}`)}
                       </span>
                     </button>
                   )
@@ -145,7 +179,7 @@ export default function OnboardingFlow() {
                   const sw = schemeSwatches(customSeedColor)
                   const selected = colorScheme === 'custom'
                   return (
-                    <label className="group flex cursor-pointer flex-col items-center gap-1.5" title="自定义颜色">
+                    <label className="group flex cursor-pointer flex-col items-center gap-1.5" title={t('onboarding.theme.customColor')}>
                       <span
                         className={`flex h-10 w-10 items-center justify-center rounded-full border-2 border-dashed transition-shadow ${
                           selected
@@ -156,13 +190,13 @@ export default function OnboardingFlow() {
                       >
                         {selected ? <Check size={16} className="text-white drop-shadow" /> : <Palette size={14} className="text-white drop-shadow" />}
                       </span>
-                      <span className={`text-xs ${selected ? 'font-medium text-md-primary' : 'text-dark-onSurfaceVariant'}`}>自定义</span>
+                      <span className={`text-xs ${selected ? 'font-medium text-md-primary' : 'text-dark-onSurfaceVariant'}`}>{t('onboarding.theme.custom')}</span>
                       <input
                         type="color"
                         value={customSeedColor}
                         onChange={(e) => updateSettings({ customSeedColor: e.target.value, colorScheme: 'custom' })}
                         className="pointer-events-none absolute h-0 w-0 opacity-0"
-                        aria-label="自定义种子色"
+                        aria-label={t('onboarding.theme.customSeedAriaLabel')}
                       />
                     </label>
                   )
@@ -176,10 +210,10 @@ export default function OnboardingFlow() {
                 className="inline-flex items-center gap-1.5 rounded-full border border-dark-onSurfaceVariant/20 px-6 py-2.5 text-sm text-dark-onSurfaceVariant transition-colors hover:bg-dark-surfaceContainer"
               >
                 <ArrowLeft size={15} />
-                上一步
+                {t('onboarding.theme.prev')}
               </button>
               <PrimaryButton onClick={() => setStep(2)}>
-                下一步
+                {t('onboarding.theme.next')}
                 <ArrowRight size={16} />
               </PrimaryButton>
             </div>
@@ -194,12 +228,12 @@ export default function OnboardingFlow() {
                 <Sparkles size={44} className="text-md-primary" />
               </div>
             </div>
-            <h2 className="text-3xl font-semibold">一切就绪</h2>
-            <p className="mt-3 text-sm text-dark-onSurfaceVariant/70">主题已生效，随时开启你的第一段对话</p>
+            <h2 className="text-3xl font-semibold">{t('onboarding.done.title')}</h2>
+            <p className="mt-3 text-sm text-dark-onSurfaceVariant/70">{t('onboarding.done.subtitle')}</p>
             <div className="mt-12">
               <PrimaryButton onClick={finish}>
                 <Sparkles size={16} />
-                开始 Vibe Working 吧！
+                {t('onboarding.done.start')}
               </PrimaryButton>
             </div>
           </div>

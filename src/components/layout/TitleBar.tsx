@@ -1,4 +1,5 @@
 import { Menu, Minus, Square, X, Sparkles } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { useChatStore } from '../../stores/chat-store'
 import { useVibeStore } from '../../stores/vibe-store'
 import pkg from '../../../package.json'
@@ -8,6 +9,7 @@ interface TitleBarProps {
 }
 
 export default function TitleBar({ onToggleSidebar }: TitleBarProps) {
+  const { t } = useTranslation()
   const { streamingSessionId } = useChatStore()
   const vibeMode = useVibeStore((s) => s.isVibeMode)
   const toggleVibeMode = useVibeStore((s) => s.toggleVibeMode)
@@ -37,8 +39,8 @@ export default function TitleBar({ onToggleSidebar }: TitleBarProps) {
         <button
           onClick={() => toggleVibeMode()}
           className="h-7 flex items-center gap-1 px-2 mr-2 rounded-md3-sm bg-md-tertiary/15 text-md-tertiary hover:bg-md-tertiary/25 transition-colors"
-          title="进入 VIBE 模式"
-          aria-label="切换 VIBE 模式"
+          title={t('titlebar.vibeEnter')}
+          aria-label={t('titlebar.vibeToggleAria')}
           aria-pressed={vibeMode}
         >
           <Sparkles size={14} />
@@ -53,7 +55,7 @@ export default function TitleBar({ onToggleSidebar }: TitleBarProps) {
             streamingSessionId ? 'bg-md-info animate-pulse-soft' : 'bg-md-success'
           }`} />
           <span className="text-xs text-dark-onSurfaceVariant">
-            {streamingSessionId ? '执行中...' : '就绪'}
+            {streamingSessionId ? t('titlebar.statusExecuting') : t('titlebar.statusReady')}
           </span>
         </div>
 

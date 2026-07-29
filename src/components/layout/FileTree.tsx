@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { FolderOpen, Folder, File, ChevronRight, ChevronDown, HardDrive } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { ipc } from '../../lib/ipc-client'
 import type { FileEntry } from '../../types/ipc'
 
@@ -13,6 +14,7 @@ interface TreeNode {
 }
 
 function FileTreeNode({ node, depth = 0, onToggle }: { node: TreeNode; depth?: number; onToggle: (path: string) => void }) {
+  const { t } = useTranslation()
   const paddingLeft = depth * 16 + 8
 
   if (!node.isDirectory) {
@@ -47,7 +49,7 @@ function FileTreeNode({ node, depth = 0, onToggle }: { node: TreeNode; depth?: n
       )}
       {node.expanded && node.loading && (
         <div className="py-1 text-xs text-dark-onSurfaceVariant/50" style={{ paddingLeft: paddingLeft + 20 }}>
-          加载中...
+          {t('fileTree.loading')}
         </div>
       )}
     </div>
@@ -55,6 +57,7 @@ function FileTreeNode({ node, depth = 0, onToggle }: { node: TreeNode; depth?: n
 }
 
 export default function FileTree() {
+  const { t } = useTranslation()
   const [rootPath, setRootPath] = useState<string | null>(null)
   const [tree, setTree] = useState<TreeNode[]>([])
 
@@ -148,12 +151,12 @@ export default function FileTree() {
     return (
       <div className="flex flex-col items-center justify-center h-48 gap-3 text-dark-onSurfaceVariant">
         <HardDrive size={32} className="opacity-30" />
-        <p className="text-sm opacity-50">选择一个工作区文件夹</p>
+        <p className="text-sm opacity-50">{t('fileTree.selectWorkspace')}</p>
         <button
           onClick={handleSelectFolder}
           className="px-4 py-2 bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer rounded-md3-sm text-sm transition-colors"
         >
-          选择文件夹
+          {t('fileTree.selectFolder')}
         </button>
       </div>
     )
@@ -167,7 +170,7 @@ export default function FileTree() {
           onClick={handleSelectFolder}
           className="text-xs text-md-info hover:underline"
         >
-          更换
+          {t('fileTree.change')}
         </button>
       </div>
       {tree.map((node) => (

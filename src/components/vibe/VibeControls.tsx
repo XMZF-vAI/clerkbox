@@ -1,9 +1,11 @@
 import { useState, useEffect } from 'react'
 import { LogOut, Settings2, Maximize, Minimize } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { useVibeStore } from '../../stores/vibe-store'
 import VibeCustomizeMenu from './VibeCustomizeMenu'
 
 export default function VibeControls() {
+  const { t } = useTranslation()
   const toggleVibeMode = useVibeStore((s) => s.toggleVibeMode)
   const [showMenu, setShowMenu] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
@@ -47,7 +49,7 @@ export default function VibeControls() {
         className="fixed top-4 left-4 z-50 flex items-center gap-2 px-3 py-2 liquid-glass-btn rounded-full text-white/90"
       >
         {isFullscreen ? <Minimize size={14} /> : <Maximize size={14} />}
-        <span className="text-xs font-medium">{isFullscreen ? '退出全屏' : '全屏'}</span>
+        <span className="text-xs font-medium">{isFullscreen ? t('vibe.exitFullscreen') : t('vibe.fullscreen')}</span>
       </button>
 
       {/* Customize button - bottom left */}
@@ -56,7 +58,7 @@ export default function VibeControls() {
         className="fixed bottom-4 left-4 z-50 flex items-center gap-2 px-4 py-2 liquid-glass-btn rounded-full text-white/90"
       >
         <Settings2 size={16} />
-        <span className="text-xs font-medium">定制</span>
+        <span className="text-xs font-medium">{t('vibe.customize')}</span>
       </button>
 
       {/* Exit button - bottom right */}
@@ -65,7 +67,7 @@ export default function VibeControls() {
         className="fixed bottom-4 right-4 z-50 flex items-center gap-2 px-4 py-2 liquid-glass-btn rounded-full text-white/90"
       >
         <LogOut size={16} />
-        <span className="text-xs font-medium">退出</span>
+        <span className="text-xs font-medium">{t('vibe.exit')}</span>
       </button>
 
       {showMenu && <VibeCustomizeMenu onClose={() => setShowMenu(false)} />}

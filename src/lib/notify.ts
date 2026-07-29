@@ -5,21 +5,22 @@
  * 通知点击会切换到对应会话并聚焦窗口。
  */
 
+import i18n from '../i18n'
 import { useChatStore } from '../stores/chat-store'
 import APP_ICON from '../assets/icon.png'
 
 export type NotifyKind = 'done' | 'error' | 'confirm-danger'
 
-const TITLES: Record<NotifyKind, string> = {
-  done: 'ClerkBox 已完成工作',
-  error: 'ClerkBox 异常停下',
-  'confirm-danger': 'ClerkBox 有危险命令需确认',
+const TITLE_KEYS: Record<NotifyKind, string> = {
+  done: 'notify.doneTitle',
+  error: 'notify.errorTitle',
+  'confirm-danger': 'notify.confirmDangerTitle',
 }
 
-const BODIES: Record<NotifyKind, string> = {
-  done: '一个会话的任务已完成，点击查看',
-  error: '一个会话的 AI 执行出现错误，点击查看',
-  'confirm-danger': '检测到高风险命令，需要你确认后才会执行',
+const BODY_KEYS: Record<NotifyKind, string> = {
+  done: 'notify.doneBody',
+  error: 'notify.errorBody',
+  'confirm-danger': 'notify.confirmDangerBody',
 }
 
 /**
@@ -62,8 +63,8 @@ export function notifyIfNotViewing(
   function emit() {
     try {
       // tag 加时间戳避免同一会话多次触发时被合并吞掉
-      const n = new Notification(TITLES[kind], {
-        body: body ?? BODIES[kind],
+      const n = new Notification(i18n.t(TITLE_KEYS[kind]), {
+        body: body ?? i18n.t(BODY_KEYS[kind]),
         // 复用应用图标
         icon: APP_ICON,
         tag: `clerkbox-${sessionId}-${kind}-${Date.now()}`,

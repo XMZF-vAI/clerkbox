@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, memo, useMemo } from 'react'
 import { ChevronDown, ChevronUp, Wrench } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import type { Message } from '../../types/agent'
 import MessageItem from './MessageItem'
 import ThinkingShimmer from './ThinkingShimmer'
@@ -70,6 +71,7 @@ function countMsgToolCalls(msg: Message): number {
 
 /** Turn panel - 只保留一个回合级折叠按钮：折叠时只显示最终回复，展开时按自然顺序显示所有中间步骤 */
 const TurnPanel = memo(function TurnPanel({ turn, isLastTurn, isStreaming, vibe }: { turn: Turn; isLastTurn: boolean; isStreaming: boolean; vibe?: boolean }) {
+  const { t } = useTranslation()
   const [stepsExpanded, setStepsExpanded] = useState(false)
 
   const isActiveTurn = isLastTurn && isStreaming
@@ -119,7 +121,7 @@ const TurnPanel = memo(function TurnPanel({ turn, isLastTurn, isStreaming, vibe 
           >
             {stepsExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
             <Wrench size={11} />
-            <span>{stepsExpanded ? '收起步骤' : `展开 ${stepCount} 个步骤`}</span>
+            <span>{stepsExpanded ? t('chat.collapseSteps') : t('chat.expandSteps', { count: stepCount })}</span>
           </button>
           {stepsExpanded && (
             <div className={`mt-1 space-y-2 border-l-2 pl-3 ${

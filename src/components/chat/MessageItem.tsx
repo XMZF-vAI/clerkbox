@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useMemo, memo } from 'react'
 import { Copy, Check, Terminal, FileText, FolderOpen, AlertTriangle, ChevronDown, ChevronUp, Wrench, FilePen, Globe, Pencil, Archive } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import type { Message, StreamingToolCall } from '../../types/agent'
 import { useChatStore } from '../../stores/chat-store'
 import ThinkingShimmer from './ThinkingShimmer'
@@ -51,6 +52,7 @@ function extractWriteFileData(argsSoFar: string): { path: string; content: strin
 
 /** Streaming write_file preview card */
 function WriteFilePreviewCard({ streamingCall }: { streamingCall: StreamingToolCall }) {
+  const { t } = useTranslation()
   const { path, content } = useMemo(() => extractWriteFileData(streamingCall.argsSoFar), [streamingCall.argsSoFar])
   const scrollRef = useRef<HTMLPreElement>(null)
   const [autoScroll, setAutoScroll] = useState(true)
@@ -75,13 +77,13 @@ function WriteFilePreviewCard({ streamingCall }: { streamingCall: StreamingToolC
       <div className="flex items-center gap-2 px-3 py-1.5 bg-md-info/8 border-b border-md-info/15">
         <FilePen size={12} className="text-md-info flex-shrink-0" />
         <span className="text-[11px] font-medium text-md-info truncate">
-          {path || '正在生成路径...'}
+          {path || t('toolPreview.generatingPath')}
         </span>
         <span className="ml-auto text-[10px] px-1.5 py-0.5 rounded-md3-xs bg-md-info/15 text-md-info animate-pulse-soft flex-shrink-0">
-          写入中...
+          {t('toolPreview.writing')}
         </span>
         <span className="text-[10px] text-dark-onSurfaceVariant/40 flex-shrink-0">
-          {lineCount} 行
+          {lineCount} {t('common.lines')}
         </span>
       </div>
       {/* Content preview - fixed height with scroll */}
@@ -104,6 +106,7 @@ function WriteFilePreviewCard({ streamingCall }: { streamingCall: StreamingToolC
 
 /** Streaming search_replace preview card */
 function SearchReplacePreviewCard({ streamingCall }: { streamingCall: StreamingToolCall }) {
+  const { t } = useTranslation()
   let path = ''
   let oldPreview = ''
   let newPreview = ''
@@ -122,10 +125,10 @@ function SearchReplacePreviewCard({ streamingCall }: { streamingCall: StreamingT
       <div className="flex items-center gap-2 px-3 py-1.5 bg-md-primary/8 border-b border-md-primary/15">
         <Pencil size={12} className="text-md-primary flex-shrink-0" />
         <span className="text-[11px] font-medium text-md-primary truncate">
-          {path || '正在解析...'}
+          {path || t('toolPreview.parsing')}
         </span>
         <span className="ml-auto text-[10px] px-1.5 py-0.5 rounded-md3-xs bg-md-primary/15 text-md-primary animate-pulse-soft flex-shrink-0">
-          搜索替换中...
+          {t('toolPreview.searchReplacing')}
         </span>
       </div>
       <div className="px-3 py-2 text-[11px] font-mono leading-relaxed space-y-1">
@@ -142,7 +145,7 @@ function SearchReplacePreviewCard({ streamingCall }: { streamingCall: StreamingT
           </div>
         )}
         {!oldPreview && !newPreview && (
-          <span className="text-dark-onSurfaceVariant/40">正在接收参数...</span>
+          <span className="text-dark-onSurfaceVariant/40">{t('toolPreview.receivingArgs')}</span>
         )}
       </div>
     </div>
@@ -151,6 +154,7 @@ function SearchReplacePreviewCard({ streamingCall }: { streamingCall: StreamingT
 
 /** Streaming edit_file preview card */
 function EditFilePreviewCard({ streamingCall }: { streamingCall: StreamingToolCall }) {
+  const { t } = useTranslation()
   const scrollRef = useRef<HTMLPreElement>(null)
   const [autoScroll, setAutoScroll] = useState(true)
 
@@ -165,17 +169,17 @@ function EditFilePreviewCard({ streamingCall }: { streamingCall: StreamingToolCa
         const type = op.type || '?'
         const line = op.line || '?'
         const lines = type === 'delete' ? (op.count || 1) : (op.content?.split('\n').length || 1)
-        if (type === 'replace') return `L${line}: 替换 ${lines} 行`
-        if (type === 'insert') return `L${line}: 插入 ${lines} 行`
-        if (type === 'delete') return `L${line}: 删除 ${lines} 行`
-        return `操作${i + 1}`
+        if (type === 'replace') return t('toolPreview.replaceLines', { line, count: lines })
+        if (type === 'insert') return t('toolPreview.insertLines', { line, count: lines })
+        if (type === 'delete') return t('toolPreview.deleteLines', { line, count: lines })
+        return t('toolPreview.operationN', { n: i + 1 })
       }).join('\n')
     }
   } catch {
     // Partial JSON - try regex for path
     const pathMatch = streamingCall.argsSoFar.match(/"path"\s*:\s*"((?:[^"\\]|\\.)*)"/)
     if (pathMatch) path = pathMatch[1]
-    opsPreview = '正在解析操作...'
+    opsPreview = t('toolPreview.parsingOps')
   }
 
   useEffect(() => {
@@ -190,10 +194,10 @@ function EditFilePreviewCard({ streamingCall }: { streamingCall: StreamingToolCa
       <div className="flex items-center gap-2 px-3 py-1.5 bg-md-success/8 border-b border-md-success/15">
         <Pencil size={12} className="text-md-success flex-shrink-0" />
         <span className="text-[11px] font-medium text-md-success truncate">
-          {path || '正在生成路径...'}
+          {path || t('toolPreview.generatingPath')}
         </span>
         <span className="ml-auto text-[10px] px-1.5 py-0.5 rounded-md3-xs bg-md-success/15 text-md-success animate-pulse-soft flex-shrink-0">
-          编辑中...
+          {t('toolPreview.editing')}
         </span>
       </div>
       {/* Operations preview */}
@@ -217,6 +221,7 @@ function EditFilePreviewCard({ streamingCall }: { streamingCall: StreamingToolCa
 /** Compact tool call bar - horizontal strip style */
 function ToolCallBar({ toolCall, result, vibe }: { toolCall: NonNullable<Message['toolCalls']>[0]; result?: Message['toolResults']; vibe?: boolean }) {
   // U1: Hook 必须放在 early return 之前，否则违反 Rules of Hooks。
+  const { t } = useTranslation()
   const [expanded, setExpanded] = useState(false)
   // spawn_agent 由 SubAgentCard 单独展示，不显示原始工具调用条
   if (toolCall.name === 'spawn_agent') return null
@@ -233,19 +238,7 @@ function ToolCallBar({ toolCall, result, vibe }: { toolCall: NonNullable<Message
     ? <Globe size={12} />
     : <Terminal size={12} />
 
-  const friendlyNames: Record<string, string> = {
-    read_file: '读取文件',
-    write_file: '写入文件',
-    edit_file: '编辑文件',
-    search_replace: '搜索替换',
-    list_dir: '列出目录',
-    search_files: '搜索文件',
-    search_content: '搜索内容',
-    execute_command: '执行命令',
-    web_search: '搜索互联网',
-    web_fetch: '访问网页',
-  }
-  const displayName = friendlyNames[toolCall.name] || toolCall.name
+  const displayName = t(`tools.${toolCall.name}`, { defaultValue: toolCall.name })
 
   const getArgsPreview = () => {
     const args = toolCall.arguments
@@ -288,7 +281,7 @@ function ToolCallBar({ toolCall, result, vibe }: { toolCall: NonNullable<Message
         onClick={() => setExpanded(!expanded)}
         aria-expanded={expanded}
         aria-controls={`tc-detail-${toolCall.id}`}
-        aria-label={`工具调用：${displayName}${toolResult ? (isError ? '（失败）' : '（完成）') : '（执行中）'}`}
+        aria-label={t('toolPreview.toolCallStatus', { name: displayName, status: toolResult ? (isError ? t('toolPreview.statusFailed') : t('toolPreview.statusComplete')) : t('toolPreview.statusExecuting') })}
         className={`w-full flex items-center gap-2 px-3 py-1.5 text-[11px] transition-colors ${
           vibe ? 'hover:bg-white/10' : 'hover:bg-dark-surfaceContainerHigh/40'
         }`}
@@ -298,7 +291,7 @@ function ToolCallBar({ toolCall, result, vibe }: { toolCall: NonNullable<Message
         <span className={vibe ? 'text-white/40 truncate' : 'text-dark-onSurfaceVariant/30 truncate'}>{getArgsPreview()}</span>
         {toolResult && (
           <span className={`ml-auto text-[10px] px-1 py-0.5 rounded-md3-xs flex-shrink-0 ${isError ? 'bg-md-error/15 text-md-error' : 'bg-md-success/15 text-md-success'}`}>
-            {isError ? '失败' : '完成'}
+            {isError ? t('toolPreview.executionFailed') : t('toolPreview.executionComplete')}
           </span>
         )}
         {!isError && toolCall.name === 'edit_file' && editAddedLines > 0 && (
@@ -313,7 +306,7 @@ function ToolCallBar({ toolCall, result, vibe }: { toolCall: NonNullable<Message
         )}
         {!toolResult && (
           <span className="ml-auto text-[10px] px-1 py-0.5 rounded-md3-xs bg-md-info/15 text-md-info animate-pulse-soft flex-shrink-0">
-            执行中...
+            {t('toolPreview.executing')}
           </span>
         )}
         <span className={`flex-shrink-0 ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/30'}`}>
@@ -326,7 +319,7 @@ function ToolCallBar({ toolCall, result, vibe }: { toolCall: NonNullable<Message
           className={`px-3 pb-2 space-y-2 text-[11px] border-t ${vibe ? 'border-white/10' : 'border-dark-onSurfaceVariant/5'}`}
         >
           <div className="pt-2">
-            <span className={vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/40'}>参数：</span>
+            <span className={vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/40'}>{t('chat.toolParams')}</span>
             <pre className={`mt-1 p-2 rounded-md3-xs overflow-x-auto text-[10px] ${
               vibe ? 'bg-black/30 text-white/90' : 'bg-dark-surfaceContainerHigh'
             }`}>
@@ -335,7 +328,7 @@ function ToolCallBar({ toolCall, result, vibe }: { toolCall: NonNullable<Message
           </div>
           {toolResult && (
             <div>
-              <span className={vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/40'}>结果：</span>
+              <span className={vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/40'}>{t('chat.toolResult')}</span>
               <pre className={`mt-1 p-2 rounded-md3-xs overflow-x-auto max-h-48 text-[10px] whitespace-pre-wrap ${
                 isError ? 'bg-md-error/8 text-md-error' : vibe ? 'bg-black/30 text-white/90' : 'bg-dark-surfaceContainerHigh'
               }`}>
@@ -361,6 +354,7 @@ interface ThinkingHeaderProps {
 
 /** Thinking header: shimmer while streaming, summary when done */
 function ThinkingHeader({ thinkingContent, isStreaming, hasContent, finishReason, expanded, onToggle, vibe }: ThinkingHeaderProps) {
+  const { t } = useTranslation()
   const startRef = useRef<number | null>(null)
   const endRef = useRef<number | null>(null)
   const [elapsed, setElapsed] = useState(0)
@@ -406,8 +400,8 @@ function ThinkingHeader({ thinkingContent, isStreaming, hasContent, finishReason
   }, [done])
 
   const summaryText = !done
-    ? `Thinking...`
-    : `Thought for ${elapsed} second${elapsed === 1 ? '' : 's'}`
+    ? t('chat.thinkingInProgress')
+    : t('chat.thinkingDone', { count: elapsed })
 
   return (
     <div className="w-full mb-1.5">
@@ -656,6 +650,7 @@ function escapeHtml(text: string): string {
 }
 
 function MessageItem({ message, vibe = false, sessionId }: MessageItemProps) {
+  const { t } = useTranslation()
   const [copied, setCopied] = useState(false)
   const [thinkingExpanded, setThinkingExpanded] = useState(false)
   const [collapsedExpanded, setCollapsedExpanded] = useState(false)
@@ -675,7 +670,7 @@ function MessageItem({ message, vibe = false, sessionId }: MessageItemProps) {
   // Compact boundary message — render as a divider card
   if (message.role === 'system' && message.isCompactSummary) {
     const meta = message.compactMetadata
-    const timeStr = new Date(message.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+    const timeStr = new Date(message.timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
     return (
       <div className="flex justify-center animate-slide-up my-2">
         <div className={`flex items-center gap-2 px-3 py-1.5 rounded-md3-md text-[11px] ${
@@ -684,7 +679,7 @@ function MessageItem({ message, vibe = false, sessionId }: MessageItemProps) {
             : 'bg-dark-surfaceContainer/40 border border-dark-onSurfaceVariant/8 text-dark-onSurfaceVariant/50'
         }`}>
           <Archive size={12} className="flex-shrink-0" />
-          <span>上下文已压缩{meta ? ` (${meta.messagesSummarized} 条消息合并为摘要)` : ''}</span>
+          <span>{t('chat.contextCompressed')}{meta ? t('chat.contextCompressedMeta', { count: meta.messagesSummarized }) : ''}</span>
           <span className="opacity-60">{timeStr}</span>
         </div>
       </div>
@@ -706,7 +701,7 @@ function MessageItem({ message, vibe = false, sessionId }: MessageItemProps) {
           >
             {summaryExpanded ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
             <Archive size={11} />
-            <span>压缩摘要</span>
+            <span>{t('chat.compactSummary')}</span>
           </button>
           {summaryExpanded && (
             <div className={`mt-2 px-4 py-2.5 rounded-md3-md text-sm leading-relaxed ${
@@ -752,7 +747,7 @@ function MessageItem({ message, vibe = false, sessionId }: MessageItemProps) {
           >
             {collapsedExpanded ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
             <Wrench size={11} />
-            <span>中间步骤 (工具调用: {toolCallsCount})</span>
+            <span>{t('chat.collapsedSteps', { count: toolCallsCount })}</span>
           </button>
           {collapsedExpanded && (
             <div className="mt-2">
@@ -841,7 +836,7 @@ function MessageItem({ message, vibe = false, sessionId }: MessageItemProps) {
                 : 'bg-dark-surfaceContainer/40 border border-dark-onSurfaceVariant/8 text-dark-onSurfaceVariant/50'
             }`}>
               {tc.name.includes('file') ? <FileText size={11} /> : <Terminal size={11} />}
-              <span>正在生成工具调用: {tc.name}...</span>
+              <span>{t('chat.streamingToolCall', { name: tc.name })}</span>
               <span className="ml-auto w-1.5 h-1.5 rounded-full bg-md-info animate-pulse-soft" />
             </div>
           )
@@ -860,13 +855,13 @@ function MessageItem({ message, vibe = false, sessionId }: MessageItemProps) {
         {isTruncated && (
           <div className="mt-1 flex items-center gap-1 text-[11px] text-md-warning">
             <AlertTriangle size={10} />
-            输出被截断
+            {t('chat.truncated')}
           </div>
         )}
 
         {/* Timestamp */}
         <span className={`text-[10px] mt-1 px-1 ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/30'}`}>
-          {new Date(message.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
+          {new Date(message.timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
         </span>
       </div>
     </div>

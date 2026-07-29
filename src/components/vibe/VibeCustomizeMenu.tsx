@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { X, Image, Music, FolderOpen, File } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { useVibeStore, DEFAULT_VIBE_BACKGROUND, DEFAULT_VIBE_MUSIC } from '../../stores/vibe-store'
 import { ipc } from '../../lib/ipc-client'
 
@@ -8,6 +9,7 @@ interface VibeCustomizeMenuProps {
 }
 
 export default function VibeCustomizeMenu({ onClose }: VibeCustomizeMenuProps) {
+  const { t } = useTranslation()
   const background = useVibeStore((s) => s.background)
   const music = useVibeStore((s) => s.music)
   const musicFolder = useVibeStore((s) => s.musicFolder)
@@ -113,15 +115,15 @@ export default function VibeCustomizeMenu({ onClose }: VibeCustomizeMenuProps) {
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
-        aria-label="VIBE 定制"
+        aria-label={t('vibe.customizeTitle')}
         tabIndex={-1}
         className="relative z-10 w-full max-w-sm liquid-glass-strong rounded-3xl p-5 text-white/90 animate-slide-up focus:outline-none"
       >
         <div className="flex items-center justify-between mb-4">
-          <h3 className="text-sm font-medium">VIBE 定制</h3>
+          <h3 className="text-sm font-medium">{t('vibe.customizeTitle')}</h3>
           <button
             onClick={onClose}
-            aria-label="关闭"
+            aria-label={t('common.close')}
             className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-white/15 transition-colors"
           >
             <X size={14} />
@@ -132,7 +134,7 @@ export default function VibeCustomizeMenu({ onClose }: VibeCustomizeMenuProps) {
         <div className="space-y-3 mb-5">
           <div className="flex items-center gap-2 text-xs font-medium text-white/80">
             <Image size={14} />
-            <span>背景图</span>
+            <span>{t('vibe.background')}</span>
           </div>
 
           <div className="flex gap-2">
@@ -140,7 +142,7 @@ export default function VibeCustomizeMenu({ onClose }: VibeCustomizeMenuProps) {
               type="text"
               value={bgUrl}
               onChange={(e) => setBgUrl(e.target.value)}
-              placeholder="输入网络图片 URL"
+              placeholder={t('vibe.bgUrlPlaceholder')}
               className="flex-1 px-3 py-1.5 text-xs bg-white/10 border border-white/20 rounded-lg placeholder-white/40 outline-none focus:border-white/40 transition-colors"
             />
             <button
@@ -148,7 +150,7 @@ export default function VibeCustomizeMenu({ onClose }: VibeCustomizeMenuProps) {
               disabled={!bgUrl.trim()}
               className="px-3 py-1.5 text-xs rounded-lg bg-white/20 hover:bg-white/30 disabled:opacity-40 transition-colors"
             >
-              应用
+              {t('common.apply')}
             </button>
           </div>
 
@@ -158,18 +160,18 @@ export default function VibeCustomizeMenu({ onClose }: VibeCustomizeMenuProps) {
               className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/15 border border-white/20 transition-colors"
             >
               <File size={13} />
-              选择本地图片
+              {t('vibe.selectLocalImage')}
             </button>
             <button
               onClick={handleResetBackground}
               className="px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/15 border border-white/20 transition-colors"
             >
-              默认
+              {t('common.default')}
             </button>
           </div>
 
           {background.type === 'local' && (
-            <div className="text-[10px] text-white/50 truncate">当前：{background.value}</div>
+            <div className="text-[10px] text-white/50 truncate">{t('vibe.currentPrefix')}{background.value}</div>
           )}
         </div>
 
@@ -180,7 +182,7 @@ export default function VibeCustomizeMenu({ onClose }: VibeCustomizeMenuProps) {
         <div className="space-y-3">
           <div className="flex items-center gap-2 text-xs font-medium text-white/80">
             <Music size={14} />
-            <span>音乐</span>
+            <span>{t('vibe.music')}</span>
           </div>
 
           <div className="flex gap-2">
@@ -188,7 +190,7 @@ export default function VibeCustomizeMenu({ onClose }: VibeCustomizeMenuProps) {
               type="text"
               value={musicUrl}
               onChange={(e) => setMusicUrl(e.target.value)}
-              placeholder="输入网络音频 URL"
+              placeholder={t('vibe.musicUrlPlaceholder')}
               className="flex-1 px-3 py-1.5 text-xs bg-white/10 border border-white/20 rounded-lg placeholder-white/40 outline-none focus:border-white/40 transition-colors"
             />
             <button
@@ -196,7 +198,7 @@ export default function VibeCustomizeMenu({ onClose }: VibeCustomizeMenuProps) {
               disabled={!musicUrl.trim()}
               className="px-3 py-1.5 text-xs rounded-lg bg-white/20 hover:bg-white/30 disabled:opacity-40 transition-colors"
             >
-              应用
+              {t('common.apply')}
             </button>
           </div>
 
@@ -206,13 +208,13 @@ export default function VibeCustomizeMenu({ onClose }: VibeCustomizeMenuProps) {
               className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/15 border border-white/20 transition-colors"
             >
               <File size={13} />
-              选择本地音频
+              {t('vibe.selectLocalAudio')}
             </button>
             <button
               onClick={handleResetMusic}
               className="px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/15 border border-white/20 transition-colors"
             >
-              默认
+              {t('common.default')}
             </button>
           </div>
 
@@ -221,7 +223,7 @@ export default function VibeCustomizeMenu({ onClose }: VibeCustomizeMenuProps) {
           <div className="space-y-2">
             <div className="flex items-center gap-2 text-xs font-medium text-white/80">
               <FolderOpen size={14} />
-              <span>音乐文件夹</span>
+              <span>{t('vibe.musicFolder')}</span>
             </div>
             <div className="flex gap-2">
               <button
@@ -229,24 +231,24 @@ export default function VibeCustomizeMenu({ onClose }: VibeCustomizeMenuProps) {
                 className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/15 border border-white/20 transition-colors"
               >
                 <FolderOpen size={13} />
-                选择文件夹
+                {t('vibe.selectFolder')}
               </button>
               {musicFolder && (
                 <button
                   onClick={handleClearMusicFolder}
                   className="px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/15 border border-white/20 transition-colors"
                 >
-                  清除
+                  {t('vibe.clear')}
                 </button>
               )}
             </div>
             {musicFolder && (
-              <div className="text-[10px] text-white/50 truncate">当前文件夹：{musicFolder}</div>
+              <div className="text-[10px] text-white/50 truncate">{t('vibe.currentFolderPrefix')}{musicFolder}</div>
             )}
           </div>
 
           {music?.type === 'local' && !musicFolder && (
-            <div className="text-[10px] text-white/50 truncate">当前音频：{music.value}</div>
+            <div className="text-[10px] text-white/50 truncate">{t('vibe.currentAudioPrefix')}{music.value}</div>
           )}
         </div>
       </div>

@@ -1,5 +1,6 @@
 import { useState, useRef, KeyboardEvent, useEffect } from 'react'
 import { Send, Brain, FolderOpen, ChevronDown, Hammer, Eye, Square, ClipboardList, Zap, Check, X, Store, Plus } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { useSettingsStore } from '../../stores/settings-store'
 import { useChatStore } from '../../stores/chat-store'
 import { useSkillsStore } from '../../stores/skills-store'
@@ -16,6 +17,7 @@ interface ChatInputProps {
 }
 
 export default function ChatInput({ onSend, onStop, isStreaming, variant = 'default', vibe = false }: ChatInputProps) {
+  const { t } = useTranslation()
   const [content, setContent] = useState('')
   const [folderSelecting, setFolderSelecting] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -43,7 +45,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
     const trimmed = content.trim()
     if (!trimmed || isStreaming) return
     if (trimmed.length > 50000) {
-      alert('消息过长，请控制在 50000 字符以内')
+      alert(t('chat.messageTooLong'))
       return
     }
     onSend(trimmed)
@@ -116,7 +118,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
 
   const mode = settings.permissionMode
   const modeIcon = mode === 'craft' ? Hammer : mode === 'plan' ? ClipboardList : Eye
-  const modeLabel = mode === 'craft' ? 'Craft' : mode === 'plan' ? 'Plan' : 'Ask'
+  const modeLabel = mode === 'craft' ? t('sidebar.mode.craftLabel') : mode === 'plan' ? t('sidebar.mode.planLabel') : t('sidebar.mode.askLabel')
   const ModeIcon = modeIcon
 
   const currentModelLabel =
@@ -146,7 +148,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
         <div className={`flex items-center gap-1.5 mb-2 px-1 max-w-5xl mx-auto ${vibe ? 'text-white/50' : ''}`}>
           <FolderOpen size={12} className={vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/50'} />
           <span className={`text-[11px] truncate max-w-[400px] ${vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/50'}`}>
-            {effectiveWorkDir}{currentSession?.workingDir ? '' : ' (默认)'}
+            {effectiveWorkDir}{currentSession?.workingDir ? '' : t('chat.defaultWorkDirSuffix')}
           </span>
         </div>
       )}
@@ -164,7 +166,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
                     ? 'bg-white/15 text-white/90 hover:bg-white/25'
                     : 'bg-md-primary/15 text-md-primary hover:bg-md-primary/25'
                 }`}
-                title={`点击卸载 ${skill.name}`}
+                title={t('chat.unloadSkillTitle', { name: skill.name })}
               >
                 <span>{skill.icon}</span>
                 <span>{skill.name}</span>
@@ -182,7 +184,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
           onKeyDown={handleKeyDown}
           onInput={handleInput}
           disabled={isStreaming}
-          placeholder={vibe ? '在 VIBE 模式中输入...' : (effectiveWorkDir ? `在 ${effectiveWorkDir.split(/[/\\]/).pop()} 中工作...` : '输入指令，按 Enter 发送...')}
+          placeholder={vibe ? t('chat.placeholderVibe') : (effectiveWorkDir ? t('chat.placeholderWorkDir', { name: effectiveWorkDir.split(/[/\\]/).pop() }) : t('chat.placeholderDefault'))}
           rows={1}
           className={`w-full bg-transparent text-sm resize-none outline-none min-h-[20px] max-h-[200px] py-1 ${
             vibe
@@ -202,8 +204,8 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
                 ? 'hover:bg-white/15 text-white/70'
                 : 'hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant'
             }`}
-            title="选择工作目录"
-            aria-label="选择工作目录"
+            title={t('chat.selectFolderTitle')}
+            aria-label={t('chat.selectFolderAria')}
           >
             {folderSelecting ? <div className={`w-3.5 h-3.5 border-2 border-t-transparent rounded-full animate-spin ${vibe ? 'border-white/50' : 'border-dark-onSurfaceVariant/40'}`} /> : <FolderOpen size={16} />}
           </button>
@@ -242,8 +244,8 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
                 >
                   <Hammer size={16} />
                   <div className="text-left">
-                    <div className="font-medium">Craft 模式</div>
-                    <div className="text-[10px] opacity-60">可读写文件、执行命令，危险操作需确认</div>
+                    <div className="font-medium">{t('chat.modeCraftTitle')}</div>
+                    <div className="text-[10px] opacity-60">{t('chat.modeCraftDesc')}</div>
                   </div>
                 </button>
                 <button
@@ -256,8 +258,8 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
                 >
                   <Eye size={16} />
                   <div className="text-left">
-                    <div className="font-medium">Ask 模式</div>
-                    <div className="text-[10px] opacity-60">仅允许读取文件和目录，不可修改或执行</div>
+                    <div className="font-medium">{t('chat.modeAskTitle')}</div>
+                    <div className="text-[10px] opacity-60">{t('chat.modeAskDesc')}</div>
                   </div>
                 </button>
                 <button
@@ -270,8 +272,8 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
                 >
                   <ClipboardList size={16} />
                   <div className="text-left">
-                    <div className="font-medium">Plan 模式</div>
-                    <div className="text-[10px] opacity-60">先制定计划写入 plan.md，确认后再执行</div>
+                    <div className="font-medium">{t('chat.modePlanTitle')}</div>
+                    <div className="text-[10px] opacity-60">{t('chat.modePlanDesc')}</div>
                   </div>
                 </button>
               </div>
@@ -290,7 +292,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
                   ? 'hover:bg-white/15 text-white/70'
                   : 'hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant'
             }`}
-            title={settings.enableThinking ? '关闭思考模式' : '开启思考模式'}
+            title={settings.enableThinking ? t('chat.craftModeTitle') : t('chat.craftModeTitleOff')}
           >
             <Brain size={16} />
           </button>
@@ -308,8 +310,8 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
                     ? 'hover:bg-white/15 text-white/70'
                     : 'hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant'
               }`}
-              title="技能"
-              aria-label="技能"
+              title={t('chat.skillsAria')}
+              aria-label={t('chat.skillsAria')}
               aria-expanded={showSkillMenu}
             >
               <Zap size={14} />
@@ -332,11 +334,11 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
                 <div className={`px-3 py-2 text-[10px] uppercase tracking-wide ${
                   vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/40'
                 }`}>
-                  已安装技能
+                  {t('chat.installedSkills')}
                 </div>
                 {skills.length === 0 ? (
                   <div className={`px-3 py-3 text-xs text-center ${vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/50'}`}>
-                    还没有安装任何技能
+                    {t('chat.noSkills')}
                   </div>
                 ) : (
                   <div className="max-h-56 overflow-y-auto">
@@ -379,7 +381,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
                     }`}
                   >
                     <Store size={14} />
-                    <span>获取技能</span>
+                    <span>{t('chat.getSkills')}</span>
                   </button>
                 </div>
               </div>
@@ -405,7 +407,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
               }`}>
                 {settings.customModels.length === 0 ? (
                   <div className={`px-3 py-3 text-xs ${vibe ? 'text-white/60' : 'text-dark-onSurfaceVariant'}`}>
-                    还没有模型，点击下方添加
+                    {t('chat.noModels')}
                   </div>
                 ) : (
                   settings.customModels.map((m) => {
@@ -435,7 +437,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
                     vibe ? 'text-md-primary hover:bg-white/10' : 'text-md-primary hover:bg-md-primary/10'
                   }`}
                 >
-                  <Plus size={13} /> 自定义模型…
+                  <Plus size={13} /> {t('chat.customModel')}
                 </button>
               </div>
             )}
@@ -464,7 +466,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
       {/* Disclaimer - only in default mode */}
       {!isWelcome && (
         <div className="text-center mt-1.5 max-w-5xl mx-auto">
-          <span className={`text-[10px] ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/30'}`}>ClerkBox 可能会产生错误信息，请核实重要内容</span>
+          <span className={`text-[10px] ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/30'}`}>{t('chat.disclaimer')}</span>
         </div>
       )}
     </div>

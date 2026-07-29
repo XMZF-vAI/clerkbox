@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Bot, CheckCircle, XCircle, Loader2 } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { useAgentRunsStore } from '../../stores/agent-runs-store'
 import { useShallow } from 'zustand/react/shallow'
 import type { Message } from '../../types/agent'
@@ -19,15 +20,16 @@ const AGENT_COLORS: Record<string, { bg: string; border: string; text: string; d
 const DEFAULT_COLOR = { bg: 'bg-md-primaryContainer', border: 'border-md-primary/30', text: 'text-md-primary', dot: 'bg-md-primary' }
 
 type RunStatus = 'running' | 'completed' | 'failed' | 'aborted'
-const STATUS_CONFIG: Record<RunStatus, { icon: React.ReactNode; label: string; labelClass: string }> & { default: { icon: React.ReactNode; label: string; labelClass: string } } = {
-  running: { icon: null, label: '运行中', labelClass: '' },
-  completed: { icon: <CheckCircle className="h-4 w-4 text-md-success" />, label: '完成', labelClass: 'text-md-success' },
-  failed: { icon: <XCircle className="h-4 w-4 text-md-error" />, label: '失败', labelClass: 'text-md-error' },
-  aborted: { icon: <XCircle className="h-4 w-4 text-md-onSurfaceVariant" />, label: '已中断', labelClass: 'text-md-onSurfaceVariant' },
-  default: { icon: <Loader2 className="h-4 w-4 animate-spin text-md-onSurfaceVariant" />, label: '未知', labelClass: 'text-md-onSurfaceVariant' },
-}
 
 export function SubAgentCard({ message, sessionId, vibe }: SubAgentCardProps) {
+  const { t } = useTranslation()
+  const STATUS_CONFIG: Record<RunStatus, { icon: React.ReactNode; label: string; labelClass: string }> & { default: { icon: React.ReactNode; label: string; labelClass: string } } = {
+    running: { icon: null, label: t('common.running'), labelClass: '' },
+    completed: { icon: <CheckCircle className="h-4 w-4 text-md-success" />, label: t('common.complete'), labelClass: 'text-md-success' },
+    failed: { icon: <XCircle className="h-4 w-4 text-md-error" />, label: t('common.failed'), labelClass: 'text-md-error' },
+    aborted: { icon: <XCircle className="h-4 w-4 text-md-onSurfaceVariant" />, label: t('common.aborted'), labelClass: 'text-md-onSurfaceVariant' },
+    default: { icon: <Loader2 className="h-4 w-4 animate-spin text-md-onSurfaceVariant" />, label: t('common.unknown'), labelClass: 'text-md-onSurfaceVariant' },
+  }
   // 只订阅卡片需要的字段（status/agentType/agentName/prompt/startedAt/id），
   // 用 useShallow 浅比较：流式期间 run.messages 引用每次都变，但这些字段不变，可跳过重渲染
   const runFields = useAgentRunsStore(useShallow((s) => {
@@ -61,7 +63,7 @@ export function SubAgentCard({ message, sessionId, vibe }: SubAgentCardProps) {
     // run 可能已因会话切换被清除，显示占位
     return (
       <div className={`my-1 rounded-md border p-1.5 text-[11px] ${vibe ? 'liquid-glass-subtle border-white/15 text-white/50' : 'border-md-outlineVariant/30 bg-dark-surfaceContainer/50 text-md-onSurfaceVariant'}`}>
-        子 agent 记录已不在
+        {t('chat.subAgentGone')}
       </div>
     )
   }
@@ -83,7 +85,7 @@ export function SubAgentCard({ message, sessionId, vibe }: SubAgentCardProps) {
     <button
       type="button"
       aria-expanded={isSelected}
-      aria-label={`子代理 ${run.agentName}，状态：${statusConfig.label}，${isSelected ? '点击关闭详情' : '点击查看干活记录'}`}
+      aria-label={t('chat.subAgentAria', { name: run.agentName, status: statusConfig.label, action: isSelected ? t('chat.subAgentAriaClose') : t('chat.subAgentAriaOpen') })}
       className={`my-1 w-full max-w-full min-w-0 cursor-pointer rounded-md border ${color.border} ${vibe ? 'liquid-glass-subtle' : color.bg} px-2 py-1.5 text-left transition-all hover:border-md-primary/50 focus:outline-none focus-visible:ring-2 focus-visible:ring-md-primary/50 ${isSelected ? 'ring-2 ring-md-primary/50' : ''}`}
       onClick={() => selectRun(isSelected ? null : run.id)}
     >

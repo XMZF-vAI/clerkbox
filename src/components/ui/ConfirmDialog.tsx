@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import { AlertTriangle, X } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 import { useVibeStore } from '../../stores/vibe-store'
 
 interface ConfirmDialogProps {
@@ -15,13 +16,16 @@ interface ConfirmDialogProps {
 export default function ConfirmDialog({
   title,
   message,
-  confirmText = '确认',
-  cancelText = '取消',
+  confirmText,
+  cancelText,
   variant = 'default',
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
+  const { t } = useTranslation()
   const isVibeMode = useVibeStore((s) => s.isVibeMode)
+  const finalConfirmText = confirmText || t('confirmDialog.confirm')
+  const finalCancelText = cancelText || t('confirmDialog.cancel')
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onCancel()
@@ -69,7 +73,7 @@ export default function ConfirmDialog({
             onClick={onCancel}
             className="px-4 py-2 rounded-md3-sm text-sm text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh transition-colors"
           >
-            {cancelText}
+            {finalCancelText}
           </button>
           <button
             onClick={onConfirm}
@@ -79,7 +83,7 @@ export default function ConfirmDialog({
                 : 'bg-md-primary text-md-onPrimary hover:bg-md-primary/90'
             }`}
           >
-            {confirmText}
+            {finalConfirmText}
           </button>
         </div>
       </div>
