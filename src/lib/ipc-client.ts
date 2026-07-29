@@ -52,12 +52,18 @@ export const ipc = {
   initClerkbox: (projectDir: string): Promise<void> => window.clerkbox.initClerkbox(projectDir),
   writeSkillMd: (projectDir: string, slug: string, content: string): Promise<void> =>
     window.clerkbox.writeSkillMd(projectDir, slug, content),
+  writeSkillDir: (projectDir: string, slug: string, files: Array<{ path: string; content: string }>): Promise<void> =>
+    window.clerkbox.writeSkillDir(projectDir, slug, files),
   removeSkillDir: (projectDir: string, slug: string): Promise<void> =>
     window.clerkbox.removeSkillDir(projectDir, slug),
   skillsSearch: (query: string, page?: number, limit?: number): Promise<string> =>
     window.clerkbox.skillsSearch(query, page, limit),
   fetchSkillMd: (githubUrl: string): Promise<string> =>
     window.clerkbox.fetchSkillMd(githubUrl),
+  fetchSkillFromRepo: (githubUrl: string): Promise<string> =>
+    window.clerkbox.fetchSkillFromRepo(githubUrl),
+  scanSkillDirs: (workingDir: string): Promise<string> =>
+    window.clerkbox.scanSkillDirs(workingDir),
   windowAction: (action: 'minimize' | 'maximize' | 'close'): void => window.clerkbox.windowAction(action),
   platform: () => window.clerkbox.platform,
   homeDir: () => window.clerkbox.homeDir,

@@ -71,9 +71,12 @@ export interface ClerkBoxAPI {
   dbClearMessages: (sessionId: string) => Promise<void>
   initClerkbox: (projectDir: string) => Promise<void>
   writeSkillMd: (projectDir: string, slug: string, content: string) => Promise<void>
+  writeSkillDir: (projectDir: string, slug: string, files: Array<{ path: string; content: string }>) => Promise<void>
   removeSkillDir: (projectDir: string, slug: string) => Promise<void>
   skillsSearch: (query: string, page?: number, limit?: number) => Promise<string>
   fetchSkillMd: (githubUrl: string) => Promise<string>
+  fetchSkillFromRepo: (githubUrl: string) => Promise<string>
+  scanSkillDirs: (workingDir: string) => Promise<string>
   platform: string
   homeDir: string
 }
@@ -86,6 +89,8 @@ export interface ParseSkillFileResult {
   icon?: string
   category?: string
   skillMdContent?: string
+  /** 技能包含的所有文件（含 SKILL.md 与子目录文件）；path 相对解压根目录 */
+  files?: Array<{ path: string; content: string }>
   error?: string
 }
 

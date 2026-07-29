@@ -12,6 +12,7 @@ import * as https from 'https'
 import * as http from 'http'
 import * as os from 'os'
 import * as cheerio from 'cheerio'
+import * as yaml from 'js-yaml'
 
 /** Resolve path relative to project root */
 function projectRoot(...segments: string[]): string {
@@ -58,26 +59,69 @@ function listEntries(dir: string, base: string = ''): string[] {
 }
 
 /** 解析 SKILL.md 的 YAML frontmatter，失败时回退到正文元数据 */
-function parseSkillMd(content: string) {
+function parseSkillMd(content: string): {
+  name: string
+  description: string
+  icon: string
+  category: string
+  triggerKeywords: string[]
+  version: string
+  author: string
+  chainsTo: string[]
+} {
   const lines = content.split('\n')
   let name = ''
   let description = ''
   let icon = '⚡'
   let category: string = 'custom'
+  let triggerKeywords: string[] = []
+  let version = ''
+  let author = ''
+  let chainsTo: string[] = []
+
+  // 辅助：把 trigger_keywords / chains_to 规范化为 string[]
+  const normalizeStrList = (v: unknown): string[] => {
+    if (v == null) return []
+    if (typeof v === 'string') return [v]
+    if (Array.isArray(v)) return v.map((x) => String(x))
+    return []
+  }
 
   // 尝试 YAML frontmatter
   if (lines[0]?.trim() === '---') {
     const end = lines.slice(1).findIndex((l) => l.trim() === '---')
     if (end !== -1) {
       const front = lines.slice(1, end + 1).join('\n')
-      const get = (key: string) => {
-        const m = front.match(new RegExp(`^${key}\\s*:\\s*(.*)$`, 'm'))
-        return m?.[1]?.trim().replace(/^["']|["']$/g, '') || ''
+      try {
+        const parsed = yaml.load(front) as Record<string, unknown> | null | undefined
+        if (parsed && typeof parsed === 'object') {
+          const getStr = (key: string) => {
+            const v = parsed[key]
+            return typeof v === 'string' ? v.trim() : v == null ? '' : String(v)
+          }
+          name = getStr('name')
+          description = getStr('description')
+          icon = getStr('icon') || '⚡'
+          category = getStr('category') || 'custom'
+          triggerKeywords = normalizeStrList(parsed['trigger_keywords'])
+          version = getStr('version')
+          author = getStr('author')
+          chainsTo = normalizeStrList(parsed['chains_to'])
+        } else {
+          // 解析为空/非对象：回退到正则
+          throw new Error('empty frontmatter')
+        }
+      } catch {
+        // yaml.load 失败：回退到正则提取 name/description（保证健壮性）
+        const get = (key: string) => {
+          const m = front.match(new RegExp(`^${key}\\s*:\\s*(.*)$`, 'm'))
+          return m?.[1]?.trim().replace(/^["']|["']$/g, '') || ''
+        }
+        name = get('name')
+        description = get('description')
+        icon = get('icon') || '⚡'
+        category = get('category') || 'custom'
       }
-      name = get('name')
-      description = get('description')
-      icon = get('icon') || '⚡'
-      category = get('category') || 'custom'
     }
   }
 
@@ -92,7 +136,7 @@ function parseSkillMd(content: string) {
     description = firstPara?.slice(0, 100) || '用户自定义技能'
   }
 
-  return { name, description, icon, category }
+  return { name, description, icon, category, triggerKeywords, version, author, chainsTo }
 }
 
 let mainWindow: BrowserWindow | null = null
@@ -237,15 +281,28 @@ function registerIpcHandlers() {
     return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
   })
 
-  /** 解析自定义技能文件，返回 SKILL.md 内容与元数据 */
+  /** 解析自定义技能文件，返回 SKILL.md 内容、完整文件列表与元数据 */
   ipcMain.handle('parseSkillFile', async (_event, filePath: string) => {
     const ext = path.extname(filePath).toLowerCase()
     let skillMdContent = ''
     let tempDir = ''
+    // 完整文件列表（path 相对解压根目录，content 为 utf-8 文本）
+    let files: Array<{ path: string; content: string }> = []
+
+    // 跳过常见二进制扩展名（仅保留文本文件，避免把图片等读成 utf-8 乱码）
+    const binaryExt = new Set([
+      '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico', '.tif', '.tiff',
+      '.zip', '.gz', '.tar', '.rar', '.7z',
+      '.mp3', '.mp4', '.wav', '.ogg', '.flac', '.m4a', '.aac', '.wma', '.avi', '.mov',
+      '.pdf', '.exe', '.dll', '.so', '.dylib', '.class', '.jar',
+      '.ttf', '.otf', '.woff', '.woff2', '.eot',
+    ])
 
     try {
       if (ext === '.skill') {
         skillMdContent = fs.readFileSync(filePath, 'utf-8')
+        // .skill 文件本身就是单个 SKILL.md 内容
+        files = [{ path: 'SKILL.md', content: skillMdContent }]
       } else if (ext === '.zip') {
         tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'clerkbox-skill-'))
         const platform = process.platform
@@ -271,12 +328,54 @@ function registerIpcHandlers() {
           throw new Error(`ZIP 中未找到 SKILL.md 文件，解压后包含：${entries.slice(0, 10).join(', ')}${entries.length > 10 ? ' ...' : ''}`)
         }
         skillMdContent = fs.readFileSync(skillMdPath, 'utf-8')
+
+        // 遍历解压目录所有文件，保留目录结构，读取文本文件内容
+        const collected: Array<{ path: string; content: string }> = []
+        const walk = (dir: string, base: string = '') => {
+          let entries: fs.Dirent[]
+          try {
+            entries = fs.readdirSync(dir, { withFileTypes: true })
+          } catch {
+            return
+          }
+          for (const e of entries) {
+            const rel = base ? `${base}/${e.name}` : e.name
+            if (e.isDirectory()) {
+              walk(path.join(dir, e.name), rel)
+            } else if (e.isFile()) {
+              const lower = path.extname(e.name).toLowerCase()
+              if (binaryExt.has(lower)) continue
+              const absPath = path.join(dir, e.name)
+              let content: string
+              try {
+                content = fs.readFileSync(absPath, 'utf-8')
+              } catch {
+                continue
+              }
+              // 含 null 字节视为二进制，跳过
+              if (content.indexOf('\u0000') !== -1) continue
+              collected.push({ path: rel, content })
+            }
+          }
+        }
+        walk(tempDir)
+
+        // 若解压根目录下没有 SKILL.md（即 SKILL.md 在子目录中），把 SKILL.md 提升到根级
+        // 同时保留其在子目录中的原位置，便于 references 路径解析
+        if (!collected.find((f) => f.path === 'SKILL.md' || /^SKILL\.md$/i.test(f.path))) {
+          const skillMdRel = path.relative(tempDir, skillMdPath).replace(/\\/g, '/')
+          const item = collected.find((f) => f.path === skillMdRel)
+          if (item) {
+            collected.unshift({ path: 'SKILL.md', content: item.content })
+          }
+        }
+        files = collected.length > 0 ? collected : [{ path: 'SKILL.md', content: skillMdContent }]
       } else {
         throw new Error('不支持的文件格式')
       }
 
       const parsed = parseSkillMd(skillMdContent)
-      return { success: true, ...parsed, skillMdContent }
+      return { success: true, ...parsed, skillMdContent, files }
     } catch (err: any) {
       return { success: false, error: err?.message || String(err) }
     } finally {
@@ -905,10 +1004,31 @@ function registerIpcHandlers() {
   })
 
   ipcMain.handle('writeSkillMd', async (_event, projectDir: string, slug: string, content: string) => {
+    // 兼容封装：单文件场景，等价于 writeSkillDir 的单文件特例
     const safeSlug = assertSafeSlug(slug)
     const skillDir = path.join(projectDir, '.clerkbox', 'skills', safeSlug)
     fs.mkdirSync(skillDir, { recursive: true })
     fs.writeFileSync(path.join(skillDir, 'SKILL.md'), content, 'utf-8')
+  })
+
+  // 多文件写盘：把技能所有文件（含 SKILL.md 与子目录文件）写到 .clerkbox/skills/<slug>/ 下
+  ipcMain.handle('writeSkillDir', async (_event, projectDir: string, slug: string, files: Array<{ path: string; content: string }>) => {
+    const safeSlug = assertSafeSlug(slug)
+    const skillDir = path.join(projectDir, '.clerkbox', 'skills', safeSlug)
+    fs.mkdirSync(skillDir, { recursive: true })
+    // 路径安全校验：确保所有文件写在 skillDir 之下
+    const expectedBase = path.resolve(skillDir)
+    for (const f of files) {
+      // 防 path traversal：清理 path，禁止绝对路径和 ../
+      const cleaned = f.path.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\.\.\//g, '')
+      const target = path.resolve(skillDir, cleaned)
+      const rel = path.relative(expectedBase, target)
+      if (rel.startsWith('..') || path.isAbsolute(rel)) {
+        throw new Error(`Path traversal blocked in writeSkillDir: ${f.path}`)
+      }
+      fs.mkdirSync(path.dirname(target), { recursive: true })
+      fs.writeFileSync(target, f.content, 'utf-8')
+    }
   })
 
   ipcMain.handle('removeSkillDir', async (_event, projectDir: string, slug: string) => {
@@ -1009,6 +1129,16 @@ function registerIpcHandlers() {
     return await fetchSkillMdFromRepo(`${owner}/${cleanRepo}`)
   })
 
+  // 整目录拉取技能：用 GitHub Trees API 列出文件后逐个抓取，返回完整文件列表
+  ipcMain.handle('fetchSkillFromRepo', async (_event, githubUrl: string) => {
+    return await fetchSkillDirFromRepo(githubUrl)
+  })
+
+  // 扫描 .claude/skills/ 标准路径，发现全局和项目级技能
+  ipcMain.handle('scanSkillDirs', async (_event, workingDir: string) => {
+    return JSON.stringify(scanSkillDirs(workingDir))
+  })
+
   // Platform info
   ipcMain.handle('getPlatform', () => {
     return process.platform
@@ -1030,14 +1160,54 @@ function validateSkillMd(content: string): { valid: boolean; warnings: string[] 
     return { valid: false, warnings }
   }
   const fm = fmMatch[1]
-  const nameMatch = fm.match(/^name:\s*(.+)$/m)
-  const descMatch = fm.match(/^description:\s*(.+)$/m)
-  const name = nameMatch ? nameMatch[1].trim() : ''
-  const description = descMatch ? descMatch[1].trim() : ''
-  if (!name) warnings.push('frontmatter 中缺少 name 字段')
-  if (!description) warnings.push('frontmatter 中缺少 description 字段')
   const bodyStart = fmMatch[0].length
   const body = normalized.slice(bodyStart).trim()
+
+  // 用 js-yaml 解析 frontmatter 做校验（与 parseSkillMd 一致）；
+  // 解析失败时回退到正则提取 name/description，但保持返回 warnings 而非抛错
+  let name = ''
+  let description = ''
+  let parsed: Record<string, unknown> | null = null
+  try {
+    const loaded = yaml.load(fm)
+    if (loaded && typeof loaded === 'object' && !Array.isArray(loaded)) {
+      parsed = loaded as Record<string, unknown>
+      const getStr = (key: string) => {
+        const v = parsed![key]
+        return typeof v === 'string' ? v.trim() : v == null ? '' : String(v)
+      }
+      name = getStr('name')
+      description = getStr('description')
+    }
+  } catch {
+    // 解析失败：回退到正则提取 name/description
+    const nameMatch = fm.match(/^name:\s*(.+)$/m)
+    const descMatch = fm.match(/^description:\s*(.+)$/m)
+    name = nameMatch ? nameMatch[1].trim() : ''
+    description = descMatch ? descMatch[1].trim() : ''
+  }
+
+  // name/description 必需校验
+  if (!name) warnings.push('frontmatter 中缺少 name 字段')
+  if (!description) warnings.push('frontmatter 中缺少 description 字段')
+
+  // trigger_keywords 校验：若存在则必须为数组或字符串
+  if (parsed && parsed['trigger_keywords'] !== undefined) {
+    const tk = parsed['trigger_keywords']
+    if (typeof tk !== 'string' && !Array.isArray(tk)) {
+      warnings.push('frontmatter 中 trigger_keywords 必须为字符串或字符串数组')
+    }
+  }
+
+  // chains_to 校验：若存在则必须为字符串或数组
+  if (parsed && parsed['chains_to'] !== undefined) {
+    const ct = parsed['chains_to']
+    if (typeof ct !== 'string' && !Array.isArray(ct)) {
+      warnings.push('frontmatter 中 chains_to 必须为字符串或字符串数组')
+    }
+  }
+
+  // 正文 ≥20 字符校验
   if (body.length < 20) warnings.push('SKILL.md 正文过短，可能未包含有效指令')
   // Always warn about external content
   warnings.push('该 skill 来自外部仓库，安装前请人工审阅 SKILL.md 内容后再激活')
@@ -1092,6 +1262,267 @@ async function fetchSkillMdFromRepo(ownerRepo: string): Promise<string> {
   }
 
   return JSON.stringify({ error: 'SKILL.md not found in repository' })
+}
+
+/** 整目录拉取技能：解析 GitHub URL，用 Trees API 列出文件后逐个抓取，返回完整文件列表。
+ *  失败时回退到 fetchSkillMdFromRepo 拉单个 SKILL.md，保证健壮性。 */
+async function fetchSkillDirFromRepo(githubUrl: string): Promise<string> {
+  // 解析 GitHub URL：支持 github.com/owner/repo、/tree/branch/path、/blob/branch/file
+  const match = githubUrl.match(/github\.com\/([^/]+)\/([^/]+)(?:\/(tree|blob)\/([^/]+)(?:\/(.+))?)?/)
+  if (!match) {
+    return JSON.stringify({ error: 'Invalid GitHub URL' })
+  }
+  const [, owner, repoRaw, kind, branchRaw, subPathRaw] = match
+  const repo = (repoRaw || '').replace(/\.git$/, '').replace(/\/$/, '')
+  const branch = branchRaw || 'main'
+  // subPath：技能在仓库中的根路径（默认根目录）
+  let subPath = (subPathRaw || '').replace(/\/$/, '')
+  // blob 单文件链接：取该文件所在目录作为 subPath，便于拉取同目录资源
+  if (kind === 'blob' && subPath) {
+    const idx = subPath.lastIndexOf('/')
+    subPath = idx >= 0 ? subPath.slice(0, idx) : ''
+  }
+
+  // 跳过常见二进制扩展名（与 parseSkillFile 保持一致）
+  const binaryExt = new Set([
+    '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico', '.tif', '.tiff',
+    '.zip', '.gz', '.tar', '.rar', '.7z',
+    '.mp3', '.mp4', '.wav', '.ogg', '.flac', '.m4a', '.aac', '.wma', '.avi', '.mov',
+    '.pdf', '.exe', '.dll', '.so', '.dylib', '.class', '.jar',
+    '.ttf', '.otf', '.woff', '.woff2', '.eot',
+  ])
+
+  // 用 GitHub Trees API 列出文件
+  const treesApiUrl = `https://api.github.com/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`
+  let treeData = ''
+  try {
+    treeData = await new Promise<string>((resolve, reject) => {
+      https.get(treesApiUrl, {
+        headers: {
+          'User-Agent': 'ClerkBox/1.5',
+          'Accept': 'application/vnd.github+json',
+        },
+        timeout: 15000,
+      }, (res) => {
+        if (res.statusCode !== 200) { resolve(''); return }
+        let body = ''
+        res.on('data', (chunk) => (body += chunk))
+        res.on('end', () => resolve(body))
+        res.on('error', (err) => reject(err))
+      }).on('error', (err) => reject(err))
+    })
+  } catch {
+    treeData = ''
+  }
+
+  // Trees API 失败：回退到旧逻辑拉单个 SKILL.md
+  if (!treeData) {
+    const fallback = await fetchSkillMdFromRepo(`${owner}/${repo}`)
+    try {
+      const parsed = JSON.parse(fallback)
+      if (parsed.success && parsed.content) {
+        return JSON.stringify({
+          success: true,
+          files: [{ path: 'SKILL.md', content: parsed.content }],
+          warnings: Array.isArray(parsed.warnings) ? parsed.warnings : [],
+        })
+      }
+    } catch { /* fall through to error */ }
+    return JSON.stringify({ error: 'SKILL.md not found' })
+  }
+
+  // 解析 tree 响应
+  let treeJson: { tree?: Array<{ path: string; type: string; size?: number }> }
+  try {
+    treeJson = JSON.parse(treeData)
+  } catch {
+    return JSON.stringify({ error: 'Failed to parse Trees API response' })
+  }
+  const tree = treeJson.tree || []
+
+  // 筛选技能目录下的文件
+  const prefix = subPath ? subPath + '/' : ''
+  const candidates: Array<{ path: string }> = []
+  for (const item of tree) {
+    if (item.type !== 'blob') continue
+    let p = item.path
+    if (prefix) {
+      if (p.startsWith(prefix)) {
+        p = p.slice(prefix.length)
+      } else {
+        continue
+      }
+    }
+    if (!p) continue
+    // 跳过二进制扩展名
+    const ext = path.extname(p).toLowerCase()
+    if (binaryExt.has(ext)) continue
+    // 跳过大于 500KB 的文件
+    if (typeof item.size === 'number' && item.size > 500 * 1024) continue
+    candidates.push({ path: p })
+    if (candidates.length >= 50) break
+  }
+
+  // 必须找到 SKILL.md
+  const hasSkillMd = candidates.some((f) => f.path === 'SKILL.md' || f.path.endsWith('/SKILL.md'))
+  if (!hasSkillMd) {
+    return JSON.stringify({ error: 'SKILL.md not found' })
+  }
+
+  // 逐个从 raw.githubusercontent.com 拉取文件内容
+  const warnings: string[] = []
+  const files: Array<{ path: string; content: string }> = []
+  for (const cand of candidates) {
+    const fullPath = prefix ? `${prefix}${cand.path}` : cand.path
+    const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${fullPath}`
+    try {
+      const content = await new Promise<string>((resolve) => {
+        https.get(rawUrl, {
+          headers: { 'User-Agent': 'ClerkBox/1.5' },
+          timeout: 15000,
+        }, (res) => {
+          if (res.statusCode !== 200) { resolve(''); return }
+          let data = ''
+          res.on('data', (chunk) => (data += chunk))
+          res.on('end', () => resolve(data))
+          res.on('error', () => resolve(''))
+        }).on('error', () => resolve(''))
+      })
+      if (!content) {
+        warnings.push(`拉取失败: ${cand.path}`)
+        continue
+      }
+      files.push({ path: cand.path, content })
+    } catch {
+      warnings.push(`拉取失败: ${cand.path}`)
+    }
+  }
+
+  // 确认 SKILL.md 内容已成功获取
+  const skillMdFile = files.find((f) => f.path === 'SKILL.md' || f.path.endsWith('/SKILL.md'))
+  if (!skillMdFile) {
+    return JSON.stringify({ error: 'SKILL.md not found' })
+  }
+
+  warnings.push('该 skill 来自外部仓库，安装前请人工审阅 SKILL.md 内容后再激活')
+  return JSON.stringify({ success: true, files, warnings })
+}
+
+/** 扫描 .claude/skills/ 标准路径，发现全局（~/.claude/skills/）和项目级（<workingDir>/.claude/skills/）技能。
+ *  对每个 <name>/SKILL.md 用 parseSkillMd 提取元数据，并递归读取目录所有文件。 */
+function scanSkillDirs(workingDir: string): Array<{
+  slug: string
+  name: string
+  description: string
+  icon: string
+  category: string
+  triggerKeywords: string[]
+  version: string
+  author: string
+  chainsTo: string[]
+  source: 'global-claude' | 'project-claude'
+  skillMdPath: string
+  skillMdContent: string
+  files: Array<{ path: string; content: string }>
+}> {
+  const result: Array<{
+    slug: string
+    name: string
+    description: string
+    icon: string
+    category: string
+    triggerKeywords: string[]
+    version: string
+    author: string
+    chainsTo: string[]
+    source: 'global-claude' | 'project-claude'
+    skillMdPath: string
+    skillMdContent: string
+    files: Array<{ path: string; content: string }>
+  }> = []
+
+  // 跳过常见二进制扩展名（与 parseSkillFile 保持一致）
+  const binaryExt = new Set([
+    '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico', '.tif', '.tiff',
+    '.zip', '.gz', '.tar', '.rar', '.7z',
+    '.mp3', '.mp4', '.wav', '.ogg', '.flac', '.m4a', '.aac', '.wma', '.avi', '.mov',
+    '.pdf', '.exe', '.dll', '.so', '.dylib', '.class', '.jar',
+    '.ttf', '.otf', '.woff', '.woff2', '.eot',
+  ])
+
+  // 扫描单个 skills 根目录
+  const scanOne = (skillsRoot: string, source: 'global-claude' | 'project-claude') => {
+    if (!fs.existsSync(skillsRoot)) return
+    let entries: fs.Dirent[]
+    try {
+      entries = fs.readdirSync(skillsRoot, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const e of entries) {
+      if (!e.isDirectory()) continue
+      const slug = e.name
+      const skillDir = path.join(skillsRoot, slug)
+      const skillMdAbs = path.join(skillDir, 'SKILL.md')
+      if (!fs.existsSync(skillMdAbs)) continue
+      try {
+        const skillMdContent = fs.readFileSync(skillMdAbs, 'utf-8')
+        const parsed = parseSkillMd(skillMdContent)
+        // 递归读取技能目录所有文件（保留目录结构，跳过二进制）
+        const files: Array<{ path: string; content: string }> = []
+        const walk = (dir: string, base: string = '') => {
+          let ents: fs.Dirent[]
+          try {
+            ents = fs.readdirSync(dir, { withFileTypes: true })
+          } catch {
+            return
+          }
+          for (const ent of ents) {
+            const rel = base ? `${base}/${ent.name}` : ent.name
+            if (ent.isDirectory()) {
+              walk(path.join(dir, ent.name), rel)
+            } else if (ent.isFile()) {
+              const lower = path.extname(ent.name).toLowerCase()
+              if (binaryExt.has(lower)) continue
+              let content: string
+              try {
+                content = fs.readFileSync(path.join(dir, ent.name), 'utf-8')
+              } catch {
+                continue
+              }
+              // 含 null 字节视为二进制，跳过
+              if (content.indexOf('\u0000') !== -1) continue
+              files.push({ path: rel, content })
+            }
+          }
+        }
+        walk(skillDir)
+        result.push({
+          slug,
+          name: parsed.name,
+          description: parsed.description,
+          icon: parsed.icon,
+          category: parsed.category,
+          triggerKeywords: parsed.triggerKeywords,
+          version: parsed.version,
+          author: parsed.author,
+          chainsTo: parsed.chainsTo,
+          source,
+          skillMdPath: skillMdAbs,
+          skillMdContent,
+          files,
+        })
+      } catch {
+        // 单个技能解析失败跳过，不影响其他
+      }
+    }
+  }
+
+  // 全局路径：~/.claude/skills/
+  scanOne(path.join(os.homedir(), '.claude', 'skills'), 'global-claude')
+  // 项目路径：<workingDir>/.claude/skills/
+  scanOne(path.join(workingDir, '.claude', 'skills'), 'project-claude')
+  return result
 }
 
 // ── Web search/fetch helpers ──

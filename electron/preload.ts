@@ -7,7 +7,7 @@ contextBridge.exposeInMainWorld('clerkbox', {
   selectAudioFile: (): Promise<string | null> => ipcRenderer.invoke('selectAudioFile'),
   selectMusicFolder: (): Promise<string | null> => ipcRenderer.invoke('selectMusicFolder'),
   selectSkillFile: (): Promise<string | null> => ipcRenderer.invoke('selectSkillFile'),
-  parseSkillFile: (filePath: string): Promise<{ success: boolean; name?: string; description?: string; icon?: string; category?: string; skillMdContent?: string; error?: string }> =>
+  parseSkillFile: (filePath: string): Promise<{ success: boolean; name?: string; description?: string; icon?: string; category?: string; skillMdContent?: string; files?: Array<{ path: string; content: string }>; error?: string }> =>
     ipcRenderer.invoke('parseSkillFile', filePath),
   fileExists: (path: string): Promise<boolean> => ipcRenderer.invoke('fileExists', path),
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke('openExternal', url),
@@ -88,6 +88,8 @@ contextBridge.exposeInMainWorld('clerkbox', {
   initClerkbox: (projectDir: string): Promise<void> => ipcRenderer.invoke('initClerkbox', projectDir),
   writeSkillMd: (projectDir: string, slug: string, content: string): Promise<void> =>
     ipcRenderer.invoke('writeSkillMd', projectDir, slug, content),
+  writeSkillDir: (projectDir: string, slug: string, files: Array<{ path: string; content: string }>): Promise<void> =>
+    ipcRenderer.invoke('writeSkillDir', projectDir, slug, files),
   removeSkillDir: (projectDir: string, slug: string): Promise<void> =>
     ipcRenderer.invoke('removeSkillDir', projectDir, slug),
 
@@ -95,6 +97,8 @@ contextBridge.exposeInMainWorld('clerkbox', {
   skillsSearch: (query: string, page?: number, limit?: number): Promise<string> =>
     ipcRenderer.invoke('skillsSearch', query, page, limit),
   fetchSkillMd: (githubUrl: string): Promise<string> => ipcRenderer.invoke('fetchSkillMd', githubUrl),
+  fetchSkillFromRepo: (githubUrl: string): Promise<string> => ipcRenderer.invoke('fetchSkillFromRepo', githubUrl),
+  scanSkillDirs: (workingDir: string): Promise<string> => ipcRenderer.invoke('scanSkillDirs', workingDir),
 
   // Platform
   // S7: sandbox: true 后 preload 无法直接 require('os')，改用同步 IPC 获取。

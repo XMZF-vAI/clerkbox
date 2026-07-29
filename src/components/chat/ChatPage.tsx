@@ -57,6 +57,7 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
   useEffect(() => {
     if (workingDir) {
       ipc.initClerkbox(workingDir).catch((e) => { console.error('initClerkbox failed:', e) })
+      useSkillsStore.getState().discoverStandardSkills(workingDir).catch((e) => { console.error('discoverStandardSkills failed:', e) })
     }
   }, [workingDir])
 
@@ -68,7 +69,15 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
     if (!workingDir) return
     const activeSkills = skills.filter((s) => sessionSkillIds.includes(s.id))
     for (const skill of activeSkills) {
-      ipc.writeSkillMd(workingDir, skill.slug, skill.skillMdContent).catch((e) => { console.error('writeSkillMd failed:', e) })
+      // 标准路径技能（global-claude/project-claude）不写盘，直接引用原路径
+      if (skill.source === 'global-claude' || skill.source === 'project-claude') continue
+      // online/custom 技能写盘完整文件目录（files 空时回退单文件）
+      const files = skill.files && skill.files.length > 0
+        ? skill.files
+        : [{ path: 'SKILL.md', content: skill.skillMdContent }]
+      ipc.writeSkillDir(workingDir, skill.slug, files).catch((err) =>
+        console.error(`[ChatPage] writeSkillDir failed for ${skill.slug}:`, err)
+      )
     }
   }, [workingDir, sessionSkillIds, skills])
 

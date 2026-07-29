@@ -23,6 +23,17 @@ import { useUIStore } from '../../stores/ui-store'
 import type { SkillsMPSkill } from '../../types/skills'
 
 /**
+ * Source badge metadata: label + Tailwind classes.
+ * 在线=蓝 自定义=紫 全局=绿 项目=青
+ */
+const SOURCE_BADGE: Record<string, { label: string; className: string }> = {
+  online: { label: '在线', className: 'bg-md-info/15 text-md-info' },
+  custom: { label: '自定义', className: 'bg-md-tertiary/15 text-md-tertiary' },
+  'global-claude': { label: '全局', className: 'bg-md-success/15 text-md-success' },
+  'project-claude': { label: '项目', className: 'bg-cyan-500/15 text-cyan-300' },
+}
+
+/**
  * Full-page Skill Store that replaces the chat area.
  * Features: recommended skills + search + installed management.
  */
@@ -63,7 +74,13 @@ export default function SkillStore() {
   const currentSession = sessions.find((s) => s.id === activeSessionId)
   const workingDir = currentSession?.workingDir || currentSession?.defaultWorkDir || ''
 
-  const installedSkills = skills.filter((s) => s.source === 'online' || s.source === 'custom')
+  const installedSkills = skills.filter(
+    (s) =>
+      s.source === 'online' ||
+      s.source === 'custom' ||
+      s.source === 'global-claude' ||
+      s.source === 'project-claude'
+  )
 
   // Load recommended on mount
   useEffect(() => {
@@ -294,43 +311,76 @@ export default function SkillStore() {
               <div className="grid gap-2 w-full">
                 {installedSkills.map((skill) => {
                   const isActive = sessionSkillIds.includes(skill.id)
+                  const isRemovable = skill.source === 'online' || skill.source === 'custom'
+                  const badge = SOURCE_BADGE[skill.source]
                   return (
                     <div
                       key={skill.id}
-                      className={`flex items-center gap-3 px-4 py-3 rounded-xl border transition-all max-w-full overflow-hidden ${
+                      className={`flex items-start gap-3 px-4 py-3 rounded-xl border transition-all max-w-full overflow-hidden ${
                         isActive
                           ? 'bg-md-primary/8 border-md-primary/20'
                           : 'bg-dark-surfaceContainerHigh/50 border-dark-onSurfaceVariant/5'
                       }`}
                     >
-                      <span className="text-xl flex-shrink-0">{skill.icon}</span>
+                      <span className="text-xl flex-shrink-0 mt-0.5">{skill.icon}</span>
                       <div className="flex-1 min-w-0 overflow-hidden">
-                        <span className="text-sm font-medium text-dark-onSurface block truncate">{skill.name}</span>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-sm font-medium text-dark-onSurface truncate">{skill.name}</span>
+                          {skill.version && (
+                            <span className="text-[10px] text-dark-onSurfaceVariant/40">v{skill.version}</span>
+                          )}
+                          {badge && (
+                            <span
+                              className={`px-1.5 py-0.5 rounded-full text-[10px] font-medium ${badge.className}`}
+                            >
+                              {badge.label}
+                            </span>
+                          )}
+                        </div>
                         <p className="text-xs text-dark-onSurfaceVariant/50 truncate">{skill.description}</p>
+                        {skill.author && (
+                          <p className="text-[10px] text-dark-onSurfaceVariant/40 mt-0.5 truncate">by {skill.author}</p>
+                        )}
+                        {skill.triggerKeywords.length > 0 && (
+                          <div className="flex items-center gap-1 flex-wrap mt-1">
+                            {skill.triggerKeywords.slice(0, 5).map((kw) => (
+                              <span
+                                key={kw}
+                                className="px-1.5 py-0.5 rounded-full bg-dark-surfaceContainer text-dark-onSurfaceVariant/60 text-[10px]"
+                              >
+                                {kw}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                         {skill.warnings && skill.warnings.length > 0 && (
                           <p className="text-[10px] text-md-warning/80 mt-0.5 truncate" title={skill.warnings.join('\n')}>
                             ⚠️ {skill.warnings[0]}{skill.warnings.length > 1 ? t('skillstore.warningsSuffix', { count: skill.warnings.length }) : ''}
                           </p>
                         )}
                       </div>
-                      <button
-                        onClick={() => toggleSessionSkill(skill.id, workingDir)}
-                        className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium transition-all flex-shrink-0 ${
-                          isActive
-                            ? 'bg-md-primary text-md-onPrimary hover:bg-md-primary/90'
-                            : 'bg-dark-surfaceContainer hover:bg-dark-surfaceContainerHighest text-dark-onSurfaceVariant'
-                        }`}
-                      >
-                        {isActive ? <Check size={11} /> : <Zap size={11} />}
-                        {isActive ? t('skillstore.loaded') : t('skillstore.load')}
-                      </button>
-                      <button
-                        onClick={() => handleUninstall(skill.id)}
-                        className="p-1.5 rounded-lg hover:bg-md-error/10 text-dark-onSurfaceVariant/40 hover:text-md-error transition-all flex-shrink-0"
-                        title={t('common.uninstall')}
-                      >
-                        <Trash2 size={13} />
-                      </button>
+                      <div className="flex items-center gap-1.5 flex-shrink-0 mt-1">
+                        <button
+                          onClick={() => toggleSessionSkill(skill.id, workingDir)}
+                          className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium transition-all flex-shrink-0 ${
+                            isActive
+                              ? 'bg-md-primary text-md-onPrimary hover:bg-md-primary/90'
+                              : 'bg-dark-surfaceContainer hover:bg-dark-surfaceContainerHighest text-dark-onSurfaceVariant'
+                          }`}
+                        >
+                          {isActive ? <Check size={11} /> : <Zap size={11} />}
+                          {isActive ? t('skillstore.loaded') : t('skillstore.load')}
+                        </button>
+                        {isRemovable && (
+                          <button
+                            onClick={() => handleUninstall(skill.id)}
+                            className="p-1.5 rounded-lg hover:bg-md-error/10 text-dark-onSurfaceVariant/40 hover:text-md-error transition-all flex-shrink-0"
+                            title={t('common.uninstall')}
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        )}
+                      </div>
                     </div>
                   )
                 })}

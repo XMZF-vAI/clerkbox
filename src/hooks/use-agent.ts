@@ -92,10 +92,19 @@ Your working directory contains a \`.clerkbox/\` folder with the following struc
 └── memory/    ← structured memory (MEMORY.md + topic files)
 \`\`\`
 
-### Skills
-The user has loaded several skills for you (see "Currently Active Skills" list below). **You MUST read the SKILL.md file of each skill using the read_file tool before doing anything else.** Understand each skill's specific instructions and capabilities, then follow them strictly in all subsequent work.
-Skill file path format: \`.clerkbox/skills/<skill-name>/SKILL.md\`
-If you reply without reading the skill files first, the user's work may fail. **Read the skills first, then work.**
+### Skills (Progressive Loading)
+The user has activated several skills. Below is a lightweight **skill index** (name + description + trigger keywords + path). The full SKILL.md content is NOT included here to save context.
+
+**Skill Router Rules:**
+1. **Match by relevance**: Compare the user's current task against each skill's description and trigger_keywords. Only read the SKILL.md of skills that are clearly relevant to the current task.
+2. **No match → skip reading**: If no skill matches the current task, do NOT read any SKILL.md file. Respond directly.
+3. **Read on-demand**: When a skill matches, use the read_file tool to read its SKILL.md (path shown in the index), then follow its instructions.
+4. **Task evolution**: If the conversation shifts and a previously-irrelevant skill becomes relevant, read its SKILL.md at that point.
+5. **Slash command**: If the user's message starts with \`/<skill-slug>\`, treat it as an explicit activation — immediately read that skill's SKILL.md and prioritize its instructions for the subsequent input.
+6. **Skill chaining**: When a skill's main action completes and it declares \`chains_to\` (a list of successor skill slugs), evaluate whether any successor skill's description matches the current state. If it matches, read that successor's SKILL.md and continue per its instructions. Chaining is advisory (use your judgment), not mandatory.
+
+**Skill Index:**
+(see the "Currently Active Skills" list injected below)
 
 ### Plan Mode
 When you are in Plan Mode:
@@ -438,7 +447,15 @@ export function useAgent(sessionId: string) {
       memoryPrompt?: string
       workingDir?: string
       permissionMode?: string
-      activeSkillSlugs?: string[]
+      activeSkillIndex?: Array<{
+        slug: string
+        name: string
+        description: string
+        triggerKeywords: string[]
+        version: string
+        skillMdPath: string
+        chainsTo: string[]
+      }>
       extraSystemPrompt?: string
     } = {}
   ): Array<{ role: string; content: string; tool_calls?: unknown; tool_call_id?: string; reasoning_content?: string }> => {
@@ -446,7 +463,7 @@ export function useAgent(sessionId: string) {
       memoryPrompt = '',
       workingDir = getWorkingDir(),
       permissionMode = settings.permissionMode,
-      activeSkillSlugs = useSkillsStore.getState().getActiveSkillSlugs(),
+      activeSkillIndex = useSkillsStore.getState().getActiveSkillIndex(),
       extraSystemPrompt,
     } = opts
 
@@ -464,8 +481,14 @@ export function useAgent(sessionId: string) {
         systemContent += `\n\n## 当前工作目录\n${workingDir}\n\n用户的文件操作默认在此目录下执行。`
         systemContent += CLERKBOX_PROMPT
         if (memoryPrompt) systemContent += '\n\n' + memoryPrompt
-        if (activeSkillSlugs.length > 0) {
-          systemContent += `\n\n### ⚡ 当前已激活的技能（你必须先读取这些技能文件再回复用户）\n${activeSkillSlugs.map((s) => `- \`${s}\` → .clerkbox/skills/${s}/SKILL.md`).join('\n')}\n\n**重要：在回复用户之前，请先使用 read_file 工具读取上述所有技能的 SKILL.md 文件。**`
+        if (activeSkillIndex.length > 0) {
+          const indexLines = activeSkillIndex.map((s) => {
+            const kw = s.triggerKeywords.length > 0 ? ` | keywords: ${s.triggerKeywords.join(', ')}` : ''
+            const ver = s.version ? `@${s.version}` : ''
+            const chain = s.chainsTo.length > 0 ? ` | chains_to: ${s.chainsTo.join(', ')}` : ''
+            return `- \`${s.slug}\`${ver} → ${s.skillMdPath} | ${s.name}: ${s.description}${kw}${chain}`
+          })
+          systemContent += `\n\n### ⚡ Currently Active Skills (Index)\n${indexLines.join('\n')}\n\n**Follow the Skill Router rules above. Do NOT read all skills — only read those matching the current task.**`
         }
       }
       if (permissionMode === 'plan') systemContent += PLAN_MODE_PROMPT
@@ -1229,7 +1252,7 @@ export function useAgent(sessionId: string) {
           workingDir,
           memoryPrompt: '',
           permissionMode: 'craft',
-          activeSkillSlugs: [],
+          activeSkillIndex: [],
           extraSystemPrompt: agent.systemPrompt,
         }))
 
