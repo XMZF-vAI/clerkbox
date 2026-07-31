@@ -3,6 +3,20 @@ import { persist } from 'zustand/middleware'
 import type { SkillDefinition, SkillsMPSkill, SkillsMPSearchResult } from '../types/skills'
 import { ipc } from '../lib/ipc-client'
 
+// slug 级 mutex：同一技能的写盘/删除操作串行执行，防止"停用→快速激活"竞态
+// （removeSkillDir 在 writeSkillDir 之后完成导致刚写入的目录被删除）
+const skillMutex = new Map<string, Promise<void>>()
+function withSkillLock<T>(slug: string, task: () => Promise<T>): Promise<T> {
+  const prev = skillMutex.get(slug) ?? Promise.resolve()
+  const next = prev.then(task, task) as unknown as Promise<void>
+  skillMutex.set(slug, next)
+  // 链完成后清理，避免 Map 无限增长
+  next.finally(() => {
+    if (skillMutex.get(slug) === next) skillMutex.delete(slug)
+  })
+  return next as unknown as Promise<T>
+}
+
 interface SkillsState {
   /** All installed skills (only online-downloaded, no preset) */
   skills: SkillDefinition[]
@@ -94,17 +108,17 @@ export const useSkillsStore = create<SkillsState>()(
         const isActive = sessionSkillIds.includes(id)
 
         if (isActive) {
-          // 停用：所有 source 都调 removeSkillDir 清理（global-claude/project-claude
-          // 若没写过盘，removeSkillDir 的 fs.existsSync 检查会无害跳过）
-          // M11: 先更新 UI，写盘失败则回滚并打印错误
+          // 停用：UI 立即更新保证响应性，IO 操作加 slug 级锁串行化防竞态
           set({ sessionSkillIds: sessionSkillIds.filter((sid) => sid !== id) })
           if (workingDir) {
-            try {
-              await ipc.removeSkillDir(workingDir, skill.slug)
-            } catch (err) {
-              console.error(`[skills-store] removeSkillDir failed for ${skill.slug}:`, err)
-              set({ sessionSkillIds: [...get().sessionSkillIds, id] })
-            }
+            await withSkillLock(skill.slug, async () => {
+              try {
+                await ipc.removeSkillDir(workingDir, skill.slug)
+              } catch (err) {
+                console.error(`[skills-store] removeSkillDir failed for ${skill.slug}:`, err)
+                set({ sessionSkillIds: [...get().sessionSkillIds, id] })
+              }
+            })
           }
         } else {
           set({ sessionSkillIds: [...sessionSkillIds, id] })
@@ -115,12 +129,14 @@ export const useSkillsStore = create<SkillsState>()(
             const files = skill.files && skill.files.length > 0
               ? skill.files
               : [{ path: 'SKILL.md', content: skill.skillMdContent }]
-            try {
-              await ipc.writeSkillDir(workingDir, skill.slug, files)
-            } catch (err) {
-              console.error(`[skills-store] writeSkillDir failed for ${skill.slug}:`, err)
-              set({ sessionSkillIds: get().sessionSkillIds.filter((sid) => sid !== id) })
-            }
+            await withSkillLock(skill.slug, async () => {
+              try {
+                await ipc.writeSkillDir(workingDir, skill.slug, files)
+              } catch (err) {
+                console.error(`[skills-store] writeSkillDir failed for ${skill.slug}:`, err)
+                set({ sessionSkillIds: get().sessionSkillIds.filter((sid) => sid !== id) })
+              }
+            })
           }
         }
       },
@@ -411,8 +427,12 @@ export const useSkillsStore = create<SkillsState>()(
         return persisted
       },
       partialize: (state) => ({
-        // Persist installed online skills + session skill ids
-        skills: state.skills,
+        // 仅持久化用户安装的 online/custom 技能 + 会话激活技能 id。
+        // 标准路径技能（clerkbox/claude 全局+项目级）不持久化：它们带绝对 skillMdPath，
+        // 跨 workingDir 切换后旧路径失效，且 slug 去重会阻塞新目录重新发现。每次启动由 discoverStandardSkills 重新发现。
+        skills: state.skills.filter(
+          (s) => s.source === 'online' || s.source === 'custom'
+        ),
         sessionSkillIds: state.sessionSkillIds,
       }),
     }

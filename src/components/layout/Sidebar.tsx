@@ -20,6 +20,7 @@ import ConfirmDialog from '../ui/ConfirmDialog'
 
 import APP_ICON from '../../assets/icon.png'
 import NEW_CHAT_ICON from '../../assets/new-chat-icon.png'
+import { useShallow } from 'zustand/react/shallow'
 import { useSkillsStore } from '../../stores/skills-store'
 import { useSettingsStore } from '../../stores/settings-store'
 import { useUIStore } from '../../stores/ui-store'
@@ -42,9 +43,9 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
   const { sessions, activeSessionId, createSession, setActiveSession, deleteSession } = useChatStore()
   // 订阅 sessionStatus 变化以触发 loading 圈重渲染
   const sessionStatus = useChatStore((s) => s.sessionStatus)
-  // 只订阅激活技能派生列表，避免整个 skills 数组变化（如标准技能发现/搜索）触发重渲染
-  const enabledSkills = useSkillsStore((s) =>
-    s.skills.filter((sk) => s.sessionSkillIds.includes(sk.id))
+  // 激活技能派生列表：useShallow 对数组元素做浅比较，避免 filter 每次返回新数组引用触发无意义重渲染
+  const enabledSkills = useSkillsStore(
+    useShallow((s) => s.skills.filter((sk) => s.sessionSkillIds.includes(sk.id)))
   )
   const toggleSessionSkill = useSkillsStore((s) => s.toggleSessionSkill)
   const { permissionMode, updateSettings } = useSettingsStore()
