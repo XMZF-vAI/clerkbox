@@ -32,3 +32,13 @@ Thumbs.db
 
 # Trae IDE
 .trae/
+
+# Temporary assets & planning docs (root-level scratch files, not tracked)
+# 临时截图/图标素材（正式图标在 build/ public/ src/assets/ 下，不受影响）
+/IMG_*.PNG
+/图标.png
+# 计划与评审文档
+/plan-*.md
+/CODE_REVIEW.md
+# 第三方工作目录
+/.workbuddy/
