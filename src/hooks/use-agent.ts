@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from 'react'
 import { useSettingsStore } from '../stores/settings-store'
-import { useChatStore } from '../stores/chat-store'
+import { useChatStore, getSessionAbortController, setSessionAbortController } from '../stores/chat-store'
 import { useSkillsStore } from '../stores/skills-store'
 import { toolRegistry } from '../lib/tool-registry'
 import { isDangerousCommand } from '../lib/permission-engine'
@@ -129,7 +129,6 @@ const MAX_REACT_ITERATIONS = 100 // Loop exits when model stops calling tools or
 export function useAgent(sessionId: string) {
   const settings = useSettingsStore()
   const { addMessage, updateMessage, setStreaming, sessions, compactSession, setSessionStatus } = useChatStore()
-  const abortRef = useRef<AbortController | null>(null)
   const tokenTrackerRef = useRef<TokenTracker>(new TokenTracker())
   const sessionReadFilesRef = useRef<Map<string, { content: string; timestamp: number }>>(new Map())
   const [error, setError] = useState<string | null>(null)
@@ -605,8 +604,8 @@ export function useAgent(sessionId: string) {
   /** Main send message function with full ReAct loop */
   const sendMessage = useCallback(
     async (content: string) => {
-      // Prevent concurrent sends on the same session
-      if (abortRef.current) {
+      // Prevent concurrent sends on the same session（per-session 粒度，不阻塞其他会话并发）
+      if (getSessionAbortController(sessionId)) {
         setError('当前正在处理中，请等待完成后再发送')
         return
       }
@@ -626,7 +625,7 @@ export function useAgent(sessionId: string) {
       setSessionStatus(sessionId, 'working')
 
       const controller = new AbortController()
-      abortRef.current = controller
+      setSessionAbortController(sessionId, controller)
       // 记录是否是用户主动 abort，用于决定是否发"异常停下"通知
       let abortedByUser = false
 
@@ -664,13 +663,11 @@ export function useAgent(sessionId: string) {
         notifyIfNotViewing(sessionId, 'error', msg.slice(0, 200))
       } finally {
         // B3: 只清当前 controller 的引用，避免误清新会话的 controller。
-        // 旧实现无条件 abortRef.current = null，若用户中断 A 后立刻发 B，
-        // A 的 finally 会把 B 的 controller 引用也清掉，导致 B 无法再被中断。
-        if (abortRef.current === controller) {
-          abortRef.current = null
+        if (getSessionAbortController(sessionId) === controller) {
+          setSessionAbortController(sessionId, null)
         }
-        // Always force-clear streaming state
-        useChatStore.getState().setStreaming(false)
+        // 仅清当前会话的 streaming 状态，不影响其他并发会话
+        useChatStore.getState().setStreaming(false, sessionId)
         // 用户主动 abort：直接清状态，不发通知
         if (abortedByUser) {
           setSessionStatus(sessionId, null)
@@ -1132,16 +1129,14 @@ export function useAgent(sessionId: string) {
   }
 
   const abort = useCallback(() => {
-    // B3: 只 abort，不主动清 abortRef.current。清理由 sendMessage 的 finally 负责（带身份比对）。
-    // 旧实现 abort 后立即清 null，会导致 sendMessage 的 finally 看不到 controller 而无法清理；
-    // 且若有新会话已写入 abortRef.current，这里也会误清。
-    if (abortRef.current) {
-      abortRef.current.abort()
+    // per-session abort：只中止当前会话的 controller，不影响其他并发会话
+    const ctrl = getSessionAbortController(sessionId)
+    if (ctrl) {
+      ctrl.abort()
     }
-    // Force clear streaming state regardless of current session
-    useChatStore.getState().setStreaming(false)
+    // 仅清当前会话的 streaming 状态
+    useChatStore.getState().setStreaming(false, sessionId)
     // 用户主动 abort：清当前会话工作状态，不发通知
-    // 注意：sendMessage 的 finally 也会处理，但这里同步清一次更稳，避免 finally 异步延迟导致 loading 圈残留
     if (sessionId) {
       useChatStore.getState().setSessionStatus(sessionId, null)
     }

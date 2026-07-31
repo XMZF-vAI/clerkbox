@@ -4,10 +4,32 @@ import type { Message, Session } from '../types/agent'
 
 export type SessionStatus = 'working' | 'error' | 'confirm-danger'
 
+/**
+ * 模块级 per-session AbortController 注册表。
+ * 不放入 Zustand state：controller 是命令式对象，进 state 会触发无谓渲染且无法被序列化。
+ * 多会话并发时，每个会话的 ReAct 循环通过 sessionId 取回自己的 controller。
+ */
+const sessionAbortControllers = new Map<string, AbortController>()
+
+/** 获取指定会话的 AbortController（可能为 undefined） */
+export function getSessionAbortController(sessionId: string): AbortController | undefined {
+  return sessionAbortControllers.get(sessionId)
+}
+
+/** 写入指定会话的 AbortController；若传入 null 则清除 */
+export function setSessionAbortController(sessionId: string, controller: AbortController | null): void {
+  if (controller) {
+    sessionAbortControllers.set(sessionId, controller)
+  } else {
+    sessionAbortControllers.delete(sessionId)
+  }
+}
+
 interface ChatState {
   sessions: Session[]
   activeSessionId: string | null
-  streamingSessionId: string | null  // Which session is currently streaming
+  // 当前所有正在 streaming 的会话 id 集合（支持多会话并发）
+  streamingSessionIds: Set<string>
   // per-session 工作状态：用于侧边栏 loading 圈显示与系统通知触发
   sessionStatus: Record<string, SessionStatus>
   initialized: boolean
@@ -59,7 +81,7 @@ const createEmptySession = (): Session => {
 export const useChatStore = create<ChatState>((set, get) => ({
   sessions: [],
   activeSessionId: null,
-  streamingSessionId: null,
+  streamingSessionIds: new Set<string>(),
   sessionStatus: {},
   initialized: false,
 
@@ -224,7 +246,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   setStreaming: (streaming, sessionId) => {
     const sid = sessionId || get().activeSessionId
-    set({ streamingSessionId: streaming ? sid : null })
+    if (!sid) return
+    set((state) => {
+      const next = new Set(state.streamingSessionIds)
+      if (streaming) {
+        next.add(sid)
+      } else {
+        next.delete(sid)
+      }
+      // 仅在集合实际变化时返回新引用，避免无谓渲染
+      if (next.size === state.streamingSessionIds.size) {
+        const had = state.streamingSessionIds.has(sid)
+        if (had === streaming) return state
+      }
+      return { streamingSessionIds: next }
+    })
   },
 
   setSessionStatus: (sessionId, status) => {
@@ -252,17 +288,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((state) => {
       const filtered = state.sessions.filter((s) => s.id !== id)
       ipc.dbDeleteSession(id)
+      // 中止并清理该会话的 AbortController，防止泄漏与僵尸 ReAct 循环
+      const ctrl = sessionAbortControllers.get(id)
+      if (ctrl) {
+        try { ctrl.abort() } catch { /* ignore */ }
+        sessionAbortControllers.delete(id)
+      }
       // M3: 删除会话时同步清理子 agent runs，避免 localStorage 持续膨胀至配额溢出。
       // clearSession 之前是 dead code，现在被接通了。
       import('./agent-runs-store').then(({ useAgentRunsStore }) => {
         useAgentRunsStore.getState().clearSession(id)
       }).catch((e) => console.error('Failed to clear agent runs for session:', e))
-      // 同步清理 per-session 工作状态
+      // 同步清理 per-session 工作状态与 streaming 标记
       const nextStatus = { ...state.sessionStatus }
       delete nextStatus[id]
+      const nextStreaming = new Set(state.streamingSessionIds)
+      nextStreaming.delete(id)
       return {
         sessions: filtered,
         sessionStatus: nextStatus,
+        streamingSessionIds: nextStreaming,
         activeSessionId:
           state.activeSessionId === id
             ? filtered.length > 0

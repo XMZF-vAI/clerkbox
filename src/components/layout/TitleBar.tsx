@@ -10,7 +10,8 @@ interface TitleBarProps {
 
 export default function TitleBar({ onToggleSidebar }: TitleBarProps) {
   const { t } = useTranslation()
-  const { streamingSessionId } = useChatStore()
+  // 多会话并发：TitleBar 只关心"是否有任意会话在 streaming"，不关心具体几个
+  const hasStreaming = useChatStore((s) => s.streamingSessionIds.size > 0)
   const vibeMode = useVibeStore((s) => s.isVibeMode)
   const toggleVibeMode = useVibeStore((s) => s.toggleVibeMode)
 
@@ -49,13 +50,13 @@ export default function TitleBar({ onToggleSidebar }: TitleBarProps) {
 
         {/* Status indicator */}
         <div className={`flex items-center gap-2 mr-2 px-2 py-1 rounded-md3-sm ${
-          streamingSessionId ? 'bg-md-info/10' : 'bg-dark-surfaceContainerHigh'
+          hasStreaming ? 'bg-md-info/10' : 'bg-dark-surfaceContainerHigh'
         }`}>
           <div className={`w-2 h-2 rounded-full ${
-            streamingSessionId ? 'bg-md-info animate-pulse-soft' : 'bg-md-success'
+            hasStreaming ? 'bg-md-info animate-pulse-soft' : 'bg-md-success'
           }`} />
           <span className="text-xs text-dark-onSurfaceVariant">
-            {streamingSessionId ? t('titlebar.statusExecuting') : t('titlebar.statusReady')}
+            {hasStreaming ? t('titlebar.statusExecuting') : t('titlebar.statusReady')}
           </span>
         </div>
 

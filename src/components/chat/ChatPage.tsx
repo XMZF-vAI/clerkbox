@@ -22,11 +22,10 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
   // 用 selector 精细化订阅，避免 agent-runs-store 流式期间（~20fps set）触发 ChatPage 全树重渲染
   const sessions = useChatStore((s) => s.sessions)
   const activeSessionId = useChatStore((s) => s.activeSessionId)
-  const streamingSessionId = useChatStore((s) => s.streamingSessionId)
+  const streamingSessionIds = useChatStore((s) => s.streamingSessionIds)
   const createSession = useChatStore((s) => s.createSession)
   const initialized = useChatStore((s) => s.initialized)
   const loadFromDb = useChatStore((s) => s.loadFromDb)
-  const setStreaming = useChatStore((s) => s.setStreaming)
   const sessionId = activeSessionId || ''
   const { sendMessage, abort, error } = useAgent(sessionId)
   const selectedRunId = useAgentRunsStore((s) => s.selectedRunId)
@@ -43,10 +42,11 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
     }
   }, [initialized, activeSessionId, createSession])
 
-  // Safety: clear stale streaming state on mount
+  // Safety: 应用启动时清理上次崩溃遗留的 streaming 状态（全部清空，重启后无 ReAct 循环在跑）
   useEffect(() => {
-    if (streamingSessionId) {
-      setStreaming(false)
+    const ids = useChatStore.getState().streamingSessionIds
+    if (ids.size > 0) {
+      ids.forEach((sid) => useChatStore.getState().setStreaming(false, sid))
     }
   }, [])
 
@@ -85,7 +85,7 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
   }, [workingDir, sessionSkillIds])
 
   const messages = currentSession?.messages || []
-  const isCurrentSessionStreaming = streamingSessionId === activeSessionId
+  const isCurrentSessionStreaming = streamingSessionIds.has(activeSessionId || '')
   const isEmpty = messages.length === 0
 
   const handleSend = async (content: string) => {
