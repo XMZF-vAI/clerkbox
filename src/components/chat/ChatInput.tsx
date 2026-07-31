@@ -37,7 +37,10 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
   // Skill dropdown state
   const [showSkillMenu, setShowSkillMenu] = useState(false)
   const skillMenuRef = useRef<HTMLDivElement>(null)
-  const { skills, sessionSkillIds, toggleSessionSkill } = useSkillsStore()
+  // 按字段订阅：skills 用于下拉菜单展示所有已安装技能，sessionSkillIds 用于判断激活态
+  const skills = useSkillsStore((s) => s.skills)
+  const sessionSkillIds = useSkillsStore((s) => s.sessionSkillIds)
+  const toggleSessionSkill = useSkillsStore((s) => s.toggleSessionSkill)
   const { setShowSkillStore } = useUIStore()
   const activeSkills = skills.filter((s) => sessionSkillIds.includes(s.id))
 

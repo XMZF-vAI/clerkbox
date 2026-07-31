@@ -109,8 +109,8 @@ export const useSkillsStore = create<SkillsState>()(
         } else {
           set({ sessionSkillIds: [...sessionSkillIds, id] })
           if (workingDir) {
-            // 标准路径技能（global-claude/project-claude）不写盘，直接引用原路径
-            if (skill.source === 'global-claude' || skill.source === 'project-claude') return
+            // 标准路径技能（clerkbox/claude 全局+项目级）不写盘，直接引用原路径
+            if (skill.source === 'global-clerkbox' || skill.source === 'project-clerkbox' || skill.source === 'global-claude' || skill.source === 'project-claude') return
             // online/custom 技能写盘完整文件目录（files 空时回退单文件）
             const files = skill.files && skill.files.length > 0
               ? skill.files
@@ -345,23 +345,34 @@ export const useSkillsStore = create<SkillsState>()(
             version: string
             author: string
             chainsTo: string[]
-            source: 'global-claude' | 'project-claude'
+            source: 'global-clerkbox' | 'project-clerkbox' | 'global-claude' | 'project-claude'
             skillMdPath: string
             skillMdContent: string
             files: Array<{ path: string; content: string }>
           }>
           const { skills } = get()
-          // 用 slug + source 唯一去重，避免覆盖用户已卸载的标准技能
-          const existing = new Set(skills.map((s) => `${s.slug}:${s.source}`))
+          // 去重策略：
+          //  - clerkbox 路径发现的技能：用 slug 去重（任何 source 已有该 slug 则跳过），
+          //    因为 .clerkbox/skills/ 也是 online/custom 技能激活写盘的目录，避免重复发现已安装技能
+          //  - claude 兼容路径发现的技能：用 slug+source 去重，保留同名技能在不同路径共存的灵活性
+          const existingSlugs = new Set(skills.map((s) => s.slug))
+          const existingSlugSource = new Set(skills.map((s) => `${s.slug}:${s.source}`))
           const newSkills: SkillDefinition[] = discovered
-            .filter((d) => !existing.has(`${d.slug}:${d.source}`))
+            .filter((d) => {
+              if (d.source === 'global-clerkbox' || d.source === 'project-clerkbox') {
+                // clerkbox 路径：slug 已存在则跳过（避免重复发现写盘的 online/custom 技能）
+                return !existingSlugs.has(d.slug)
+              }
+              // claude 兼容路径：slug+source 去重
+              return !existingSlugSource.has(`${d.slug}:${d.source}`)
+            })
             .map((d) => ({
               id: `${d.source}-${d.slug}`,
               slug: d.slug,
               name: d.name,
               description: d.description,
               icon: d.icon,
-              category: 'custom',
+              category: 'custom' as const,
               skillMdContent: d.skillMdContent,
               source: d.source,
               triggerKeywords: d.triggerKeywords,
@@ -385,9 +396,17 @@ export const useSkillsStore = create<SkillsState>()(
       migrate: (persisted: any, _version: number) => {
         // Clear old preset skills and stale SkillsMP data
         if (persisted?.skills) {
-          persisted.skills = persisted.skills.filter(
-            (s: any) => s.source !== 'preset'
-          )
+          persisted.skills = persisted.skills
+            .filter((s: any) => s.source !== 'preset')
+            // 补齐旧技能缺失的新字段，防止渲染时访问 undefined 崩溃
+            .map((s: any) => ({
+              ...s,
+              triggerKeywords: Array.isArray(s.triggerKeywords) ? s.triggerKeywords : [],
+              version: typeof s.version === 'string' ? s.version : '',
+              author: typeof s.author === 'string' ? s.author : '',
+              chainsTo: Array.isArray(s.chainsTo) ? s.chainsTo : [],
+              files: Array.isArray(s.files) ? s.files : (s.skillMdContent ? [{ path: 'SKILL.md', content: s.skillMdContent }] : []),
+            }))
         }
         return persisted
       },

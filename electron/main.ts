@@ -1408,7 +1408,12 @@ async function fetchSkillDirFromRepo(githubUrl: string): Promise<string> {
   return JSON.stringify({ success: true, files, warnings })
 }
 
-/** 扫描 .claude/skills/ 标准路径，发现全局（~/.claude/skills/）和项目级（<workingDir>/.claude/skills/）技能。
+/** 扫描技能目录，发现 ClerkBox 自有路径 + Anthropic 兼容路径的技能。
+ *  扫描顺序（优先级从高到低）：
+ *    1. ~/.clerkbox/skills/        （ClerkBox 全局，自有路径）
+ *    2. <workingDir>/.clerkbox/skills/ （ClerkBox 项目级，自有路径）
+ *    3. ~/.claude/skills/          （Anthropic 兼容，全局）
+ *    4. <workingDir>/.claude/skills/   （Anthropic 兼容，项目级）
  *  对每个 <name>/SKILL.md 用 parseSkillMd 提取元数据，并递归读取目录所有文件。 */
 function scanSkillDirs(workingDir: string): Array<{
   slug: string
@@ -1420,11 +1425,12 @@ function scanSkillDirs(workingDir: string): Array<{
   version: string
   author: string
   chainsTo: string[]
-  source: 'global-claude' | 'project-claude'
+  source: 'global-clerkbox' | 'project-clerkbox' | 'global-claude' | 'project-claude'
   skillMdPath: string
   skillMdContent: string
   files: Array<{ path: string; content: string }>
 }> {
+  type ScanSource = 'global-clerkbox' | 'project-clerkbox' | 'global-claude' | 'project-claude'
   const result: Array<{
     slug: string
     name: string
@@ -1435,7 +1441,7 @@ function scanSkillDirs(workingDir: string): Array<{
     version: string
     author: string
     chainsTo: string[]
-    source: 'global-claude' | 'project-claude'
+    source: ScanSource
     skillMdPath: string
     skillMdContent: string
     files: Array<{ path: string; content: string }>
@@ -1451,7 +1457,7 @@ function scanSkillDirs(workingDir: string): Array<{
   ])
 
   // 扫描单个 skills 根目录
-  const scanOne = (skillsRoot: string, source: 'global-claude' | 'project-claude') => {
+  const scanOne = (skillsRoot: string, source: ScanSource) => {
     if (!fs.existsSync(skillsRoot)) return
     let entries: fs.Dirent[]
     try {
@@ -1518,9 +1524,11 @@ function scanSkillDirs(workingDir: string): Array<{
     }
   }
 
-  // 全局路径：~/.claude/skills/
+  // ClerkBox 自有路径（优先）
+  scanOne(path.join(os.homedir(), '.clerkbox', 'skills'), 'global-clerkbox')
+  scanOne(path.join(workingDir, '.clerkbox', 'skills'), 'project-clerkbox')
+  // Anthropic 兼容路径
   scanOne(path.join(os.homedir(), '.claude', 'skills'), 'global-claude')
-  // 项目路径：<workingDir>/.claude/skills/
   scanOne(path.join(workingDir, '.claude', 'skills'), 'project-claude')
   return result
 }

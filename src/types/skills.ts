@@ -27,8 +27,8 @@ export interface SkillDefinition {
   category: 'document' | 'automation' | 'development' | 'online' | 'custom'
   /** SKILL.md content (frontmatter + body) written to disk when activated */
   skillMdContent: string
-  /** Source: preset (built-in), online (downloaded from marketplace), custom (user-defined), or claude-config 引用 */
-  source: 'preset' | 'online' | 'custom' | 'global-claude' | 'project-claude'
+  /** Source: online(在线安装) | custom(本地导入) | global-clerkbox(~/.clerkbox/skills/) | project-clerkbox(<proj>/.clerkbox/skills/) | global-claude(~/.claude/skills/ 兼容) | project-claude(<proj>/.claude/skills/ 兼容) */
+  source: 'preset' | 'online' | 'custom' | 'global-clerkbox' | 'project-clerkbox' | 'global-claude' | 'project-claude'
   /** Validation/installation warnings (e.g. external source review reminder) */
   warnings?: string[]
   /** 触发关键词（来自 frontmatter trigger_keywords，默认空数组） */

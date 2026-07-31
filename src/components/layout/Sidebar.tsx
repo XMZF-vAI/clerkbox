@@ -42,7 +42,11 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
   const { sessions, activeSessionId, createSession, setActiveSession, deleteSession } = useChatStore()
   // 订阅 sessionStatus 变化以触发 loading 圈重渲染
   const sessionStatus = useChatStore((s) => s.sessionStatus)
-  const { skills, sessionSkillIds, toggleSessionSkill } = useSkillsStore()
+  // 只订阅激活技能派生列表，避免整个 skills 数组变化（如标准技能发现/搜索）触发重渲染
+  const enabledSkills = useSkillsStore((s) =>
+    s.skills.filter((sk) => s.sessionSkillIds.includes(sk.id))
+  )
+  const toggleSessionSkill = useSkillsStore((s) => s.toggleSessionSkill)
   const { permissionMode, updateSettings } = useSettingsStore()
   const { showSkillStore, setShowSkillStore } = useUIStore()
   const [showSkillPicker, setShowSkillPicker] = useState(false)
@@ -61,8 +65,6 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
   }, [showSkillPicker])
-
-  const enabledSkills = skills.filter((s) => sessionSkillIds.includes(s.id))
 
   // Get current session's workingDir for skill sync (user-picked or default)
   const currentSession = sessions.find((s) => s.id === activeSessionId)

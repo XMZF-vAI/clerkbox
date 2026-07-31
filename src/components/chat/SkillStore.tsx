@@ -29,6 +29,8 @@ import type { SkillsMPSkill } from '../../types/skills'
 const SOURCE_BADGE: Record<string, { label: string; className: string }> = {
   online: { label: '在线', className: 'bg-md-info/15 text-md-info' },
   custom: { label: '自定义', className: 'bg-md-tertiary/15 text-md-tertiary' },
+  'global-clerkbox': { label: '全局', className: 'bg-md-primary/15 text-md-primary' },
+  'project-clerkbox': { label: '项目', className: 'bg-md-secondary/15 text-md-secondary' },
   'global-claude': { label: '全局', className: 'bg-md-success/15 text-md-success' },
   'project-claude': { label: '项目', className: 'bg-cyan-500/15 text-cyan-300' },
 }
@@ -78,6 +80,8 @@ export default function SkillStore() {
     (s) =>
       s.source === 'online' ||
       s.source === 'custom' ||
+      s.source === 'global-clerkbox' ||
+      s.source === 'project-clerkbox' ||
       s.source === 'global-claude' ||
       s.source === 'project-claude'
   )
@@ -341,7 +345,7 @@ export default function SkillStore() {
                         {skill.author && (
                           <p className="text-[10px] text-dark-onSurfaceVariant/40 mt-0.5 truncate">by {skill.author}</p>
                         )}
-                        {skill.triggerKeywords.length > 0 && (
+                        {(skill.triggerKeywords?.length ?? 0) > 0 && (
                           <div className="flex items-center gap-1 flex-wrap mt-1">
                             {skill.triggerKeywords.slice(0, 5).map((kw) => (
                               <span
