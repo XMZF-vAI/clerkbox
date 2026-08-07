@@ -8,7 +8,7 @@ import OnboardingFlow from './components/onboarding/OnboardingFlow'
 import VibeBackground from './components/vibe/VibeBackground'
 import VibeMusicPlayer from './components/vibe/VibeMusicPlayer'
 import VibeControls from './components/vibe/VibeControls'
-import { useSettingsStore, seedCustomModelsIfEmpty } from './stores/settings-store'
+import { useSettingsStore, migrateProvidersIfNeeded } from './stores/settings-store'
 import { useUIStore } from './stores/ui-store'
 import { useVibeStore } from './stores/vibe-store'
 import { applyColorScheme, resolveSeed } from './lib/theme-engine'
@@ -66,8 +66,8 @@ export default function App() {
   useEffect(() => window.clerkbox?.onWindowStateChange(setIsMaximized), [])
   useEffect(() => useSettingsStore.persist.onFinishHydration(() => setHydrated(true)), [])
 
-  // 老用户迁移：把现有生效配置种子化成第一条自定义模型
-  useEffect(() => { seedCustomModelsIfEmpty() }, [])
+  // 老用户迁移：把扁平 customModels 归并成 providers（必须等水合完成再读 state）
+  useEffect(() => { if (hydrated) migrateProvidersIfNeeded() }, [hydrated])
 
   // 圆角 + transform 创建包含块，使内部 fixed 元素（弹窗、VIBE 控件）也被圆角裁剪
   const windowShape = isMaximized ? '' : 'rounded-xl [transform:translateZ(0)]'

@@ -8,11 +8,22 @@ import { ipc } from '../lib/ipc-client'
 import { buildMemoryPrompt } from '../lib/memory'
 import { TokenTracker } from '../lib/token-tracker'
 import { estimateTokensForText } from '../lib/token-estimate'
-import { compactConversation, AUTO_COMPACT_THRESHOLD, findKeepBoundaryIndex } from '../lib/compact'
+import { compactConversation, findKeepBoundaryIndex } from '../lib/compact'
+import i18n from '../i18n'
 import { findAgent } from '../lib/agent-registry'
 import { useAgentRunsStore } from '../stores/agent-runs-store'
 import { notifyIfNotViewing } from '../lib/notify'
-import type { Message, ToolCall, ToolResult, StreamChunk, StreamingToolCall, TokenUsage } from '../types/agent'
+import { openChatStream, sseLines } from '../lib/api-transport'
+import { requiresApiKey } from '../lib/provider-catalog'
+import {
+  buildRequestBody,
+  canKeepThinking,
+  createParserState,
+  parseEvent,
+  type AnthropicThinkingBlock,
+  type NeutralMessage,
+} from '../lib/api-adapters'
+import type { ApiCompat, Message, ToolCall, ToolResult, StreamingToolCall, TokenUsage } from '../types/agent'
 
 const SYSTEM_PROMPT = `You are ClerkBox, a powerful AI assistant running on the user's desktop. You interact with the user's file system and terminal through tools.
 
@@ -143,9 +154,15 @@ export function useAgent(sessionId: string) {
 
   const makeId = () => `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
-  /** Parse SSE stream from OpenAI-compatible API */
+  /**
+   * 解析流式响应。
+   *
+   * 吃的是传输层给出的**文本分片流**（`AsyncIterable<string>`），而不是 `Response` ——
+   * 这样主进程代理与渲染进程直连两条路共用同一份解析代码。
+   * 协议差异（OpenAI / Anthropic）由 api-adapters 的 parseEvent 归一化掉。
+   */
   const parseStream = async (
-    response: Response,
+    stream: { chunks: AsyncIterable<string>; compat: ApiCompat },
     controller: AbortController,
     callbacks: {
       onContent: (text: string) => void
@@ -153,193 +170,146 @@ export function useAgent(sessionId: string) {
       onToolCallUpdate: (calls: Map<number, { id: string; name: string; args: string }>) => void
       onFinish: (reason: string | null) => void
       onUsage: (usage: TokenUsage) => void
+      /** anthropic: 收到带签名的 thinking block（用于下一轮回放） */
+      onThinkingBlock?: (block: AnthropicThinkingBlock) => void
     }
   ) => {
-    const reader = response.body?.getReader()
-    if (!reader) throw new Error('No response body')
-
-    const decoder = new TextDecoder()
-    let buffer = ''
     const toolCallBuffers = new Map<number, { id: string; name: string; args: string }>()
+    const state = createParserState()
 
-    try {
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        if (controller.signal.aborted) break
+    for await (const payload of sseLines(stream.chunks)) {
+      if (controller.signal.aborted) break
 
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() || ''
+      let json: unknown
+      try {
+        json = JSON.parse(payload)
+      } catch {
+        continue // 跳过残缺 JSON 分片
+      }
 
-        for (const line of lines) {
-          const trimmed = line.trim()
-          if (!trimmed || trimmed === 'data: [DONE]') continue
-          if (!trimmed.startsWith('data: ')) continue
-
-          try {
-            const data: StreamChunk = JSON.parse(trimmed.slice(6))
-
-            // Capture usage data from the final chunk (OpenAI sends usage in a separate final chunk)
-            if (data.usage) {
-              // Store usage via the callback - we'll add an onUsage callback
-              callbacks.onUsage(data.usage)
+      for (const ev of parseEvent(stream.compat, json, state)) {
+        switch (ev.kind) {
+          case 'content':
+            callbacks.onContent(ev.text)
+            break
+          case 'thinking':
+            callbacks.onThinking(ev.text)
+            break
+          case 'toolCallDelta': {
+            const existing = toolCallBuffers.get(ev.index)
+            if (existing) {
+              if (ev.id) existing.id = ev.id
+              if (ev.name) existing.name = ev.name
+              if (ev.argsDelta) existing.args += ev.argsDelta
+            } else {
+              toolCallBuffers.set(ev.index, {
+                id: ev.id || `tc-${ev.index}`,
+                name: ev.name || '',
+                args: ev.argsDelta || '',
+              })
             }
-
-            const choice = data.choices?.[0]
-            if (!choice) continue
-
-            const delta = choice.delta
-
-            // Handle thinking/reasoning content (DeepSeek R1, GLM, etc.)
-            // Different providers use different field names:
-            // - DeepSeek: reasoning_content
-            // - GLM (ZhipuAI): reasoning_content in streaming delta
-            if (delta?.reasoning_content) {
-              callbacks.onThinking(delta.reasoning_content)
-            } else if (delta?.thinking_content) {
-              callbacks.onThinking(delta.thinking_content)
-            }
-
-            // Handle regular content
-            if (delta?.content) {
-              callbacks.onContent(delta.content)
-            }
-
-            // Handle tool calls - accumulate across chunks
-            if (delta?.tool_calls) {
-              for (const tc of delta.tool_calls) {
-                const idx = tc.index
-                const existing = toolCallBuffers.get(idx)
-                if (existing) {
-                  if (tc.id) existing.id = tc.id
-                  if (tc.function?.name) existing.name = tc.function.name
-                  if (tc.function?.arguments) existing.args += tc.function.arguments
-                } else {
-                  toolCallBuffers.set(idx, {
-                    id: tc.id || `tc-${idx}`,
-                    name: tc.function?.name || '',
-                    args: tc.function?.arguments || '',
-                  })
-                }
-              }
-              callbacks.onToolCallUpdate(toolCallBuffers)
-            }
-
-            // Handle finish
-            if (choice.finish_reason) {
-              callbacks.onFinish(choice.finish_reason)
-            }
-          } catch {
-            // Skip malformed JSON chunks
+            callbacks.onToolCallUpdate(toolCallBuffers)
+            break
           }
+          case 'signature':
+            callbacks.onThinkingBlock?.({ type: 'thinking', thinking: ev.thinking, signature: ev.signature })
+            break
+          case 'usage':
+            callbacks.onUsage(ev.usage)
+            break
+          case 'finish':
+            callbacks.onFinish(ev.reason)
+            break
+          case 'error':
+            throw new Error(ev.message)
         }
       }
-    } finally {
-      reader.releaseLock()
     }
 
     return toolCallBuffers
   }
 
   /** Send messages to API and get streaming response.
-   *  opts.modelOverride: 子 agent 模式下覆盖 settings.model。 */
+   *  opts.modelOverride: 子 agent 模式下覆盖 settings.model。
+   *  opts.thinkingBlocks: anthropic 协议下带签名的 thinking block 缓存（本轮内有效）。
+   *  返回文本分片流 + 协议标记，交给 parseStream 解析。 */
   const callAPI = useCallback(
     async (
-      messages: Array<{ role: string; content: string; tool_calls?: unknown; tool_call_id?: string; reasoning_content?: string }>,
+      messages: NeutralMessage[],
       controller: AbortController,
-      opts: { modelOverride?: string } = {}
-    ) => {
+      opts: {
+        modelOverride?: string
+        thinkingBlocks?: Map<string, AnthropicThinkingBlock[]>
+      } = {}
+    ): Promise<{ chunks: AsyncIterable<string>; compat: ApiCompat }> => {
       // Get all tool definitions (skills are prompt-only, no dynamic tools)
       const tools = toolRegistry.definitions.map((t) => ({
-        type: 'function' as const,
-        function: {
-          name: t.name,
-          description: t.description,
-          parameters: t.parameters,
-        },
+        name: t.name,
+        description: t.description,
+        parameters: t.parameters,
       }))
 
       const effectiveModel = opts.modelOverride || settings.model
+      const compat: ApiCompat = settings.apiCompat || 'openai'
 
-      const body: Record<string, unknown> = {
+      // Anthropic 要求带 tool_use 的轮次原样回放 thinking block（含 signature）。
+      // 历史消息（从 DB 读出来的）没有签名 —— 这种情况下必须对本次请求关掉思考，否则 400。
+      const thinkingOk = compat !== 'anthropic' || canKeepThinking(messages, opts.thinkingBlocks)
+
+      // 优先读当前激活模型的高级参数；没有则回退全局默认
+      const activeModel = settings.providers
+        .find((p) => p.id === settings.activeProviderId)
+        ?.models.find((m) => m.id === (settings.activeModelId || effectiveModel))
+      const temperature = activeModel?.temperature ?? settings.temperature ?? 0.7
+      const maxTokens = activeModel?.maxTokens ?? settings.maxTokens ?? 16000
+      // maxInputTokens 仅用于截断预算，不写入 API body
+
+      const body = buildRequestBody(compat, {
         model: effectiveModel,
         messages,
-        temperature: settings.temperature,
-        max_tokens: settings.maxTokens,
+        tools,
+        temperature,
+        maxTokens,
+        thinking: settings.enableThinking && thinkingOk,
+        thinkingBudget: settings.thinkingBudget,
+        reasoningEffort: activeModel?.reasoningEfforts?.length ? settings.reasoningEffort : undefined,
         stream: true,
-        stream_options: { include_usage: true },
-      }
-
-      // Only add tools if there are definitions
-      if (tools.length > 0) {
-        body.tools = tools
-      }
-
-      // Thinking mode support - different providers use different parameters
-      if (settings.enableThinking) {
-        const modelLower = effectiveModel.toLowerCase()
-
-        if (modelLower.includes('reasoner') || modelLower.includes('r1')) {
-          // DeepSeek R1 / reasoner: auto-thinks, no extra param needed
-        } else if (modelLower.includes('glm')) {
-          // ZhipuAI GLM series: uses thinking object parameter
-          // GLM-5.1, GLM-5, GLM-4.7 default to thinking ON, but we explicitly enable
-          body.thinking = {
-            type: 'enabled',
-            clear_thinking: false, // Keep reasoning content for better context continuity
-          }
-        } else {
-          // DeepSeek / other providers: use enable_thinking parameter
-          body.enable_thinking = true
-          if (settings.thinkingBudget) {
-            body.thinking_budget = settings.thinkingBudget
-          }
-        }
-      }
+        thinkingBlocks: opts.thinkingBlocks,
+      })
 
       // M6: 120s timeout 使用独立的 AbortController，避免 abort 整个 ReAct 循环的 controller。
       // 旧实现直接用 controller.abort()，一次慢响应会让整个会话后续都无法继续。
+      // 注意：主进程代理路径的超时由主进程自己管，这里的超时只覆盖「建立连接」阶段。
       const timeoutController = new AbortController()
       const timeoutId = setTimeout(() => timeoutController.abort(new Error('Request timeout after 120s')), 120_000)
-      // 组合信号：外层 controller 或 timeout 任一触发都中止当前 fetch
-      const combinedSignal = (AbortSignal as any).any
+      // 组合信号：外层 controller 或 timeout 任一触发都中止当前请求
+      const combinedSignal: AbortSignal = (AbortSignal as any).any
         ? (AbortSignal as any).any([controller.signal, timeoutController.signal])
         : controller.signal
-      // 若环境不支持 AbortSignal.any，则在外层 controller abort 时也 abort timeoutController
       const forwardAbort = () => timeoutController.abort()
       controller.signal.addEventListener('abort', forwardAbort)
 
-      let response: Response
-      let fetchSucceeded = false
+      let opened = false
       try {
-        response = await fetch(`${settings.baseUrl}/chat/completions`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${settings.apiKey}`,
+        const chunks = await openChatStream(
+          {
+            baseUrl: settings.baseUrl,
+            apiKey: settings.apiKey,
+            apiCompat: compat,
+            directFetch: settings.directFetch,
           },
-          body: JSON.stringify(body),
-          signal: combinedSignal,
-        })
-        fetchSucceeded = true
+          body,
+          combinedSignal
+        )
+        opened = true
+        return { chunks, compat }
       } finally {
         controller.signal.removeEventListener('abort', forwardAbort)
         clearTimeout(timeoutId)
-        // 仅在 fetch 失败时 abort timeoutController（避免泄漏）。
-        // 成功时不 abort —— 响应头已到达但 body 流尚未读取，abort 会中断流。
-        if (!fetchSucceeded) {
-          timeoutController.abort()
-        }
+        // 仅在建连失败时 abort timeoutController（避免泄漏）。
+        // 成功时不 abort —— 流尚未读取，abort 会中断流。
+        if (!opened) timeoutController.abort()
       }
-
-      if (!response.ok) {
-        // L4: 截断错误响应体到前 500 字符，避免超长错误信息撑爆 UI / 日志
-        const errText = (await response.text()).slice(0, 500)
-        throw new Error(`API Error ${response.status}: ${errText}`)
-      }
-
-      return response
     },
     [settings]
   )
@@ -353,9 +323,12 @@ export function useAgent(sessionId: string) {
    *  IMPORTANT: Must preserve message sequence integrity — tool messages must always
    *  follow their corresponding assistant+tool_calls message.
    */
-  const truncateMessages = (msgs: Array<{ role: string; content: string; tool_calls?: unknown; tool_call_id?: string; reasoning_content?: string }>): Array<{ role: string; content: string; tool_calls?: unknown; tool_call_id?: string; reasoning_content?: string }> => {
-    // Most models support 128K+ context now. Reserve ~8K for output, use 120K for input.
-    const MAX_INPUT_TOKENS = 120000
+  const truncateMessages = (msgs: NeutralMessage[]): NeutralMessage[] => {
+    // 优先读当前激活模型的输入预算；没有则回退全局 / 默认 184K
+    const activeForBudget = settings.providers
+      .find((p) => p.id === settings.activeProviderId)
+      ?.models.find((m) => m.id === settings.activeModelId)
+    const MAX_INPUT_TOKENS = activeForBudget?.maxInputTokens ?? settings.maxInputTokens ?? 184000
 
     let totalTokens = 0
     for (const m of msgs) {
@@ -457,7 +430,7 @@ export function useAgent(sessionId: string) {
       }>
       extraSystemPrompt?: string
     } = {}
-  ): Array<{ role: string; content: string; tool_calls?: unknown; tool_call_id?: string; reasoning_content?: string }> => {
+  ): NeutralMessage[] => {
     const {
       memoryPrompt = '',
       workingDir = getWorkingDir(),
@@ -493,7 +466,7 @@ export function useAgent(sessionId: string) {
       if (permissionMode === 'plan') systemContent += PLAN_MODE_PROMPT
     }
 
-    const result: Array<{ role: string; content: string; tool_calls?: unknown; tool_call_id?: string; reasoning_content?: string }> = [
+    const result: NeutralMessage[] = [
       { role: 'system', content: systemContent },
     ]
 
@@ -515,7 +488,7 @@ export function useAgent(sessionId: string) {
         })
       } else if (m.role === 'assistant' && m.toolCalls && m.toolCalls.length > 0) {
         // Assistant message with tool calls
-        const msg: Record<string, unknown> = {
+        const msg: NeutralMessage = {
           role: 'assistant',
           content: m.content || '',
           tool_calls: m.toolCalls.map((tc) => ({
@@ -523,20 +496,23 @@ export function useAgent(sessionId: string) {
             type: 'function',
             function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
           })),
+          // anthropic 协议需要用它回查本轮缓存的带签名 thinking block
+          _msgId: m.id,
         }
         // GLM requires reasoning_content in history messages for better context continuity
         if (m.thinkingContent) {
           msg.reasoning_content = m.thinkingContent
         }
-        result.push(msg as typeof result[number])
+        result.push(msg)
       } else {
         // Regular user/assistant message
-        const msg: Record<string, unknown> = { role: m.role, content: m.content }
+        const msg: NeutralMessage = { role: m.role, content: m.content }
         // Include reasoning_content for assistant messages (required by GLM)
         if (m.role === 'assistant' && m.thinkingContent) {
           msg.reasoning_content = m.thinkingContent
         }
-        result.push(msg as typeof result[number])
+        if (m.role === 'assistant') msg._msgId = m.id
+        result.push(msg)
       }
     }
 
@@ -610,12 +586,14 @@ export function useAgent(sessionId: string) {
         return
       }
 
-      if (!settings.apiKey) {
-        setError('请先在设置中配置 API Key')
-        return
-      }
       if (!settings.baseUrl) {
         setError('请先在设置中配置 API Base URL')
+        return
+      }
+      // 本地部署（Ollama / LM Studio 等）无需 Key，不能在这里一刀切拦掉
+      const activeProvider = settings.providers.find((p) => p.id === settings.activeProviderId)
+      if (!settings.apiKey && requiresApiKey(settings.baseUrl, activeProvider?.presetId)) {
+        setError('请先在设置中配置 API Key')
         return
       }
 
@@ -704,12 +682,33 @@ export function useAgent(sessionId: string) {
       }
     }
 
+    // anthropic 协议下，带工具调用的 assistant 轮必须原样回放带签名的 thinking block。
+    // 签名只在本轮 ReAct 循环内有效，所以放内存不入库；键为 assistant 消息 id。
+    const thinkingBlocks = new Map<string, AnthropicThinkingBlock[]>()
+
     for (let iteration = 0; iteration < MAX_REACT_ITERATIONS; iteration++) {
       if (controller.signal.aborted) return
 
       // Auto-compact check: if token count exceeds threshold, summarize older messages
+      // 阈值 = 输入预算 − 20K 缓冲（与模型高级设置联动）
+      const compactInputBudget = (() => {
+        const m = settings.providers
+          .find((p) => p.id === settings.activeProviderId)
+          ?.models.find((x) => x.id === settings.activeModelId)
+        return m?.maxInputTokens ?? settings.maxInputTokens ?? 184000
+      })()
+      const autoCompactThreshold = Math.max(compactInputBudget - 20000, Math.floor(compactInputBudget * 0.8))
       const currentTokenCount = tokenTrackerRef.current.getTokenCount(conversationMessages)
-      if (currentTokenCount > AUTO_COMPACT_THRESHOLD && conversationMessages.length > 12) {
+      if (currentTokenCount > autoCompactThreshold && conversationMessages.length > 12) {
+        // ── 压缩过程展示：插入一条"正在压缩上下文"占位消息，让用户看到压缩在进行中 ──
+        const compactingId = makeId()
+        addMessage(sessionId, {
+          id: compactingId,
+          role: 'assistant',
+          content: '',
+          timestamp: Date.now(),
+          _isCompacting: true,
+        })
         try {
           const compactionResult = await compactConversation(
             conversationMessages,
@@ -721,19 +720,33 @@ export function useAgent(sessionId: string) {
           // Recompute the keep boundary (same logic as inside compactConversation)
           const keepStartIndex = findKeepBoundaryIndex(conversationMessages)
           const keptMessages = conversationMessages.slice(keepStartIndex)
+          // 被压缩的历史消息（压缩点之前）——用户仍要在界面上看到它们，故保留但不发给 API
+          const summarizedMessages = conversationMessages.slice(0, keepStartIndex)
 
-          const newMessages = [
+          // 发给 API 的消息：只含 边界 + 摘要 + 保留的新消息 + 文件附件（真正释放 token）
+          const apiMessagesAfterCompact = [
             compactionResult.boundaryMessage,
             compactionResult.summaryMessage,
             ...keptMessages,
             ...compactionResult.fileAttachments,
           ]
 
-          // Sync to store and DB
+          // 界面/DB 消息：完整保留全部历史（含压缩点之前的 summarizedMessages），
+          // 压缩组件（边界 + 摘要）插在压缩点位置，用户依旧能看到全部对话记录。
+          const newMessages = [
+            ...summarizedMessages,
+            compactionResult.boundaryMessage,
+            compactionResult.summaryMessage,
+            ...keptMessages,
+            ...compactionResult.fileAttachments,
+          ]
+
+          // Sync to store and DB（保留全部历史）
           compactSession(sessionId, newMessages, compactionResult.boundaryMessage.id)
 
-          // Replace conversation messages for subsequent iterations
-          conversationMessages = newMessages
+          // 后续迭代的 conversationMessages 用 API 子集（释放 token），
+          // 界面上则通过 compactSession 保留全量历史（见 newMessages）。
+          conversationMessages = apiMessagesAfterCompact
 
           // Clear the read file state (it's now in file attachments)
           sessionReadFilesRef.current = new Map()
@@ -745,6 +758,11 @@ export function useAgent(sessionId: string) {
           console.log(`[compact] Auto-compacted: ${compactionResult.preCompactTokenCount} → ${compactionResult.postCompactTokenCount} tokens, ${compactionResult.boundaryMessage.compactMetadata?.messagesSummarized} messages summarized`)
         } catch (err) {
           console.error('[compact] Auto-compaction failed, falling back to truncateMessages:', err)
+          // 压缩失败：把"正在压缩"占位消息改为可见提示，避免残留空白占位
+          updateMessage(sessionId, compactingId, {
+            content: i18n.t('chat.compactFailed'),
+            _isCompacting: false,
+          })
           // Fallback: let truncateMessages handle it below
         }
       }
@@ -753,7 +771,7 @@ export function useAgent(sessionId: string) {
       const apiMessages = truncateMessages(buildAPIMessages(conversationMessages, { memoryPrompt }))
 
       // Call API
-      const response = await callAPI(apiMessages, controller)
+      const response = await callAPI(apiMessages, controller, { thinkingBlocks })
 
       // Parse streaming response
       let content = ''
@@ -808,6 +826,11 @@ export function useAgent(sessionId: string) {
         },
         onUsage: (usage: TokenUsage) => {
           tokenTrackerRef.current.recordUsage(usage)
+        },
+        onThinkingBlock: (block) => {
+          const list = thinkingBlocks.get(assistantId)
+          if (list) list.push(block)
+          else thinkingBlocks.set(assistantId, [block])
         },
       })
 
@@ -1213,12 +1236,21 @@ export function useAgent(sessionId: string) {
 
     try {
       const maxTurns = agent.maxTurns || 50
+      // 子 agent 独立的 thinking 签名缓存，与主 agent 互不干扰
+      const thinkingBlocks = new Map<string, AnthropicThinkingBlock[]>()
       for (let iteration = 0; iteration < maxTurns; iteration++) {
         if (subController.signal.aborted) break
 
         // ── auto-compact 检查（子 agent 也要应用） ──
+        const subInputBudget = (() => {
+          const m = subSettings.providers
+            ?.find((p) => p.id === subSettings.activeProviderId)
+            ?.models.find((x) => x.id === subSettings.activeModelId)
+          return m?.maxInputTokens ?? subSettings.maxInputTokens ?? 184000
+        })()
+        const subAutoCompactThreshold = Math.max(subInputBudget - 20000, Math.floor(subInputBudget * 0.8))
         const tokenCount = subTokenTracker.getTokenCount(conversationMessages)
-        if (tokenCount > AUTO_COMPACT_THRESHOLD && conversationMessages.length > 12) {
+        if (tokenCount > subAutoCompactThreshold && conversationMessages.length > 12) {
           try {
             const compactionResult = await compactConversation(
               conversationMessages,
@@ -1251,7 +1283,7 @@ export function useAgent(sessionId: string) {
           extraSystemPrompt: agent.systemPrompt,
         }))
 
-        const response = await callAPI(apiMessages, subController, { modelOverride: agent.model })
+        const response = await callAPI(apiMessages, subController, { modelOverride: agent.model, thinkingBlocks })
 
         // 解析流（复用 parseStream）
         let content = ''
@@ -1303,6 +1335,11 @@ export function useAgent(sessionId: string) {
             finishReason = reason
           },
           onUsage: (usage: TokenUsage) => { subTokenTracker.recordUsage(usage) },
+          onThinkingBlock: (block) => {
+            const list = thinkingBlocks.get(assistantId)
+            if (list) list.push(block)
+            else thinkingBlocks.set(assistantId, [block])
+          },
         })
 
         // B4: abort 后不执行 toolCalls（与主 agent 一致）

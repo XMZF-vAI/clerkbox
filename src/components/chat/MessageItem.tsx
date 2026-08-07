@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo, memo } from 'react'
-import { Copy, Check, Terminal, FileText, FolderOpen, AlertTriangle, ChevronDown, ChevronUp, Wrench, FilePen, Globe, Pencil, Archive } from 'lucide-react'
+import { Copy, Check, Terminal, FileText, FolderOpen, AlertTriangle, ChevronDown, ChevronUp, Wrench, FilePen, Globe, Pencil, Archive, Loader2 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { Message, StreamingToolCall } from '../../types/agent'
 import { useChatStore } from '../../stores/chat-store'
@@ -72,9 +72,9 @@ function WriteFilePreviewCard({ streamingCall }: { streamingCall: StreamingToolC
   const lineCount = content.split('\n').length
 
   return (
-    <div className="rounded-md3-md border border-md-info/20 bg-md-info/5 overflow-hidden max-w-md">
+    <div className="rounded-md3-md border border-md-info/[0.03] bg-md-info/5 overflow-hidden max-w-md">
       {/* Header */}
-      <div className="flex items-center gap-2 px-3 py-1.5 bg-md-info/8 border-b border-md-info/15">
+      <div className="flex items-center gap-2 px-3 py-1.5 bg-md-info/8 border-b border-md-info/[0.03]">
         <FilePen size={12} className="text-md-info flex-shrink-0" />
         <span className="text-[11px] font-medium text-md-info truncate">
           {path || t('toolPreview.generatingPath')}
@@ -121,8 +121,8 @@ function SearchReplacePreviewCard({ streamingCall }: { streamingCall: StreamingT
   }
 
   return (
-    <div className="rounded-md3-md border border-md-primary/20 bg-md-primary/5 overflow-hidden max-w-md">
-      <div className="flex items-center gap-2 px-3 py-1.5 bg-md-primary/8 border-b border-md-primary/15">
+    <div className="rounded-md3-md border border-md-primary/[0.03] bg-md-primary/5 overflow-hidden max-w-md">
+      <div className="flex items-center gap-2 px-3 py-1.5 bg-md-primary/8 border-b border-md-primary/[0.03]">
         <Pencil size={12} className="text-md-primary flex-shrink-0" />
         <span className="text-[11px] font-medium text-md-primary truncate">
           {path || t('toolPreview.parsing')}
@@ -189,9 +189,9 @@ function EditFilePreviewCard({ streamingCall }: { streamingCall: StreamingToolCa
   }, [opsPreview, autoScroll])
 
   return (
-    <div className="rounded-md3-md border border-md-success/20 bg-md-success/5 overflow-hidden max-w-md">
+    <div className="rounded-md3-md border border-md-success/[0.03] bg-md-success/5 overflow-hidden max-w-md">
       {/* Header */}
-      <div className="flex items-center gap-2 px-3 py-1.5 bg-md-success/8 border-b border-md-success/15">
+      <div className="flex items-center gap-2 px-3 py-1.5 bg-md-success/8 border-b border-md-success/[0.03]">
         <Pencil size={12} className="text-md-success flex-shrink-0" />
         <span className="text-[11px] font-medium text-md-success truncate">
           {path || t('toolPreview.generatingPath')}
@@ -274,8 +274,8 @@ function ToolCallBar({ toolCall, result, vibe }: { toolCall: NonNullable<Message
           ? 'border-md-error/30 bg-md-error/10'
           : 'border-md-error/15 bg-md-error/5'
         : vibe
-          ? 'liquid-glass-subtle border-white/15'
-          : 'border-dark-onSurfaceVariant/8 bg-dark-surfaceContainer/40'
+          ? 'liquid-glass-subtle border-white/[0.03]'
+          : 'border-dark-onSurfaceVariant/[0.03] bg-dark-surfaceContainer/40'
     }`}>
       <button
         onClick={() => setExpanded(!expanded)}
@@ -316,7 +316,7 @@ function ToolCallBar({ toolCall, result, vibe }: { toolCall: NonNullable<Message
       {expanded && (
         <div
           id={`tc-detail-${toolCall.id}`}
-          className={`px-3 pb-2 space-y-2 text-[11px] border-t ${vibe ? 'border-white/10' : 'border-dark-onSurfaceVariant/5'}`}
+          className={`px-3 pb-2 space-y-2 text-[11px] border-t ${vibe ? 'border-white/[0.03]' : 'border-dark-onSurfaceVariant/[0.03]'}`}
         >
           <div className="pt-2">
             <span className={vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/40'}>{t('chat.toolParams')}</span>
@@ -687,7 +687,7 @@ function MessageItem({ message, vibe = false, sessionId }: MessageItemProps) {
   }
 
   // Compact summary message — render as collapsible card with "摘要" label
-  if (message.role === 'user' && message.isCompactSummary) {
+  if (message.isCompactSummary && message.role !== 'system') {
     return (
       <div className="flex justify-center animate-slide-up my-1">
         <div className="w-full max-w-[90%]">
@@ -719,6 +719,22 @@ function MessageItem({ message, vibe = false, sessionId }: MessageItemProps) {
 
   // Tool result messages are hidden (displayed inside ToolCallBar)
   if (isToolResult) return null
+
+  // 正在压缩上下文占位 —— 居中显示过程提示（压缩完成后被摘要卡片替换）
+  if (message._isCompacting) {
+    return (
+      <div className="flex justify-center animate-slide-up my-1">
+        <div className={`flex items-center gap-2 px-3 py-1.5 rounded-md3-md text-[11px] ${
+          vibe
+            ? 'bg-white/5 border border-white/[0.03] text-white/50'
+            : 'bg-dark-surfaceContainer/40 border border-dark-onSurfaceVariant/[0.03] text-dark-onSurfaceVariant/50'
+        }`}>
+          <Loader2 size={12} className="animate-spin" />
+          <span>{t('chat.compactingContext')}</span>
+        </div>
+      </div>
+    )
+  }
 
   // Sub-agent card placeholder — render as SubAgentCard
   if (message.isSubAgentCard) {

@@ -1,6 +1,6 @@
 {
   "name": "clerkbox",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "XMZF vAI - ClerkBox: Single AI Agent Desktop Workbench",
   "main": "dist-electron/electron/main.js",
   "scripts": {
@@ -24,6 +24,7 @@
     "ai": "^6.0.195",
     "cheerio": "^1.2.0",
     "i18next": "^26.3.6",
+    "iconv-lite": "^0.7.3",
     "js-yaml": "^4.1.0",
     "lucide-react": "^1.17.0",
     "react": "^19.2.7",
@@ -57,7 +58,7 @@
     "appId": "com.xmzf.clerkbox",
     "productName": "ClerkBox",
     "directories": {
-      "output": "release",
+      "output": "release-out",
       "buildResources": "build"
     },
     "files": [
@@ -73,7 +74,11 @@
       "icon": "build/icon.ico"
     },
     "electronUpdaterCompatibility": ">=2.16.0",
-    "publish": null,
+    "publish": {
+      "provider": "github",
+      "owner": "XMZF-vAI",
+      "repo": "clerkbox"
+    },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,

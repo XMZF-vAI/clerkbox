@@ -48,6 +48,23 @@ contextBridge.exposeInMainWorld('clerkbox', {
   webFetch: (url: string, maxLength?: number): Promise<any> =>
     ipcRenderer.invoke('webFetch', url, maxLength),
 
+  // 模型 API 代理（主进程 fetch，绕开渲染进程同源策略）
+  apiFetchModels: (cfg: { baseUrl: string; apiKey: string; apiCompat: string }): Promise<any> =>
+    ipcRenderer.invoke('apiFetchModels', cfg),
+  apiTestConnection: (cfg: { baseUrl: string; apiKey: string; apiCompat: string }): Promise<any> =>
+    ipcRenderer.invoke('apiTestConnection', cfg),
+  apiChatStream: (cfg: { baseUrl: string; apiKey: string; apiCompat: string }, body: unknown): Promise<{ requestId: string }> =>
+    ipcRenderer.invoke('apiChatStream', cfg, body),
+  apiAbort: (requestId: string): Promise<void> => ipcRenderer.invoke('apiAbort', requestId),
+  /** 订阅流式分片；返回退订函数 */
+  onApiChunk: (
+    callback: (payload: { requestId: string; chunk?: string; done?: boolean; error?: string }) => void
+  ): (() => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, payload: any) => callback(payload)
+    ipcRenderer.on('apiChunk', listener)
+    return () => ipcRenderer.removeListener('apiChunk', listener)
+  },
+
   // Memory system
   scanMemory: (workingDir: string): Promise<any[]> =>
     ipcRenderer.invoke('scanMemory', workingDir),

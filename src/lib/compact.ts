@@ -1,16 +1,18 @@
-import type { Message, AppSettings, CompactMetadata, CompactionResult } from '../types/agent'
+import type { ApiCompat, Message, AppSettings, CompactMetadata, CompactionResult } from '../types/agent'
 import { estimateTokensForText, truncateTextToTokens } from './token-estimate'
+import { buildRequestBody, extractText } from './api-adapters'
+import { postJson } from './api-transport'
 
 // ── 上下文压缩常量 ──
 
-// 有效上下文窗口（128K 模型减去 8K 输出预留）
-export const EFFECTIVE_CONTEXT_WINDOW = 120_000
+// 有效上下文窗口（默认输入 184K）
+export const EFFECTIVE_CONTEXT_WINDOW = 184_000
 
 // 自动压缩阈值（effective window − 20K buffer）
-export const AUTO_COMPACT_THRESHOLD = 100_000
+export const AUTO_COMPACT_THRESHOLD = 164_000
 
 // 警告阈值（threshold − 10K）
-export const WARNING_THRESHOLD = 90_000
+export const WARNING_THRESHOLD = 154_000
 
 // 压缩时保留的最近消息数（约 2-3 个完整对话轮次）
 export const KEEP_RECENT_COUNT = 6
@@ -146,30 +148,30 @@ export async function callCompactAPI(
   // Add the summarization request
   apiMessages.push({ role: 'user', content: 'Please summarize the conversation above according to the format specified.' })
 
-  const body: Record<string, unknown> = {
+  const compat: ApiCompat = settings.apiCompat || 'openai'
+
+  // 摘要是非流式一次性请求：不开思考、无工具，temperature 0 求稳定
+  const body = buildRequestBody(compat, {
     model: settings.model,
     messages: apiMessages,
-    temperature: 0, // Low temperature for factual summary
-    max_tokens: COMPACT_MAX_OUTPUT_TOKENS,
-    stream: false, // Non-streaming for simplicity
-  }
-
-  const response = await fetch(`${settings.baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${settings.apiKey}`,
-    },
-    body: JSON.stringify(body),
+    tools: [],
+    temperature: 0,
+    maxTokens: COMPACT_MAX_OUTPUT_TOKENS,
+    thinking: false,
+    stream: false,
   })
 
-  if (!response.ok) {
-    const errText = await response.text()
-    throw new Error(`Compact API Error ${response.status}: ${errText}`)
-  }
+  const data = await postJson(
+    {
+      baseUrl: settings.baseUrl,
+      apiKey: settings.apiKey,
+      apiCompat: compat,
+      directFetch: settings.directFetch,
+    },
+    body
+  )
 
-  const data = await response.json()
-  const content: string = data.choices?.[0]?.message?.content || ''
+  const content = extractText(compat, data)
 
   if (!content) {
     throw new Error('Compact API returned empty response')
@@ -483,9 +485,12 @@ export async function compactConversation(
   }
 
   // 9. Construct summary message
+  // role 设为 'assistant' 而非 'user'：避免 isCompactSummary 标志丢失时
+  // 被误渲染为用户消息（绿色气泡）。buildAPIMessages 会将其作为 assistant
+  // 消息发给 API，AI 仍能正确理解为对话摘要。
   const summaryMessage: Message = {
     id: `compact-summary-${now}-${Math.random().toString(36).slice(2, 8)}`,
-    role: 'user',
+    role: 'assistant',
     content: summaryText,
     timestamp: now,
     isCompactSummary: true,

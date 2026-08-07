@@ -517,6 +517,9 @@ class ToolRegistry {
           if (output.length > 50000) {
             output = output.slice(0, 50000) + '\n\n... [输出过长，已截断]'
           }
+          if (result.encodingFallback) {
+            output += '\n[编码: GBK→UTF-8]'
+          }
           return output || '命令执行完成（无输出）'
         } catch (e) {
           return `Error: 命令执行失败 - ${e instanceof Error ? e.message : String(e)}`

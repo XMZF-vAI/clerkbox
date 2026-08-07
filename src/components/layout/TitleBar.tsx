@@ -27,12 +27,9 @@ export default function TitleBar({ onToggleSidebar }: TitleBarProps) {
         >
           <Menu size={18} />
         </button>
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-medium">ClerkBox</span>
-          <span className="text-xs px-1.5 py-0.5 rounded-md3-xs bg-dark-surfaceContainerHigh text-dark-onSurfaceVariant">
-            v{pkg.version}
-          </span>
-        </div>
+        <span className="text-xs px-1.5 py-0.5 rounded-md3-xs bg-dark-surfaceContainerHigh text-dark-onSurfaceVariant">
+          v{pkg.version}
+        </span>
       </div>
 
       <div className="flex items-center gap-1" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>

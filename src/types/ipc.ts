@@ -1,4 +1,4 @@
-import type { MemoryEntry, MemoryType } from './agent'
+import type { ApiCompat, MemoryEntry, MemoryType } from './agent'
 
 export interface FileEntry {
   name: string
@@ -50,10 +50,15 @@ export interface ClerkBoxAPI {
   selectSkillFile: () => Promise<string | null>
   parseSkillFile: (filePath: string) => Promise<ParseSkillFileResult>
   listDir: (path: string) => Promise<FileEntry[]>
-  executeCommand: (command: string, cwd?: string) => Promise<{ stdout: string; stderr: string; exitCode: number }>
-  executeCommandWithShell: (command: string, cwd: string | undefined, shellType: string) => Promise<{ stdout: string; stderr: string; exitCode: number }>
+  executeCommand: (command: string, cwd?: string) => Promise<{ stdout: string; stderr: string; exitCode: number; encodingFallback?: boolean }>
+  executeCommandWithShell: (command: string, cwd: string | undefined, shellType: string) => Promise<{ stdout: string; stderr: string; exitCode: number; encodingFallback?: boolean }>
   webSearch: (query: string, count?: number) => Promise<WebSearchResult[] | { error: string }>
   webFetch: (url: string, maxLength?: number) => Promise<{ content: string; url: string } | { error: string }>
+  apiFetchModels: (cfg: ApiConnConfig) => Promise<{ models: FetchedModel[] } | { error: string }>
+  apiTestConnection: (cfg: ApiConnConfig) => Promise<{ ok: true; latencyMs: number } | { error: string }>
+  apiChatStream: (cfg: ApiConnConfig, body: unknown) => Promise<{ requestId: string }>
+  apiAbort: (requestId: string) => Promise<void>
+  onApiChunk: (callback: (payload: ApiChunkPayload) => void) => () => void
   scanMemory: (workingDir: string) => Promise<MemoryEntry[]>
   scanAgents: (workingDir: string) => Promise<Array<{ filename: string; content: string }>>
   readMemoryIndex: (workingDir: string) => Promise<{ content: string; wasTruncated: boolean; reason?: string }>
@@ -79,6 +84,27 @@ export interface ClerkBoxAPI {
   scanSkillDirs: (workingDir: string) => Promise<string>
   platform: string
   homeDir: string
+}
+
+/** 模型 API 连接配置（主进程代理入参） */
+export interface ApiConnConfig {
+  baseUrl: string
+  apiKey: string
+  apiCompat: ApiCompat
+}
+
+/** 在线拉取到的一个模型 */
+export interface FetchedModel {
+  id: string
+  label?: string
+}
+
+/** 流式分片事件负载 */
+export interface ApiChunkPayload {
+  requestId: string
+  chunk?: string
+  done?: boolean
+  error?: string
 }
 
 /** parseSkillFile IPC 返回类型 */

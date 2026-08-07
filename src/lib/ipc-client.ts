@@ -1,4 +1,12 @@
-import type { FileEntry, SessionRow, MessageRow, ParseSkillFileResult } from '../types/ipc'
+import type {
+  ApiChunkPayload,
+  ApiConnConfig,
+  FetchedModel,
+  FileEntry,
+  MessageRow,
+  ParseSkillFileResult,
+  SessionRow,
+} from '../types/ipc'
 import type { MemoryEntry } from '../types/agent'
 
 export const ipc = {
@@ -15,14 +23,24 @@ export const ipc = {
   writeFile: (path: string, content: string): Promise<void> =>
     window.clerkbox.writeFile(path, content),
   listDir: (path: string): Promise<FileEntry[]> => window.clerkbox.listDir(path),
-  executeCommand: (command: string, cwd?: string): Promise<{ stdout: string; stderr: string; exitCode: number }> =>
+  executeCommand: (command: string, cwd?: string): Promise<{ stdout: string; stderr: string; exitCode: number; encodingFallback?: boolean }> =>
     window.clerkbox.executeCommand(command, cwd),
-  executeCommandWithShell: (command: string, cwd: string | undefined, shellType: string): Promise<{ stdout: string; stderr: string; exitCode: number }> =>
+  executeCommandWithShell: (command: string, cwd: string | undefined, shellType: string): Promise<{ stdout: string; stderr: string; exitCode: number; encodingFallback?: boolean }> =>
     window.clerkbox.executeCommandWithShell(command, cwd, shellType),
   webSearch: (query: string, count?: number): Promise<Array<{ title: string; snippet: string; url: string }> | { error: string }> =>
     window.clerkbox.webSearch(query, count),
   webFetch: (url: string, maxLength?: number): Promise<{ content: string; url: string } | { error: string }> =>
     window.clerkbox.webFetch(url, maxLength),
+  // 模型 API 代理（主进程 fetch，绕开渲染进程同源策略）
+  apiFetchModels: (cfg: ApiConnConfig): Promise<{ models: FetchedModel[] } | { error: string }> =>
+    window.clerkbox.apiFetchModels(cfg),
+  apiTestConnection: (cfg: ApiConnConfig): Promise<{ ok: true; latencyMs: number } | { error: string }> =>
+    window.clerkbox.apiTestConnection(cfg),
+  apiChatStream: (cfg: ApiConnConfig, body: unknown): Promise<{ requestId: string }> =>
+    window.clerkbox.apiChatStream(cfg, body),
+  apiAbort: (requestId: string): Promise<void> => window.clerkbox.apiAbort(requestId),
+  onApiChunk: (callback: (payload: ApiChunkPayload) => void): (() => void) =>
+    window.clerkbox.onApiChunk(callback),
   // Memory system
   scanMemory: (workingDir: string): Promise<MemoryEntry[]> =>
     window.clerkbox.scanMemory(workingDir),

@@ -6,9 +6,6 @@ import {
   Trash2,
   FolderClosed,
   Zap,
-  Hammer,
-  HelpCircle,
-  ClipboardList,
   Store,
   Loader2,
   AlertTriangle,
@@ -19,7 +16,6 @@ import { useChatStore } from '../../stores/chat-store'
 import ConfirmDialog from '../ui/ConfirmDialog'
 
 import APP_ICON from '../../assets/icon.png'
-import NEW_CHAT_ICON from '../../assets/new-chat-icon.png'
 import { useShallow } from 'zustand/react/shallow'
 import { useSkillsStore } from '../../stores/skills-store'
 import { useSettingsStore } from '../../stores/settings-store'
@@ -28,14 +24,6 @@ import { useUIStore } from '../../stores/ui-store'
 interface SidebarProps {
   collapsed: boolean
   onToggle: () => void
-}
-
-type PermissionMode = 'craft' | 'ask' | 'plan'
-
-const MODE_META: Record<PermissionMode, { icon: typeof Hammer; labelKey: string; descKey: string }> = {
-  craft: { icon: Hammer, labelKey: 'sidebar.mode.craftLabel', descKey: 'sidebar.mode.craftDesc' },
-  ask: { icon: HelpCircle, labelKey: 'sidebar.mode.askLabel', descKey: 'sidebar.mode.askDesc' },
-  plan: { icon: ClipboardList, labelKey: 'sidebar.mode.planLabel', descKey: 'sidebar.mode.planDesc' },
 }
 
 export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
@@ -48,7 +36,6 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
     useShallow((s) => s.skills.filter((sk) => s.sessionSkillIds.includes(sk.id)))
   )
   const toggleSessionSkill = useSkillsStore((s) => s.toggleSessionSkill)
-  const { permissionMode, updateSettings } = useSettingsStore()
   const { showSkillStore, setShowSkillStore } = useUIStore()
   const [showSkillPicker, setShowSkillPicker] = useState(false)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
@@ -74,18 +61,6 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
   const handleToggleSkill = (id: string) => {
     toggleSessionSkill(id, workingDir)
   }
-
-  const cycleMode = () => {
-    const modes: Array<PermissionMode> = ['craft', 'ask', 'plan']
-    const idx = modes.indexOf(permissionMode)
-    const next = modes[(idx + 1) % modes.length]
-    updateSettings({ permissionMode: next })
-  }
-
-  const currentMode = MODE_META[permissionMode] || MODE_META.craft
-  const ModeIcon = currentMode.icon
-  const currentModeLabel = t(currentMode.labelKey)
-  const currentModeDesc = t(currentMode.descKey)
 
   if (collapsed) {
     return (
@@ -126,15 +101,6 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
           </div>
         )}
         <button
-          onClick={cycleMode}
-          className={`w-8 h-8 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors mb-1 ${
-            permissionMode === 'plan' ? 'text-md-info' : permissionMode === 'ask' ? 'text-md-success' : ''
-          }`}
-          title={`${t('sidebar.modePrefix')}: ${currentModeLabel}`}
-        >
-          <ModeIcon size={18} />
-        </button>
-        <button
           onClick={() => useSettingsStore.getState().updateSettings({ showSettings: true })}
           className="w-8 h-8 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors"
         >
@@ -159,7 +125,6 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
           onClick={() => { setShowSkillStore(false); createSession() }}
           className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-md3-md bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer transition-colors text-sm"
         >
-          <img src={NEW_CHAT_ICON} alt="" className="w-4 h-4 object-contain" />
           <span>{t('sidebar.newChat')}</span>
         </button>
         <button
@@ -175,25 +140,8 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
         </button>
       </div>
 
-      {/* Mode selector + Active skills indicator */}
-      <div className="px-3 pb-2 space-y-1.5">
-        {/* Mode toggle */}
-        <button
-          onClick={cycleMode}
-          className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-md3-sm transition-colors text-xs ${
-            permissionMode === 'plan'
-              ? 'bg-md-info/10 text-md-info hover:bg-md-info/20'
-              : permissionMode === 'ask'
-                ? 'bg-md-success/10 text-md-success hover:bg-md-success/20'
-                : 'bg-dark-surfaceContainerHigh text-dark-onSurfaceVariant hover:bg-dark-surfaceContainer'
-          }`}
-        >
-          <ModeIcon size={14} />
-          <span className="font-medium">{currentModeLabel}</span>
-          <span className="text-dark-onSurfaceVariant/40">— {currentModeDesc}</span>
-        </button>
-
-        {/* Active skills */}
+      {/* Active skills */}
+      <div className="px-3 pb-2">
         {enabledSkills.length > 0 && (
           <div className="flex items-center gap-1 flex-wrap">
             {enabledSkills.map((s) => (

@@ -7,12 +7,14 @@ import {
 } from 'electron'
 import * as path from 'path'
 import * as fs from 'fs'
-import { exec } from 'child_process'
+import { exec, spawn } from 'child_process'
+import * as iconv from 'iconv-lite'
 import * as https from 'https'
 import * as http from 'http'
 import * as os from 'os'
 import * as cheerio from 'cheerio'
 import * as yaml from 'js-yaml'
+import { registerApiProxyHandlers, bindApiProxyCleanup } from './api-proxy'
 
 /** Resolve path relative to project root */
 function projectRoot(...segments: string[]): string {
@@ -175,6 +177,9 @@ function createWindow() {
     mainWindow = null
   })
 
+  // 窗口销毁 / reload 时掐掉在途的模型 API 流式请求
+  bindApiProxyCleanup(mainWindow)
+
   // 圆角窗口：向渲染进程同步最大化状态（最大化时取消圆角）
   const sendWindowState = () => {
     mainWindow?.webContents.send('windowStateChanged', mainWindow.isMaximized())
@@ -221,6 +226,9 @@ function registerIpcHandlers() {
     mainWindow && !mainWindow.isDestroyed()
       ? dialog.showMessageBox(mainWindow, options)
       : dialog.showMessageBox(options)
+
+  // 模型 API 代理（拉模型列表 / 测连接 / 流式对话 / 中止）
+  registerApiProxyHandlers()
 
   // S7: 同步暴露平台信息(sandbox: true 后 preload 无法直接 require('os'))
   ipcMain.on('getPlatform', (event) => {
@@ -518,6 +526,20 @@ function registerIpcHandlers() {
     return null
   }
 
+  /**
+   * 解码子进程输出：先用 UTF-8 解码，若含 U+FFFD 替换字符则回退用 GBK(CP936) 解码。
+   * 返回解码后的文本及是否触发了 GBK 回退的标记。
+   */
+  function decodeOutput(buf: Buffer): { text: string; fallbackUsed: boolean } {
+    if (buf.length === 0) return { text: '', fallbackUsed: false }
+    const utf8Text = buf.toString('utf8')
+    if (utf8Text.includes('\uFFFD')) {
+      // UTF-8 解码出现替换字符，回退用 GBK 解码
+      return { text: iconv.decode(buf, 'gbk'), fallbackUsed: true }
+    }
+    return { text: utf8Text, fallbackUsed: false }
+  }
+
   // Shell
   ipcMain.handle(
     'executeCommand',
@@ -526,12 +548,62 @@ function registerIpcHandlers() {
       if (blockReason) {
         return { stdout: '', stderr: `命令被主进程拒绝：${blockReason}`, exitCode: -1 }
       }
+      const MAX_BUFFER = 10 * 1024 * 1024
+      const TIMEOUT_MS = 60000
+      // Windows 默认 cmd.exe，强制 UTF-8 代码页
+      const isWin = process.platform === 'win32'
+      const shellCmd = isWin ? `chcp 65001 >nul 2>&1 && ${command}` : command
+      const shellArgs = isWin ? ['/c', shellCmd] : ['-c', command]
+      const shellPath = isWin ? 'cmd.exe' : '/bin/sh'
       return new Promise((resolve) => {
-        exec(command, { cwd, timeout: 60000, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
+        const child = spawn(shellPath, shellArgs, {
+          cwd,
+          env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+          windowsHide: true,
+        })
+        const stdoutChunks: Buffer[] = []
+        const stderrChunks: Buffer[] = []
+        let stdoutLen = 0
+        let stderrLen = 0
+        let killed = false
+        let settled = false
+        const timer = setTimeout(() => {
+          killed = true
+          child.kill()
+        }, TIMEOUT_MS)
+        child.stdout.on('data', (chunk: Buffer) => {
+          stdoutLen += chunk.length
+          if (stdoutLen > MAX_BUFFER) {
+            if (!killed) { killed = true; child.kill() }
+            return
+          }
+          stdoutChunks.push(chunk)
+        })
+        child.stderr.on('data', (chunk: Buffer) => {
+          stderrLen += chunk.length
+          if (stderrLen > MAX_BUFFER) {
+            if (!killed) { killed = true; child.kill() }
+            return
+          }
+          stderrChunks.push(chunk)
+        })
+        child.on('error', (err) => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          resolve({ stdout: '', stderr: String(err), exitCode: 1, encodingFallback: false })
+        })
+        child.on('close', (code) => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          const out = decodeOutput(Buffer.concat(stdoutChunks))
+          const err = decodeOutput(Buffer.concat(stderrChunks))
           resolve({
-            stdout: stdout || '',
-            stderr: stderr || '',
-            exitCode: error ? (error.code ?? 1) : 0,
+            stdout: out.text,
+            stderr: err.text,
+            exitCode: killed ? -1 : (code ?? 0),
+            encodingFallback: out.fallbackUsed || err.fallbackUsed,
           })
         })
       })
@@ -545,14 +617,63 @@ function registerIpcHandlers() {
       if (blockReason) {
         return { stdout: '', stderr: `命令被主进程拒绝：${blockReason}`, exitCode: -1 }
       }
-      const shellPath = shellType === 'powershell' ? 'powershell.exe' : 'cmd.exe'
-      const shellCmd = shellType === 'powershell' ? `& { ${command} }` : `/c ${command}`
+      const isPS = shellType === 'powershell'
+      const shellPath = isPS ? 'powershell.exe' : 'cmd.exe'
+      // 强制 UTF-8 控制台代码页
+      const shellCmd = isPS
+        ? `& { [Console]::OutputEncoding=[Text.Encoding]::UTF8; chcp 65001 > $null; ${command} }`
+        : `chcp 65001 >nul 2>&1 && ${command}`
+      const MAX_BUFFER = 10 * 1024 * 1024
+      const TIMEOUT_MS = 60000
       return new Promise((resolve) => {
-        exec(shellCmd, { cwd, shell: shellPath, timeout: 60000, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
+        const child = spawn(shellPath, isPS ? ['-NoProfile', '-Command', shellCmd] : ['/c', shellCmd], {
+          cwd,
+          env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+          windowsHide: true,
+        })
+        const stdoutChunks: Buffer[] = []
+        const stderrChunks: Buffer[] = []
+        let stdoutLen = 0
+        let stderrLen = 0
+        let killed = false
+        let settled = false
+        const timer = setTimeout(() => {
+          killed = true
+          child.kill()
+        }, TIMEOUT_MS)
+        child.stdout.on('data', (chunk: Buffer) => {
+          stdoutLen += chunk.length
+          if (stdoutLen > MAX_BUFFER) {
+            if (!killed) { killed = true; child.kill() }
+            return
+          }
+          stdoutChunks.push(chunk)
+        })
+        child.stderr.on('data', (chunk: Buffer) => {
+          stderrLen += chunk.length
+          if (stderrLen > MAX_BUFFER) {
+            if (!killed) { killed = true; child.kill() }
+            return
+          }
+          stderrChunks.push(chunk)
+        })
+        child.on('error', (err) => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          resolve({ stdout: '', stderr: String(err), exitCode: 1, encodingFallback: false })
+        })
+        child.on('close', (code) => {
+          if (settled) return
+          settled = true
+          clearTimeout(timer)
+          const out = decodeOutput(Buffer.concat(stdoutChunks))
+          const err = decodeOutput(Buffer.concat(stderrChunks))
           resolve({
-            stdout: stdout || '',
-            stderr: stderr || '',
-            exitCode: error ? (error.code ?? 1) : 0,
+            stdout: out.text,
+            stderr: err.text,
+            exitCode: killed ? -1 : (code ?? 0),
+            encodingFallback: out.fallbackUsed || err.fallbackUsed,
           })
         })
       })

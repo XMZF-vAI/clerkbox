@@ -33,12 +33,17 @@ function groupIntoTurns(messages: Message[]): Turn[] {
       turns.push({ userMsg: msg, aiMessages: [], turnId: msg.id })
       continue
     }
-    // Compact summary message (user + isCompactSummary) — also starts its own turn
-    if (msg.role === 'user' && msg.isCompactSummary) {
+    // Compact summary message (assistant + isCompactSummary) — also starts its own turn
+    if (msg.isCompactSummary) {
       if (currentTurn) {
         turns.push(currentTurn)
         currentTurn = null
       }
+      turns.push({ userMsg: msg, aiMessages: [], turnId: msg.id })
+      continue
+    }
+    // 正在压缩上下文占位 —— 独立成 turn，确保压缩过程提示可见
+    if (msg._isCompacting) {
       turns.push({ userMsg: msg, aiMessages: [], turnId: msg.id })
       continue
     }

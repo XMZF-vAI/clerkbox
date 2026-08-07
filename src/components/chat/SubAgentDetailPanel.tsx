@@ -29,7 +29,7 @@ function ToolCallBar({ tc, result, vibe }: { tc: ToolCall; result?: ToolResult; 
   })()
 
   return (
-    <div className={`my-1 rounded border ${vibe ? 'liquid-glass-subtle border-white/15' : 'border-md-outlineVariant/30 bg-dark-surfaceContainer/50'}`}>
+    <div className={`my-1 rounded border overflow-hidden ${vibe ? 'liquid-glass-subtle border-white/[0.03]' : 'border-dark-onSurfaceVariant/[0.03] bg-dark-surfaceContainer/40'}`}>
       <button
         className={`flex w-full items-center gap-2 px-2 py-1.5 text-left ${vibe ? 'hover:bg-white/10' : 'hover:bg-md-primaryContainer/20'}`}
         onClick={() => setExpanded(!expanded)}
@@ -45,7 +45,7 @@ function ToolCallBar({ tc, result, vibe }: { tc: ToolCall; result?: ToolResult; 
         </span>
       </button>
       {expanded && (
-        <div id={`sub-tc-detail-${tc.id}`} className={`border-t px-2 py-1.5 ${vibe ? 'border-white/10' : 'border-md-outlineVariant/20'}`}>
+        <div id={`sub-tc-detail-${tc.id}`} className={`border-t px-2 py-1.5 ${vibe ? 'border-white/[0.03]' : 'border-dark-onSurfaceVariant/[0.03]'}`}>
           <div className={`text-[10px] ${vibe ? 'text-white/50' : 'text-md-onSurfaceVariant'}`}>{t('chat.toolParamsShort')}</div>
           <pre className={`mt-0.5 max-h-32 overflow-auto rounded p-1.5 text-[11px] ${vibe ? 'bg-black/30 text-white/90' : 'bg-dark-surfaceContainerHigh text-md-onSurface'}`}>{JSON.stringify(tc.arguments, null, 2)}</pre>
           {result && (

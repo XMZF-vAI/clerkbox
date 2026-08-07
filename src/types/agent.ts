@@ -11,6 +11,7 @@ export interface Message {
   isCompactSummary?: boolean  // Marks compact boundary/summary messages
   compactMetadata?: CompactMetadata  // Metadata for compact boundary messages
   streamingToolCalls?: StreamingToolCall[]  // Tool calls currently being streamed (transient, not persisted)
+  _isCompacting?: boolean  // Transient: true 表示该消息是"正在压缩上下文"的过程占位（不入库，压缩完成后被替换）
   _isStreaming?: boolean  // Transient: true while this message is being streamed from API
   subAgentId?: string        // 标记此消息属于哪个子 agent（主对话消息不带此字段）
   isSubAgentCard?: boolean   // 标记此消息是子 agent 卡片占位（用于 UI 渲染）
@@ -65,7 +66,7 @@ export interface Session {
   updatedAt: number
 }
 
-/** 用户自定义模型（一个平台接入的完整档案） */
+/** 用户自定义模型（旧结构，仅用于迁移到 ModelProvider；UI 不再读取） */
 export interface CustomModel {
   id: string
   /** 显示名，如 "DeepSeek V3" */
@@ -76,11 +77,58 @@ export interface CustomModel {
   apiKey: string
 }
 
+/** API 协议兼容模式 */
+export type ApiCompat = 'openai' | 'anthropic'
+
+export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'max' | 'xhigh'
+
+/** 提供商下已启用的一个模型 */
+export interface ProviderModel {
+  /** 真实模型 id，如 "deepseek-chat" */
+  id: string
+  /** 用户自定义别名；空则展示 id */
+  label?: string
+  /** 是否支持思考；未设按全局开关兼容 */
+  supportsThinking?: boolean
+  /** 该模型支持的思考档位，按顺序从弱到强 */
+  reasoningEfforts?: ReasoningEffort[]
+  /** 当前模型思考档位 */
+  reasoningEffort?: ReasoningEffort
+  /** 模型级 Temperature；未设则回退到全局默认 0.7 */
+  temperature?: number
+  /** 模型级输入上下文预算（token）；未设则回退到全局默认 184000 */
+  maxInputTokens?: number
+  /** 模型级输出 Max Tokens；未设则回退到全局默认 16000 */
+  maxTokens?: number
+}
+
+/** 一个提供商 = 一套连接凭据 + 该平台下已启用的模型 */
+export interface ModelProvider {
+  id: string
+  /** 显示名，如 "DeepSeek" */
+  name: string
+  /** 来自内置目录的哪一项；手填的为 undefined */
+  presetId?: string
+  /** 该提供商使用哪种 API 协议 */
+  apiCompat: ApiCompat
+  baseUrl: string
+  apiKey: string
+  /** 已启用（勾选进来）的模型 */
+  models: ProviderModel[]
+  /** true = 绕过主进程代理，渲染进程直连（排障退路） */
+  directFetch?: boolean
+  /** UI 折叠状态 */
+  collapsed?: boolean
+}
+
 export interface AppSettings {
   apiKey: string
   baseUrl: string
   model: string
   temperature: number
+  /** 输入上下文预算（token），用于截断 / 压缩阈值 */
+  maxInputTokens: number
+  /** 输出 max_tokens */
   maxTokens: number
   theme: 'light' | 'dark' | 'system'
   /** 色系：马卡龙预设 id 或 'custom' */
@@ -91,10 +139,23 @@ export interface AppSettings {
   permissionMode: 'craft' | 'ask' | 'plan'
   enableThinking: boolean
   thinkingBudget?: number
-  /** 用户自定义模型列表（多平台接入） */
+  reasoningEffort?: ReasoningEffort
+  /** 提供商列表（每个提供商持有连接凭据 + 已启用模型） */
+  providers: ModelProvider[]
+  /** 当前生效的提供商 id */
+  activeProviderId?: string
+  /** 当前生效的模型 id（在 activeProviderId 之下） */
+  activeModelId?: string
+  /** 派生字段：随激活的 provider 同步写入，供 use-agent / compact 直接读 */
+  apiCompat: ApiCompat
+  /** 派生字段：当前 provider 是否绕过主进程代理直连 */
+  directFetch: boolean
+  /** 旧结构，保留仅用于迁移；UI 不再读取 */
   customModels: CustomModel[]
-  /** 当前生效的自定义模型 id（空 = 手动直填） */
+  /** 旧结构，保留仅用于迁移 */
   activeCustomModelId?: string
+  /** 迁移完成时间戳（存在即表示已迁移过，不再重复执行） */
+  providersMigratedAt?: number
   /** 首次启动欢迎流程是否已完成（true = 不再展示） */
   hasCompletedOnboarding: boolean
 }

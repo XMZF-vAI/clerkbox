@@ -7,6 +7,7 @@ dist-electron/
 
 # Release / packaged app artifacts
 release/
+release-out/
 *.exe
 *.zip
 *.blockmap
@@ -42,3 +43,8 @@ Thumbs.db
 /CODE_REVIEW.md
 # 第三方工作目录
 /.workbuddy/
+# IDE 本地配置与计划
+.claude/
+# 临时素材与校验脚本
+/logo-animation/
+/tmp-adapters-check.mts

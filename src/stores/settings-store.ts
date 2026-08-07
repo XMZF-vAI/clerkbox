@@ -1,17 +1,22 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import type { AppSettings, CustomModel } from '../types/agent'
+import type { AppSettings, ApiCompat, CustomModel, ModelProvider, ProviderModel } from '../types/agent'
+import { guessApiCompat, guessPresetByBaseUrl, fallbackNameFromBaseUrl } from '../lib/provider-catalog'
 
 interface SettingsState extends AppSettings {
   showSettings: boolean
   updateSettings: (partial: Partial<AppSettings & { showSettings?: boolean }>) => void
   resetSettings: () => void
-  /** 添加/更新自定义模型 */
-  upsertCustomModel: (model: CustomModel) => void
-  /** 删除自定义模型；若删除的是当前生效项，回落到剩余第一项 */
-  removeCustomModel: (id: string) => void
-  /** 设为当前生效模型：把该模型的 model/baseUrl/apiKey 写入生效字段 */
-  activateCustomModel: (id: string) => void
+  /** 添加/更新提供商 */
+  upsertProvider: (provider: ModelProvider) => void
+  /** 删除提供商；若删除的是当前生效项，回落到剩余第一个可用模型 */
+  removeProvider: (id: string) => void
+  /** 覆盖某提供商的已启用模型列表 */
+  setProviderModels: (providerId: string, models: ProviderModel[]) => void
+  /** 从提供商移除单个模型 */
+  removeProviderModel: (providerId: string, modelId: string) => void
+  /** 设为当前生效：把该提供商的连接信息 + 模型写入派生字段 */
+  activateModel: (providerId: string, modelId: string) => void
 }
 
 const defaultSettings: AppSettings = {
@@ -19,7 +24,8 @@ const defaultSettings: AppSettings = {
   baseUrl: 'https://api.deepseek.com/v1',
   model: 'deepseek-chat',
   temperature: 0.7,
-  maxTokens: 8192,
+  maxInputTokens: 184000,
+  maxTokens: 16000,
   theme: 'dark',
   colorScheme: 'classic',
   customSeedColor: '#F4A7B9',
@@ -27,13 +33,45 @@ const defaultSettings: AppSettings = {
   permissionMode: 'craft',
   enableThinking: false,
   thinkingBudget: undefined,
+  providers: [],
+  activeProviderId: undefined,
+  activeModelId: undefined,
+  apiCompat: 'openai',
+  directFetch: false,
   customModels: [],
   activeCustomModelId: undefined,
+  providersMigratedAt: undefined,
   hasCompletedOnboarding: false,
 }
 
-/** 把模型的连接信息写入生效字段 */
-const applyModel = (m: CustomModel) => ({ model: m.model, baseUrl: m.baseUrl, apiKey: m.apiKey, activeCustomModelId: m.id })
+/** 把提供商 + 模型的连接信息写入生效（派生）字段 */
+const applyActive = (p: ModelProvider, modelId: string) => {
+  const model = p.models.find((m) => m.id === modelId)
+  return {
+    model: modelId,
+    baseUrl: p.baseUrl,
+    apiKey: p.apiKey,
+    apiCompat: p.apiCompat,
+    directFetch: p.directFetch ?? false,
+    activeProviderId: p.id,
+    activeModelId: modelId,
+    // 模型级高级参数 → 同步到全局生效字段（未配置则保留全局默认）
+    temperature: model?.temperature ?? defaultSettings.temperature,
+    maxInputTokens: model?.maxInputTokens ?? defaultSettings.maxInputTokens,
+    maxTokens: model?.maxTokens ?? defaultSettings.maxTokens,
+    enableThinking: model?.supportsThinking === undefined ? defaultSettings.enableThinking : model.supportsThinking,
+    thinkingBudget: defaultSettings.thinkingBudget,
+    reasoningEffort: model?.reasoningEffort ?? model?.reasoningEfforts?.[0] ?? 'medium',
+  }
+}
+
+/** 在提供商列表里找第一个「有模型」的组合，用于删除后回落 */
+const firstAvailable = (providers: ModelProvider[]): { provider: ModelProvider; modelId: string } | null => {
+  for (const p of providers) {
+    if (p.models.length > 0) return { provider: p, modelId: p.models[0].id }
+  }
+  return null
+}
 
 export const useSettingsStore = create<SettingsState>()(
   persist(
@@ -42,25 +80,48 @@ export const useSettingsStore = create<SettingsState>()(
       showSettings: false,
       updateSettings: (partial) => set((state) => ({ ...state, ...partial })),
       resetSettings: () => set({ ...defaultSettings, showSettings: false }),
-      upsertCustomModel: (model) => set((state) => {
-        const exists = state.customModels.some((m) => m.id === model.id)
-        const customModels = exists
-          ? state.customModels.map((m) => (m.id === model.id ? model : m))
-          : [...state.customModels, model]
-        // 若编辑的正是当前生效模型，同步刷新生效字段
-        const patch = state.activeCustomModelId === model.id ? applyModel(model) : {}
-        return { customModels, ...patch }
+
+      upsertProvider: (provider) => set((state) => {
+        const exists = state.providers.some((p) => p.id === provider.id)
+        const providers = exists
+          ? state.providers.map((p) => (p.id === provider.id ? provider : p))
+          : [...state.providers, provider]
+        // 若编辑的正是当前生效提供商，同步刷新派生字段
+        if (state.activeProviderId !== provider.id) return { providers }
+        // 当前生效模型可能已被移除 → 回落到该提供商第一个模型
+        const stillThere = provider.models.some((m) => m.id === state.activeModelId)
+        const modelId = stillThere ? state.activeModelId! : provider.models[0]?.id
+        if (!modelId) {
+          const next = firstAvailable(providers)
+          return next
+            ? { providers, ...applyActive(next.provider, next.modelId) }
+            : { providers, activeProviderId: undefined, activeModelId: undefined }
+        }
+        return { providers, ...applyActive(provider, modelId) }
       }),
-      removeCustomModel: (id) => set((state) => {
-        const customModels = state.customModels.filter((m) => m.id !== id)
-        if (state.activeCustomModelId !== id) return { customModels }
-        // 删除的是当前项：回落到剩余第一项，否则清空生效标记
-        const next = customModels[0]
-        return { customModels, ...(next ? applyModel(next) : { activeCustomModelId: undefined }) }
+
+      removeProvider: (id) => set((state) => {
+        const providers = state.providers.filter((p) => p.id !== id)
+        if (state.activeProviderId !== id) return { providers }
+        const next = firstAvailable(providers)
+        return next
+          ? { providers, ...applyActive(next.provider, next.modelId) }
+          : { providers, activeProviderId: undefined, activeModelId: undefined }
       }),
-      activateCustomModel: (id) => {
-        const m = get().customModels.find((x) => x.id === id)
-        if (m) set(applyModel(m))
+
+      setProviderModels: (providerId, models) => {
+        const p = get().providers.find((x) => x.id === providerId)
+        if (p) get().upsertProvider({ ...p, models })
+      },
+
+      removeProviderModel: (providerId, modelId) => {
+        const p = get().providers.find((x) => x.id === providerId)
+        if (p) get().upsertProvider({ ...p, models: p.models.filter((m) => m.id !== modelId) })
+      },
+
+      activateModel: (providerId, modelId) => {
+        const p = get().providers.find((x) => x.id === providerId)
+        if (p) set(applyActive(p, modelId))
       },
     }),
     {
@@ -70,20 +131,116 @@ export const useSettingsStore = create<SettingsState>()(
         const { showSettings: _, ...rest } = state
         return rest
       },
+      // 旧版本没有 maxInputTokens 时补默认，避免 undefined 贯穿运行时
+      merge: (persisted, current) => {
+        const p = (persisted ?? {}) as Partial<AppSettings>
+        return {
+          ...current,
+          ...p,
+          maxInputTokens: p.maxInputTokens ?? defaultSettings.maxInputTokens,
+          maxTokens: p.maxTokens ?? defaultSettings.maxTokens,
+          temperature: p.temperature ?? defaultSettings.temperature,
+        }
+      },
     }
   )
 )
 
-/** 老用户迁移：customModels 为空但已有生效配置时，种子化成第一条 */
-export function seedCustomModelsIfEmpty() {
+/**
+ * 老用户迁移：把扁平的 customModels 按 baseUrl 归并成 providers。
+ *
+ * - 只跑一次（providersMigratedAt 作标记）
+ * - **不删除** customModels，万一有问题旧数据还在
+ * - 若连 customModels 都没有，但已有生效的 model/baseUrl，则种子化成一个提供商
+ */
+export function migrateProvidersIfNeeded() {
   const s = useSettingsStore.getState()
-  if (s.customModels.length > 0 || !s.model.trim()) return
-  const seed: CustomModel = {
-    id: `seed-${Date.now()}`,
-    label: s.model,
-    model: s.model,
-    baseUrl: s.baseUrl,
-    apiKey: s.apiKey,
+  if (s.providersMigratedAt) return
+  if (s.providers.length > 0) {
+    useSettingsStore.setState({ providersMigratedAt: Date.now() })
+    return
   }
-  useSettingsStore.setState({ customModels: [seed], activeCustomModelId: seed.id })
+
+  // 数据源：优先用 customModels；为空则用当前生效字段种子化一条
+  const source: CustomModel[] = s.customModels.length > 0
+    ? s.customModels
+    : s.model.trim() && s.baseUrl.trim()
+      ? [{ id: `seed-${Date.now()}`, label: s.model, model: s.model, baseUrl: s.baseUrl, apiKey: s.apiKey }]
+      : []
+
+  if (source.length === 0) {
+    useSettingsStore.setState({ providersMigratedAt: Date.now() })
+    return
+  }
+
+  // 按 baseUrl 分组（同一平台的多个模型归到一个提供商下）
+  const byBaseUrl = new Map<string, CustomModel[]>()
+  for (const m of source) {
+    const key = m.baseUrl.trim().replace(/\/+$/, '')
+    const list = byBaseUrl.get(key)
+    if (list) list.push(m)
+    else byBaseUrl.set(key, [m])
+  }
+
+  const providers: ModelProvider[] = []
+  let activeProviderId: string | undefined
+  let activeModelId: string | undefined
+
+  let i = 0
+  for (const [baseUrl, models] of byBaseUrl) {
+    const preset = guessPresetByBaseUrl(baseUrl)
+    // 协议判定：预设匹配上就用预设的（altCompat 命中则用 alt 的协议），否则从 URL 猜
+    let apiCompat: ApiCompat
+    if (preset) {
+      const altHit = preset.altCompat && baseUrl.replace(/\/+$/, '') === preset.altCompat.baseUrl.replace(/\/+$/, '')
+      apiCompat = altHit ? preset.altCompat!.apiCompat : preset.apiCompat
+    } else {
+      apiCompat = guessApiCompat(baseUrl)
+    }
+
+    const providerId = `p-${Date.now()}-${i++}`
+    // apiKey 取组内第一个非空的
+    const apiKey = models.find((m) => m.apiKey.trim())?.apiKey || ''
+
+    // 模型去重：同一个 model id 只保留一条，别名取第一个跟 id 不同的 label
+    const seen = new Map<string, ProviderModel>()
+    for (const m of models) {
+      if (seen.has(m.model)) continue
+      const label = m.label.trim() && m.label.trim() !== m.model ? m.label.trim() : undefined
+      seen.set(m.model, { id: m.model, label })
+    }
+
+    providers.push({
+      id: providerId,
+      name: preset?.name || fallbackNameFromBaseUrl(baseUrl),
+      presetId: preset && preset.group !== 'custom' ? preset.id : undefined,
+      apiCompat,
+      baseUrl,
+      apiKey,
+      models: [...seen.values()],
+    })
+
+    // 保持原来的生效项
+    const wasActive = models.find((m) => m.id === s.activeCustomModelId)
+    if (wasActive) {
+      activeProviderId = providerId
+      activeModelId = wasActive.model
+    }
+  }
+
+  // 原来没有生效标记（或没匹配上）→ 回落到第一个
+  if (!activeProviderId) {
+    const first = firstAvailable(providers)
+    if (first) {
+      activeProviderId = first.provider.id
+      activeModelId = first.modelId
+    }
+  }
+
+  const active = providers.find((p) => p.id === activeProviderId)
+  useSettingsStore.setState({
+    providers,
+    providersMigratedAt: Date.now(),
+    ...(active && activeModelId ? applyActive(active, activeModelId) : {}),
+  })
 }

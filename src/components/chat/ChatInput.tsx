@@ -6,7 +6,6 @@ import { useChatStore } from '../../stores/chat-store'
 import { useSkillsStore } from '../../stores/skills-store'
 import { useUIStore } from '../../stores/ui-store'
 import { ipc } from '../../lib/ipc-client'
-import type { CustomModel } from '../../types/agent'
 
 interface ChatInputProps {
   onSend: (content: string) => void
@@ -37,6 +36,8 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
   // Skill dropdown state
   const [showSkillMenu, setShowSkillMenu] = useState(false)
   const skillMenuRef = useRef<HTMLDivElement>(null)
+  const [showThinkingMenu, setShowThinkingMenu] = useState(false)
+  const thinkingMenuRef = useRef<HTMLDivElement>(null)
   // 按字段订阅：skills 用于下拉菜单展示所有已安装技能，sessionSkillIds 用于判断激活态
   const skills = useSkillsStore((s) => s.skills)
   const sessionSkillIds = useSkillsStore((s) => s.sessionSkillIds)
@@ -86,12 +87,28 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
     }
   }
 
+  const activeProvider = settings.providers.find((p) => p.id === settings.activeProviderId)
+  const activeModel = activeProvider?.models.find((m) => m.id === settings.activeModelId)
+  const thinkingSupported = activeModel?.supportsThinking ?? false
+  const reasoningEfforts = activeModel?.reasoningEfforts ?? []
+  const hasReasoningLevels = reasoningEfforts.length > 0
+  const currentEffortIndex = Math.max(0, reasoningEfforts.indexOf((activeModel?.reasoningEffort || settings.reasoningEffort || reasoningEfforts[0]) as never))
+
   const toggleThinking = () => {
+    if (!thinkingSupported) return
     settings.updateSettings({ enableThinking: !settings.enableThinking })
   }
 
-  const handleSelectModel = (m: CustomModel) => {
-    settings.activateCustomModel(m.id)
+  const setReasoningEffort = (index: number) => {
+    if (!activeProvider || !activeModel) return
+    const effort = reasoningEfforts[index]
+    const models = activeProvider.models.map((m) => m.id === activeModel.id ? { ...m, reasoningEffort: effort } : m)
+    settings.setProviderModels(activeProvider.id, models)
+    settings.updateSettings({ reasoningEffort: effort, enableThinking: true })
+  }
+
+  const handleSelectModel = (providerId: string, modelId: string) => {
+    settings.activateModel(providerId, modelId)
     setShowModelMenu(false)
   }
 
@@ -112,20 +129,30 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
       if (skillMenuRef.current && !skillMenuRef.current.contains(e.target as Node)) {
         setShowSkillMenu(false)
       }
+      if (thinkingMenuRef.current && !thinkingMenuRef.current.contains(e.target as Node)) {
+        setShowThinkingMenu(false)
+      }
     }
-    if (showModelMenu || showModeMenu || showSkillMenu) {
+    if (showModelMenu || showModeMenu || showSkillMenu || showThinkingMenu) {
       document.addEventListener('mousedown', handleClickOutside)
       return () => document.removeEventListener('mousedown', handleClickOutside)
     }
-  }, [showModelMenu, showModeMenu, showSkillMenu])
+  }, [showModelMenu, showModeMenu, showSkillMenu, showThinkingMenu])
 
   const mode = settings.permissionMode
   const modeIcon = mode === 'craft' ? Hammer : mode === 'plan' ? ClipboardList : Eye
   const modeLabel = mode === 'craft' ? t('sidebar.mode.craftLabel') : mode === 'plan' ? t('sidebar.mode.planLabel') : t('sidebar.mode.askLabel')
   const ModeIcon = modeIcon
 
-  const currentModelLabel =
-    settings.customModels.find((m) => m.id === settings.activeCustomModelId)?.label || settings.model
+  // 当前模型显示名：优先取所属提供商里登记的 label，回落到 model id
+  const currentModelLabel = (() => {
+    const p = settings.providers.find((x) => x.id === settings.activeProviderId)
+    const m = p?.models.find((x) => x.id === settings.activeModelId)
+    return m?.label || m?.id || settings.model
+  })()
+
+  // 只显示有模型的提供商，避免下拉里出现空组
+  const providersWithModels = settings.providers.filter((p) => p.models.length > 0)
 
   const isWelcome = variant === 'welcome'
 
@@ -283,22 +310,58 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
             )}
           </div>
 
-          {/* Thinking mode toggle */}
-          <button
-            onClick={toggleThinking}
-            className={`h-8 flex items-center gap-1 px-2 flex-shrink-0 rounded-md3-sm transition-colors ${
-              settings.enableThinking
-                ? vibe
-                  ? 'bg-md-tertiary/30 text-md-tertiary'
-                  : 'bg-md-tertiary/20 text-md-tertiary'
-                : vibe
-                  ? 'hover:bg-white/15 text-white/70'
-                  : 'hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant'
-            }`}
-            title={settings.enableThinking ? t('chat.craftModeTitle') : t('chat.craftModeTitleOff')}
-          >
-            <Brain size={16} />
-          </button>
+          {/* Thinking mode + reasoning effort */}
+          <div className="relative" ref={thinkingMenuRef}>
+            <button
+              onClick={() => {
+                if (!thinkingSupported) return
+                if (!settings.enableThinking) toggleThinking()
+                setShowThinkingMenu(!showThinkingMenu)
+              }}
+              disabled={!thinkingSupported}
+              className={`h-8 flex items-center gap-1 px-2 flex-shrink-0 rounded-md3-sm transition-colors ${
+                settings.enableThinking && thinkingSupported
+                  ? vibe
+                    ? 'bg-md-tertiary/30 text-md-tertiary'
+                    : 'bg-md-tertiary/20 text-md-tertiary'
+                  : vibe
+                    ? 'hover:bg-white/15 text-white/70 disabled:opacity-30'
+                    : 'hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant disabled:opacity-30'
+              }`}
+              title={thinkingSupported ? t('chat.thinkingLevel') : t('chat.thinkingUnsupported')}
+            >
+              <Brain size={16} />
+              {hasReasoningLevels && <span className="text-[10px] capitalize">{reasoningEfforts[currentEffortIndex]}</span>}
+              {hasReasoningLevels && <ChevronDown size={11} className={`transition-transform ${showThinkingMenu ? 'rotate-180' : ''}`} />}
+            </button>
+            {showThinkingMenu && thinkingSupported && hasReasoningLevels && (
+              <div className={`absolute bottom-full mb-1 left-0 w-64 p-3 rounded-md3-md z-50 ${
+                vibe ? 'liquid-glass-strong' : 'bg-dark-surfaceContainerHighest border border-dark-onSurfaceVariant/10 shadow-lg'
+              }`}>
+                <div className="flex items-center justify-between mb-2 text-xs">
+                  <span>{t('chat.thinkingLevel')}</span>
+                  <button
+                    onClick={toggleThinking}
+                    className={`px-2 py-0.5 rounded-full text-[10px] ${settings.enableThinking ? 'bg-md-tertiary/20 text-md-tertiary' : 'bg-dark-surfaceContainer text-dark-onSurfaceVariant'}`}
+                  >
+                    {settings.enableThinking ? t('chat.thinkingOn') : t('chat.thinkingOff')}
+                  </button>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={Math.max(0, reasoningEfforts.length - 1)}
+                  step={1}
+                  value={currentEffortIndex}
+                  onChange={(e) => setReasoningEffort(Number(e.target.value))}
+                  className="w-full accent-md-tertiary"
+                />
+                <div className="mt-1 flex justify-between text-[9px] text-dark-onSurfaceVariant/70">
+                  {reasoningEfforts.map((effort) => <span key={effort} className="capitalize">{effort}</span>)}
+                </div>
+              </div>
+            )}
+          </div>
 
           {/* Skill selector dropdown */}
           <div className="relative" ref={skillMenuRef}>
@@ -408,30 +471,53 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
                   ? 'liquid-glass-strong'
                   : 'bg-dark-surfaceContainerHighest border border-dark-onSurfaceVariant/10 shadow-lg'
               }`}>
-                {settings.customModels.length === 0 ? (
+                {providersWithModels.length === 0 ? (
                   <div className={`px-3 py-3 text-xs ${vibe ? 'text-white/60' : 'text-dark-onSurfaceVariant'}`}>
                     {t('chat.noModels')}
                   </div>
                 ) : (
-                  settings.customModels.map((m) => {
-                    const active = m.id === settings.activeCustomModelId
-                    return (
-                      <button
-                        key={m.id}
-                        onClick={() => handleSelectModel(m)}
-                        className={`w-full text-left px-3 py-2 transition-colors ${
-                          active
-                            ? vibe ? 'text-md-primary bg-md-primary/10' : 'text-md-primary bg-md-primary/5'
-                            : vibe ? 'text-white/90 hover:bg-white/10' : 'text-dark-onSurface hover:bg-dark-surfaceContainer'
+                  providersWithModels.map((p) => (
+                    <div key={p.id}>
+                      {/* 提供商分组标题：滚动时吸附在顶部 */}
+                      <div
+                        className={`sticky top-0 z-10 flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide backdrop-blur-sm ${
+                          vibe
+                            ? 'text-white/50 bg-black/25'
+                            : 'text-dark-onSurfaceVariant/70 bg-dark-surfaceContainerHighest/95'
                         }`}
                       >
-                        <div className="text-xs font-medium truncate">{m.label}</div>
-                        <div className={`text-[10px] truncate mt-0.5 ${active ? 'text-md-primary/70' : vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/70'}`}>
-                          {m.model}
-                        </div>
-                      </button>
-                    )
-                  })
+                        <span className="truncate">{p.name}</span>
+                        <span
+                          className={`px-1 py-px rounded text-[9px] normal-case font-medium flex-shrink-0 ${
+                            vibe ? 'bg-white/15 text-white/70' : 'bg-dark-surfaceContainer text-dark-onSurfaceVariant'
+                          }`}
+                        >
+                          {p.apiCompat === 'anthropic' ? 'Anthropic' : 'OpenAI'}
+                        </span>
+                      </div>
+                      {p.models.map((m) => {
+                        const active = p.id === settings.activeProviderId && m.id === settings.activeModelId
+                        return (
+                          <button
+                            key={m.id}
+                            onClick={() => handleSelectModel(p.id, m.id)}
+                            className={`w-full text-left px-3 py-2 transition-colors ${
+                              active
+                                ? vibe ? 'text-md-primary bg-md-primary/10' : 'text-md-primary bg-md-primary/5'
+                                : vibe ? 'text-white/90 hover:bg-white/10' : 'text-dark-onSurface hover:bg-dark-surfaceContainer'
+                            }`}
+                          >
+                            <div className="text-xs font-medium truncate">{m.label || m.id}</div>
+                            {m.label && (
+                              <div className={`text-[10px] truncate mt-0.5 ${active ? 'text-md-primary/70' : vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/70'}`}>
+                                {m.id}
+                              </div>
+                            )}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  ))
                 )}
                 <div className={`my-1 border-t ${vibe ? 'border-white/15' : 'border-dark-onSurfaceVariant/10'}`} />
                 <button
