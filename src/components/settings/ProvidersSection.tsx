@@ -10,8 +10,22 @@ import {
   type ProviderPreset, type ProviderGroup,
 } from '../../lib/provider-catalog'
 import { ipc } from '../../lib/ipc-client'
-import type { ApiCompat, ModelProvider, ProviderModel, ReasoningEffort } from '../../types/agent'
+import type { ApiCompat, ModelProvider, ProviderModel, ReasoningEffort, ThinkingStyle } from '../../types/agent'
+import { REASONING_EFFORTS, DEFAULT_THINKING_STYLE } from '../../types/agent'
 import type { FetchedModel } from '../../types/ipc'
+
+/** 思考风格选项（thinkingStyle → 文案 key） */
+const THINKING_STYLE_OPTIONS: Array<[ThinkingStyle, string]> = [
+  ['effort', 'settings.api.styleEffort'],
+  ['budget', 'settings.api.styleBudget'],
+  ['enable', 'settings.api.styleEnable'],
+  ['glm', 'settings.api.styleGlm'],
+  ['auto', 'settings.api.styleAuto'],
+]
+
+/** 默认思考风格：模型未显式声明时按协议推断 */
+const defaultStyleFor = (model: ProviderModel, provider: ModelProvider): ThinkingStyle =>
+  model.thinkingStyle ?? DEFAULT_THINKING_STYLE[provider.apiCompat]
 
 const inputCls =
   'w-full px-3 py-2 bg-dark-surfaceContainerHighest rounded-md3-sm text-sm border border-dark-onSurfaceVariant/10 outline-none focus:border-md-primary/40 transition-colors'
@@ -313,7 +327,9 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
               {provider.models.map((m) => {
                 const active = isActiveProvider && settings.activeModelId === m.id
                 const advancedOpen = advancedModelId === m.id
-                const effortOptions: ReasoningEffort[] = ['minimal', 'low', 'medium', 'high', 'max', 'xhigh']
+                const effortOptions: ReasoningEffort[] = [...REASONING_EFFORTS]
+                const sortEfforts = (efforts: ReasoningEffort[]) =>
+                  [...efforts].sort((a, b) => REASONING_EFFORTS.indexOf(a) - REASONING_EFFORTS.indexOf(b))
                 const patchModel = (partial: Partial<ProviderModel>) => {
                   const models = provider.models.map((x) => (x.id === m.id ? { ...x, ...partial } : x))
                   settings.setProviderModels(provider.id, models)
@@ -382,6 +398,25 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
                         </label>
                         {(m.supportsThinking ?? false) && (
                           <div>
+                            <div className="text-[10px] text-dark-onSurfaceVariant mb-1">{t('settings.api.thinkingStyle')}</div>
+                            <div className="flex flex-wrap gap-1">
+                              {THINKING_STYLE_OPTIONS.map(([style, labelKey]) => (
+                                <button
+                                  key={style}
+                                  type="button"
+                                  onClick={() => patchModel({ thinkingStyle: style })}
+                                  className={`px-2 py-1 rounded-md3-xs text-[10px] transition-colors ${
+                                    (m.thinkingStyle ?? defaultStyleFor(m, provider)) === style
+                                      ? 'bg-md-primary/20 text-md-primary'
+                                      : 'bg-dark-surfaceContainer text-dark-onSurfaceVariant/60'
+                                  }`}
+                                >{t(labelKey)}</button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        {(m.supportsThinking ?? false) && (
+                          <div>
                             <div className="text-[10px] text-dark-onSurfaceVariant mb-1">{t('settings.api.reasoningLevels')}</div>
                             <div className="flex flex-wrap gap-1">
                               {effortOptions.map((effort) => {
@@ -393,8 +428,11 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
                                     onClick={() => {
                                       const next = selected
                                         ? (m.reasoningEfforts ?? []).filter((x) => x !== effort)
-                                        : [...(m.reasoningEfforts ?? []), effort]
-                                      patchModel({ reasoningEfforts: next.length ? next : ['medium'], reasoningEffort: next.includes(m.reasoningEffort || 'medium') ? m.reasoningEffort : next[0] })
+                                        : sortEfforts([...(m.reasoningEfforts ?? []), effort])
+                                      patchModel({
+                                        reasoningEfforts: next.length ? next : ['medium'],
+                                        reasoningEffort: next.includes(m.reasoningEffort || 'medium') ? m.reasoningEffort : next[0],
+                                      })
                                     }}
                                     className={`px-2 py-1 rounded-md3-xs text-[10px] transition-colors ${selected ? 'bg-md-primary/20 text-md-primary' : 'bg-dark-surfaceContainer text-dark-onSurfaceVariant/60'}`}
                                   >{effort}</button>

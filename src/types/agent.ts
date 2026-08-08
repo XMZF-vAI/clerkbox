@@ -82,6 +82,30 @@ export type ApiCompat = 'openai' | 'anthropic'
 
 export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'max' | 'xhigh'
 
+/** 思考档位规范顺序（从弱到强），UI 滑块与保存排序都以此为基准 */
+export const REASONING_EFFORTS: readonly ReasoningEffort[] = [
+  'minimal', 'low', 'medium', 'high', 'max', 'xhigh',
+]
+
+/** 思考档位在请求体中的表达方式（协议相关，模型级声明） */
+export type ThinkingStyle =
+  | 'auto'     // 模型自行决定，无需额外参数（如 DeepSeek Reasoner）
+  | 'effort'   // OpenAI reasoning_effort（如 OpenAI o 系）
+  | 'enable'   // enable_thinking[+thinking_budget]（如 DashScope/Qwen）
+  | 'glm'      // thinking:{type:enabled,clear_thinking:false}（智谱 GLM）
+  | 'budget'   // Anthropic thinking:{type:enabled,budget_tokens}
+
+/** 按 apiCompat / 预设推断默认思考风格 */
+export const DEFAULT_THINKING_STYLE: Record<ApiCompat, ThinkingStyle> = {
+  anthropic: 'budget',
+  openai: 'enable',
+}
+
+/** 防止非法档位损坏状态：取最近的一个合法档位 */
+export function normalizeEffort(v: unknown, fallback: ReasoningEffort = 'medium'): ReasoningEffort {
+  return REASONING_EFFORTS.includes(v as ReasoningEffort) ? (v as ReasoningEffort) : fallback
+}
+
 /** 提供商下已启用的一个模型 */
 export interface ProviderModel {
   /** 真实模型 id，如 "deepseek-chat" */
@@ -90,6 +114,8 @@ export interface ProviderModel {
   label?: string
   /** 是否支持思考；未设按全局开关兼容 */
   supportsThinking?: boolean
+  /** 思考在请求体里的表达方式（协议相关）；未设则按 apiCompat/预设推断 */
+  thinkingStyle?: ThinkingStyle
   /** 该模型支持的思考档位，按顺序从弱到强 */
   reasoningEfforts?: ReasoningEffort[]
   /** 当前模型思考档位 */

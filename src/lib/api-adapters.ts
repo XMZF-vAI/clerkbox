@@ -1,4 +1,5 @@
-import type { ApiCompat, TokenUsage } from '../types/agent'
+import type { ApiCompat, ThinkingStyle, TokenUsage } from '../types/agent'
+import { DEFAULT_THINKING_STYLE } from '../types/agent'
 
 /**
  * OpenAI / Anthropic 双协议适配层。
@@ -38,6 +39,8 @@ export interface BuildBodyOptions {
   thinking: boolean
   thinkingBudget?: number
   reasoningEffort?: import('../types/agent').ReasoningEffort
+  /** 思考在请求体里的表达方式（模型级声明）；未设则按 compat 推断 */
+  thinkingStyle?: ThinkingStyle
   /** 是否流式 */
   stream: boolean
   /** anthropic 专用：messageId → 带 signature 的原始 thinking block */
@@ -122,18 +125,26 @@ function buildOpenAIBody(o: BuildBodyOptions): Record<string, unknown> {
     }))
   }
 
-  // 思考开关 —— 各家 OpenAI 兼容实现参数不统一，沿用原有的按模型名分支逻辑
+  // 思考开关 —— 各家 OpenAI 兼容实现参数不统一，由模型级声明（thinkingStyle）决定，
+  // 不再用模型名字符串猜测。未声明时按协议回退默认。
   if (o.thinking) {
-    const m = o.model.toLowerCase()
-    if (o.reasoningEffort) body.reasoning_effort = o.reasoningEffort
-    if (m.includes('reasoner') || m.includes('r1')) {
-      // DeepSeek R1 / reasoner：自动思考，无需额外参数
-    } else if (m.includes('glm')) {
-      // 智谱 GLM：thinking 对象；clear_thinking=false 保留推理内容以延续上下文
-      body.thinking = { type: 'enabled', clear_thinking: false }
-    } else {
-      body.enable_thinking = true
-      if (o.thinkingBudget) body.thinking_budget = o.thinkingBudget
+    const style = o.thinkingStyle ?? DEFAULT_THINKING_STYLE.openai
+    switch (style) {
+      case 'effort':
+        // OpenAI 推理模型：只发 reasoning_effort，绝不混发 enable_thinking
+        if (o.reasoningEffort) body.reasoning_effort = o.reasoningEffort
+        break
+      case 'glm':
+        // 智谱 GLM：thinking 对象；clear_thinking=false 保留推理内容以延续上下文
+        body.thinking = { type: 'enabled', clear_thinking: false }
+        break
+      case 'auto':
+        // 模型自行决定（如 DeepSeek Reasoner），无需额外参数
+        break
+      case 'enable':
+      default:
+        body.enable_thinking = true
+        if (o.thinkingBudget) body.thinking_budget = o.thinkingBudget
     }
   }
 
@@ -161,6 +172,20 @@ interface AnthropicMessage {
 /** Anthropic 思考预算下限（API 硬性要求） */
 const MIN_THINKING_BUDGET = 1024
 
+/**
+ * 思考档位 → Anthropic budget_tokens。
+ * Anthropic 没有离散档位，用预算近似表达强度（参考 Claude Code 的 effort→budget 思路）。
+ * minimal 贴近下限，xhigh 给足预算；最终还会被 max_tokens-1 钳制。
+ */
+const EFFORT_BUDGET: Record<string, number> = {
+  minimal: 1024,
+  low: 2048,
+  medium: 4096,
+  high: 8192,
+  max: 16000,
+  xhigh: 32000,
+}
+
 function buildAnthropicBody(o: BuildBodyOptions): Record<string, unknown> {
   const { system, messages } = toAnthropicMessages(o.messages, o.thinkingBlocks)
 
@@ -186,7 +211,9 @@ function buildAnthropicBody(o: BuildBodyOptions): Record<string, unknown> {
   let thinkingOn = false
   if (o.thinking) {
     const headroom = o.maxTokens - 1
-    const desired = o.thinkingBudget ?? Math.min(headroom, 4096)
+    // 档位优先 → 显式 budget → 默认 4096
+    const fromEffort = o.reasoningEffort ? EFFORT_BUDGET[o.reasoningEffort] : undefined
+    const desired = fromEffort ?? o.thinkingBudget ?? Math.min(headroom, 4096)
     const budget = Math.min(Math.max(desired, MIN_THINKING_BUDGET), headroom)
     // max_tokens 太小时容不下最小预算，此时只能不开思考
     if (budget >= MIN_THINKING_BUDGET) {
@@ -274,8 +301,18 @@ export function toAnthropicMessages(
     if (m.content) push('user', [{ type: 'text', text: m.content }])
   }
 
-  // 必须以 user 开头：开头若是 assistant 就丢掉（没有对应用户输入的助手消息无意义）
-  while (out.length > 0 && out[0].role === 'assistant') out.shift()
+  // 必须以 user 开头：开头若是 assistant 就处理掉。
+  // 纯工具轮（无正文）的 orphan assistant 直接丢弃；带正文的（如压缩摘要）转为 user 保留，
+  // 否则 Anthropic 会把它丢掉，导致压缩后的上下文信息丢失。
+  while (out.length > 0 && out[0].role === 'assistant') {
+    const head = out[0]
+    const texts = head.content.filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+    if (texts.length > 0) {
+      out[0] = { role: 'user', content: texts }
+    } else {
+      out.shift()
+    }
+  }
 
   return { system, messages: out }
 }
@@ -316,6 +353,8 @@ export interface ParserState {
   blockTypes: Map<number, string>
   /** anthropic: block index → 累积的 thinking 文本（配签名一起回放） */
   thinkingText: Map<number, string>
+  /** anthropic: block index → 累积的 signature（允许服务端分片下发签名） */
+  thinkingSignatures: Map<number, string>
   /** anthropic: message_start 里拿到的 input_tokens */
   inputTokens: number
   /** anthropic: 累计的 output_tokens */
@@ -325,6 +364,7 @@ export interface ParserState {
 export const createParserState = (): ParserState => ({
   blockTypes: new Map(),
   thinkingText: new Map(),
+  thinkingSignatures: new Map(),
   inputTokens: 0,
   outputTokens: 0,
 })
@@ -456,14 +496,23 @@ function parseAnthropicEvent(json: unknown, state: ParserState): NormalizedEvent
         state.thinkingText.set(idx, (state.thinkingText.get(idx) || '') + d.thinking)
         events.push({ kind: 'thinking', text: d.thinking })
       } else if (d.type === 'signature_delta' && d.signature) {
-        events.push({
-          kind: 'signature',
-          index: idx,
-          signature: d.signature,
-          thinking: state.thinkingText.get(idx) || '',
-        })
+        // 签名可能跨多个 delta 分片下发 → 先累积，等 block 结束再一次性提交完整 block
+        state.thinkingSignatures.set(idx, (state.thinkingSignatures.get(idx) || '') + d.signature)
       } else if (d.type === 'input_json_delta' && d.partial_json !== undefined) {
         events.push({ kind: 'toolCallDelta', index: idx, argsDelta: d.partial_json })
+      }
+      break
+    }
+
+    case 'content_block_stop': {
+      const idx = ev.index ?? 0
+      if (state.blockTypes.get(idx) === 'thinking') {
+        const thinking = state.thinkingText.get(idx) || ''
+        const signature = state.thinkingSignatures.get(idx)
+        // 只有拿到完整签名才提交（回放时缺签名会导致下一轮 400）
+        if (signature) {
+          events.push({ kind: 'signature', index: idx, signature, thinking })
+        }
       }
       break
     }

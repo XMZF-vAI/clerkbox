@@ -311,15 +311,11 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
           </div>
 
           {/* Thinking mode + reasoning effort */}
-          <div className="relative" ref={thinkingMenuRef}>
+          <div className="relative flex items-center" ref={thinkingMenuRef}>
             <button
-              onClick={() => {
-                if (!thinkingSupported) return
-                if (!settings.enableThinking) toggleThinking()
-                setShowThinkingMenu(!showThinkingMenu)
-              }}
+              onClick={toggleThinking}
               disabled={!thinkingSupported}
-              className={`h-8 flex items-center gap-1 px-2 flex-shrink-0 rounded-md3-sm transition-colors ${
+              className={`h-8 flex items-center gap-1 px-2 flex-shrink-0 rounded-l-md3-sm transition-colors ${
                 settings.enableThinking && thinkingSupported
                   ? vibe
                     ? 'bg-md-tertiary/30 text-md-tertiary'
@@ -328,12 +324,31 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
                     ? 'hover:bg-white/15 text-white/70 disabled:opacity-30'
                     : 'hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant disabled:opacity-30'
               }`}
-              title={thinkingSupported ? t('chat.thinkingLevel') : t('chat.thinkingUnsupported')}
+              title={thinkingSupported ? t('chat.thinkingToggle') : t('chat.thinkingUnsupported')}
+              aria-pressed={settings.enableThinking && thinkingSupported}
             >
               <Brain size={16} />
-              {hasReasoningLevels && <span className="text-[10px] capitalize">{reasoningEfforts[currentEffortIndex]}</span>}
-              {hasReasoningLevels && <ChevronDown size={11} className={`transition-transform ${showThinkingMenu ? 'rotate-180' : ''}`} />}
             </button>
+            {hasReasoningLevels && (
+              <button
+                onClick={() => setShowThinkingMenu((v) => !v)}
+                disabled={!thinkingSupported}
+                className={`h-8 flex items-center gap-1 px-1.5 flex-shrink-0 rounded-r-md3-sm transition-colors ${
+                  settings.enableThinking && thinkingSupported
+                    ? vibe
+                      ? 'bg-md-tertiary/30 text-md-tertiary'
+                      : 'bg-md-tertiary/20 text-md-tertiary'
+                    : vibe
+                      ? 'text-white/70 disabled:opacity-30'
+                      : 'text-dark-onSurfaceVariant disabled:opacity-30'
+                }`}
+                title={t('chat.thinkingLevel')}
+                aria-expanded={showThinkingMenu}
+              >
+                <span className="text-[10px] capitalize">{reasoningEfforts[currentEffortIndex]}</span>
+                <ChevronDown size={11} className={`transition-transform ${showThinkingMenu ? 'rotate-180' : ''}`} />
+              </button>
+            )}
             {showThinkingMenu && thinkingSupported && hasReasoningLevels && (
               <div className={`absolute bottom-full mb-1 left-0 w-64 p-3 rounded-md3-md z-50 ${
                 vibe ? 'liquid-glass-strong' : 'bg-dark-surfaceContainerHighest border border-dark-onSurfaceVariant/10 shadow-lg'

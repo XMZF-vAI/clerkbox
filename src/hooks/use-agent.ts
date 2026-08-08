@@ -256,13 +256,26 @@ export function useAgent(sessionId: string) {
       // 历史消息（从 DB 读出来的）没有签名 —— 这种情况下必须对本次请求关掉思考，否则 400。
       const thinkingOk = compat !== 'anthropic' || canKeepThinking(messages, opts.thinkingBlocks)
 
-      // 优先读当前激活模型的高级参数；没有则回退全局默认
-      const activeModel = settings.providers
-        .find((p) => p.id === settings.activeProviderId)
-        ?.models.find((m) => m.id === (settings.activeModelId || effectiveModel))
+      // 优先按当前 provider + 真实生效模型解析高级参数。
+      // 子 agent 用 modelOverride 覆盖了模型时，activeModelId 可能不属于子 agent 的模型，
+      // 因此要跨所有 provider 按 effectiveModel 兜底查找，避免子 agent 误用主模型参数。
+      const activeModel = (() => {
+        const pid = settings.activeProviderId
+        const p = settings.providers.find((x) => x.id === pid)
+        const inProvider = p?.models.find((m) => m.id === effectiveModel)
+        if (inProvider) return inProvider
+        for (const pp of settings.providers) {
+          const m = pp.models.find((x) => x.id === effectiveModel)
+          if (m) return m
+        }
+        return undefined
+      })()
       const temperature = activeModel?.temperature ?? settings.temperature ?? 0.7
       const maxTokens = activeModel?.maxTokens ?? settings.maxTokens ?? 16000
       // maxInputTokens 仅用于截断预算，不写入 API body
+      const effort = activeModel?.reasoningEfforts?.length
+        ? activeModel.reasoningEffort ?? settings.reasoningEffort
+        : undefined
 
       const body = buildRequestBody(compat, {
         model: effectiveModel,
@@ -272,7 +285,8 @@ export function useAgent(sessionId: string) {
         maxTokens,
         thinking: settings.enableThinking && thinkingOk,
         thinkingBudget: settings.thinkingBudget,
-        reasoningEffort: activeModel?.reasoningEfforts?.length ? settings.reasoningEffort : undefined,
+        reasoningEffort: effort,
+        thinkingStyle: compat === 'anthropic' ? 'budget' : (activeModel?.thinkingStyle ?? undefined),
         stream: true,
         thinkingBlocks: opts.thinkingBlocks,
       })

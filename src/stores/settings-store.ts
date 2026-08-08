@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { AppSettings, ApiCompat, CustomModel, ModelProvider, ProviderModel } from '../types/agent'
+import { normalizeEffort } from '../types/agent'
 import { guessApiCompat, guessPresetByBaseUrl, fallbackNameFromBaseUrl } from '../lib/provider-catalog'
 
 interface SettingsState extends AppSettings {
@@ -47,7 +48,7 @@ const defaultSettings: AppSettings = {
 /** 把提供商 + 模型的连接信息写入生效（派生）字段 */
 const applyActive = (p: ModelProvider, modelId: string) => {
   const model = p.models.find((m) => m.id === modelId)
-  return {
+  const base = {
     model: modelId,
     baseUrl: p.baseUrl,
     apiKey: p.apiKey,
@@ -59,11 +60,29 @@ const applyActive = (p: ModelProvider, modelId: string) => {
     temperature: model?.temperature ?? defaultSettings.temperature,
     maxInputTokens: model?.maxInputTokens ?? defaultSettings.maxInputTokens,
     maxTokens: model?.maxTokens ?? defaultSettings.maxTokens,
-    enableThinking: model?.supportsThinking === undefined ? defaultSettings.enableThinking : model.supportsThinking,
     thinkingBudget: defaultSettings.thinkingBudget,
-    reasoningEffort: model?.reasoningEffort ?? model?.reasoningEfforts?.[0] ?? 'medium',
+    reasoningEffort: model?.reasoningEfforts?.length
+      ? normalizeEffort(model.reasoningEffort ?? model.reasoningEfforts[0])
+      : undefined,
   }
+  // 思考开关是「用户偏好」，不应被模型能力覆盖自动开启。
+  // 仅当模型明确不支持思考时才强制关闭，避免用户切到支持模型后思考被意外打开。
+  return model?.supportsThinking === false
+    ? { ...base, enableThinking: false as boolean }
+    : base
 }
+
+/** 清空所有生效（派生）字段 —— 避免删光 provider 后残留 baseUrl/apiKey，继续发请求给已删除端点 */
+const clearActive = () => ({
+  model: '',
+  baseUrl: '',
+  apiKey: '',
+  apiCompat: 'openai' as ApiCompat,
+  directFetch: false,
+  activeProviderId: undefined,
+  activeModelId: undefined,
+  reasoningEffort: undefined,
+})
 
 /** 在提供商列表里找第一个「有模型」的组合，用于删除后回落 */
 const firstAvailable = (providers: ModelProvider[]): { provider: ModelProvider; modelId: string } | null => {
@@ -95,7 +114,7 @@ export const useSettingsStore = create<SettingsState>()(
           const next = firstAvailable(providers)
           return next
             ? { providers, ...applyActive(next.provider, next.modelId) }
-            : { providers, activeProviderId: undefined, activeModelId: undefined }
+            : { providers, ...clearActive() }
         }
         return { providers, ...applyActive(provider, modelId) }
       }),
@@ -106,7 +125,7 @@ export const useSettingsStore = create<SettingsState>()(
         const next = firstAvailable(providers)
         return next
           ? { providers, ...applyActive(next.provider, next.modelId) }
-          : { providers, activeProviderId: undefined, activeModelId: undefined }
+          : { providers, ...clearActive() }
       }),
 
       setProviderModels: (providerId, models) => {
