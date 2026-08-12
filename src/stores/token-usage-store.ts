@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { persist } from 'zustand-middleware'
+import { persist } from 'zustand/middleware'
 import type { TokenUsage } from '../types/agent'
 
 /** 单次调用记录：用于明细展示 */

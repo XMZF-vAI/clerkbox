@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from 'react'
 import { useSettingsStore } from '../stores/settings-store'
 import { useChatStore, getSessionAbortController, setSessionAbortController } from '../stores/chat-store'
+import { useTokenUsageStore } from '../stores/token-usage-store'
 import { useSkillsStore } from '../stores/skills-store'
 import { toolRegistry } from '../lib/tool-registry'
 import { isDangerousCommand } from '../lib/permission-engine'
@@ -995,6 +996,17 @@ export function useAgent(sessionId: string) {
           onUsage: (usage: TokenUsage) => {
             turnUsage = usage
             tokenTrackerRef.current.recordUsage(usage)
+            // 累计到全局 token 用量统计（供设置页通用栏展示）
+            try {
+              useTokenUsageStore.getState().recordUsage({
+                usage,
+                sessionId,
+                model: settings.model,
+                providerId: settings.activeProviderId,
+              })
+            } catch (error) {
+              console.error('[use-agent] record token usage failed:', error)
+            }
           },
           onThinkingBlock: (block) => {
             const list = thinkingBlocks.get(assistantId)

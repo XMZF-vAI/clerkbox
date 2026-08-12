@@ -1,5 +1,5 @@
 import { useState, useEffect, useId, useRef } from 'react'
-import { Cpu, Palette, RotateCcw, Check, AlertCircle, Info, X, Plus, Pencil, Trash2, Sparkles, Languages, FileText } from 'lucide-react'
+import { Cpu, Palette, RotateCcw, Check, AlertCircle, Info, X, Plus, Pencil, Trash2, Sparkles, Languages, FileText, Settings } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useSettingsStore } from '../../stores/settings-store'
 import { useVibeStore } from '../../stores/vibe-store'
@@ -7,11 +7,12 @@ import { MACARON_PRESETS, schemeSwatches } from '../../lib/theme-engine'
 import { SUPPORTED_LANGUAGES } from '../../i18n'
 import { ipc } from '../../lib/ipc-client'
 import ProvidersSection from './ProvidersSection'
+import TokenUsageStats from './TokenUsageStats'
 import ConfirmDialog from '../ui/ConfirmDialog'
 
 import APP_ICON from '../../assets/icon.png'
 
-type Tab = 'api' | 'appearance' | 'about'
+type Tab = 'api' | 'general' | 'appearance' | 'about'
 
 const THEME_LABEL_KEY: Record<string, string> = {
   light: 'settings.appearance.light',
@@ -101,6 +102,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
 
   const tabs: { key: Tab; label: string; icon: typeof Cpu }[] = [
     { key: 'api', label: t('settings.tabs.api'), icon: Cpu },
+    { key: 'general', label: t('settings.tabs.general'), icon: Settings },
     { key: 'appearance', label: t('settings.tabs.appearance'), icon: Palette },
     { key: 'about', label: t('settings.tabs.about'), icon: Info },
   ]
@@ -188,12 +190,14 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                       <span className="text-sm font-medium text-dark-onSurface truncate">
                         {activeLabel}
                       </span>
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-dark-surfaceContainerHighest text-dark-onSurfaceVariant flex-shrink-0">
-                        {settings.apiCompat === 'anthropic' ? 'Anthropic' : 'OpenAI'}
-                      </span>
+                      {activeProvider && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-dark-surfaceContainerHighest text-dark-onSurfaceVariant flex-shrink-0">
+                          {settings.apiCompat === 'anthropic' ? 'Anthropic' : 'OpenAI'}
+                        </span>
+                      )}
                     </div>
                     <div className="text-xs text-dark-onSurfaceVariant truncate">
-                      {activeProvider ? `${activeProvider.name} · ` : ''}{settings.model || t('settings.api.noActive')}
+                      {activeProvider ? `${activeProvider.name} · ${settings.model || t('settings.api.noActive')}` : t('settings.api.noActive')}
                     </div>
                   </div>
                   <button
@@ -213,47 +217,16 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                 )}
 
                 <ProvidersSection />
-
-                {/* 项目指令 AGENTS.md */}
-                <div className="space-y-3 p-4 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10">
-                  <div className="flex items-center gap-2">
-                    <FileText size={14} className="text-md-primary flex-shrink-0" />
-                    <span className="text-sm font-medium text-dark-onSurface">项目指令</span>
-                  </div>
-                  <p className="text-xs text-dark-onSurfaceVariant/70 leading-relaxed">
-                    启用后，工作目录根目录下的 AGENTS.md 会被注入到系统提示词。AGENTS.md 是跨工具标准（Codex / OpenCode / Qwen 原生支持），用于向 AI 描述项目技术栈、构建命令和编码规范。
-                  </p>
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={settings.agentsMdEnabled}
-                      onChange={(e) => settings.updateSettings({ agentsMdEnabled: e.target.checked })}
-                      className="accent-md-primary"
-                    />
-                    <span className="text-xs text-dark-onSurfaceVariant">注入 AGENTS.md</span>
-                  </label>
-                  {settings.agentsMdEnabled && (
-                    <label className="flex items-center gap-2 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={settings.claudeMdCompat}
-                        onChange={(e) => settings.updateSettings({ claudeMdCompat: e.target.checked })}
-                        className="accent-md-primary"
-                      />
-                      <span className="text-xs text-dark-onSurfaceVariant">兼容 CLAUDE.md（AGENTS.md 不存在时回退读取）</span>
-                    </label>
-                  )}
-                </div>
               </div>
             )}
 
-            {activeTab === 'appearance' && (
-              <div className="space-y-6">
+            {activeTab === 'general' && (
+              <div className="space-y-5">
                 {/* 语言 */}
                 <div>
                   <label className="flex items-center gap-2 text-sm font-medium mb-2">
                     <Languages size={14} />
-                    {t('settings.appearance.languageTitle')}
+                    {t('settings.general.languageTitle')}
                   </label>
                   <div className="flex gap-2">
                     {SUPPORTED_LANGUAGES.map((lang) => (
@@ -275,6 +248,44 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                   </div>
                 </div>
 
+                {/* 项目指令 AGENTS.md */}
+                <div className="space-y-3 p-4 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10">
+                  <div className="flex items-center gap-2">
+                    <FileText size={14} className="text-md-primary flex-shrink-0" />
+                    <span className="text-sm font-medium text-dark-onSurface">{t('settings.general.agentsMdTitle')}</span>
+                  </div>
+                  <p className="text-xs text-dark-onSurfaceVariant/70 leading-relaxed">
+                    {t('settings.general.agentsMdDesc')}
+                  </p>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={settings.agentsMdEnabled}
+                      onChange={(e) => settings.updateSettings({ agentsMdEnabled: e.target.checked })}
+                      className="accent-md-primary"
+                    />
+                    <span className="text-xs text-dark-onSurfaceVariant">{t('settings.general.agentsMdToggle')}</span>
+                  </label>
+                  {settings.agentsMdEnabled && (
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={settings.claudeMdCompat}
+                        onChange={(e) => settings.updateSettings({ claudeMdCompat: e.target.checked })}
+                        className="accent-md-primary"
+                      />
+                      <span className="text-xs text-dark-onSurfaceVariant">{t('settings.general.claudeMdCompat')}</span>
+                    </label>
+                  )}
+                </div>
+
+                {/* Token 用量统计 */}
+                <TokenUsageStats />
+              </div>
+            )}
+
+            {activeTab === 'appearance' && (
+              <div className="space-y-6">
                 <div>
                   <label className="text-sm font-medium mb-2 block">{t('settings.appearance.themeMode')}</label>
                   <div className="flex gap-2">

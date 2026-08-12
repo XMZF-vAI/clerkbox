@@ -39,6 +39,8 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
 
   // Model dropdown state
   const [showModelMenu, setShowModelMenu] = useState(false)
+  // 折叠的提供商 id 集合（默认当前生效的提供商展开，其余折叠）
+  const [collapsedProviders, setCollapsedProviders] = useState<Set<string>>(new Set())
   const modelMenuRef = useRef<HTMLDivElement>(null)
   const modelTriggerRef = useRef<HTMLButtonElement>(null)
 
@@ -175,6 +177,17 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
   const handleSelectModel = (providerId: string, modelId: string) => {
     settings.activateModel(providerId, modelId)
     setShowModelMenu(false)
+    setCollapsedProviders(new Set())
+  }
+
+  // 切换某提供商的折叠状态
+  const toggleProviderCollapse = (providerId: string) => {
+    setCollapsedProviders((prev) => {
+      const next = new Set(prev)
+      if (next.has(providerId)) next.delete(providerId)
+      else next.add(providerId)
+      return next
+    })
   }
 
   const handleAddCustomModel = () => {
@@ -239,11 +252,11 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
   const modeLabel = mode === 'craft' ? t('sidebar.mode.craftLabel') : mode === 'plan' ? t('sidebar.mode.planLabel') : t('sidebar.mode.askLabel')
   const ModeIcon = modeIcon
 
-  // 当前模型显示名：优先取所属提供商里登记的 label，回落到 model id
+  // 当前模型显示名：优先取所属提供商里登记的 label，回落到 model id；都没有则提示未配置
   const currentModelLabel = (() => {
     const p = settings.providers.find((x) => x.id === settings.activeProviderId)
     const m = p?.models.find((x) => x.id === settings.activeModelId)
-    return m?.label || m?.id || settings.model
+    return m?.label || m?.id || settings.model || t('chat.noModelActive')
   })()
 
   // 只显示有模型的提供商，避免下拉里出现空组
@@ -700,49 +713,61 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
                     {t('chat.noModels')}
                   </div>
                 ) : (
-                  providersWithModels.map((p) => (
-                    <div key={p.id}>
-                      {/* 提供商分组标题：滚动时吸附在顶部 */}
-                      <div
-                        className={`sticky top-0 z-10 flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide backdrop-blur-sm ${
-                          vibe
-                            ? 'text-white/50 bg-black/25'
-                            : 'text-dark-onSurfaceVariant/70 bg-dark-surfaceContainerHighest/95'
-                        }`}
-                      >
-                        <span className="truncate">{p.name}</span>
-                        <span
-                          className={`px-1 py-px rounded text-[9px] normal-case font-medium flex-shrink-0 ${
-                            vibe ? 'bg-white/15 text-white/70' : 'bg-dark-surfaceContainer text-dark-onSurfaceVariant'
+                  providersWithModels.map((p) => {
+                    const collapsed = collapsedProviders.has(p.id)
+                    const hasActive = p.id === settings.activeProviderId
+                    // 当前生效的提供商默认展开
+                    const isExpanded = !collapsed || hasActive
+                    return (
+                      <div key={p.id}>
+                        {/* 提供商分组标题：可点击折叠 */}
+                        <button
+                          type="button"
+                          onClick={() => toggleProviderCollapse(p.id)}
+                          className={`sticky top-0 z-10 w-full flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide backdrop-blur-sm transition-colors ${
+                            vibe
+                              ? 'text-white/60 bg-black/25 hover:bg-black/35'
+                              : 'text-dark-onSurfaceVariant/70 bg-dark-surfaceContainerHighest/95 hover:bg-dark-surfaceContainerHighest'
                           }`}
                         >
-                          {p.apiCompat === 'anthropic' ? 'Anthropic' : 'OpenAI'}
-                        </span>
-                      </div>
-                      {p.models.map((m) => {
-                        const active = p.id === settings.activeProviderId && m.id === settings.activeModelId
-                        return (
-                          <button
-                            type="button"
-                            key={m.id}
-                            onClick={() => handleSelectModel(p.id, m.id)}
-                            className={`w-full text-left px-3 py-2 transition-colors ${
-                              active
-                                ? vibe ? 'text-md-primary bg-md-primary/10' : 'text-md-primary bg-md-primary/5'
-                                : vibe ? 'text-white/90 hover:bg-white/10' : 'text-dark-onSurface hover:bg-dark-surfaceContainer'
+                          <ChevronDown
+                            size={10}
+                            className={`flex-shrink-0 transition-transform ${isExpanded ? '' : '-rotate-90'}`}
+                          />
+                          <span className="truncate flex-1 text-left">{p.name}</span>
+                          <span
+                            className={`px-1 py-px rounded text-[9px] normal-case font-medium flex-shrink-0 ${
+                              vibe ? 'bg-white/15 text-white/70' : 'bg-dark-surfaceContainer text-dark-onSurfaceVariant'
                             }`}
                           >
-                            <div className="text-xs font-medium truncate">{m.label || m.id}</div>
-                            {m.label && (
-                              <div className={`text-[10px] truncate mt-0.5 ${active ? 'text-md-primary/70' : vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/70'}`}>
-                                {m.id}
-                              </div>
-                            )}
-                          </button>
-                        )
-                      })}
-                    </div>
-                  ))
+                            {p.apiCompat === 'anthropic' ? 'Anthropic' : 'OpenAI'}
+                          </span>
+                        </button>
+                        {isExpanded && p.models.map((m) => {
+                          const active = p.id === settings.activeProviderId && m.id === settings.activeModelId
+                          return (
+                            <button
+                              type="button"
+                              key={m.id}
+                              onClick={() => handleSelectModel(p.id, m.id)}
+                              className={`w-full text-left pl-7 pr-3 py-2 transition-colors ${
+                                active
+                                  ? vibe ? 'text-md-primary bg-md-primary/10' : 'text-md-primary bg-md-primary/5'
+                                  : vibe ? 'text-white/90 hover:bg-white/10' : 'text-dark-onSurface hover:bg-dark-surfaceContainer'
+                              }`}
+                            >
+                              <div className="text-xs font-medium truncate">{m.label || m.id}</div>
+                              {m.label && (
+                                <div className={`text-[10px] truncate mt-0.5 ${active ? 'text-md-primary/70' : vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/70'}`}>
+                                  {m.id}
+                                </div>
+                              )}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    )
+                  })
                 )}
                 <div className={`my-1 border-t ${vibe ? 'border-white/15' : 'border-dark-onSurfaceVariant/10'}`} />
                 <button

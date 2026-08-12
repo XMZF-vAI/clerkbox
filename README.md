@@ -43,6 +43,7 @@
 - [子 Agent](#子-agent)
 - [Skills 技能系统](#skills-技能系统)
 - [长期记忆](#长期记忆)
+- [AGENTS.md 项目指令](#agentsmd-项目指令)
 - [VIBE 沉浸模式](#vibe-沉浸模式)
 - [主题与外观](#主题与外观)
 - [项目结构](#项目结构)
@@ -64,6 +65,7 @@
 | **Skills 技能市场** | 一键安装来自社区的可复用提示词模板，自动注入 system prompt |
 | **长期记忆系统** | 自动维护 user / feedback / project / reference 四类记忆条目，跨会话延续上下文 |
 | **Anthropic 缓存优化** | 自动对 Anthropic 请求启用 Prompt Caching，静态系统提示前缀命中缓存；每条消息显示缓存写入/读取 token 与命中率 |
+| **AGENTS.md 项目指令** | 自动读取工作目录根目录的 `AGENTS.md` 注入系统提示词，遵循跨工具标准（Codex / OpenCode / Qwen 原生支持），可回退 `CLAUDE.md` |
 | **VIBE 沉浸模式** | 全屏背景图 + 液态玻璃 UI + 内置音乐播放器，专注对话本身 |
 | **MD3 动态主题** | 基于 Material Design 3 色彩引擎，浅色 / 深色 / 跟随系统三种模式，支持自定义种子色 |
 | **原生圆角窗口** | 自绘标题栏 + 12px 圆角，最大化时自动恢复直角，细节考究 |
@@ -138,7 +140,34 @@ Skills 是可复用的提示词模板（`SKILL.md` + frontmatter），存放在 
 
 Agent 通过 `save_memory` 工具主动写入，通过 frontmatter 索引快速检索。
 
-### 6. VIBE 沉浸模式
+### 7. AGENTS.md 项目指令
+
+ClerkBox 遵循跨工具标准，在每个会话开始时自动读取工作目录根目录的 `AGENTS.md` 并注入到系统提示词，让 AI 立即了解项目技术栈、构建命令、编码规范等。
+
+- **跨工具标准**：`AGENTS.md` 是 [agentskills.io](https://agentskills.io) 与 [agents.md](https://agents.md) 倡导的通用规范，OpenAI Codex、OpenCode、Qwen Coder 等工具原生支持
+- **CLAUDE.md 兼容**：在 **设置 → 通用** 开启「兼容 CLAUDE.md」后，若工作目录没有 `AGENTS.md` 会回退读取 `CLAUDE.md`
+- **完全可选**：不需要时可关闭注入功能，Agent 行为不受影响
+- **示例 `AGENTS.md`**：
+
+```markdown
+# Project: ClerkBox
+
+## Tech Stack
+- Electron 42 + React 19 + TypeScript 6
+- Vite 5 / Tailwind CSS 3
+- Zustand 5 (state) + Zod (validation)
+
+## Build & Test
+- `npm run dev` — Vite + Electron dev mode
+- `npm run build` — Production build (NSIS installer)
+
+## Conventions
+- 主进程 IPC handler 入口必须校验路径合法性
+- 优先 React.memo + useMemo 优化流式渲染
+- 中文界面文案放 src/i18n/locales/zh-CN.ts
+```
+
+### 8. VIBE 沉浸模式
 
 一键进入专注模式：
 
@@ -201,7 +230,8 @@ npm run build
 
 | 命令 | 作用 |
 | --- | --- |
-| `npm run dev` | 启动开发服务器与 Electron |
+| `npm run dev` | 启动开发服务器（端口 5175）与 Electron |
+| `npm run dev:alt` | 同上，但使用 5176 端口（5175 被占用时使用） |
 | `npm run build:electron` | 仅编译 Electron 主进程 TypeScript |
 | `npm run electron` | 编译并启动 Electron |
 | `npm run build` | 完整生产构建（生成安装包） |
@@ -212,14 +242,15 @@ npm run build
 ## 快速开始
 
 1. **首次启动**：完成欢迎页引导，选择主题与颜色方案
-2. **配置模型**：进入 **设置 → 模型**，填入你的 API Key
+2. **配置模型**：进入 **设置 → API 配置 → 添加提供商**（内置 DeepSeek / OpenAI / Anthropic / 通义千问 / 智谱 GLM 等预设），填入你的 API Key
 3. **选择工作目录**：点击侧边栏底部按钮，选择一个项目文件夹作为 Agent 的工作目录
-4. **开始对话**：在输入框输入你的需求，例如：
+4. **（可选）添加 AGENTS.md**：在工作目录根目录放置 `AGENTS.md` 描述项目技术栈与编码规范，ClerkBox 会自动注入到系统提示词
+5. **开始对话**：在输入框输入你的需求，例如：
    - "帮我重构 src/utils.ts 里的 parseDate 函数"
    - "分析这个项目的依赖结构"
    - "搜索所有 TODO 注释并列出来"
-5. **派生子 Agent**：Agent 会自动判断是否需要派生子 Agent 处理复杂子任务
-6. **进入 VIBE 模式**：点击标题栏 VIBE 按钮进入沉浸模式
+6. **派生子 Agent**：Agent 会自动判断是否需要派生子 Agent 处理复杂子任务
+7. **进入 VIBE 模式**：点击标题栏 VIBE 按钮进入沉浸模式
 
 ---
 
@@ -245,6 +276,9 @@ interface ModelConfig {
 - **VIBE 模式**：背景图、音乐源
 - **工作目录**：当前会话绑定的项目目录
 - **数据目录**：默认 `%APPDATA%/ClerkBox`
+- **语言**：中文（默认）/ English，运行时切换无需重启
+- **AGENTS.md 注入**：开启后自动读取工作目录根目录的 `AGENTS.md` 注入系统提示词；可选择兼容 `CLAUDE.md` 回退
+- **Token 用量统计**：累计 API 调用次数、输入/输出 token、缓存写入/命中与命中率（设置 → 通用）
 
 ### 数据目录结构
 
@@ -442,7 +476,7 @@ Agent 通过 `save_memory` 工具自动写入，会话开始时扫描 frontmatte
 
 ### 功能
 
-- **全屏背景**：默认 Pexels 高质量图片，支持自定义网络图或本地图片
+- **全屏背景**：默认全屏背景图，支持自定义网络图或本地图片
 - **液态玻璃 UI**：消息气泡、输入框、控件均采用 `liquid-glass` 毛玻璃效果
 - **音乐播放器**：右上角悬浮控制器，支持单曲 / 文件夹播放，白色进度条
 - **定制菜单**：左下角玻璃菜单，配置背景与音乐
@@ -456,7 +490,7 @@ Agent 通过 `save_memory` 工具自动写入，会话开始时扫描 frontmatte
 
 ### 默认音乐
 
-内置默认背景音乐 `https://xmzf.space/bj.mp3`，可在定制菜单中替换。
+内置默认背景音乐 `https://download.xmzf.space/d/well.mp3`，背景图 `https://download.xmzf.space/d/all.jpg`，可在定制菜单中替换。
 
 ---
 
@@ -592,11 +626,16 @@ ClerkBox/
 - [x] 圆角窗口 + 自绘标题栏
 - [x] 欢迎页引导
 - [x] 长上下文自动压缩（compact）
-- [x] Token 用量追踪
+- [x] Token 用量追踪（含设置页统计面板）
 - [x] Anthropic Prompt Caching（静态 system 前缀缓存 + 命中率展示）
 - [x] 危险命令拦截
 - [x] 文件修改自动备份
 - [x] 国际化（i18n，中 / 英）
+- [x] 通用设置栏（语言 / AGENTS.md / Token 用量统计）
+- [x] AGENTS.md 项目指令注入（跨工具标准，CLAUDE.md 兼容回退）
+- [x] 中断按钮强制停止工具执行（主进程子进程跟踪与终止）
+- [x] 模型选择器按提供商分组可折叠
+- [x] Apache 2.0 协议迁移（含专利授权条款）
 
 ### 计划中 (v1.8+)
 
@@ -614,7 +653,7 @@ ClerkBox/
 - [ ] Skills 本地签名校验
 - [ ] 命令面板（Ctrl+K）
 - [ ] 多窗口多会话
-- [ ] Token 用量仪表盘
+- [ ] Token 用量按模型/会话维度分布
 - [ ] macOS / Linux 支持
 
 ---

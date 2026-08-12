@@ -23,8 +23,8 @@ interface SettingsState extends AppSettings {
 
 const defaultSettings: AppSettings = {
   apiKey: '',
-  baseUrl: 'https://api.deepseek.com/v1',
-  model: 'deepseek-chat',
+  baseUrl: '',
+  model: '',
   temperature: 0.7,
   maxInputTokens: 184000,
   maxTokens: 16000,
