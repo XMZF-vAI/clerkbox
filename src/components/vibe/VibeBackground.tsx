@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useVibeStore, DEFAULT_VIBE_BACKGROUND } from '../../stores/vibe-store'
 import { ipc } from '../../lib/ipc-client'
+import { toFileUrl } from '../../lib/file-url'
 
 export default function VibeBackground() {
   const background = useVibeStore((s) => s.background)
@@ -9,29 +10,29 @@ export default function VibeBackground() {
   const [fade, setFade] = useState(false)
 
   useEffect(() => {
-    let objectUrl: string | null = null
+    let cancelled = false
+    setFade(false)
 
     const resolveSrc = async () => {
       if (background.type === 'local') {
         const exists = await ipc.fileExists(background.value)
+        if (cancelled) return
         if (!exists) {
           setBackground(DEFAULT_VIBE_BACKGROUND)
           setSrc(DEFAULT_VIBE_BACKGROUND.value)
           return
         }
-        objectUrl = `file://${background.value}`
-        setSrc(objectUrl)
+        setSrc(toFileUrl(background.value))
       } else {
+        if (cancelled) return
         setSrc(background.value)
       }
     }
 
-    resolveSrc()
+    void resolveSrc()
 
     return () => {
-      if (objectUrl && objectUrl.startsWith('blob:')) {
-        URL.revokeObjectURL(objectUrl)
-      }
+      cancelled = true
     }
   }, [background, setBackground])
 
@@ -47,10 +48,9 @@ export default function VibeBackground() {
       <div
         className="absolute inset-0 bg-cover bg-center bg-no-repeat transition-opacity duration-700"
         style={{
-          backgroundImage: `url(${src})`,
+          backgroundImage: `url(${JSON.stringify(src)})`,
           opacity: fade ? 1 : 0,
         }}
-        onLoad={() => setFade(true)}
       />
       <img
         src={src}

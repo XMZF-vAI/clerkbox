@@ -50,8 +50,9 @@ export interface ClerkBoxAPI {
   selectSkillFile: () => Promise<string | null>
   parseSkillFile: (filePath: string) => Promise<ParseSkillFileResult>
   listDir: (path: string) => Promise<FileEntry[]>
-  executeCommand: (command: string, cwd?: string) => Promise<{ stdout: string; stderr: string; exitCode: number; encodingFallback?: boolean }>
-  executeCommandWithShell: (command: string, cwd: string | undefined, shellType: string) => Promise<{ stdout: string; stderr: string; exitCode: number; encodingFallback?: boolean }>
+  executeCommand: (command: string, cwd?: string, sessionId?: string) => Promise<{ stdout: string; stderr: string; exitCode: number; encodingFallback?: boolean }>
+  executeCommandWithShell: (command: string, cwd: string | undefined, shellType: string, sessionId?: string) => Promise<{ stdout: string; stderr: string; exitCode: number; encodingFallback?: boolean }>
+  cancelSessionCommands: (sessionId: string) => Promise<{ killed: number }>
   webSearch: (query: string, count?: number) => Promise<WebSearchResult[] | { error: string }>
   webFetch: (url: string, maxLength?: number) => Promise<{ content: string; url: string } | { error: string }>
   apiFetchModels: (cfg: ApiConnConfig) => Promise<{ models: FetchedModel[] } | { error: string }>
@@ -59,6 +60,9 @@ export interface ClerkBoxAPI {
   apiChatStream: (cfg: ApiConnConfig, body: unknown) => Promise<{ requestId: string }>
   apiAbort: (requestId: string) => Promise<void>
   onApiChunk: (callback: (payload: ApiChunkPayload) => void) => () => void
+  loadApiKeys: () => Promise<Record<string, string>>
+  saveApiKey: (id: string, apiKey: string) => Promise<void>
+  removeApiKey: (id: string) => Promise<void>
   scanMemory: (workingDir: string) => Promise<MemoryEntry[]>
   scanAgents: (workingDir: string) => Promise<Array<{ filename: string; content: string }>>
   readMemoryIndex: (workingDir: string) => Promise<{ content: string; wasTruncated: boolean; reason?: string }>
@@ -69,6 +73,8 @@ export interface ClerkBoxAPI {
   dbUpdateSessionTitle: (id: string, title: string, updatedAt: number) => Promise<void>
   dbDeleteSession: (id: string) => Promise<void>
   dbGetAllSessions: () => Promise<SessionRow[]>
+  dbGetRecents: () => Promise<string[]>
+  dbSetRecents: (recents: string[]) => Promise<void>
   dbAddMessage: (row: MessageRow) => Promise<void>
   dbUpdateMessage: (id: string, content: string, toolCalls?: string, toolResults?: string, thinkingContent?: string | null, finishReason?: string | null) => Promise<void>
   dbGetMessages: (sessionId: string) => Promise<MessageRow[]>

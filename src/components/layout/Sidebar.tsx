@@ -101,8 +101,11 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
           </div>
         )}
         <button
+          type="button"
           onClick={() => useSettingsStore.getState().updateSettings({ showSettings: true })}
           className="w-8 h-8 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors"
+          aria-label={t('sidebar.settings')}
+          title={t('sidebar.settings')}
         >
           <Settings size={18} />
         </button>
@@ -113,23 +116,23 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
   return (
     <div className="w-64 flex flex-col bg-dark-surfaceDim border-r border-dark-onSurfaceVariant/10">
       <div className="flex items-center justify-between px-4 py-3">
-        <div className="flex items-center gap-2">
-          <img src={APP_ICON} alt="ClerkBox" className="w-5 h-5 rounded" />
-          <span className="text-sm font-semibold tracking-wide text-dark-onSurfaceVariant">ClerkBox</span>
+        <div className="flex items-center gap-2.5">
+          <img src={APP_ICON} alt="ClerkBox" className="w-8 h-8 rounded" />
+          <span className="text-base font-semibold tracking-wide text-dark-onSurfaceVariant">ClerkBox</span>
         </div>
       </div>
 
-      {/* New Chat + Skill Store buttons - same size, side by side */}
-      <div className="px-3 pb-2 flex gap-1.5">
+      {/* New Chat + Skill Store buttons - vertical stack for better breathing room */}
+      <div className="px-3 pb-2 flex flex-col gap-1.5">
         <button
           onClick={() => { setShowSkillStore(false); createSession() }}
-          className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-md3-md bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer transition-colors text-sm"
+          className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-md3-md bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer transition-colors text-sm"
         >
           <span>{t('sidebar.newChat')}</span>
         </button>
         <button
           onClick={() => setShowSkillStore(!showSkillStore)}
-          className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-md3-md transition-colors text-sm ${
+          className={`w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-md3-md transition-colors text-sm ${
             showSkillStore
               ? 'bg-md-primary/15 text-md-primary hover:bg-md-primary/25'
               : 'bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant'
@@ -170,7 +173,7 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
               key={s.id}
               onMouseEnter={() => setHoveredSessionId(s.id)}
               onMouseLeave={() => setHoveredSessionId(null)}
-              className={`flex items-center gap-2 px-3 py-2 rounded-full text-sm transition-colors ${
+              className={`group flex items-center gap-2 px-3 py-2 rounded-full text-sm transition-colors ${
                 activeSessionId === s.id
                   ? 'bg-md-secondaryContainer text-md-onSecondaryContainer'
                   : 'text-dark-onSurfaceVariant hover:bg-dark-surfaceContainer'
@@ -220,7 +223,7 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
                   setConfirmDeleteId(s.id)
                 }}
                 className={`w-6 h-6 flex items-center justify-center rounded-md3-xs hover:bg-md-error/20 hover:text-md-error transition-opacity flex-shrink-0 ${
-                  hoveredSessionId === s.id ? 'opacity-100' : 'opacity-0'
+                  hoveredSessionId === s.id ? 'opacity-100' : 'opacity-0 group-focus-within:opacity-100'
                 }`}
                 aria-label={t('sidebar.deleteSessionAria')}
                 title={t('sidebar.deleteSessionAria')}

@@ -117,7 +117,9 @@ const TurnPanel = memo(function TurnPanel({ turn, isLastTurn, isStreaming, vibe 
       {shouldFold && (
         <div className="pl-2">
           <button
+            type="button"
             onClick={() => setStepsExpanded(!stepsExpanded)}
+            aria-expanded={stepsExpanded}
             className={`flex items-center gap-1.5 text-[11px] transition-colors py-1 ${
               vibe
                 ? 'text-white/50 hover:text-white/70'
@@ -161,7 +163,7 @@ export default function MessageList({ messages, isStreaming, vibe }: MessageList
   const bottomRef = useRef<HTMLDivElement>(null)
   const isNearBottomRef = useRef(true)
 
-  // U3: 监听滚动，只有用户位于底部附近时才自动滚动到底部，避免强制拉回。
+  // Only auto-scroll while the user is already near the latest message.
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
@@ -180,11 +182,11 @@ export default function MessageList({ messages, isStreaming, vibe }: MessageList
     }
   }, [messages, isStreaming])
 
+  const turns = useMemo(() => groupIntoTurns(messages), [messages])
+
   if (messages.length === 0) {
     return null
   }
-
-  const turns = useMemo(() => groupIntoTurns(messages), [messages])
 
   return (
     <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-6 space-y-6">

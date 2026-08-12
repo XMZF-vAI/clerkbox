@@ -1,4 +1,5 @@
-import { Menu, Minus, Square, X, Sparkles } from 'lucide-react'
+import { Menu, Minus, Square, X, Sparkles, Copy } from 'lucide-react'
+import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useChatStore } from '../../stores/chat-store'
 import { useVibeStore } from '../../stores/vibe-store'
@@ -15,6 +16,14 @@ export default function TitleBar({ onToggleSidebar }: TitleBarProps) {
   const vibeMode = useVibeStore((s) => s.isVibeMode)
   const toggleVibeMode = useVibeStore((s) => s.toggleVibeMode)
 
+  // 监听窗口最大化状态，根据状态切换中间按钮的图标和 hover 提示
+  const [isMaximized, setIsMaximized] = useState(false)
+  useEffect(() => {
+    // 初始值（preload 未主动推送，靠 onWindowStateChange 第一次触达前避免图标错位）
+    const off = window.clerkbox?.onWindowStateChange((max) => setIsMaximized(max))
+    return () => { off?.() }
+  }, [])
+
   return (
     <div
       className="h-11 flex items-center justify-between px-4 bg-dark-surface/80 backdrop-blur-md border-b border-dark-onSurfaceVariant/10 select-none"
@@ -22,7 +31,10 @@ export default function TitleBar({ onToggleSidebar }: TitleBarProps) {
     >
       <div className="flex items-center gap-3" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
         <button
+          type="button"
           onClick={onToggleSidebar}
+          aria-label={t('titlebar.toggleSidebar')}
+          title={t('titlebar.toggleSidebar')}
           className="w-8 h-8 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors"
         >
           <Menu size={18} />
@@ -35,6 +47,7 @@ export default function TitleBar({ onToggleSidebar }: TitleBarProps) {
       <div className="flex items-center gap-1" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
         {/* VIBE mode toggle */}
         <button
+          type="button"
           onClick={() => toggleVibeMode()}
           className="h-7 flex items-center gap-1 px-2 mr-2 rounded-md3-sm bg-md-tertiary/15 text-md-tertiary hover:bg-md-tertiary/25 transition-colors"
           title={t('titlebar.vibeEnter')}
@@ -59,19 +72,28 @@ export default function TitleBar({ onToggleSidebar }: TitleBarProps) {
 
         {/* Window controls */}
         <button
+          type="button"
           onClick={() => window.clerkbox?.windowAction('minimize')}
+          aria-label={t('titlebar.windowMinimize')}
+          title={t('titlebar.windowMinimize')}
           className="w-8 h-8 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors"
         >
           <Minus size={16} />
         </button>
         <button
+          type="button"
           onClick={() => window.clerkbox?.windowAction('maximize')}
+          title={isMaximized ? t('titlebar.windowRestore') : t('titlebar.windowMaximize')}
+          aria-label={isMaximized ? t('titlebar.windowRestore') : t('titlebar.windowMaximize')}
           className="w-8 h-8 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors"
         >
-          <Square size={14} />
+          {isMaximized ? <Copy size={14} /> : <Square size={14} />}
         </button>
         <button
+          type="button"
           onClick={() => window.clerkbox?.windowAction('close')}
+          aria-label={t('titlebar.windowClose')}
+          title={t('titlebar.windowClose')}
           className="w-8 h-8 flex items-center justify-center rounded-md3-sm hover:bg-md-error/20 hover:text-md-error transition-colors"
         >
           <X size={16} />

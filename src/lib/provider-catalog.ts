@@ -1,4 +1,5 @@
-import type { ApiCompat } from '../types/agent'
+import type { ApiCompat, ReasoningEffort, ThinkingStyle } from '../types/agent'
+import { DEFAULT_THINKING_STYLE } from '../types/agent'
 
 /**
  * 内置提供商目录。
@@ -19,14 +20,49 @@ export interface ProviderPreset {
   apiKeyUrl?: string
   /** false = 本地部署，无需 Key */
   requiresKey?: boolean
+  /**
+   * 该平台思考能力的默认协议预设。
+   * 不同厂商的思考档位名称/参数各不相同，这里按厂商声明：
+   * - thinkingStyle：思考在请求体里的默认表达方式
+   * - efforts：该平台思考模型默认支持的档位（从弱到强）
+   * - effortKeywords：模型 id 含这些关键词 → 视为思考模型（自动开启）
+   * 未命中 effortKeywords 的模型默认支持思考 = false（由用户在高级设置手动开）。
+   */
+  thinking?: {
+    thinkingStyle: ThinkingStyle
+    efforts: ReasoningEffort[]
+    effortKeywords: string[]
+  }
 }
 
-export type ProviderGroup = 'international' | 'china' | 'aggregator' | 'local' | 'custom'
+export type ProviderGroup = 'official' | 'international' | 'china' | 'aggregator' | 'local' | 'custom'
 
 /** 分组顺序（UI 依此渲染分组标题） */
-export const PROVIDER_GROUPS: ProviderGroup[] = ['international', 'china', 'aggregator', 'local', 'custom']
+export const PROVIDER_GROUPS: ProviderGroup[] = ['official', 'international', 'china', 'aggregator', 'local', 'custom']
 
 export const PROVIDER_PRESETS: ProviderPreset[] = [
+  // ── 官方 ──
+  {
+    id: 'lunora',
+    name: 'Lunora API',
+    group: 'official',
+    apiCompat: 'openai',
+    baseUrl: 'https://api.uselunora.com/v1',
+    apiKeyUrl: 'https://console.uselunora.com/',
+    thinking: {
+      thinkingStyle: 'enable',
+      // Lunora 聚合多厂商模型（Claude / OpenAI o 系 / DeepSeek / 通义 / Gemini / Grok 等）
+      efforts: ['low', 'medium', 'high'],
+      effortKeywords: [
+        'claude', 'sonnet', 'opus', 'haiku',
+        'o1', 'o3', 'o4', 'gpt-5',
+        'reasoning', 'thinking', 'reasoner',
+        'deepseek', 'qwen',
+        'gemini', 'grok',
+      ],
+    },
+  },
+
   // ── 国际 ──
   {
     id: 'openai',
@@ -35,6 +71,12 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     apiCompat: 'openai',
     baseUrl: 'https://api.openai.com/v1',
     apiKeyUrl: 'https://platform.openai.com/api-keys',
+    thinking: {
+      thinkingStyle: 'effort',
+      // o 系推理模型通过 reasoning_effort 控制，档位 low/medium/high
+      efforts: ['low', 'medium', 'high'],
+      effortKeywords: ['o1', 'o3', 'o4', 'gpt-5', 'reasoning'],
+    },
   },
   {
     id: 'anthropic',
@@ -43,6 +85,12 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     apiCompat: 'anthropic',
     baseUrl: 'https://api.anthropic.com',
     apiKeyUrl: 'https://console.anthropic.com/settings/keys',
+    thinking: {
+      thinkingStyle: 'budget',
+      // Anthropic 无离散档位，用 budget_tokens 近似；全部档位可用
+      efforts: ['minimal', 'low', 'medium', 'high', 'max', 'xhigh'],
+      effortKeywords: ['claude', 'sonnet', 'opus', 'haiku'],
+    },
   },
   {
     id: 'gemini',
@@ -51,6 +99,11 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     apiCompat: 'openai',
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
     apiKeyUrl: 'https://aistudio.google.com/apikey',
+    thinking: {
+      thinkingStyle: 'enable',
+      efforts: ['low', 'medium', 'high'],
+      effortKeywords: ['gemini'],
+    },
   },
   {
     id: 'xai',
@@ -60,6 +113,11 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     baseUrl: 'https://api.x.ai/v1',
     altCompat: { apiCompat: 'anthropic', baseUrl: 'https://api.x.ai' },
     apiKeyUrl: 'https://console.x.ai',
+    thinking: {
+      thinkingStyle: 'effort',
+      efforts: ['low', 'medium', 'high'],
+      effortKeywords: ['grok', 'reasoning'],
+    },
   },
   {
     id: 'mistral',
@@ -68,6 +126,11 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     apiCompat: 'openai',
     baseUrl: 'https://api.mistral.ai/v1',
     apiKeyUrl: 'https://console.mistral.ai/api-keys',
+    thinking: {
+      thinkingStyle: 'enable',
+      efforts: ['low', 'medium', 'high'],
+      effortKeywords: ['reasoning', 'thinking'],
+    },
   },
   {
     id: 'groq',
@@ -76,6 +139,11 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     apiCompat: 'openai',
     baseUrl: 'https://api.groq.com/openai/v1',
     apiKeyUrl: 'https://console.groq.com/keys',
+    thinking: {
+      thinkingStyle: 'enable',
+      efforts: ['low', 'medium', 'high'],
+      effortKeywords: ['reasoning', 'thinking'],
+    },
   },
   {
     id: 'together',
@@ -84,6 +152,11 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     apiCompat: 'openai',
     baseUrl: 'https://api.together.xyz/v1',
     apiKeyUrl: 'https://api.together.xyz/settings/api-keys',
+    thinking: {
+      thinkingStyle: 'enable',
+      efforts: ['low', 'medium', 'high'],
+      effortKeywords: ['reasoning', 'thinking'],
+    },
   },
 
   // ── 国内 ──
@@ -95,6 +168,12 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     baseUrl: 'https://api.deepseek.com/v1',
     altCompat: { apiCompat: 'anthropic', baseUrl: 'https://api.deepseek.com/anthropic' },
     apiKeyUrl: 'https://platform.deepseek.com/api_keys',
+    thinking: {
+      thinkingStyle: 'auto',
+      // deepseek-reasoner 自动思考无档位；V3.1/V4 也开始支持 reasoning_effort
+      efforts: ['low', 'medium', 'high'],
+      effortKeywords: ['reasoner', 'v4', 'thinking'],
+    },
   },
   {
     id: 'zhipu',
@@ -104,6 +183,11 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
     altCompat: { apiCompat: 'anthropic', baseUrl: 'https://open.bigmodel.cn/api/anthropic' },
     apiKeyUrl: 'https://bigmodel.cn/usercenter/apikeys',
+    thinking: {
+      thinkingStyle: 'glm',
+      efforts: ['low', 'medium', 'high'],
+      effortKeywords: ['glm', 'thinking'],
+    },
   },
   {
     id: 'dashscope',
@@ -113,6 +197,11 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     altCompat: { apiCompat: 'anthropic', baseUrl: 'https://dashscope.aliyuncs.com/api/v2/apps/claude-code-proxy' },
     apiKeyUrl: 'https://bailian.console.aliyun.com/?apiKey=1',
+    thinking: {
+      thinkingStyle: 'enable',
+      efforts: ['low', 'medium', 'high'],
+      effortKeywords: ['qwen'],
+    },
   },
   {
     id: 'moonshot',
@@ -122,6 +211,11 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     baseUrl: 'https://api.moonshot.cn/v1',
     altCompat: { apiCompat: 'anthropic', baseUrl: 'https://api.moonshot.cn/anthropic' },
     apiKeyUrl: 'https://platform.moonshot.cn/console/api-keys',
+    thinking: {
+      thinkingStyle: 'enable',
+      efforts: ['low', 'medium', 'high'],
+      effortKeywords: ['kimi', 'reasoning', 'thinking'],
+    },
   },
   {
     id: 'minimax',
@@ -130,6 +224,11 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     apiCompat: 'openai',
     baseUrl: 'https://api.minimaxi.com/v1',
     apiKeyUrl: 'https://platform.minimaxi.com/user-center/basic-information/interface-key',
+    thinking: {
+      thinkingStyle: 'enable',
+      efforts: ['low', 'medium', 'high'],
+      effortKeywords: ['reasoning', 'thinking'],
+    },
   },
   {
     id: 'siliconflow',
@@ -138,6 +237,11 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     apiCompat: 'openai',
     baseUrl: 'https://api.siliconflow.cn/v1',
     apiKeyUrl: 'https://cloud.siliconflow.cn/account/ak',
+    thinking: {
+      thinkingStyle: 'enable',
+      efforts: ['low', 'medium', 'high'],
+      effortKeywords: ['reasoning', 'thinking'],
+    },
   },
   {
     id: 'volcengine',
@@ -146,6 +250,11 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     apiCompat: 'openai',
     baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
     apiKeyUrl: 'https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey',
+    thinking: {
+      thinkingStyle: 'enable',
+      efforts: ['low', 'medium', 'high'],
+      effortKeywords: ['deepseek', 'qwen'],
+    },
   },
   {
     id: 'qianfan',
@@ -154,6 +263,11 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     apiCompat: 'openai',
     baseUrl: 'https://qianfan.baidubce.com/v2',
     apiKeyUrl: 'https://console.bce.baidu.com/iam/#/iam/apikey/list',
+    thinking: {
+      thinkingStyle: 'enable',
+      efforts: ['low', 'medium', 'high'],
+      effortKeywords: ['deepseek', 'qwen', 'ernie'],
+    },
   },
   {
     id: 'hunyuan',
@@ -162,6 +276,11 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     apiCompat: 'openai',
     baseUrl: 'https://api.hunyuan.cloud.tencent.com/v1',
     apiKeyUrl: 'https://console.cloud.tencent.com/hunyuan/api-key',
+    thinking: {
+      thinkingStyle: 'enable',
+      efforts: ['low', 'medium', 'high'],
+      effortKeywords: ['hunyuan', 'thinking'],
+    },
   },
   {
     id: 'stepfun',
@@ -170,6 +289,11 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     apiCompat: 'openai',
     baseUrl: 'https://api.stepfun.com/v1',
     apiKeyUrl: 'https://platform.stepfun.com/interface-key',
+    thinking: {
+      thinkingStyle: 'enable',
+      efforts: ['low', 'medium', 'high'],
+      effortKeywords: ['step', 'thinking'],
+    },
   },
 
   // ── 聚合 ──
@@ -251,6 +375,28 @@ export function guessApiCompat(baseUrl: string): ApiCompat {
   const lower = baseUrl.toLowerCase()
   if (lower.includes('anthropic') || lower.includes('claude')) return 'anthropic'
   return 'openai'
+}
+
+/**
+ * 按提供商预设推断一个「新拉取模型」的思考默认值。
+ * 命中预设 && 模型 id 含 effortKeywords → 视为思考模型，自动填充档位与风格；
+ * 否则返回 undefined（由用户手动在高级设置里开启）。
+ */
+export function inferThinkingDefaults(
+  presetId: string | undefined,
+  modelId: string
+): { supportsThinking: boolean; thinkingStyle: ThinkingStyle; reasoningEfforts: ReasoningEffort[] } | undefined {
+  const preset = getPreset(presetId)
+  const t = preset?.thinking
+  if (!t) return undefined
+  const lower = modelId.toLowerCase()
+  const hit = t.effortKeywords.some((k) => lower.includes(k))
+  if (!hit) return undefined
+  return {
+    supportsThinking: true,
+    thinkingStyle: t.thinkingStyle,
+    reasoningEfforts: [...t.efforts],
+  }
 }
 
 /**

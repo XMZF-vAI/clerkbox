@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { ipc } from '../lib/ipc-client'
-import type { Message, Session } from '../types/agent'
+import type { Message, Session, ToolCall, ToolResult } from '../types/agent'
 
 export type SessionStatus = 'working' | 'error' | 'confirm-danger'
 
@@ -10,6 +10,88 @@ export type SessionStatus = 'working' | 'error' | 'confirm-danger'
  * 多会话并发时，每个会话的 ReAct 循环通过 sessionId 取回自己的 controller。
  */
 const sessionAbortControllers = new Map<string, AbortController>()
+
+function logPersistenceFailure(operation: string, promise: Promise<unknown>): void {
+  void promise.catch((error) => console.error(`[chat-store] ${operation} failed:`, error))
+}
+
+const pendingMessageWrites = new Map<string, { sessionId: string; timer: ReturnType<typeof setTimeout> }>()
+
+function persistMessageUpdate(sessionId: string, message: Message): void {
+  logPersistenceFailure('update message', ipc.dbUpdateMessage(
+    message.id,
+    message.content,
+    message.toolCalls ? JSON.stringify(message.toolCalls) : undefined,
+    message.toolResults ? JSON.stringify(message.toolResults) : undefined,
+    message.thinkingContent || null,
+    message.finishReason || null
+  ))
+}
+
+function scheduleMessagePersistence(sessionId: string, message: Message, immediately: boolean): void {
+  const pending = pendingMessageWrites.get(message.id)
+  if (pending) {
+    clearTimeout(pending.timer)
+    pendingMessageWrites.delete(message.id)
+  }
+
+  if (immediately) {
+    persistMessageUpdate(sessionId, message)
+    return
+  }
+
+  const timer = setTimeout(() => {
+    pendingMessageWrites.delete(message.id)
+    persistMessageUpdate(sessionId, message)
+  }, 300)
+  pendingMessageWrites.set(message.id, { sessionId, timer })
+}
+
+function cancelPendingMessageWrites(sessionId: string): void {
+  for (const [messageId, pending] of pendingMessageWrites) {
+    if (pending.sessionId !== sessionId) continue
+    clearTimeout(pending.timer)
+    pendingMessageWrites.delete(messageId)
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function parseToolCalls(value: string | null | undefined): ToolCall[] | undefined {
+  if (!value) return undefined
+  try {
+    const parsed: unknown = JSON.parse(value)
+    if (!Array.isArray(parsed)) return undefined
+    return parsed.flatMap((item) =>
+      isRecord(item) && typeof item.id === 'string' && typeof item.name === 'string' && isRecord(item.arguments)
+        ? [{ id: item.id, name: item.name, arguments: item.arguments }]
+        : []
+    )
+  } catch {
+    return undefined
+  }
+}
+
+function parseToolResults(value: string | null | undefined): ToolResult[] | undefined {
+  if (!value) return undefined
+  try {
+    const parsed: unknown = JSON.parse(value)
+    if (!Array.isArray(parsed)) return undefined
+    return parsed.flatMap((item) =>
+      isRecord(item) && typeof item.toolCallId === 'string' && typeof item.content === 'string'
+        ? [{
+            toolCallId: item.toolCallId,
+            content: item.content,
+            ...(typeof item.isError === 'boolean' ? { isError: item.isError } : {}),
+          }]
+        : []
+    )
+  } catch {
+    return undefined
+  }
+}
 
 /** 获取指定会话的 AbortController（可能为 undefined） */
 export function getSessionAbortController(sessionId: string): AbortController | undefined {
@@ -32,12 +114,16 @@ interface ChatState {
   streamingSessionIds: Set<string>
   // per-session 工作状态：用于侧边栏 loading 圈显示与系统通知触发
   sessionStatus: Record<string, SessionStatus>
+  // 用户曾选过的文件夹历史（全局、跨会话、唯一），按时间倒序，最多 8 个
+  recentsFolders: string[]
   initialized: boolean
   createSession: () => string
   setActiveSession: (id: string) => void
   addMessage: (sessionId: string, message: Message) => void
   updateMessage: (sessionId: string, messageId: string, updates: Partial<Message>) => void
   updateSessionWorkingDir: (sessionId: string, dir: string) => void
+  /** 添加一个 recent folder，置顶，去重，最多保留 8 个。同步持久化到 DB。 */
+  pushRecentFolder: (dir: string) => Promise<void>
   setStreaming: (streaming: boolean, sessionId?: string) => void
   setSessionStatus: (sessionId: string, status: SessionStatus | null) => void
   deleteSession: (id: string) => void
@@ -65,6 +151,13 @@ const getDefaultWorkDirBase = (): { base: string; sep: string } => {
   }
 }
 
+function comparableFolderPath(value: string): string {
+  const normalized = value.replace(/\\/g, '/').replace(/\/+$/, '') || '/'
+  return /^[A-Za-z]:\//.test(normalized) || normalized.startsWith('//')
+    ? normalized.toLowerCase()
+    : normalized
+}
+
 const createEmptySession = (): Session => {
   const now = Date.now()
   const { base, sep } = getDefaultWorkDirBase()
@@ -81,8 +174,9 @@ const createEmptySession = (): Session => {
 export const useChatStore = create<ChatState>((set, get) => ({
   sessions: [],
   activeSessionId: null,
-  streamingSessionIds: new Set<string>(),
+  streamingSessionIds: new Set(),
   sessionStatus: {},
+  recentsFolders: [],
   initialized: false,
 
   loadFromDb: async () => {
@@ -93,12 +187,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const msgRows = await ipc.dbGetMessages(row.id)
         const messages: Message[] = msgRows.map((m) => ({
           id: m.id,
-          role: m.role as Message['role'],
+          role: ['user', 'assistant', 'system', 'tool'].includes(m.role) ? m.role as Message['role'] : 'assistant',
           content: m.content || '',
           thinkingContent: m.thinking_content || undefined,
           timestamp: m.timestamp,
-          toolCalls: m.tool_calls ? JSON.parse(m.tool_calls) : undefined,
-          toolResults: m.tool_results ? JSON.parse(m.tool_results) : undefined,
+          toolCalls: parseToolCalls(m.tool_calls),
+          toolResults: parseToolResults(m.tool_results),
           finishReason: m.finish_reason || undefined,
           isCompactSummary: m.is_compact === 1 ? true : undefined,
           isSubAgentCard: m.is_sub_agent_card === 1 ? true : undefined,
@@ -122,13 +216,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
       )
       for (const s of sessions) {
         if (s.messages.length === 0 && s.title === '新会话') {
-          ipc.dbDeleteSession(s.id)
+          logPersistenceFailure('delete empty session', ipc.dbDeleteSession(s.id))
         }
       }
+
+      // 加载用户曾选过的文件夹历史
+      const recentsFolders = await ipc.dbGetRecents().catch(() => [])
 
       set({
         sessions: [newSession, ...cleanedSessions],
         activeSessionId: newSession.id,
+        recentsFolders,
         initialized: true,
       })
     } catch {
@@ -146,7 +244,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // Also delete the session from DB
       for (const s of state.sessions) {
         if (s.messages.length === 0 && s.title === '新会话') {
-          ipc.dbDeleteSession(s.id)
+          logPersistenceFailure('delete empty session', ipc.dbDeleteSession(s.id))
         }
       }
       return {
@@ -154,12 +252,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
         activeSessionId: session.id,
       }
     })
-    ipc.dbCreateSession({
+    logPersistenceFailure('create session', ipc.dbCreateSession({
       id: session.id,
       title: session.title,
       created_at: session.createdAt,
       updated_at: session.updatedAt,
-    })
+    }))
     return session.id
   },
 
@@ -168,7 +266,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // Auto-delete empty sessions when switching away
       const cleanedSessions = state.sessions.map((s) => {
         if (s.id !== id && s.messages.length === 0 && s.title === '新会话') {
-          ipc.dbDeleteSession(s.id)
+          logPersistenceFailure('delete empty session', ipc.dbDeleteSession(s.id))
           return null
         }
         return s
@@ -191,7 +289,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           : s
       ),
     }))
-    ipc.dbAddMessage({
+    logPersistenceFailure('add message', ipc.dbAddMessage({
       id: message.id,
       session_id: sessionId,
       role: message.role,
@@ -204,7 +302,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       is_compact: message.isCompactSummary ? 1 : 0,
       is_sub_agent_card: message.isSubAgentCard ? 1 : 0,
       sub_agent_id: message.subAgentId || null,
-    })
+    }))
     // Auto-update session title from first user message
     const session = get().sessions.find((s) => s.id === sessionId)
     if (session && session.title === '新会话' && message.role === 'user') {
@@ -214,7 +312,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           s.id === sessionId ? { ...s, title: newTitle } : s
         ),
       }))
-      ipc.dbUpdateSessionTitle(sessionId, newTitle, Date.now())
+      logPersistenceFailure('update session title', ipc.dbUpdateSessionTitle(sessionId, newTitle, Date.now()))
     }
   },
 
@@ -230,17 +328,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
           : s
       ),
     }))
-    // Persist to DB (debounced by caller)
+    // Persist streaming updates in short batches to avoid rewriting the full DB for every chunk.
     const msg = get().sessions.find((s) => s.id === sessionId)?.messages.find((m) => m.id === messageId)
     if (msg) {
-      ipc.dbUpdateMessage(
-        messageId,
-        msg.content,
-        msg.toolCalls ? JSON.stringify(msg.toolCalls) : undefined,
-        msg.toolResults ? JSON.stringify(msg.toolResults) : undefined,
-        msg.thinkingContent || null,
-        msg.finishReason || null
-      )
+      scheduleMessagePersistence(sessionId, msg, msg._isStreaming !== true)
     }
   },
 
@@ -284,17 +375,29 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }))
   },
 
+  pushRecentFolder: async (dir) => {
+    // Keep POSIX paths case-sensitive while matching Windows paths case-insensitively.
+    const comparableDir = comparableFolderPath(dir)
+    const next = [dir, ...get().recentsFolders.filter((path) => comparableFolderPath(path) !== comparableDir)]
+    if (next.length > 8) next.length = 8
+    set({ recentsFolders: next })
+    await ipc.dbSetRecents(next).catch(() => { /* 持久化失败不阻塞 UI */ })
+  },
+
   deleteSession: (id) =>
     set((state) => {
+      cancelPendingMessageWrites(id)
       const filtered = state.sessions.filter((s) => s.id !== id)
-      ipc.dbDeleteSession(id)
+      logPersistenceFailure('delete session', ipc.dbDeleteSession(id))
       // 中止并清理该会话的 AbortController，防止泄漏与僵尸 ReAct 循环
       const ctrl = sessionAbortControllers.get(id)
       if (ctrl) {
         try { ctrl.abort() } catch { /* ignore */ }
         sessionAbortControllers.delete(id)
       }
-      // M3: 删除会话时同步清理子 agent runs，避免 localStorage 持续膨胀至配额溢出。
+      // 杀掉该会话在主进程里还在跑的 shell 子进程，避免点中断后命令继续执行
+      logPersistenceFailure('cancel session commands', ipc.cancelSessionCommands(id))
+      // Remove related subagent runs so persisted storage does not accumulate stale records.
       // clearSession 之前是 dead code，现在被接通了。
       import('./agent-runs-store').then(({ useAgentRunsStore }) => {
         useAgentRunsStore.getState().clearSession(id)
@@ -332,11 +435,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     //    但 deleteBeforeId 是新创建的 boundaryMessage.id（不在 DB 中），导致 findIndex 返回 -1 直接 return 什么也不删；
     //    而 dbAddMessage 是纯 push 无 UPSERT，keptMessages 会被重复写入，重启后历史翻倍。
     //    改为「清空再重写」是最稳妥的方案。
-    ipc.dbClearMessages(sessionId)
+    cancelPendingMessageWrites(sessionId)
+    logPersistenceFailure('clear compacted messages', ipc.dbClearMessages(sessionId))
 
     // 3. 写入压缩后的完整消息列表（boundary + summary + keptMessages + fileAttachments）
     for (const msg of newMessages) {
-      ipc.dbAddMessage({
+      logPersistenceFailure('write compacted message', ipc.dbAddMessage({
         id: msg.id,
         session_id: sessionId,
         role: msg.role,
@@ -347,10 +451,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         tool_results: msg.toolResults ? JSON.stringify(msg.toolResults) : null,
         finish_reason: msg.finishReason || null,
         is_compact: msg.isCompactSummary ? 1 : 0,
-        // 修复 M7：补齐子 agent 卡片字段，否则压缩后卡片变成普通空消息
+        // Preserve subagent-card metadata when rewriting compacted history.
         is_sub_agent_card: msg.isSubAgentCard ? 1 : 0,
         sub_agent_id: msg.subAgentId || null,
-      })
+      }))
     }
   },
 }))

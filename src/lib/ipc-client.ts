@@ -23,10 +23,12 @@ export const ipc = {
   writeFile: (path: string, content: string): Promise<void> =>
     window.clerkbox.writeFile(path, content),
   listDir: (path: string): Promise<FileEntry[]> => window.clerkbox.listDir(path),
-  executeCommand: (command: string, cwd?: string): Promise<{ stdout: string; stderr: string; exitCode: number; encodingFallback?: boolean }> =>
-    window.clerkbox.executeCommand(command, cwd),
-  executeCommandWithShell: (command: string, cwd: string | undefined, shellType: string): Promise<{ stdout: string; stderr: string; exitCode: number; encodingFallback?: boolean }> =>
-    window.clerkbox.executeCommandWithShell(command, cwd, shellType),
+  executeCommand: (command: string, cwd?: string, sessionId?: string): Promise<{ stdout: string; stderr: string; exitCode: number; encodingFallback?: boolean }> =>
+    window.clerkbox.executeCommand(command, cwd, sessionId),
+  executeCommandWithShell: (command: string, cwd: string | undefined, shellType: string, sessionId?: string): Promise<{ stdout: string; stderr: string; exitCode: number; encodingFallback?: boolean }> =>
+    window.clerkbox.executeCommandWithShell(command, cwd, shellType, sessionId),
+  cancelSessionCommands: (sessionId: string): Promise<{ killed: number }> =>
+    window.clerkbox.cancelSessionCommands(sessionId),
   webSearch: (query: string, count?: number): Promise<Array<{ title: string; snippet: string; url: string }> | { error: string }> =>
     window.clerkbox.webSearch(query, count),
   webFetch: (url: string, maxLength?: number): Promise<{ content: string; url: string } | { error: string }> =>
@@ -41,6 +43,9 @@ export const ipc = {
   apiAbort: (requestId: string): Promise<void> => window.clerkbox.apiAbort(requestId),
   onApiChunk: (callback: (payload: ApiChunkPayload) => void): (() => void) =>
     window.clerkbox.onApiChunk(callback),
+  loadApiKeys: (): Promise<Record<string, string>> => window.clerkbox.loadApiKeys(),
+  saveApiKey: (id: string, apiKey: string): Promise<void> => window.clerkbox.saveApiKey(id, apiKey),
+  removeApiKey: (id: string): Promise<void> => window.clerkbox.removeApiKey(id),
   // Memory system
   scanMemory: (workingDir: string): Promise<MemoryEntry[]> =>
     window.clerkbox.scanMemory(workingDir),
@@ -58,6 +63,8 @@ export const ipc = {
     window.clerkbox.dbUpdateSessionTitle(id, title, updatedAt),
   dbDeleteSession: (id: string): Promise<void> => window.clerkbox.dbDeleteSession(id),
   dbGetAllSessions: (): Promise<SessionRow[]> => window.clerkbox.dbGetAllSessions(),
+  dbGetRecents: (): Promise<string[]> => window.clerkbox.dbGetRecents(),
+  dbSetRecents: (recents: string[]): Promise<void> => window.clerkbox.dbSetRecents(recents),
   dbAddMessage: (row: MessageRow): Promise<void> => window.clerkbox.dbAddMessage(row),
   dbUpdateMessage: (id: string, content: string, toolCalls?: string, toolResults?: string, thinkingContent?: string | null, finishReason?: string | null): Promise<void> =>
     window.clerkbox.dbUpdateMessage(id, content, toolCalls, toolResults, thinkingContent, finishReason),

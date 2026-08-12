@@ -22,14 +22,43 @@ export interface ApiConnConfig {
 const ANTHROPIC_VERSION = '2023-06-01'
 /** 单次请求上限，与渲染进程原有语义保持一致 */
 const REQUEST_TIMEOUT_MS = 120_000
+/** A stream must continue making progress after its response headers arrive. */
+const STREAM_IDLE_TIMEOUT_MS = 60_000
 /** 分片合批：攒够时长或字节数就推一次，避免 IPC 洪泛 */
 const FLUSH_INTERVAL_MS = 16
 const FLUSH_BYTES = 8192
-/** 错误响应体截断长度，避免超长错误信息撑爆 UI / 日志 */
-const ERROR_BODY_LIMIT = 500
+const ERROR_BODY_LIMIT = 8 * 1024
+const MODEL_LIST_LIMIT = 2 * 1024 * 1024
+const STREAM_RESPONSE_LIMIT = 20 * 1024 * 1024
+const REQUEST_BODY_LIMIT = 10 * 1024 * 1024
+const MAX_API_KEY_BYTES = 16 * 1024
+const MAX_BASE_URL_LENGTH = 4_096
 
 /** 在途请求：requestId → AbortController */
 const inflight = new Map<string, AbortController>()
+const userAborted = new Set<string>()
+
+function assertApiConfig(value: unknown): asserts value is ApiConnConfig {
+  if (!value || typeof value !== 'object') throw new Error('Invalid API configuration')
+  const cfg = value as Partial<ApiConnConfig>
+  if (cfg.apiCompat !== 'openai' && cfg.apiCompat !== 'anthropic') throw new Error('Invalid API compatibility mode')
+  if (typeof cfg.baseUrl !== 'string' || cfg.baseUrl.length === 0 || cfg.baseUrl.length > MAX_BASE_URL_LENGTH) {
+    throw new Error('Invalid API base URL')
+  }
+  let parsed: URL
+  try { parsed = new URL(cfg.baseUrl) } catch { throw new Error('Invalid API base URL') }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('API base URL must use HTTP or HTTPS')
+  if (parsed.username || parsed.password) throw new Error('API base URL must not contain credentials')
+  if (typeof cfg.apiKey !== 'string' || Buffer.byteLength(cfg.apiKey, 'utf8') > MAX_API_KEY_BYTES) {
+    throw new Error('Invalid or oversized API key')
+  }
+}
+
+function apiKeyFromConfig(value: unknown): string {
+  if (!value || typeof value !== 'object') return ''
+  const apiKey = (value as { apiKey?: unknown }).apiKey
+  return typeof apiKey === 'string' ? apiKey : ''
+}
 
 /** 去掉尾部斜杠 */
 const trimSlash = (s: string) => s.replace(/\/+$/, '')
@@ -111,22 +140,63 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs = REQU
 
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e))
 
+/** Remove the active API key before returning provider diagnostics to the renderer. */
+function redactApiKey(message: string, apiKey: string): string {
+  return apiKey ? message.split(apiKey).join('[REDACTED]') : message
+}
+
+/** Read a response body without allowing an untrusted endpoint to allocate unbounded memory. */
+async function readResponseText(response: Response, maxBytes: number): Promise<string> {
+  if (!response.body) return ''
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let receivedBytes = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done || !value) break
+      const remaining = maxBytes - receivedBytes
+      if (value.byteLength > remaining || remaining === 0) {
+        await reader.cancel()
+        throw new Error(`Response exceeds the ${maxBytes} byte limit`)
+      }
+      chunks.push(value)
+      receivedBytes += value.byteLength
+    }
+  } finally {
+    reader.releaseLock()
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))))
+}
+
 export function registerApiProxyHandlers() {
   /** 拉取模型列表 */
   ipcMain.handle('apiFetchModels', async (_e, cfg: ApiConnConfig) => {
     try {
+      assertApiConfig(cfg)
       const url = endpointFor(cfg.apiCompat, cfg.baseUrl, 'models')
       const res = await fetchWithTimeout(url, { method: 'GET', headers: headersFor(cfg) }, 30_000)
       if (!res.ok) {
-        const body = (await res.text().catch(() => '')).slice(0, ERROR_BODY_LIMIT)
+        const body = redactApiKey(await readResponseText(res, ERROR_BODY_LIMIT).catch(() => ''), apiKeyFromConfig(cfg))
         return { error: `HTTP ${res.status}${body ? `: ${body}` : ''}` }
       }
-      const json = await res.json().catch(() => null)
+      let text: string
+      try {
+        text = await readResponseText(res, MODEL_LIST_LIMIT)
+      } catch (e) {
+        return { error: redactApiKey(errMsg(e), apiKeyFromConfig(cfg)) }
+      }
+      let json: unknown = null
+      try {
+        json = JSON.parse(text)
+      } catch {
+        return { error: 'Invalid model-list response' }
+      }
       const models = normalizeModelList(json)
       if (models.length === 0) return { error: 'EMPTY_LIST' }
       return { models }
     } catch (e) {
-      return { error: errMsg(e) }
+      return { error: redactApiKey(errMsg(e), apiKeyFromConfig(cfg)) }
     }
   })
 
@@ -134,15 +204,16 @@ export function registerApiProxyHandlers() {
   ipcMain.handle('apiTestConnection', async (_e, cfg: ApiConnConfig) => {
     const started = Date.now()
     try {
+      assertApiConfig(cfg)
       const url = endpointFor(cfg.apiCompat, cfg.baseUrl, 'models')
       const res = await fetchWithTimeout(url, { method: 'GET', headers: headersFor(cfg) }, 20_000)
       if (!res.ok) {
-        const body = (await res.text().catch(() => '')).slice(0, ERROR_BODY_LIMIT)
+        const body = redactApiKey(await readResponseText(res, ERROR_BODY_LIMIT).catch(() => ''), apiKeyFromConfig(cfg))
         return { error: `HTTP ${res.status}${body ? `: ${body}` : ''}` }
       }
       return { ok: true as const, latencyMs: Date.now() - started }
     } catch (e) {
-      return { error: errMsg(e) }
+      return { error: redactApiKey(errMsg(e), apiKeyFromConfig(cfg)) }
     }
   })
 
@@ -164,7 +235,15 @@ export function registerApiProxyHandlers() {
     void (async () => {
       let timer: NodeJS.Timeout | undefined
       try {
+        assertApiConfig(cfg)
         const url = endpointFor(cfg.apiCompat, cfg.baseUrl, 'chat')
+        const serializedBody = JSON.stringify(body)
+        if (typeof serializedBody !== 'string') {
+          throw new Error('Request body must be serializable JSON')
+        }
+        if (Buffer.byteLength(serializedBody, 'utf-8') > REQUEST_BODY_LIMIT) {
+          throw new Error(`Request body exceeds the ${REQUEST_BODY_LIMIT} byte limit`)
+        }
         timer = setTimeout(
           () => controller.abort(new Error(`Request timeout after ${REQUEST_TIMEOUT_MS / 1000}s`)),
           REQUEST_TIMEOUT_MS
@@ -173,12 +252,12 @@ export function registerApiProxyHandlers() {
         const res = await fetch(url, {
           method: 'POST',
           headers: headersFor(cfg),
-          body: JSON.stringify(body),
+          body: serializedBody,
           signal: controller.signal,
         })
 
         if (!res.ok) {
-          const errText = (await res.text().catch(() => '')).slice(0, ERROR_BODY_LIMIT)
+          const errText = redactApiKey(await readResponseText(res, ERROR_BODY_LIMIT).catch(() => ''), apiKeyFromConfig(cfg))
           send({ error: `API Error ${res.status}: ${errText}` })
           return
         }
@@ -187,14 +266,21 @@ export function registerApiProxyHandlers() {
           return
         }
 
-        // 响应头已到达 → 关掉整体超时，交给流自身与 abort 控制
-        clearTimeout(timer)
-        timer = undefined
+        // After headers, replace the connection timeout with a resettable idle timeout.
+        const resetIdleTimeout = () => {
+          if (timer) clearTimeout(timer)
+          timer = setTimeout(
+            () => controller.abort(new Error(`Stream stalled for ${STREAM_IDLE_TIMEOUT_MS / 1000}s`)),
+            STREAM_IDLE_TIMEOUT_MS
+          )
+        }
+        resetIdleTimeout()
 
         const reader = res.body.getReader()
         const decoder = new TextDecoder()
         let pending = ''
         let lastFlush = Date.now()
+        let receivedBytes = 0
 
         const flush = () => {
           if (!pending) return
@@ -207,7 +293,18 @@ export function registerApiProxyHandlers() {
           while (true) {
             const { done, value } = await reader.read()
             if (done) break
-            if (controller.signal.aborted) break
+            if (controller.signal.aborted) {
+              if (userAborted.has(requestId)) break
+              throw controller.signal.reason instanceof Error
+                ? controller.signal.reason
+                : new Error('API stream aborted')
+            }
+            receivedBytes += value.byteLength
+            if (receivedBytes > STREAM_RESPONSE_LIMIT) {
+              await reader.cancel()
+              throw new Error(`Stream exceeds the ${STREAM_RESPONSE_LIMIT} byte limit`)
+            }
+            resetIdleTimeout()
             pending += decoder.decode(value, { stream: true })
             if (pending.length >= FLUSH_BYTES || Date.now() - lastFlush >= FLUSH_INTERVAL_MS) flush()
           }
@@ -220,11 +317,12 @@ export function registerApiProxyHandlers() {
         send({ done: true })
       } catch (e) {
         // 主动 abort 不算错误，渲染进程侧已经知道自己取消了
-        if (controller.signal.aborted) send({ done: true })
-        else send({ error: errMsg(e) })
+        if (userAborted.has(requestId)) send({ done: true })
+        else send({ error: redactApiKey(errMsg(e), apiKeyFromConfig(cfg)) })
       } finally {
         if (timer) clearTimeout(timer)
         inflight.delete(requestId)
+        userAborted.delete(requestId)
       }
     })()
 
@@ -233,6 +331,7 @@ export function registerApiProxyHandlers() {
 
   /** 中止在途请求 */
   ipcMain.handle('apiAbort', (_e, requestId: string) => {
+    if (inflight.has(requestId)) userAborted.add(requestId)
     inflight.get(requestId)?.abort()
     inflight.delete(requestId)
   })
@@ -240,7 +339,10 @@ export function registerApiProxyHandlers() {
 
 /** 窗口销毁 / reload 时清理所有在途请求，避免流写向已销毁的 webContents */
 export function abortAllApiRequests() {
-  for (const [, ac] of inflight) ac.abort()
+  for (const [requestId, ac] of inflight) {
+    userAborted.add(requestId)
+    ac.abort()
+  }
   inflight.clear()
 }
 

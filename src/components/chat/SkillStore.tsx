@@ -20,19 +20,19 @@ import { useTranslation } from 'react-i18next'
 import { useSkillsStore } from '../../stores/skills-store'
 import { useChatStore } from '../../stores/chat-store'
 import { useUIStore } from '../../stores/ui-store'
+import { ipc } from '../../lib/ipc-client'
 import type { SkillsMPSkill } from '../../types/skills'
 
 /**
- * Source badge metadata: label + Tailwind classes.
- * 在线=蓝 自定义=紫 全局=绿 项目=青
+ * Source badge metadata maps an installation source to its visual treatment.
  */
-const SOURCE_BADGE: Record<string, { label: string; className: string }> = {
-  online: { label: '在线', className: 'bg-md-info/15 text-md-info' },
-  custom: { label: '自定义', className: 'bg-md-tertiary/15 text-md-tertiary' },
-  'global-clerkbox': { label: '全局', className: 'bg-md-primary/15 text-md-primary' },
-  'project-clerkbox': { label: '项目', className: 'bg-md-secondary/15 text-md-secondary' },
-  'global-claude': { label: '全局', className: 'bg-md-success/15 text-md-success' },
-  'project-claude': { label: '项目', className: 'bg-cyan-500/15 text-cyan-300' },
+const SOURCE_BADGE: Record<string, { labelKey: string; className: string }> = {
+  online: { labelKey: 'skillstore.sourceOnline', className: 'bg-md-info/15 text-md-info' },
+  custom: { labelKey: 'skillstore.sourceCustom', className: 'bg-md-tertiary/15 text-md-tertiary' },
+  'global-clerkbox': { labelKey: 'skillstore.sourceGlobal', className: 'bg-md-primary/15 text-md-primary' },
+  'project-clerkbox': { labelKey: 'skillstore.sourceProject', className: 'bg-md-secondary/15 text-md-secondary' },
+  'global-claude': { labelKey: 'skillstore.sourceGlobal', className: 'bg-md-success/15 text-md-success' },
+  'project-claude': { labelKey: 'skillstore.sourceProject', className: 'bg-cyan-500/15 text-cyan-300' },
 }
 
 /**
@@ -70,8 +70,9 @@ export default function SkillStore() {
   const [uploadFileName, setUploadFileName] = useState<string | null>(null)
   const [uploadLoading, setUploadLoading] = useState(false)
   const [uploadError, setUploadError] = useState<string | null>(null)
-  const [isDragging, setIsDragging] = useState(false)
-  const fileInputRef = useRef<HTMLInputElement>(null)
+  const uploadLoadingRef = useRef(false)
+  const uploadTriggerRef = useRef<HTMLButtonElement>(null)
+  const uploadDialogRef = useRef<HTMLDivElement>(null)
 
   const currentSession = sessions.find((s) => s.id === activeSessionId)
   const workingDir = currentSession?.workingDir || currentSession?.defaultWorkDir || ''
@@ -86,12 +87,58 @@ export default function SkillStore() {
       s.source === 'project-claude'
   )
 
-  // Load recommended on mount
   useEffect(() => {
     if (recommendedSkills.length === 0) {
-      loadRecommended()
+      void loadRecommended()
     }
-  }, [])
+  }, [loadRecommended, recommendedSkills.length])
+
+  useEffect(() => {
+    uploadLoadingRef.current = uploadLoading
+  }, [uploadLoading])
+
+  useEffect(() => {
+    if (!showUploadModal) return
+
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const frame = requestAnimationFrame(() => {
+      uploadDialogRef.current?.querySelector<HTMLElement>('[data-autofocus]')?.focus()
+    })
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        if (uploadLoadingRef.current) return
+        event.stopPropagation()
+        setShowUploadModal(false)
+        resetUpload()
+        return
+      }
+      if (event.key !== 'Tab') return
+
+      const dialog = uploadDialogRef.current
+      if (!dialog) return
+      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      ))
+      if (focusable.length === 0) return
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+
+    document.addEventListener('keydown', handleKeyDown, true)
+    return () => {
+      cancelAnimationFrame(frame)
+      document.removeEventListener('keydown', handleKeyDown, true)
+      if (previousFocus?.isConnected) previousFocus.focus()
+      else uploadTriggerRef.current?.focus()
+    }
+  }, [showUploadModal])
 
   const handleSearch = useCallback(() => {
     if (query.trim()) {
@@ -142,8 +189,6 @@ export default function SkillStore() {
     setUploadFileName(null)
     setUploadError(null)
     setUploadLoading(false)
-    setIsDragging(false)
-    if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
   const openUploadModal = () => {
@@ -152,44 +197,42 @@ export default function SkillStore() {
   }
 
   const closeUploadModal = () => {
+    if (uploadLoading) return
     setShowUploadModal(false)
     resetUpload()
   }
 
   const selectFile = async () => {
     setUploadError(null)
-    const filePath = await window.clerkbox.selectSkillFile()
-    if (!filePath) return
-    const name = filePath.replace(/\\/g, '/').split('/').pop() || filePath
-    setUploadFilePath(filePath)
-    setUploadFileName(name)
-  }
-
-  const handleFileDrop = (e: React.DragEvent) => {
-    e.preventDefault()
-    setIsDragging(false)
-    const file = e.dataTransfer.files[0]
-    if (!file) return
-    const name = file.name
-    const ext = name.split('.').pop()?.toLowerCase()
-    if (ext !== 'skill' && ext !== 'zip') {
-      setUploadError(t('skillstore.invalidFile'))
-      return
+    try {
+      const filePath = await ipc.selectSkillFile()
+      if (!filePath) return
+      const name = filePath.replace(/\\/g, '/').split('/').pop() || filePath
+      setUploadFilePath(filePath)
+      setUploadFileName(name)
+    } catch (error) {
+      console.error('Failed to select a skill file:', error)
+      setUploadError(t('skillstore.installFailed'))
     }
-    // 拖拽文件无法直接拿到 Electron 主进程需要的绝对路径，提示用户点击选择
-    setUploadError(t('skillstore.dragDropHint'))
   }
 
   const confirmUpload = async () => {
     if (!uploadFilePath) return
     setUploadLoading(true)
     setUploadError(null)
-    const result = await installCustomSkill(uploadFilePath)
-    setUploadLoading(false)
-    if (result.success) {
-      closeUploadModal()
-    } else {
-      setUploadError(result.error || t('skillstore.installFailed'))
+    try {
+      const result = await installCustomSkill(uploadFilePath)
+      if (result.success) {
+        setShowUploadModal(false)
+        resetUpload()
+      } else {
+        setUploadError(result.error || t('skillstore.installFailed'))
+      }
+    } catch (error) {
+      console.error('Failed to install a custom skill:', error)
+      setUploadError(t('skillstore.installFailed'))
+    } finally {
+      setUploadLoading(false)
     }
   }
 
@@ -227,6 +270,7 @@ export default function SkillStore() {
               </span>
             ) : (
               <button
+                type="button"
                 onClick={() => handleInstall(mpSkill)}
                 disabled={installing}
                 className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium bg-md-primary/15 text-md-primary hover:bg-md-primary/25 disabled:opacity-40 transition-all"
@@ -242,6 +286,7 @@ export default function SkillStore() {
             rel="noopener noreferrer"
             className="p-1.5 rounded-lg hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant/30 hover:text-dark-onSurfaceVariant transition-all"
             title={t('skillstore.viewOnSkillHub')}
+            aria-label={t('skillstore.viewOnSkillHub')}
           >
             <ExternalLink size={12} />
           </a>
@@ -261,6 +306,8 @@ export default function SkillStore() {
         </div>
         <div className="flex items-center gap-2">
           <button
+            ref={uploadTriggerRef}
+            type="button"
             onClick={openUploadModal}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-md3-md bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer transition-colors text-sm text-dark-onSurfaceVariant"
           >
@@ -268,6 +315,7 @@ export default function SkillStore() {
             {t('skillstore.loadCustom')}
           </button>
           <button
+            type="button"
             onClick={handleBack}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-md3-md bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer transition-colors text-sm text-dark-onSurfaceVariant"
           >
@@ -283,15 +331,18 @@ export default function SkillStore() {
           <div className="flex-1 relative">
             <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-dark-onSurfaceVariant/40" />
             <input
+              id="skill-store-search"
               type="text"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+              onKeyDown={(e) => e.key === 'Enter' && !e.nativeEvent.isComposing && handleSearch()}
               placeholder={t('skillstore.searchPlaceholder')}
               className="w-full pl-9 pr-4 py-2.5 rounded-md3-md bg-dark-surfaceContainerHigh border border-dark-onSurfaceVariant/10 focus:border-md-primary/50 focus:ring-1 focus:ring-md-primary/30 outline-none transition-all text-sm placeholder:text-dark-onSurfaceVariant/30"
             />
+            <label htmlFor="skill-store-search" className="sr-only">{t('skillstore.search')}</label>
           </div>
           <button
+            type="button"
             onClick={handleSearch}
             disabled={searchLoading || !query.trim()}
             className="px-5 py-2.5 rounded-md3-md bg-md-primary hover:bg-md-primary/90 disabled:opacity-40 disabled:cursor-not-allowed transition-colors text-sm text-md-onPrimary font-medium flex items-center gap-1.5"
@@ -337,7 +388,7 @@ export default function SkillStore() {
                             <span
                               className={`px-1.5 py-0.5 rounded-full text-[10px] font-medium ${badge.className}`}
                             >
-                              {badge.label}
+                              {t(badge.labelKey)}
                             </span>
                           )}
                         </div>
@@ -365,6 +416,7 @@ export default function SkillStore() {
                       </div>
                       <div className="flex items-center gap-1.5 flex-shrink-0 mt-1">
                         <button
+                          type="button"
                           onClick={() => toggleSessionSkill(skill.id, workingDir)}
                           className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium transition-all flex-shrink-0 ${
                             isActive
@@ -377,6 +429,7 @@ export default function SkillStore() {
                         </button>
                         {isRemovable && (
                           <button
+                            type="button"
                             onClick={() => handleUninstall(skill.id)}
                             className="p-1.5 rounded-lg hover:bg-md-error/10 text-dark-onSurfaceVariant/40 hover:text-md-error transition-all flex-shrink-0"
                             title={t('common.uninstall')}
@@ -443,6 +496,7 @@ export default function SkillStore() {
                   {searchHasNext && (
                     <div className="flex justify-center mt-4">
                       <button
+                        type="button"
                         onClick={() => searchOnlineSkills(searchQuery, searchPage + 1)}
                         className="flex items-center gap-1.5 px-4 py-2 rounded-md3-md bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer transition-colors text-sm text-dark-onSurfaceVariant"
                       >
@@ -467,12 +521,25 @@ export default function SkillStore() {
 
       {/* ── 上传自定义技能弹窗 ── */}
       {showUploadModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-          <div className="w-full max-w-md rounded-xl bg-dark-surfaceContainerHigh border border-dark-onSurfaceVariant/10 shadow-2xl p-5 animate-fade-in">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+          onClick={closeUploadModal}
+        >
+          <div
+            ref={uploadDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="skill-upload-title"
+            aria-describedby="skill-upload-requirements"
+            className="w-full max-w-md rounded-xl bg-dark-surfaceContainerHigh border border-dark-onSurfaceVariant/10 shadow-2xl p-5 animate-fade-in"
+            onClick={(event) => event.stopPropagation()}
+          >
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-base font-semibold text-dark-onSurface">{t('skillstore.uploadTitle')}</h3>
+              <h3 id="skill-upload-title" className="text-base font-semibold text-dark-onSurface">{t('skillstore.uploadTitle')}</h3>
               <button
+                type="button"
                 onClick={closeUploadModal}
+                disabled={uploadLoading}
                 className="p-1 rounded-md3-sm hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant/60 transition-colors"
                 aria-label={t('common.close')}
               >
@@ -480,33 +547,13 @@ export default function SkillStore() {
               </button>
             </div>
 
-            <div
+            <button
+              type="button"
+              data-autofocus
               onClick={selectFile}
-              onDrop={handleFileDrop}
-              onDragOver={(e) => { e.preventDefault(); setIsDragging(true) }}
-              onDragLeave={() => setIsDragging(false)}
-              className={`relative flex flex-col items-center justify-center gap-3 rounded-lg border-2 border-dashed px-6 py-10 cursor-pointer transition-colors ${
-                isDragging
-                  ? 'border-md-primary bg-md-primary/5'
-                  : 'border-dark-onSurfaceVariant/25 hover:border-dark-onSurfaceVariant/40 bg-dark-surfaceDim/50'
-              }`}
+              disabled={uploadLoading}
+              className="relative flex w-full flex-col items-center justify-center gap-3 rounded-lg border-2 border-dashed border-dark-onSurfaceVariant/25 bg-dark-surfaceDim/50 px-6 py-10 transition-colors hover:border-dark-onSurfaceVariant/40 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".skill,.zip"
-                className="hidden"
-                onChange={(e) => {
-                  const file = e.target.files?.[0]
-                  if (!file) return
-                  const ext = file.name.split('.').pop()?.toLowerCase()
-                  if (ext !== 'skill' && ext !== 'zip') {
-                    setUploadError('仅支持 .skill 或 .zip 文件')
-                    return
-                  }
-                  setUploadError('请通过点击选择文件上传（浏览器安全限制无法获取文件路径）')
-                }}
-              />
               {uploadFileName ? (
                 <>
                   <FileText size={32} className="text-md-primary" />
@@ -515,36 +562,39 @@ export default function SkillStore() {
               ) : (
                 <>
                   <FileArchive size={32} className="text-dark-onSurfaceVariant/50" />
-                  <span className="text-sm text-dark-onSurfaceVariant">拖放或点击上传</span>
+                  <span className="text-sm text-dark-onSurfaceVariant">{t('skillstore.uploadHint')}</span>
                 </>
               )}
-            </div>
+            </button>
 
-            <ul className="mt-4 space-y-1.5 text-xs text-dark-onSurfaceVariant/60 list-disc pl-4">
-              <li>包含根级 SKILL.md 文件的 zip 或 .skill 文件</li>
-              <li>SKILL.md 包含以 YAML 格式编写的技能名称和描述</li>
+            <ul id="skill-upload-requirements" className="mt-4 space-y-1.5 text-xs text-dark-onSurfaceVariant/60 list-disc pl-4">
+              <li>{t('skillstore.uploadReq1')}</li>
+              <li>{t('skillstore.uploadReq2')}</li>
             </ul>
 
             {uploadError && (
-              <div className="mt-3 text-xs text-md-error bg-md-error/10 border border-md-error/20 rounded-md3-sm px-3 py-2">
+              <div role="alert" className="mt-3 text-xs text-md-error bg-md-error/10 border border-md-error/20 rounded-md3-sm px-3 py-2">
                 {uploadError}
               </div>
             )}
 
             <div className="mt-5 flex justify-end gap-2">
               <button
+                type="button"
                 onClick={closeUploadModal}
-                className="px-4 py-2 rounded-md3-md text-sm text-dark-onSurfaceVariant hover:bg-dark-surfaceContainer transition-colors"
+                disabled={uploadLoading}
+                className="px-4 py-2 rounded-md3-md text-sm text-dark-onSurfaceVariant hover:bg-dark-surfaceContainer transition-colors disabled:cursor-not-allowed disabled:opacity-50"
               >
-                取消
+                {t('common.cancel')}
               </button>
               <button
+                type="button"
                 onClick={confirmUpload}
                 disabled={!uploadFilePath || uploadLoading}
                 className="px-4 py-2 rounded-md3-md text-sm font-medium bg-md-primary text-md-onPrimary hover:bg-md-primary/90 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
               >
                 {uploadLoading && <Loader2 size={14} className="animate-spin" />}
-                确认
+                {t('skillstore.confirmUpload')}
               </button>
             </div>
           </div>

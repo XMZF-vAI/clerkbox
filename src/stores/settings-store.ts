@@ -3,6 +3,7 @@ import { persist } from 'zustand/middleware'
 import type { AppSettings, ApiCompat, CustomModel, ModelProvider, ProviderModel } from '../types/agent'
 import { normalizeEffort } from '../types/agent'
 import { guessApiCompat, guessPresetByBaseUrl, fallbackNameFromBaseUrl } from '../lib/provider-catalog'
+import { ipc } from '../lib/ipc-client'
 
 interface SettingsState extends AppSettings {
   showSettings: boolean
@@ -43,6 +44,27 @@ const defaultSettings: AppSettings = {
   activeCustomModelId: undefined,
   providersMigratedAt: undefined,
   hasCompletedOnboarding: false,
+  agentsMdEnabled: true,
+  claudeMdCompat: true,
+}
+
+const apiKeyWriteQueues = new Map<string, Promise<void>>()
+const apiKeyRevisions = new Map<string, number>()
+let credentialStorageReady = false
+let credentialHydrationEpoch = 0
+
+/** Serialize credential writes per provider so rapid input cannot persist out of order. */
+function queueApiKeyWrite(providerId: string, apiKey: string): Promise<void> {
+  const previous = apiKeyWriteQueues.get(providerId) ?? Promise.resolve()
+  const next = previous
+    .catch(() => undefined)
+    .then(() => (apiKey ? ipc.saveApiKey(providerId, apiKey) : ipc.removeApiKey(providerId)))
+  apiKeyWriteQueues.set(providerId, next)
+  void next.then(
+    () => { if (apiKeyWriteQueues.get(providerId) === next) apiKeyWriteQueues.delete(providerId) },
+    () => { if (apiKeyWriteQueues.get(providerId) === next) apiKeyWriteQueues.delete(providerId) },
+  )
+  return next
 }
 
 /** 把提供商 + 模型的连接信息写入生效（派生）字段 */
@@ -98,9 +120,23 @@ export const useSettingsStore = create<SettingsState>()(
       ...defaultSettings,
       showSettings: false,
       updateSettings: (partial) => set((state) => ({ ...state, ...partial })),
-      resetSettings: () => set({ ...defaultSettings, showSettings: false }),
+      resetSettings: () => {
+        credentialHydrationEpoch += 1
+        const providerIds = get().providers.map((provider) => provider.id)
+        set({ ...defaultSettings, showSettings: false })
+        for (const id of providerIds) {
+          void queueApiKeyWrite(id, '').catch((error) => console.error('[settings-store] remove API key failed:', error))
+        }
+      },
 
-      upsertProvider: (provider) => set((state) => {
+      upsertProvider: (provider) => {
+        const previous = get().providers.find((item) => item.id === provider.id)
+        if (previous?.apiKey !== provider.apiKey) {
+          apiKeyRevisions.set(provider.id, (apiKeyRevisions.get(provider.id) ?? 0) + 1)
+          void queueApiKeyWrite(provider.id, provider.apiKey)
+            .catch((error) => console.error('[settings-store] save API key failed:', error))
+        }
+        set((state) => {
         const exists = state.providers.some((p) => p.id === provider.id)
         const providers = exists
           ? state.providers.map((p) => (p.id === provider.id ? provider : p))
@@ -116,17 +152,24 @@ export const useSettingsStore = create<SettingsState>()(
             ? { providers, ...applyActive(next.provider, next.modelId) }
             : { providers, ...clearActive() }
         }
-        return { providers, ...applyActive(provider, modelId) }
-      }),
+          return { providers, ...applyActive(provider, modelId) }
+        })
+      },
 
-      removeProvider: (id) => set((state) => {
+      removeProvider: (id) => {
+        if (get().providers.some((provider) => provider.id === id)) {
+          apiKeyRevisions.set(id, (apiKeyRevisions.get(id) ?? 0) + 1)
+          void queueApiKeyWrite(id, '').catch((error) => console.error('[settings-store] remove API key failed:', error))
+        }
+        set((state) => {
         const providers = state.providers.filter((p) => p.id !== id)
         if (state.activeProviderId !== id) return { providers }
         const next = firstAvailable(providers)
         return next
           ? { providers, ...applyActive(next.provider, next.modelId) }
-          : { providers, ...clearActive() }
-      }),
+            : { providers, ...clearActive() }
+        })
+      },
 
       setProviderModels: (providerId, models) => {
         const p = get().providers.find((x) => x.id === providerId)
@@ -146,9 +189,21 @@ export const useSettingsStore = create<SettingsState>()(
     {
       name: 'clerkbox-settings',
       partialize: (state) => {
-        // Don't persist showSettings
-        const { showSettings: _, ...rest } = state
-        return rest
+        // Keep credentials only in Electron's OS-backed safeStorage.
+        const { showSettings: _, apiKey: _apiKey, providers, customModels, ...rest } = state
+        const keepBrowserCredentials = !credentialStorageReady
+        return {
+          ...rest,
+          apiKey: keepBrowserCredentials ? state.apiKey : '',
+          providers: providers.map((provider) => ({
+            ...provider,
+            apiKey: keepBrowserCredentials ? provider.apiKey : '',
+          })),
+          customModels: customModels.map((model) => ({
+            ...model,
+            apiKey: keepBrowserCredentials ? model.apiKey : '',
+          })),
+        }
       },
       // 旧版本没有 maxInputTokens 时补默认，避免 undefined 贯穿运行时
       merge: (persisted, current) => {
@@ -261,5 +316,60 @@ export function migrateProvidersIfNeeded() {
     providers,
     providersMigratedAt: Date.now(),
     ...(active && activeModelId ? applyActive(active, activeModelId) : {}),
+  })
+}
+
+/** Restore encrypted provider credentials after Zustand hydrates non-secret settings. */
+export async function hydrateProviderApiKeys(): Promise<void> {
+  const state = useSettingsStore.getState()
+  const revisionSnapshot = new Map(apiKeyRevisions)
+  const hydrationEpoch = credentialHydrationEpoch
+  let encryptedKeys: Record<string, string>
+  try {
+    encryptedKeys = await ipc.loadApiKeys()
+  } catch (error) {
+    console.error('[settings-store] load API keys failed:', error)
+    return
+  }
+
+  const keysToMigrate: Array<[string, string]> = []
+  const providers = state.providers.map((provider) => {
+    const legacyKey = provider.apiKey || (provider.id === state.activeProviderId ? state.apiKey : '')
+    const apiKey = encryptedKeys[provider.id] ?? legacyKey
+    if (!encryptedKeys[provider.id] && legacyKey) keysToMigrate.push([provider.id, legacyKey])
+    return { ...provider, apiKey }
+  })
+
+  try {
+    if (hydrationEpoch !== credentialHydrationEpoch) return
+    await Promise.all(keysToMigrate.map(([id, apiKey]) => queueApiKeyWrite(id, apiKey)))
+  } catch (error) {
+    // Preserve the legacy browser copy until the OS-backed migration succeeds.
+    console.error('[settings-store] migrate API keys failed:', error)
+    return
+  }
+
+  if (hydrationEpoch !== credentialHydrationEpoch) return
+
+  const latest = useSettingsStore.getState()
+  const latestProviders = latest.providers.map((provider) => {
+    const initial = state.providers.find((item) => item.id === provider.id)
+    const keyChangedDuringHydration = (apiKeyRevisions.get(provider.id) ?? 0) !== (revisionSnapshot.get(provider.id) ?? 0)
+    if (keyChangedDuringHydration) return provider
+    const legacyKey = provider.apiKey || (provider.id === latest.activeProviderId ? latest.apiKey : '')
+    return { ...provider, apiKey: encryptedKeys[provider.id] ?? legacyKey }
+  })
+  const activeProvider = latestProviders.find((provider) => provider.id === latest.activeProviderId)
+  for (const provider of latestProviders) {
+    if ((apiKeyRevisions.get(provider.id) ?? 0) !== (revisionSnapshot.get(provider.id) ?? 0)) {
+      void queueApiKeyWrite(provider.id, provider.apiKey)
+        .catch((error) => console.error('[settings-store] save API key failed:', error))
+    }
+  }
+  credentialStorageReady = true
+  useSettingsStore.setState({
+    providers: latestProviders,
+    apiKey: activeProvider?.apiKey ?? '',
+    customModels: latest.customModels.map((model) => ({ ...model, apiKey: '' })),
   })
 }

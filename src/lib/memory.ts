@@ -61,7 +61,7 @@ export async function buildMemoryPrompt(workingDir: string, homeDir: string): Pr
   if (globalEntries.length > 0) {
     const parts: string[] = []
     let totalChars = 0
-    for (const entry of globalEntries) {
+    for (const entry of [...globalEntries].sort((a, b) => a.filename.localeCompare(b.filename))) {
       const typeLabel = entry.type ? `[${entry.type}]` : '[未分类]'
       const header = `### ${typeLabel} ${entry.name || entry.filename}`
       // 单条内容截断

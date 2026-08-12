@@ -6,8 +6,8 @@
 
 **Single AI Agent Desktop Workbench — 把 AI 工程师装进你的桌面**
 
-[![Version](https://img.shields.io/badge/version-1.6.0-7C5CFC?style=flat-square)](https://github.com/XMZF-Studio/ClerkBox)
-[![License: MIT](https://img.shields.io/badge/license-MIT-22C55E?style=flat-square)](LICENSE)
+[![Version](https://img.shields.io/badge/version-1.7.0-7C5CFC?style=flat-square)](https://github.com/XMZF-Studio/ClerkBox)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-26A2C3?style=flat-square)](LICENSE)
 [![Electron](https://img.shields.io/badge/Electron-42-47848F?style=flat-square)](https://www.electronjs.org/)
 [![React](https://img.shields.io/badge/React-19-61DAFB?style=flat-square)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6-3178C6?style=flat-square)](https://www.typescriptlang.org/)
@@ -16,6 +16,14 @@
 [![Platform](https://img.shields.io/badge/platform-Windows-0078D4?style=flat-square)](#下载与安装)
 
 </div>
+
+[English](README.en.md) | **简体中文**
+
+---
+
+> 你好呀，我是 XMZF Studio 的一位初一学生，自己写了这个项目。
+> 我们还在上学的年纪，代码写得不一定完美，但每一行都是认真对待的。
+> 希望你能喜欢它，也欢迎提意见或一起改进～
 
 ---
 
@@ -27,7 +35,6 @@
 
 - [亮点速览](#亮点速览)
 - [核心能力](#核心能力)
-- [界面预览](#界面预览)
 - [下载与安装](#下载与安装)
 - [从源码构建](#从源码构建)
 - [快速开始](#快速开始)
@@ -56,11 +63,12 @@
 | **子 Agent 编排** | 内置"侦察兵"（只读）与"通用助手"（全工具），支持自定义子 Agent，独立上下文隔离执行 |
 | **Skills 技能市场** | 一键安装来自社区的可复用提示词模板，自动注入 system prompt |
 | **长期记忆系统** | 自动维护 user / feedback / project / reference 四类记忆条目，跨会话延续上下文 |
+| **Anthropic 缓存优化** | 自动对 Anthropic 请求启用 Prompt Caching，静态系统提示前缀命中缓存；每条消息显示缓存写入/读取 token 与命中率 |
 | **VIBE 沉浸模式** | 全屏背景图 + 液态玻璃 UI + 内置音乐播放器，专注对话本身 |
 | **MD3 动态主题** | 基于 Material Design 3 色彩引擎，浅色 / 深色 / 跟随系统三种模式，支持自定义种子色 |
 | **原生圆角窗口** | 自绘标题栏 + 12px 圆角，最大化时自动恢复直角，细节考究 |
 | **本地优先** | 所有数据存储在本地 SQLite/JSON，零云端依赖，完全离线可用 |
-| **MIT 开源** | 完全自由使用、修改、分发 |
+| **Apache 2.0 开源** | 自由使用、修改、分发，含专利授权条款，衍生作品可灵活选择许可证 |
 
 ---
 
@@ -139,31 +147,6 @@ Agent 通过 `save_memory` 工具主动写入，通过 frontmatter 索引快速�
 - 右上角悬浮音乐播放器（支持单曲 / 音乐文件夹）
 - 左下角定制菜单（背景 / 音乐 / 文件夹）
 - 配置持久化，退出后普通界面状态保持
-
----
-
-## 界面预览
-
-```
-┌──────────────────────────────────────────────────────────┐
-│ ◉ ◉ ◉   ClerkBox                              [─][□][✕] │  ← 自绘圆角标题栏
-├──────────┬───────────────────────────────────────────────┤
-│          │  模型: deepseek-chat     [VIBE]  [设置]        │
-│  会话 1   ├───────────────────────────────────────────────┤
-│  会话 2   │                                               │
-│  会话 3   │   用户: 帮我重构这个函数                      │
-│          │                                               │
-│  ─────   │   助手: 我先读取文件...                        │
-│  新建会话 │   [read_file] src/utils.ts                    │
-│          │   [search_replace] src/utils.ts                │
-│  Skills  │   已完成重构，主要改动：                       │
-│  设置     │   • 拆分了职责                                │
-│          │   • 添加了类型注解                             │
-│          │                                               │
-│          ├───────────────────────────────────────────────┤
-│          │  [输入消息...]                              [↑]│
-└──────────┴───────────────────────────────────────────────┘
-```
 
 ---
 
@@ -576,7 +559,6 @@ ClerkBox/
 | [Tailwind CSS](https://tailwindcss.com/) | 3 | 原子化 CSS |
 | [Zustand](https://github.com/pmndrs/zustand) | 5 | 状态管理 |
 | [lucide-react](https://lucide.dev/) | 1 | 图标库 |
-| [recharts](https://recharts.org/) | 3 | 图表（Token 用量等） |
 | [Vercel AI SDK](https://sdk.vercel.ai/) | 6 | 流式 LLM 调用 |
 | [@material/material-color-utilities](https://github.com/material-foundation/material-color-utilities) | 0.4 | MD3 色彩引擎 |
 | [cheerio](https://cheerio.js.org/) | 1.2 | HTML 解析（web_search） |
@@ -599,7 +581,7 @@ ClerkBox/
 
 ## 路线图
 
-### 已完成 (v1.5.x)
+### 已完成（当前版本）
 
 - [x] ReAct 工具循环 + 流式输出
 - [x] 子 Agent 编排（内置 + 自定义）
@@ -611,10 +593,12 @@ ClerkBox/
 - [x] 欢迎页引导
 - [x] 长上下文自动压缩（compact）
 - [x] Token 用量追踪
+- [x] Anthropic Prompt Caching（静态 system 前缀缓存 + 命中率展示）
 - [x] 危险命令拦截
 - [x] 文件修改自动备份
+- [x] 国际化（i18n，中 / 英）
 
-### 计划中 (v1.6+)
+### 计划中 (v1.8+)
 
 - [ ] 会话分支（fork）：从某条消息分叉新会话
 - [ ] 消息编辑重发
@@ -631,7 +615,6 @@ ClerkBox/
 - [ ] 命令面板（Ctrl+K）
 - [ ] 多窗口多会话
 - [ ] Token 用量仪表盘
-- [ ] 国际化（i18n）
 - [ ] macOS / Linux 支持
 
 ---
@@ -671,30 +654,24 @@ ClerkBox/
 
 ## 许可证
 
-本项目基于 [MIT License](LICENSE) 开源。
+本项目基于 [Apache License, Version 2.0](LICENSE) 开源。
 
 ```
-MIT License
+Apache License 2.0
 
-Copyright (c) 2026 XMZF Studio
+Copyright 2026 XMZF Studio
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+    http://www.apache.org/licenses/LICENSE-2.0
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 ```
 
 ---
@@ -715,6 +692,6 @@ SOFTWARE.
 
 **[报告 Bug](https://github.com/XMZF-Studio/ClerkBox/issues)** · **[功能建议](https://github.com/XMZF-Studio/ClerkBox/issues)** · **[Pull Request](https://github.com/XMZF-Studio/ClerkBox/pulls)**
 
-Made with care by **XMZF Studio** · Released under the MIT License
+Made with care by **XMZF Studio** · Released under the Apache License 2.0
 
 </div>

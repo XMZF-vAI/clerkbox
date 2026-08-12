@@ -1,6 +1,8 @@
 import type { AgentDefinition } from '../types/agent'
 import { ipc } from './ipc-client'
 
+const MAX_CUSTOM_AGENT_TURNS = 100
+
 // ── 内置 agent 定义 ──
 
 export const BUILTIN_AGENTS: AgentDefinition[] = [
@@ -143,7 +145,9 @@ export async function loadCustomAgents(workingDir: string): Promise<AgentDefinit
       let maxTurns: number | undefined
       if (maxTurnsRaw) {
         const parsed = parseInt(maxTurnsRaw, 10)
-        maxTurns = Number.isNaN(parsed) ? undefined : parsed
+        maxTurns = Number.isFinite(parsed) && parsed > 0
+          ? Math.min(parsed, MAX_CUSTOM_AGENT_TURNS)
+          : undefined
       }
       const color = frontmatter.color?.trim() || undefined
 
@@ -170,12 +174,15 @@ export async function loadCustomAgents(workingDir: string): Promise<AgentDefinit
 
 // ── 合并内置与自定义 agent ──
 
-// 按 agentType 去重：自定义 agent 覆盖同名的内置 agent
+// Built-in agent identifiers stay reserved so project-local definitions cannot alter
+// the permissions or behavior users expect from standard agent types.
 export async function getAllAgents(workingDir: string): Promise<AgentDefinition[]> {
   const custom = await loadCustomAgents(workingDir)
   const map = new Map<string, AgentDefinition>()
   for (const a of BUILTIN_AGENTS) map.set(a.agentType, a)
-  for (const a of custom) map.set(a.agentType, a)
+  for (const a of custom) {
+    if (!map.has(a.agentType)) map.set(a.agentType, a)
+  }
   return Array.from(map.values())
 }
 

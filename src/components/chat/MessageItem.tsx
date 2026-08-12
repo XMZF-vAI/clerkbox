@@ -18,7 +18,7 @@ function extractWriteFileData(argsSoFar: string): { path: string; content: strin
   try {
     const parsed = JSON.parse(argsSoFar)
     return { path: parsed.path || '', content: parsed.content || '' }
-  } catch {}
+  } catch { /* Partial JSON falls through to tolerant field extraction. */ }
 
   let path = ''
   let content = ''
@@ -220,7 +220,7 @@ function EditFilePreviewCard({ streamingCall }: { streamingCall: StreamingToolCa
 
 /** Compact tool call bar - horizontal strip style */
 function ToolCallBar({ toolCall, result, vibe }: { toolCall: NonNullable<Message['toolCalls']>[0]; result?: Message['toolResults']; vibe?: boolean }) {
-  // U1: Hook 必须放在 early return 之前，否则违反 Rules of Hooks。
+  // Hooks must run before the conditional return to preserve hook order.
   const { t } = useTranslation()
   const [expanded, setExpanded] = useState(false)
   // spawn_agent 由 SubAgentCard 单独展示，不显示原始工具调用条
@@ -263,7 +263,7 @@ function ToolCallBar({ toolCall, result, vibe }: { toolCall: NonNullable<Message
         const diffData = JSON.parse(diffMatch[1])
         editAddedLines = diffData.addedLines || 0
         editRemovedLines = diffData.removedLines || 0
-      } catch {}
+      } catch { /* Diff metadata is optional and should not hide the tool result. */ }
     }
   }
 
@@ -278,6 +278,7 @@ function ToolCallBar({ toolCall, result, vibe }: { toolCall: NonNullable<Message
           : 'border-dark-onSurfaceVariant/[0.03] bg-dark-surfaceContainer/40'
     }`}>
       <button
+        type="button"
         onClick={() => setExpanded(!expanded)}
         aria-expanded={expanded}
         aria-controls={`tc-detail-${toolCall.id}`}
@@ -360,7 +361,7 @@ function ThinkingHeader({ thinkingContent, isStreaming, hasContent, finishReason
   const [elapsed, setElapsed] = useState(0)
   const [done, setDone] = useState(false)
 
-  // P4: 状态标记 effect —— 只在 thinkingContent / 流式状态变化时启动/结束计时
+  // Start and stop the timer only when thinking content or stream state changes.
   useEffect(() => {
     if (!thinkingContent) {
       startRef.current = null
@@ -388,7 +389,7 @@ function ThinkingHeader({ thinkingContent, isStreaming, hasContent, finishReason
     }
   }, [thinkingContent, isStreaming, hasContent, finishReason])
 
-  // P4: tick effect —— 独立维护，避免每次 render 重建 setInterval
+  // Keep the ticker independent so renders do not recreate its interval.
   useEffect(() => {
     if (done || startRef.current == null) return
     const id = setInterval(() => {
@@ -405,7 +406,12 @@ function ThinkingHeader({ thinkingContent, isStreaming, hasContent, finishReason
 
   return (
     <div className="w-full mb-1.5">
-      <button onClick={onToggle} className="flex items-center gap-1.5 py-1 group">
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={expanded}
+        className="flex items-center gap-1.5 py-1 group"
+      >
         <span
           className={`text-sm font-medium tracking-wide ${
             !done ? 'thinking-shimmer' : vibe ? 'text-white/70' : 'text-dark-onSurfaceVariant/60'
@@ -462,7 +468,7 @@ function renderMarkdown(text: string): string {
 
   const closeTable = () => {
     if (!inTable) return
-    // U2: 表格至少需要表头 + 分隔符两行；分隔符行必须所有 cell 都是 - / : / | / 空格。
+    // A table requires a header and a separator row to avoid dropping plain text.
     // 否则这不是合法 markdown 表格，回退为普通段落渲染，避免数据丢失。
     if (tableRows.length >= 2 && isTableSeparatorLine(tableRows[1])) {
       result.push('<table class="markdown-table"><thead><tr>')
@@ -660,11 +666,19 @@ function MessageItem({ message, vibe = false, sessionId }: MessageItemProps) {
   const isTruncated = message.finishReason === 'length'
   const hasThinking = !!message.thinkingContent && message.thinkingContent.length > 0
   const hasStreamingWriteFile = message.streamingToolCalls?.some(tc => tc.name === 'write_file')
+  const cacheReadTokens = message.usage?.cache_read_input_tokens ?? 0
+  const cacheCreatedTokens = message.usage?.cache_creation_input_tokens ?? 0
+  const cacheEligibleTokens = cacheReadTokens + cacheCreatedTokens
+  const cacheHitRate = cacheEligibleTokens > 0 ? Math.round(cacheReadTokens / cacheEligibleTokens * 100) : 0
 
-  const handleCopy = () => {
-    navigator.clipboard.writeText(message.content)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(message.content)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch (error) {
+      console.error('Failed to copy message:', error)
+    }
   }
 
   // Compact boundary message — render as a divider card
@@ -731,6 +745,22 @@ function MessageItem({ message, vibe = false, sessionId }: MessageItemProps) {
         }`}>
           <Loader2 size={12} className="animate-spin" />
           <span>{t('chat.compactingContext')}</span>
+        </div>
+      </div>
+    )
+  }
+
+  // 请求失败后正在重试 —— 居中显示过程提示（重试成功后清除该标记）
+  if (message._retrying) {
+    return (
+      <div className="flex justify-center animate-slide-up my-1">
+        <div className={`flex items-center gap-2 px-3 py-1.5 rounded-md3-md text-[11px] ${
+          vibe
+            ? 'bg-white/5 border border-white/[0.03] text-white/60'
+            : 'bg-dark-surfaceContainer/40 border border-dark-onSurfaceVariant/[0.03] text-dark-onSurfaceVariant/60'
+        }`}>
+          <Loader2 size={12} className="animate-spin" />
+          <span>{t('chat.retrying', { attempt: message._retrying.attempt })}</span>
         </div>
       </div>
     )
@@ -825,8 +855,11 @@ function MessageItem({ message, vibe = false, sessionId }: MessageItemProps) {
           >
             {!isUser && (
               <button
+                type="button"
                 onClick={handleCopy}
-                className={`absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity w-6 h-6 flex items-center justify-center rounded-md3-xs ${
+                aria-label={t('common.copy')}
+                title={t('common.copy')}
+                className={`absolute top-2 right-2 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity w-6 h-6 flex items-center justify-center rounded-md3-xs ${
                   vibe ? 'hover:bg-white/15' : 'hover:bg-dark-surfaceContainer'
                 }`}
               >
@@ -873,6 +906,16 @@ function MessageItem({ message, vibe = false, sessionId }: MessageItemProps) {
             <AlertTriangle size={10} />
             {t('chat.truncated')}
           </div>
+        )}
+
+        {cacheEligibleTokens > 0 && !isUser && (
+          <span className={`text-[10px] mt-1 px-1 ${vibe ? 'text-white/45' : 'text-dark-onSurfaceVariant/40'}`}>
+            {t('chat.cacheStats', {
+              rate: cacheHitRate,
+              read: cacheReadTokens.toLocaleString(),
+              created: cacheCreatedTokens.toLocaleString(),
+            })}
+          </span>
         )}
 
         {/* Timestamp */}

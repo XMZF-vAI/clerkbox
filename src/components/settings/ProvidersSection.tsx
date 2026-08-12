@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useId, useRef } from 'react'
 import {
   Plus, Trash2, ChevronRight, RefreshCw, Check, AlertCircle,
   Search, ExternalLink, X, Pencil, Eye, EyeOff, Settings2, Thermometer, Hash, Brain,
@@ -6,7 +6,7 @@ import {
 import { useTranslation } from 'react-i18next'
 import { useSettingsStore } from '../../stores/settings-store'
 import {
-  PROVIDER_PRESETS, PROVIDER_GROUPS, getPreset,
+  PROVIDER_PRESETS, PROVIDER_GROUPS, getPreset, inferThinkingDefaults,
   type ProviderPreset, type ProviderGroup,
 } from '../../lib/provider-catalog'
 import { ipc } from '../../lib/ipc-client'
@@ -30,7 +30,58 @@ const defaultStyleFor = (model: ProviderModel, provider: ModelProvider): Thinkin
 const inputCls =
   'w-full px-3 py-2 bg-dark-surfaceContainerHighest rounded-md3-sm text-sm border border-dark-onSurfaceVariant/10 outline-none focus:border-md-primary/40 transition-colors'
 
+/** Keep transient modal focus and keyboard behavior consistent across settings dialogs. */
+function useModalAccessibility(onClose: () => void, initialFocus: { current: HTMLElement | null }) {
+  const dialogRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const dialog = dialogRef.current
+    const focusableSelector = [
+      'button:not([disabled])',
+      '[href]',
+      'input:not([disabled])',
+      'select:not([disabled])',
+      'textarea:not([disabled])',
+      '[tabindex]:not([tabindex="-1"])',
+    ].join(',')
+
+    if (initialFocus.current) initialFocus.current.focus()
+    else dialog?.focus()
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        event.stopPropagation()
+        onClose()
+        return
+      }
+      if (event.key !== 'Tab' || !dialog) return
+
+      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(focusableSelector))
+      if (focusable.length === 0) return
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+
+    document.addEventListener('keydown', onKeyDown, true)
+    return () => {
+      document.removeEventListener('keydown', onKeyDown, true)
+      if (previousFocus && document.contains(previousFocus)) previousFocus.focus()
+    }
+  }, [initialFocus, onClose])
+
+  return dialogRef
+}
+
 const GROUP_LABEL_KEY: Record<ProviderGroup, string> = {
+  official: 'settings.providers.groupOfficial',
   international: 'settings.providers.groupInternational',
   china: 'settings.providers.groupChina',
   aggregator: 'settings.providers.groupAggregator',
@@ -52,6 +103,7 @@ export default function ProvidersSection() {
   const settings = useSettingsStore()
   const [showCatalog, setShowCatalog] = useState(false)
   const [modelPicker, setModelPicker] = useState<string | null>(null)
+  const selectedProvider = modelPicker ? settings.providers.find((provider) => provider.id === modelPicker) : null
 
   const addFromPreset = (preset: ProviderPreset) => {
     const provider: ModelProvider = {
@@ -73,6 +125,7 @@ export default function ProvidersSection() {
       <div className="flex items-center justify-between mb-2">
         <label className="text-sm font-medium">{t('settings.providers.title')}</label>
         <button
+          type="button"
           onClick={() => setShowCatalog(true)}
           className="flex items-center gap-1 px-2.5 py-1 rounded-md3-sm text-xs text-md-primary hover:bg-md-primary/10 transition-colors"
         >
@@ -99,9 +152,9 @@ export default function ProvidersSection() {
       {showCatalog && (
         <CatalogModal onClose={() => setShowCatalog(false)} onPick={addFromPreset} />
       )}
-      {modelPicker && (
+      {selectedProvider && (
         <ModelPickerModal
-          provider={settings.providers.find((x) => x.id === modelPicker)!}
+          provider={selectedProvider}
           onClose={() => setModelPicker(null)}
         />
       )}
@@ -148,7 +201,18 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
   const addManualModel = () => {
     const id = manualId.trim()
     if (!id || provider.models.some((m) => m.id === id)) return
-    patch({ models: [...provider.models, { id }] })
+    const thinking = inferThinkingDefaults(provider.presetId, id)
+    patch({
+      models: [...provider.models, {
+        id,
+        ...(thinking ? {
+          supportsThinking: true,
+          thinkingStyle: thinking.thinkingStyle,
+          reasoningEfforts: thinking.reasoningEfforts,
+          reasoningEffort: thinking.reasoningEfforts[0],
+        } : {}),
+      }],
+    })
     setManualId('')
   }
 
@@ -175,6 +239,7 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
       {/* 头部 */}
       <div className="flex items-center gap-2 px-3.5 py-2.5">
         <button
+          type="button"
           onClick={() => patch({ collapsed: !provider.collapsed })}
           className="w-5 h-5 flex items-center justify-center text-dark-onSurfaceVariant flex-shrink-0"
           aria-label={expanded ? t('settings.providers.collapse') : t('settings.providers.expand')}
@@ -196,6 +261,7 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
           />
         ) : (
           <button
+            type="button"
             onClick={() => patch({ collapsed: !provider.collapsed })}
             className="flex-1 min-w-0 flex items-center gap-2 text-left"
           >
@@ -208,6 +274,7 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
         )}
 
         <button
+          type="button"
           onClick={() => { setNameDraft(provider.name); setRenaming(true) }}
           className="w-7 h-7 flex items-center justify-center rounded-md3-xs text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHighest transition-colors flex-shrink-0"
           aria-label={t('settings.providers.rename')}
@@ -215,6 +282,7 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
           <Pencil size={13} />
         </button>
         <button
+          type="button"
           onClick={() => settings.removeProvider(provider.id)}
           className="w-7 h-7 flex items-center justify-center rounded-md3-xs text-dark-onSurfaceVariant hover:text-md-error hover:bg-md-error/10 transition-colors flex-shrink-0"
           aria-label={t('settings.providers.remove')}
@@ -232,7 +300,9 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
               {(['openai', 'anthropic'] as ApiCompat[]).map((c) => (
                 <button
                   key={c}
+                  type="button"
                   onClick={() => switchCompat(c)}
+                  aria-pressed={provider.apiCompat === c}
                   className={`flex-1 px-3 py-1.5 rounded-md3-sm text-xs border transition-colors ${
                     provider.apiCompat === c
                       ? 'border-md-primary/50 bg-md-primary/12 text-md-primary font-medium'
@@ -250,6 +320,7 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
 
           <input
             type="text"
+            aria-label={t('settings.api.baseUrlPlaceholder')}
             value={provider.baseUrl}
             onChange={(e) => patch({ baseUrl: e.target.value })}
             placeholder={t('settings.api.baseUrlPlaceholder')}
@@ -259,6 +330,7 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
             <div className="relative flex-1">
               <input
                 type={showKey ? 'text' : 'password'}
+                aria-label={t('settings.api.apiKeyPlaceholder')}
                 value={provider.apiKey}
                 onChange={(e) => patch({ apiKey: e.target.value })}
                 placeholder={t('settings.api.apiKeyPlaceholder')}
@@ -276,6 +348,7 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
             </div>
             {preset?.apiKeyUrl && (
               <button
+                type="button"
                 onClick={() => ipc.openExternal(preset.apiKeyUrl!)}
                 className="px-2.5 flex items-center gap-1 rounded-md3-sm text-xs text-md-primary hover:bg-md-primary/10 transition-colors flex-shrink-0 whitespace-nowrap"
               >
@@ -298,6 +371,7 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
           {/* 操作条 */}
           <div className="flex items-center gap-2 flex-wrap">
             <button
+              type="button"
               onClick={onPickModels}
               disabled={!provider.baseUrl.trim()}
               className="flex items-center gap-1 px-2.5 py-1.5 rounded-md3-sm text-xs bg-md-primary text-md-onPrimary font-medium hover:bg-md-primary/90 transition-colors disabled:opacity-40"
@@ -305,6 +379,7 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
               <RefreshCw size={12} /> {t('settings.providers.fetchModels')}
             </button>
             <button
+              type="button"
               onClick={testConnection}
               disabled={testStatus === 'testing' || !provider.baseUrl.trim()}
               className="px-2.5 py-1.5 rounded-md3-sm text-xs border border-dark-onSurfaceVariant/15 text-dark-onSurfaceVariant hover:bg-dark-surfaceContainer transition-colors disabled:opacity-40"
@@ -312,10 +387,10 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
               {testStatus === 'testing' ? t('settings.api.testing') : t('settings.api.testConnection')}
             </button>
             {testStatus === 'ok' && (
-              <span className="flex items-center gap-1 text-xs text-md-success"><Check size={12} /> {testMsg}</span>
+              <span role="status" className="flex items-center gap-1 text-xs text-md-success"><Check size={12} /> {testMsg}</span>
             )}
             {testStatus === 'error' && (
-              <span className="flex items-center gap-1 text-xs text-md-error min-w-0 truncate" title={testMsg}>
+              <span role="alert" className="flex items-center gap-1 text-xs text-md-error min-w-0 truncate" title={testMsg}>
                 <AlertCircle size={12} className="flex-shrink-0" /> <span className="truncate">{testMsg}</span>
               </span>
             )}
@@ -345,7 +420,9 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
                   >
                     <div className="flex items-center gap-2 px-2.5 py-1.5">
                       <button
+                        type="button"
                         onClick={() => settings.activateModel(provider.id, m.id)}
+                        aria-pressed={active}
                         className="flex-1 min-w-0 text-left"
                       >
                         <div className="flex items-center gap-2">
@@ -361,6 +438,7 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
                         {m.label && <div className="text-[10px] text-dark-onSurfaceVariant/70 truncate">{m.id}</div>}
                       </button>
                       <button
+                        type="button"
                         onClick={() => setAdvancedModelId(advancedOpen ? null : m.id)}
                         className={`w-6 h-6 flex items-center justify-center rounded-md3-xs transition-colors flex-shrink-0 ${
                           advancedOpen
@@ -374,6 +452,7 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
                         <Settings2 size={11} />
                       </button>
                       <button
+                        type="button"
                         onClick={() => settings.removeProviderModel(provider.id, m.id)}
                         className="w-6 h-6 flex items-center justify-center rounded-md3-xs text-dark-onSurfaceVariant hover:text-md-error hover:bg-md-error/10 transition-colors flex-shrink-0"
                         aria-label={t('settings.api.delete')}
@@ -448,6 +527,7 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
                           </label>
                           <input
                             type="number"
+                            aria-label={t('settings.api.temperature')}
                             min={0}
                             max={2}
                             step={0.1}
@@ -467,6 +547,7 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
                             </label>
                             <input
                               type="number"
+                              aria-label={t('settings.api.maxInputTokens')}
                               min={4096}
                               max={1000000}
                               step={1024}
@@ -485,6 +566,7 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
                             </label>
                             <input
                               type="number"
+                              aria-label={t('settings.api.maxOutputTokens')}
                               min={256}
                               max={128000}
                               step={256}
@@ -509,6 +591,7 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
           <div className="flex gap-2">
             <input
               type="text"
+              aria-label={t('settings.providers.manualIdPlaceholder')}
               value={manualId}
               onChange={(e) => setManualId(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') addManualModel() }}
@@ -516,8 +599,10 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
               className={inputCls}
             />
             <button
+              type="button"
               onClick={addManualModel}
               disabled={!manualId.trim()}
+              aria-label={t('settings.providers.add')}
               className="px-2.5 rounded-md3-sm text-xs border border-dark-onSurfaceVariant/15 text-dark-onSurfaceVariant hover:bg-dark-surfaceContainer transition-colors disabled:opacity-40 flex-shrink-0"
             >
               <Plus size={13} />
@@ -533,6 +618,9 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
 function CatalogModal({ onClose, onPick }: { onClose: () => void; onPick: (p: ProviderPreset) => void }) {
   const { t } = useTranslation()
   const [query, setQuery] = useState('')
+  const titleId = useId()
+  const searchRef = useRef<HTMLInputElement>(null)
+  const dialogRef = useModalAccessibility(onClose, searchRef)
   const q = query.trim().toLowerCase()
 
   const matches = (p: ProviderPreset) =>
@@ -541,12 +629,23 @@ function CatalogModal({ onClose, onPick }: { onClose: () => void; onPick: (p: Pr
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60" onClick={onClose}>
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
         className="w-[420px] max-w-[90vw] max-h-[70vh] bg-dark-surfaceDim rounded-md3-lg border border-dark-onSurfaceVariant/10 flex flex-col shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-4 py-3 border-b border-dark-onSurfaceVariant/10">
-          <span className="text-sm font-medium">{t('settings.providers.catalogTitle')}</span>
-          <button onClick={onClose} className="w-7 h-7 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh text-dark-onSurfaceVariant">
+          <h2 id={titleId} className="text-sm font-medium">{t('settings.providers.catalogTitle')}</h2>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label={t('common.close')}
+            title={t('common.close')}
+            className="w-7 h-7 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh text-dark-onSurfaceVariant"
+          >
             <X size={14} />
           </button>
         </div>
@@ -554,7 +653,8 @@ function CatalogModal({ onClose, onPick }: { onClose: () => void; onPick: (p: Pr
           <div className="relative">
             <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-dark-onSurfaceVariant/60" />
             <input
-              autoFocus
+              ref={searchRef}
+              aria-label={t('settings.providers.searchPlaceholder')}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder={t('settings.providers.searchPlaceholder')}
@@ -574,6 +674,7 @@ function CatalogModal({ onClose, onPick }: { onClose: () => void; onPick: (p: Pr
                 {items.map((p) => (
                   <button
                     key={p.id}
+                    type="button"
                     onClick={() => onPick(p)}
                     className="w-full flex items-center gap-2 px-2.5 py-2 rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-left"
                   >
@@ -609,26 +710,41 @@ function ModelPickerModal({ provider, onClose }: { provider: ModelProvider; onCl
   const [selected, setSelected] = useState<Set<string>>(
     () => new Set(provider.models.map((m) => m.id))
   )
+  const titleId = useId()
+  const searchRef = useRef<HTMLInputElement>(null)
+  const dialogRef = useModalAccessibility(onClose, searchRef)
+  const requestSequence = useRef(0)
 
   const load = async () => {
+    const requestId = ++requestSequence.current
     setLoading(true)
     setError('')
-    const res = await ipc.apiFetchModels({
-      baseUrl: provider.baseUrl,
-      apiKey: provider.apiKey,
-      apiCompat: provider.apiCompat,
-    })
-    if ('error' in res) {
-      setError(res.error === 'EMPTY_LIST' ? t('settings.providers.emptyList') : res.error)
+    try {
+      const res = await ipc.apiFetchModels({
+        baseUrl: provider.baseUrl,
+        apiKey: provider.apiKey,
+        apiCompat: provider.apiCompat,
+      })
+      if (requestId !== requestSequence.current) return
+      if ('error' in res) {
+        setError(res.error === 'EMPTY_LIST' ? t('settings.providers.emptyList') : res.error)
+        setFetched([])
+      } else {
+        setFetched(res.models)
+      }
+    } catch (error) {
+      if (requestId !== requestSequence.current) return
+      setError(error instanceof Error ? error.message : String(error))
       setFetched([])
-    } else {
-      setFetched(res.models)
+    } finally {
+      if (requestId === requestSequence.current) setLoading(false)
     }
-    setLoading(false)
   }
 
-  // 打开即拉取（仅挂载时一次，load 依赖的 provider 在弹窗生命周期内不变）
-  useEffect(() => { void load() }, [])
+  useEffect(() => {
+    void load()
+    return () => { requestSequence.current += 1 }
+  }, [])
 
   const q = query.trim().toLowerCase()
   const visible = fetched.filter((m) => !q || m.id.toLowerCase().includes(q) || (m.label || '').toLowerCase().includes(q))
@@ -644,13 +760,24 @@ function ModelPickerModal({ provider, onClose }: { provider: ModelProvider; onCl
 
   const save = () => {
     // 保留已有模型的自定义 label，新选中的取拉取到的 label
+    // 新模型按提供商预设自动推断思考能力/档位/风格，避免各家档位名称不一致
     const models: ProviderModel[] = []
     for (const id of selected) {
       const existing = provider.models.find((m) => m.id === id)
       if (existing) models.push(existing)
       else {
         const f = fetched.find((m) => m.id === id)
-        models.push(f?.label ? { id, label: f.label } : { id })
+        const thinking = inferThinkingDefaults(provider.presetId, id)
+        models.push({
+          id,
+          ...(f?.label ? { label: f.label } : {}),
+          ...(thinking ? {
+            supportsThinking: true,
+            thinkingStyle: thinking.thinkingStyle,
+            reasoningEfforts: thinking.reasoningEfforts,
+            reasoningEffort: thinking.reasoningEfforts[0],
+          } : {}),
+        })
       }
     }
     models.sort((a, b) => a.id.localeCompare(b.id))
@@ -661,15 +788,26 @@ function ModelPickerModal({ provider, onClose }: { provider: ModelProvider; onCl
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60" onClick={onClose}>
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
         className="w-[440px] max-w-[90vw] max-h-[70vh] bg-dark-surfaceDim rounded-md3-lg border border-dark-onSurfaceVariant/10 flex flex-col shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-4 py-3 border-b border-dark-onSurfaceVariant/10">
           <div className="min-w-0">
-            <div className="text-sm font-medium truncate">{t('settings.providers.pickTitle')}</div>
+            <h2 id={titleId} className="text-sm font-medium truncate">{t('settings.providers.pickTitle')}</h2>
             <div className="text-[11px] text-dark-onSurfaceVariant truncate">{provider.name}</div>
           </div>
-          <button onClick={onClose} className="w-7 h-7 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh text-dark-onSurfaceVariant flex-shrink-0">
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label={t('common.close')}
+            title={t('common.close')}
+            className="w-7 h-7 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh text-dark-onSurfaceVariant flex-shrink-0"
+          >
             <X size={14} />
           </button>
         </div>
@@ -678,6 +816,8 @@ function ModelPickerModal({ provider, onClose }: { provider: ModelProvider; onCl
           <div className="relative flex-1">
             <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-dark-onSurfaceVariant/60" />
             <input
+              ref={searchRef}
+              aria-label={t('settings.providers.searchModelPlaceholder')}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder={t('settings.providers.searchModelPlaceholder')}
@@ -685,6 +825,7 @@ function ModelPickerModal({ provider, onClose }: { provider: ModelProvider; onCl
             />
           </div>
           <button
+            type="button"
             onClick={load}
             disabled={loading}
             className="px-2.5 rounded-md3-sm text-xs border border-dark-onSurfaceVariant/15 text-dark-onSurfaceVariant hover:bg-dark-surfaceContainer transition-colors disabled:opacity-40 flex-shrink-0"
@@ -719,7 +860,9 @@ function ModelPickerModal({ provider, onClose }: { provider: ModelProvider; onCl
               return (
                 <button
                   key={m.id}
+                  type="button"
                   onClick={() => toggle(m.id)}
+                  aria-pressed={on}
                   className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-md3-sm transition-colors text-left ${
                     on ? 'bg-md-primary/10' : 'hover:bg-dark-surfaceContainerHigh'
                   }`}
@@ -748,10 +891,11 @@ function ModelPickerModal({ provider, onClose }: { provider: ModelProvider; onCl
             {t('settings.providers.selectedCount', { count: selected.size })}
           </span>
           <div className="flex gap-2">
-            <button onClick={onClose} className="px-3 py-1.5 rounded-md3-sm text-xs text-dark-onSurfaceVariant hover:bg-dark-surfaceContainer transition-colors">
+            <button type="button" onClick={onClose} className="px-3 py-1.5 rounded-md3-sm text-xs text-dark-onSurfaceVariant hover:bg-dark-surfaceContainer transition-colors">
               {t('common.cancel')}
             </button>
             <button
+              type="button"
               onClick={save}
               className="px-3 py-1.5 bg-md-primary text-md-onPrimary rounded-md3-sm text-xs font-medium hover:bg-md-primary/90 transition-colors"
             >

@@ -6,15 +6,84 @@ import { ipc } from '../lib/ipc-client'
 // slug 级 mutex：同一技能的写盘/删除操作串行执行，防止"停用→快速激活"竞态
 // （removeSkillDir 在 writeSkillDir 之后完成导致刚写入的目录被删除）
 const skillMutex = new Map<string, Promise<void>>()
+const STANDARD_SKILL_SOURCES = new Set([
+  'global-clerkbox',
+  'project-clerkbox',
+  'global-claude',
+  'project-claude',
+])
+let standardSkillDiscoverySequence = 0
 function withSkillLock<T>(slug: string, task: () => Promise<T>): Promise<T> {
   const prev = skillMutex.get(slug) ?? Promise.resolve()
   const next = prev.then(task, task) as unknown as Promise<void>
   skillMutex.set(slug, next)
-  // 链完成后清理，避免 Map 无限增长
-  next.finally(() => {
-    if (skillMutex.get(slug) === next) skillMutex.delete(slug)
-  })
+  // Observe both outcomes so cleanup does not create an unhandled rejected promise.
+  void next.then(
+    () => { if (skillMutex.get(slug) === next) skillMutex.delete(slug) },
+    () => { if (skillMutex.get(slug) === next) skillMutex.delete(slug) }
+  )
   return next as unknown as Promise<T>
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+}
+
+function isStringList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string')
+}
+
+function storedFiles(value: unknown, skillMdContent: unknown): Array<{ path: string; content: string }> {
+  if (Array.isArray(value)) {
+    return value.flatMap((file) =>
+      isRecord(file) && typeof file.path === 'string' && typeof file.content === 'string'
+        ? [{ path: file.path, content: file.content }]
+        : []
+    )
+  }
+  return typeof skillMdContent === 'string' ? [{ path: 'SKILL.md', content: skillMdContent }] : []
+}
+
+interface DiscoveredSkill {
+  slug: string
+  name: string
+  description: string
+  icon: string
+  category: string
+  triggerKeywords: string[]
+  version: string
+  author: string
+  chainsTo: string[]
+  source: 'global-clerkbox' | 'project-clerkbox' | 'global-claude' | 'project-claude'
+  skillMdPath: string
+  skillMdContent: string
+  files: Array<{ path: string; content: string }>
+}
+
+function isDiscoveredSkill(value: unknown): value is DiscoveredSkill {
+  if (!isRecord(value)) return false
+  const validFiles = Array.isArray(value.files) && value.files.every(
+    (file) => isRecord(file) && typeof file.path === 'string' && typeof file.content === 'string'
+  )
+  return (
+    typeof value.slug === 'string' &&
+    typeof value.name === 'string' &&
+    typeof value.description === 'string' &&
+    typeof value.icon === 'string' &&
+    typeof value.category === 'string' &&
+    isStringList(value.triggerKeywords) &&
+    typeof value.version === 'string' &&
+    typeof value.author === 'string' &&
+    isStringList(value.chainsTo) &&
+    typeof value.skillMdPath === 'string' &&
+    typeof value.skillMdContent === 'string' &&
+    validFiles &&
+    STANDARD_SKILL_SOURCES.has(value.source as string)
+  )
 }
 
 interface SkillsState {
@@ -38,6 +107,8 @@ interface SkillsState {
 
   /** Toggle a skill on/off for the current session, sync to disk */
   toggleSessionSkill: (id: string, workingDir?: string) => Promise<void>
+  /** Sync all enabled user-installed skills to a working directory */
+  syncSessionSkills: (workingDir: string) => Promise<void>
   /** Set the full list of session skills */
   setSessionSkills: (ids: string[]) => void
   /** Get all skills enabled for the current session */
@@ -79,11 +150,24 @@ const generateSkillId = (mpSkill: SkillsMPSkill): string => {
 
 const generateCustomSkillId = (name: string): string => {
   const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || `skill-${Date.now()}`
-  return `custom-${slug}-${Date.now().toString(36)}`
+  return `custom-${slug}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
 }
 
 const generateSlug = (name: string): string => {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || `skill-${Date.now()}`
+}
+
+function uniqueSkillSlug(baseSlug: string, skills: SkillDefinition[]): string {
+  const existing = new Set(skills.map((skill) => skill.slug.toLowerCase()))
+  if (!existing.has(baseSlug.toLowerCase())) return baseSlug
+
+  let suffix = 2
+  let candidate = `${baseSlug}-${suffix}`
+  while (existing.has(candidate.toLowerCase())) {
+    suffix += 1
+    candidate = `${baseSlug}-${suffix}`
+  }
+  return candidate
 }
 
 export const useSkillsStore = create<SkillsState>()(
@@ -116,7 +200,11 @@ export const useSkillsStore = create<SkillsState>()(
                 await ipc.removeSkillDir(workingDir, skill.slug)
               } catch (err) {
                 console.error(`[skills-store] removeSkillDir failed for ${skill.slug}:`, err)
-                set({ sessionSkillIds: [...get().sessionSkillIds, id] })
+                set((state) => ({
+                  sessionSkillIds: state.sessionSkillIds.includes(id)
+                    ? state.sessionSkillIds
+                    : [...state.sessionSkillIds, id],
+                }))
               }
             })
           }
@@ -139,6 +227,27 @@ export const useSkillsStore = create<SkillsState>()(
             })
           }
         }
+      },
+
+      syncSessionSkills: async (workingDir: string) => {
+        const activeSkills = get().skills.filter(
+          (skill) =>
+            get().sessionSkillIds.includes(skill.id) &&
+            (skill.source === 'online' || skill.source === 'custom')
+        )
+
+        await Promise.all(activeSkills.map(async (skill) => {
+          await withSkillLock(skill.slug, async () => {
+            const currentSkill = get().skills.find((item) => item.id === skill.id)
+            if (!currentSkill || !get().sessionSkillIds.includes(skill.id)) return
+            const files = currentSkill.files && currentSkill.files.length > 0
+              ? currentSkill.files
+              : [{ path: 'SKILL.md', content: currentSkill.skillMdContent }]
+            await ipc.writeSkillDir(workingDir, currentSkill.slug, files)
+          })
+        })).catch((error) => {
+          console.error('[skills-store] syncSessionSkills failed:', error)
+        })
       },
 
       setSessionSkills: (ids: string[]) => {
@@ -198,9 +307,8 @@ export const useSkillsStore = create<SkillsState>()(
 
       installOnlineSkill: async (mpSkill: SkillsMPSkill): Promise<boolean> => {
         const id = generateSkillId(mpSkill)
-        const { skills } = get()
         // Already installed?
-        if (skills.find((s) => s.id === id)) return true
+        if (get().skills.some((skill) => skill.id === id)) return true
 
         try {
           // 优先：整目录拉取（含 SKILL.md 与所有附属文件）
@@ -231,27 +339,26 @@ export const useSkillsStore = create<SkillsState>()(
             files = [{ path: 'SKILL.md', content: skillMdContent }]
           }
 
-          // Generate a slug from the skill name
-          const slug = mpSkill.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || `skill-${Date.now()}`
-
-          const newSkill: SkillDefinition = {
-            id,
-            slug,
-            name: mpSkill.name,
-            description: (mpSkill.description || '').slice(0, 100),
-            icon: '⚡',
-            category: 'online',
-            source: 'online',
-            skillMdContent,
-            warnings,
-            triggerKeywords: [],
-            version: '',
-            author: mpSkill.author || '',
-            chainsTo: [],
-            files,
-          }
-
-          set({ skills: [...skills, newSkill] })
+          set((state) => {
+            if (state.skills.some((skill) => skill.id === id)) return state
+            const newSkill: SkillDefinition = {
+              id,
+              slug: uniqueSkillSlug(generateSlug(mpSkill.name), state.skills),
+              name: mpSkill.name,
+              description: (mpSkill.description || '').slice(0, 100),
+              icon: '⚡',
+              category: 'online',
+              source: 'online',
+              skillMdContent,
+              warnings,
+              triggerKeywords: [],
+              version: '',
+              author: mpSkill.author || '',
+              chainsTo: [],
+              files,
+            }
+            return { skills: [...state.skills, newSkill] }
+          })
           return true
         } catch {
           return false
@@ -277,7 +384,12 @@ export const useSkillsStore = create<SkillsState>()(
           } catch (err) {
             console.error(`[skills-store] uninstall removeSkillDir failed for ${skill.slug}:`, err)
             // Rollback: put skill back into state
-            set({ skills: [...get().skills, skill], sessionSkillIds: get().sessionSkillIds })
+            set((state) => ({
+              skills: state.skills.some((current) => current.id === skill.id)
+                ? state.skills
+                : [...state.skills, skill],
+              sessionSkillIds: state.sessionSkillIds,
+            }))
           }
         }
       },
@@ -291,30 +403,31 @@ export const useSkillsStore = create<SkillsState>()(
         if (!result.success || !result.skillMdContent) {
           return { success: false, error: result.error || '解析技能文件失败' }
         }
-        const { skills } = get()
+        const skillMdContent = result.skillMdContent
         const name = result.name || '自定义技能'
         const id = generateCustomSkillId(name)
-        const slug = generateSlug(name)
         // 从 result.files 取文件列表；若 result.files 缺失或空则回退单文件
         const files = result.files && result.files.length > 0
           ? result.files
-          : [{ path: 'SKILL.md', content: result.skillMdContent }]
-        const newSkill: SkillDefinition = {
-          id,
-          slug,
-          name,
-          description: (result.description || '用户自定义技能').slice(0, 100),
-          icon: result.icon || '⚡',
-          category: (result.category as SkillDefinition['category']) || 'custom',
-          source: 'custom',
-          skillMdContent: result.skillMdContent,
-          triggerKeywords: [],
-          version: '',
-          author: '',
-          chainsTo: [],
-          files,
-        }
-        set({ skills: [...skills, newSkill] })
+          : [{ path: 'SKILL.md', content: skillMdContent }]
+        set((state) => {
+          const newSkill: SkillDefinition = {
+            id,
+            slug: uniqueSkillSlug(generateSlug(name), state.skills),
+            name,
+            description: (result.description || '用户自定义技能').slice(0, 100),
+            icon: result.icon || '⚡',
+            category: (result.category as SkillDefinition['category']) || 'custom',
+            source: 'custom',
+            skillMdContent,
+            triggerKeywords: [],
+            version: '',
+            author: '',
+            chainsTo: [],
+            files,
+          }
+          return { skills: [...state.skills, newSkill] }
+        })
         return { success: true }
       },
 
@@ -349,30 +462,21 @@ export const useSkillsStore = create<SkillsState>()(
       },
 
       discoverStandardSkills: async (workingDir: string) => {
+        const requestSequence = ++standardSkillDiscoverySequence
         try {
           const raw = await ipc.scanSkillDirs(workingDir)
-          const discovered = JSON.parse(raw) as Array<{
-            slug: string
-            name: string
-            description: string
-            icon: string
-            category: string
-            triggerKeywords: string[]
-            version: string
-            author: string
-            chainsTo: string[]
-            source: 'global-clerkbox' | 'project-clerkbox' | 'global-claude' | 'project-claude'
-            skillMdPath: string
-            skillMdContent: string
-            files: Array<{ path: string; content: string }>
-          }>
-          const { skills } = get()
+          const parsed: unknown = JSON.parse(raw)
+          if (!Array.isArray(parsed)) throw new Error('Invalid skill discovery payload')
+          if (requestSequence !== standardSkillDiscoverySequence) return
+
+          const discovered = parsed.filter(isDiscoveredSkill)
+          const installedSkills = get().skills.filter((skill) => !STANDARD_SKILL_SOURCES.has(skill.source))
           // 去重策略：
           //  - clerkbox 路径发现的技能：用 slug 去重（任何 source 已有该 slug 则跳过），
           //    因为 .clerkbox/skills/ 也是 online/custom 技能激活写盘的目录，避免重复发现已安装技能
           //  - claude 兼容路径发现的技能：用 slug+source 去重，保留同名技能在不同路径共存的灵活性
-          const existingSlugs = new Set(skills.map((s) => s.slug))
-          const existingSlugSource = new Set(skills.map((s) => `${s.slug}:${s.source}`))
+          const existingSlugs = new Set(installedSkills.map((skill) => skill.slug))
+          const existingSlugSource = new Set(installedSkills.map((skill) => `${skill.slug}:${skill.source}`))
           const newSkills: SkillDefinition[] = discovered
             .filter((d) => {
               if (d.source === 'global-clerkbox' || d.source === 'project-clerkbox') {
@@ -398,9 +502,11 @@ export const useSkillsStore = create<SkillsState>()(
               files: d.files,
               skillMdPath: d.skillMdPath,
             }))
-          if (newSkills.length > 0) {
-            set({ skills: [...get().skills, ...newSkills] })
-          }
+          const skills = [...installedSkills, ...newSkills]
+          set({
+            skills,
+            sessionSkillIds: get().sessionSkillIds.filter((id) => skills.some((skill) => skill.id === id)),
+          })
         } catch (e) {
           console.error('[skills-store] discoverStandardSkills failed:', e)
         }
@@ -409,22 +515,22 @@ export const useSkillsStore = create<SkillsState>()(
     {
       name: 'clerkbox-skills',
       version: 2,
-      migrate: (persisted: any, _version: number) => {
-        // Clear old preset skills and stale SkillsMP data
-        if (persisted?.skills) {
-          persisted.skills = persisted.skills
-            .filter((s: any) => s.source !== 'preset')
-            // 补齐旧技能缺失的新字段，防止渲染时访问 undefined 崩溃
-            .map((s: any) => ({
-              ...s,
-              triggerKeywords: Array.isArray(s.triggerKeywords) ? s.triggerKeywords : [],
-              version: typeof s.version === 'string' ? s.version : '',
-              author: typeof s.author === 'string' ? s.author : '',
-              chainsTo: Array.isArray(s.chainsTo) ? s.chainsTo : [],
-              files: Array.isArray(s.files) ? s.files : (s.skillMdContent ? [{ path: 'SKILL.md', content: s.skillMdContent }] : []),
-            }))
-        }
-        return persisted
+      migrate: (persisted: unknown, _version: number): Partial<SkillsState> => {
+        const state = isRecord(persisted) ? persisted : {}
+        const skills = Array.isArray(state.skills)
+          ? state.skills.flatMap((skill) => {
+              if (!isRecord(skill) || skill.source === 'preset') return []
+              return [{
+                ...skill,
+                triggerKeywords: stringList(skill.triggerKeywords),
+                version: typeof skill.version === 'string' ? skill.version : '',
+                author: typeof skill.author === 'string' ? skill.author : '',
+                chainsTo: stringList(skill.chainsTo),
+                files: storedFiles(skill.files, skill.skillMdContent),
+              }]
+            })
+          : []
+        return { ...state, skills } as Partial<SkillsState>
       },
       partialize: (state) => ({
         // 仅持久化用户安装的 online/custom 技能 + 会话激活技能 id。

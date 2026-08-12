@@ -3,6 +3,7 @@ import { Play, Pause, SkipBack, SkipForward, Music } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useVibeStore, DEFAULT_VIBE_MUSIC } from '../../stores/vibe-store'
 import { ipc } from '../../lib/ipc-client'
+import { toFileUrl } from '../../lib/file-url'
 
 const AUDIO_EXTENSIONS = ['mp3', 'wav', 'ogg', 'flac', 'm4a', 'aac', 'wma']
 
@@ -30,9 +31,11 @@ export default function VibeMusicPlayer() {
   const [progress, setProgress] = useState(0)
   const [duration, setDuration] = useState(0)
   const [needsUserInteraction, setNeedsUserInteraction] = useState(false)
+  const currentTrack = tracks[trackIndex] || tracks[0]
 
   // Build track list
   useEffect(() => {
+    let cancelled = false
     const loadTracks = async () => {
       if (musicFolder) {
         try {
@@ -42,7 +45,8 @@ export default function VibeMusicPlayer() {
             .map((e) => e.name)
             .sort()
           if (files.length > 0) {
-            setTracks(files.map((name) => ({ name, src: `file://${musicFolder}/${name}` })))
+            if (cancelled) return
+            setTracks(files.map((name) => ({ name, src: toFileUrl(`${musicFolder}/${name}`) })))
             setTrackIndex(0)
             return
           }
@@ -50,14 +54,16 @@ export default function VibeMusicPlayer() {
           console.error('Failed to load music folder:', e)
         }
       }
+      if (cancelled) return
 
       if (music) {
         if (music.type === 'local') {
           const exists = await ipc.fileExists(music.value)
+          if (cancelled) return
           if (!exists) {
             setTracks([{ name: fileNameFromPath(DEFAULT_VIBE_MUSIC.value), src: DEFAULT_VIBE_MUSIC.value }])
           } else {
-            setTracks([{ name: fileNameFromPath(music.value), src: `file://${music.value}` }])
+            setTracks([{ name: fileNameFromPath(music.value), src: toFileUrl(music.value) }])
           }
         } else {
           setTracks([{ name: fileNameFromPath(music.value), src: music.value }])
@@ -70,10 +76,16 @@ export default function VibeMusicPlayer() {
       setTrackIndex(0)
     }
 
-    loadTracks()
+    void loadTracks()
+    return () => {
+      cancelled = true
+    }
   }, [music, musicFolder])
 
-  const currentTrack = tracks[trackIndex] || tracks[0]
+  useEffect(() => {
+    setProgress(0)
+    setDuration(0)
+  }, [currentTrack?.src])
 
   // Auto-play when track changes
   const tryPlay = useCallback(async () => {
@@ -124,7 +136,7 @@ export default function VibeMusicPlayer() {
     const audio = audioRef.current
     if (!audio) return
     setProgress(audio.currentTime)
-    setDuration(audio.duration || 0)
+    setDuration(Number.isFinite(audio.duration) ? audio.duration : 0)
   }
 
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -149,9 +161,11 @@ export default function VibeMusicPlayer() {
         ref={audioRef}
         src={currentTrack.src}
         onTimeUpdate={handleTimeUpdate}
+        onLoadedMetadata={handleTimeUpdate}
+        onPlay={() => setIsPlaying(true)}
+        onPause={() => setIsPlaying(false)}
         onEnded={handleNext}
         loop={tracks.length === 1}
-        crossOrigin="anonymous"
       />
 
       <Music size={16} className="text-white/70" />
@@ -165,6 +179,7 @@ export default function VibeMusicPlayer() {
             max={duration || 1}
             value={progress}
             onChange={handleSeek}
+            aria-label={t('vibe.seek')}
             className="flex-1 h-1 bg-white/20 rounded-full appearance-none cursor-pointer accent-white"
           />
           <span className="text-[10px] text-white/60 tabular-nums">
@@ -175,21 +190,27 @@ export default function VibeMusicPlayer() {
 
       <div className="flex items-center gap-1">
         <button
+          type="button"
           onClick={handlePrev}
           disabled={tracks.length <= 1}
+          aria-label={t('vibe.previousTrack')}
           className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-white/15 disabled:opacity-30 transition-colors"
         >
           <SkipBack size={14} />
         </button>
         <button
+          type="button"
           onClick={handlePlayPause}
+          aria-label={isPlaying ? t('vibe.pause') : t('vibe.play')}
           className="w-8 h-8 flex items-center justify-center rounded-full bg-white/20 hover:bg-white/30 transition-colors"
         >
           {isPlaying ? <Pause size={14} /> : <Play size={14} className="ml-0.5" />}
         </button>
         <button
+          type="button"
           onClick={handleNext}
           disabled={tracks.length <= 1}
+          aria-label={t('vibe.nextTrack')}
           className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-white/15 disabled:opacity-30 transition-colors"
         >
           <SkipForward size={14} />
@@ -198,6 +219,7 @@ export default function VibeMusicPlayer() {
 
       {needsUserInteraction && (
         <button
+          type="button"
           onClick={handlePlayPause}
           className="ml-1 text-[10px] px-2 py-0.5 rounded-full bg-white/20 hover:bg-white/30 transition-colors"
         >

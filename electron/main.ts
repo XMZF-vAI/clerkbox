@@ -4,17 +4,198 @@ import {
   ipcMain,
   dialog,
   shell,
+  safeStorage,
 } from 'electron'
 import * as path from 'path'
 import * as fs from 'fs'
-import { exec, spawn } from 'child_process'
+import { spawn } from 'child_process'
 import * as iconv from 'iconv-lite'
 import * as https from 'https'
 import * as http from 'http'
+import * as net from 'net'
+import * as dns from 'dns'
 import * as os from 'os'
 import * as cheerio from 'cheerio'
 import * as yaml from 'js-yaml'
 import { registerApiProxyHandlers, bindApiProxyCleanup } from './api-proxy'
+
+const SKILL_REQUEST_TIMEOUT_MS = 15_000
+const MAX_SKILL_FILE_BYTES = 512 * 1024
+const MAX_SKILL_TREE_BYTES = 5 * 1024 * 1024
+const MAX_SKILL_FILES = 50
+const MAX_SKILL_DIRECTORY_BYTES = 2 * 1024 * 1024
+const MAX_SKILL_ARCHIVE_BYTES = 20 * 1024 * 1024
+const MAX_SKILL_SCAN_ENTRIES = 1_000
+const MAX_CUSTOM_AGENT_FILES = 100
+const MAX_CUSTOM_AGENT_FILE_BYTES = 512 * 1024
+const MAX_MEMORY_FILE_BYTES = 1024 * 1024
+const MAX_MEMORY_INDEX_BYTES = 25_000
+const MAX_API_KEY_BYTES = 16 * 1024
+
+/** Reject archives whose metadata exceeds extraction limits before invoking an OS extractor. */
+function assertSafeSkillArchive(filePath: string): void {
+  const archive = fs.readFileSync(filePath)
+  const endOfCentralDirectory = 0x06054b50
+  const centralDirectoryHeader = 0x02014b50
+  const minimumEocdSize = 22
+  if (archive.length < minimumEocdSize) throw new Error('Invalid ZIP archive')
+
+  const searchStart = Math.max(0, archive.length - minimumEocdSize - 0xffff)
+  let eocdOffset = -1
+
+  for (let offset = archive.length - minimumEocdSize; offset >= searchStart; offset -= 1) {
+    if (archive.readUInt32LE(offset) === endOfCentralDirectory) {
+      eocdOffset = offset
+      break
+    }
+  }
+  if (eocdOffset === -1) throw new Error('Invalid ZIP archive')
+
+  const entriesOnDisk = archive.readUInt16LE(eocdOffset + 8)
+  const totalEntries = archive.readUInt16LE(eocdOffset + 10)
+  const centralDirectorySize = archive.readUInt32LE(eocdOffset + 12)
+  const centralDirectoryOffset = archive.readUInt32LE(eocdOffset + 16)
+  if (
+    entriesOnDisk === 0xffff ||
+    totalEntries === 0xffff ||
+    centralDirectorySize === 0xffffffff ||
+    centralDirectoryOffset === 0xffffffff
+  ) {
+    throw new Error('ZIP64 archives are not supported for skill imports')
+  }
+  if (entriesOnDisk !== totalEntries || totalEntries === 0 || totalEntries > MAX_SKILL_FILES) {
+    throw new Error(`Archive entry count must be between 1 and ${MAX_SKILL_FILES}`)
+  }
+  if (centralDirectoryOffset + centralDirectorySize > eocdOffset) {
+    throw new Error('Invalid ZIP central directory')
+  }
+
+  let offset = centralDirectoryOffset
+  let totalUncompressedBytes = 0
+  for (let index = 0; index < totalEntries; index += 1) {
+    const minimumHeaderSize = 46
+    if (offset + minimumHeaderSize > eocdOffset || archive.readUInt32LE(offset) !== centralDirectoryHeader) {
+      throw new Error('Invalid ZIP central directory entry')
+    }
+    const compressedSize = archive.readUInt32LE(offset + 20)
+    const uncompressedSize = archive.readUInt32LE(offset + 24)
+    const filenameLength = archive.readUInt16LE(offset + 28)
+    const extraLength = archive.readUInt16LE(offset + 30)
+    const commentLength = archive.readUInt16LE(offset + 32)
+    const externalAttributes = archive.readUInt32LE(offset + 38)
+    const entryLength = minimumHeaderSize + filenameLength + extraLength + commentLength
+    if (
+      compressedSize === 0xffffffff ||
+      uncompressedSize === 0xffffffff ||
+      offset + entryLength > eocdOffset
+    ) {
+      throw new Error('Invalid or ZIP64 archive entry')
+    }
+
+    const filename = archive.subarray(offset + minimumHeaderSize, offset + minimumHeaderSize + filenameLength).toString('utf-8')
+    const normalizedFilename = filename.replace(/\\/g, '/')
+    const pathSegments = normalizedFilename.split('/').filter(Boolean)
+    const unixFileType = (externalAttributes >>> 16) & 0xf000
+    if (
+      !filename ||
+      filename.includes('\0') ||
+      normalizedFilename.startsWith('/') ||
+      /^[A-Za-z]:\//.test(normalizedFilename) ||
+      pathSegments.some((segment) => segment === '.' || segment === '..') ||
+      unixFileType === 0xa000
+    ) {
+      throw new Error('Archive contains an unsafe entry path')
+    }
+
+    totalUncompressedBytes += uncompressedSize
+    if (totalUncompressedBytes > MAX_SKILL_DIRECTORY_BYTES) {
+      throw new Error(`Archive expands beyond the ${MAX_SKILL_DIRECTORY_BYTES} byte limit`)
+    }
+    offset += entryLength
+  }
+}
+
+interface GitHubRepositoryReference {
+  owner: string
+  repo: string
+  kind?: 'tree' | 'blob'
+  branch?: string
+  subPath: string
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Parse a GitHub repository URL before interpolating it into an API endpoint. */
+function parseGitHubRepositoryUrl(input: string): GitHubRepositoryReference | null {
+  try {
+    const url = new URL(input)
+    if (url.protocol !== 'https:' || !['github.com', 'www.github.com'].includes(url.hostname)) {
+      return null
+    }
+
+    const rawSegments = url.pathname.split('/').filter(Boolean)
+    if (rawSegments.length < 2) return null
+    const segments = rawSegments.map((segment) => decodeURIComponent(segment))
+    const [owner, rawRepo, route, branch, ...subPathSegments] = segments
+    const repo = rawRepo.replace(/\.git$/i, '')
+    const isRepositorySegment = (value: string) => /^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(value)
+    const isSafePathSegment = (value: string) =>
+      value.length > 0 && value.length <= 255 && value !== '.' && value !== '..' && !/[\\/\0]/.test(value)
+
+    if (!isRepositorySegment(owner) || !isRepositorySegment(repo)) return null
+    if (route !== undefined && route !== 'tree' && route !== 'blob') {
+      return { owner, repo, subPath: '' }
+    }
+    if (route && (!branch || !isSafePathSegment(branch))) return null
+    if (!subPathSegments.every(isSafePathSegment)) return null
+
+    return {
+      owner,
+      repo,
+      kind: route,
+      branch,
+      subPath: subPathSegments.join('/'),
+    }
+  } catch {
+    return null
+  }
+}
+
+/** Fetch a bounded HTTPS response and release non-successful response streams. */
+function fetchHttpsText(
+  url: string,
+  headers: Record<string, string>,
+  maxBytes: number = MAX_SKILL_FILE_BYTES
+): Promise<{ statusCode: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const request = https.get(url, { headers }, (response) => {
+      const statusCode = response.statusCode ?? 0
+      if (statusCode !== 200) {
+        response.resume()
+        resolve({ statusCode, body: '' })
+        return
+      }
+
+      const chunks: Buffer[] = []
+      let receivedBytes = 0
+      response.on('data', (chunk: Buffer) => {
+        receivedBytes += chunk.length
+        if (receivedBytes > maxBytes) {
+          response.destroy(new Error(`Response exceeds ${maxBytes} byte limit`))
+          return
+        }
+        chunks.push(chunk)
+      })
+      response.on('end', () => resolve({ statusCode, body: Buffer.concat(chunks).toString('utf-8') }))
+      response.on('error', reject)
+    })
+
+    request.setTimeout(SKILL_REQUEST_TIMEOUT_MS, () => request.destroy(new Error('Request timed out')))
+    request.on('error', reject)
+  })
+}
 
 /** Resolve path relative to project root */
 function projectRoot(...segments: string[]): string {
@@ -22,10 +203,17 @@ function projectRoot(...segments: string[]): string {
 }
 
 /** 递归查找目录下的 SKILL.md（优先根级，其次任意层级，大小写不敏感） */
-function findSkillMd(dir: string): string | null {
-  const entries = fs.readdirSync(dir, { withFileTypes: true })
+function findSkillMd(dir: string, budget: { remaining: number } = { remaining: MAX_SKILL_SCAN_ENTRIES }): string | null {
+  if (budget.remaining <= 0) return null
+  let entries: fs.Dirent[]
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true })
+  } catch {
+    return null
+  }
   // 优先：根级 SKILL.md
   for (const e of entries) {
+    if (--budget.remaining < 0) return null
     if (e.isFile() && /^skill\.md$/i.test(e.name)) {
       return path.join(dir, e.name)
     }
@@ -33,7 +221,7 @@ function findSkillMd(dir: string): string | null {
   // 其次：递归子目录
   for (const e of entries) {
     if (e.isDirectory()) {
-      const found = findSkillMd(path.join(dir, e.name))
+      const found = findSkillMd(path.join(dir, e.name), budget)
       if (found) return found
     }
   }
@@ -41,8 +229,13 @@ function findSkillMd(dir: string): string | null {
 }
 
 /** 递归列出目录下所有文件相对路径（用于错误提示） */
-function listEntries(dir: string, base: string = ''): string[] {
-  const out: string[] = []
+function listEntries(
+  dir: string,
+  base: string = '',
+  out: string[] = [],
+  budget: { remaining: number } = { remaining: MAX_SKILL_SCAN_ENTRIES }
+): string[] {
+  if (out.length >= 20 || budget.remaining <= 0) return out
   let entries: fs.Dirent[]
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true })
@@ -50,9 +243,10 @@ function listEntries(dir: string, base: string = ''): string[] {
     return out
   }
   for (const e of entries) {
+    if (out.length >= 20 || --budget.remaining < 0) return out
     const rel = base ? `${base}/${e.name}` : e.name
     if (e.isDirectory()) {
-      out.push(...listEntries(path.join(dir, e.name), rel))
+      listEntries(path.join(dir, e.name), rel, out, budget)
     } else {
       out.push(rel)
     }
@@ -143,8 +337,57 @@ function parseSkillMd(content: string): {
 
 let mainWindow: BrowserWindow | null = null
 
+/** Keep provider credentials encrypted by the OS instead of in renderer localStorage. */
+function credentialStorePath(): string {
+  return path.join(app.getPath('userData'), 'clerkbox-credentials.json')
+}
+
+function assertCredentialId(value: unknown): string {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(value)) {
+    throw new Error('Invalid credential identifier')
+  }
+  return value
+}
+
+function readCredentialStore(): Record<string, string> {
+  try {
+    const parsed: unknown = JSON.parse(fs.readFileSync(credentialStorePath(), 'utf-8'))
+    if (!isRecord(parsed)) return {}
+    const entries = Object.entries(parsed).filter(
+      (entry): entry is [string, string] => /^[A-Za-z0-9._-]{1,128}$/.test(entry[0]) && typeof entry[1] === 'string'
+    )
+    return Object.fromEntries(entries)
+  } catch {
+    return {}
+  }
+}
+
+function writeCredentialStore(store: Record<string, string>): void {
+  const destination = credentialStorePath()
+  const temporary = `${destination}.tmp-${process.pid}`
+  fs.mkdirSync(path.dirname(destination), { recursive: true })
+  fs.writeFileSync(temporary, JSON.stringify(store), 'utf-8')
+  try {
+    fs.renameSync(temporary, destination)
+  } catch (error) {
+    try {
+      fs.copyFileSync(temporary, destination)
+    } finally {
+      fs.rmSync(temporary, { force: true })
+    }
+    if (!fs.existsSync(destination)) throw error
+  }
+}
+
+function assertEncryptionAvailable(): void {
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error('System credential encryption is unavailable')
+  }
+}
+
 function createWindow() {
   const preloadPath = projectRoot('dist-electron/electron/preload.js')
+  const devUrl = process.env.VITE_DEV_SERVER_URL
 
   mainWindow = new BrowserWindow({
     width: 1200,
@@ -165,8 +408,38 @@ function createWindow() {
     },
   })
 
+  const openInBrowser = (url: string) => {
+    try {
+      const parsed = new URL(url)
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        void shell.openExternal(parsed.toString())
+      }
+    } catch {
+      // Ignore malformed popup URLs instead of navigating the application window.
+    }
+  }
+
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    openInBrowser(url)
+    return { action: 'deny' }
+  })
+
+  const trustedOrigin = devUrl ? new URL(devUrl).origin : null
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    try {
+      const parsed = new URL(url)
+      const isTrusted = trustedOrigin
+        ? parsed.origin === trustedOrigin
+        : parsed.protocol === 'file:'
+      if (isTrusted) return
+    } catch {
+      // Fall through and block malformed navigation targets.
+    }
+    event.preventDefault()
+    openInBrowser(url)
+  })
+
   // Dev or production URL
-  const devUrl = process.env.VITE_DEV_SERVER_URL
   if (devUrl) {
     mainWindow.loadURL(devUrl)
   } else {
@@ -201,7 +474,7 @@ interface MemoryEntry {
 
 // ── IPC Handlers ──
 
-// M12: memory 文件操作全局序列化队列，防止并发写入导致索引损坏
+/** Serialize memory writes so concurrent updates cannot overwrite each other. */
 const memWriteQueue: Promise<unknown>[] = []
 function enqueueMemWrite<T>(op: () => Promise<T> | T): Promise<T> {
   const promise = (memWriteQueue.length > 0 ? memWriteQueue[memWriteQueue.length - 1] : Promise.resolve()).then(
@@ -209,7 +482,10 @@ function enqueueMemWrite<T>(op: () => Promise<T> | T): Promise<T> {
     op
   )
   memWriteQueue.push(promise)
-  promise.finally(() => {
+  void promise.then(() => {
+    const idx = memWriteQueue.indexOf(promise)
+    if (idx !== -1) memWriteQueue.splice(idx, 1)
+  }, () => {
     const idx = memWriteQueue.indexOf(promise)
     if (idx !== -1) memWriteQueue.splice(idx, 1)
   })
@@ -217,7 +493,7 @@ function enqueueMemWrite<T>(op: () => Promise<T> | T): Promise<T> {
 }
 
 function registerIpcHandlers() {
-  // S8: dialog 调用前校验主窗口，避免空指针；同时提供无父窗口的 fallback 重载
+  // Dialogs remain usable while the main window is closing or has not been created.
   const showOpenDialogSafe = (options: Electron.OpenDialogOptions) =>
     mainWindow && !mainWindow.isDestroyed()
       ? dialog.showOpenDialog(mainWindow, options)
@@ -230,12 +506,46 @@ function registerIpcHandlers() {
   // 模型 API 代理（拉模型列表 / 测连接 / 流式对话 / 中止）
   registerApiProxyHandlers()
 
-  // S7: 同步暴露平台信息(sandbox: true 后 preload 无法直接 require('os'))
+  // The sandboxed preload cannot access OS APIs directly.
   ipcMain.on('getPlatform', (event) => {
     event.returnValue = process.platform
   })
   ipcMain.on('getHomeDir', (event) => {
     event.returnValue = os.homedir()
+  })
+
+  ipcMain.handle('loadApiKeys', async (): Promise<Record<string, string>> => {
+    assertEncryptionAvailable()
+    const credentials = readCredentialStore()
+    const decrypted: Record<string, string> = {}
+    for (const [id, encrypted] of Object.entries(credentials)) {
+      try {
+        decrypted[id] = safeStorage.decryptString(Buffer.from(encrypted, 'base64'))
+      } catch {
+        // A credential encrypted for another OS account must never crash startup.
+      }
+    }
+    return decrypted
+  })
+
+  ipcMain.handle('saveApiKey', async (_event, id: unknown, apiKey: unknown): Promise<void> => {
+    const credentialId = assertCredentialId(id)
+    if (typeof apiKey !== 'string' || Buffer.byteLength(apiKey, 'utf-8') > MAX_API_KEY_BYTES) {
+      throw new Error('Invalid or oversized API key')
+    }
+    assertEncryptionAvailable()
+    const credentials = readCredentialStore()
+    if (apiKey) credentials[credentialId] = safeStorage.encryptString(apiKey).toString('base64')
+    else delete credentials[credentialId]
+    writeCredentialStore(credentials)
+  })
+
+  ipcMain.handle('removeApiKey', async (_event, id: unknown): Promise<void> => {
+    const credentialId = assertCredentialId(id)
+    assertEncryptionAvailable()
+    const credentials = readCredentialStore()
+    delete credentials[credentialId]
+    writeCredentialStore(credentials)
   })
 
   // File system
@@ -291,7 +601,7 @@ function registerIpcHandlers() {
 
   /** 解析自定义技能文件，返回 SKILL.md 内容、完整文件列表与元数据 */
   ipcMain.handle('parseSkillFile', async (_event, filePath: string) => {
-    const ext = path.extname(filePath).toLowerCase()
+    const ext = typeof filePath === 'string' ? path.extname(filePath).toLowerCase() : ''
     let skillMdContent = ''
     let tempDir = ''
     // 完整文件列表（path 相对解压根目录，content 为 utf-8 文本）
@@ -307,27 +617,39 @@ function registerIpcHandlers() {
     ])
 
     try {
+      const sourceStat = fs.statSync(filePath)
+      if (!sourceStat.isFile()) throw new Error('Skill source is not a file')
+      const sourceLimit = ext === '.zip' ? MAX_SKILL_ARCHIVE_BYTES : MAX_SKILL_FILE_BYTES
+      if (sourceStat.size > sourceLimit) throw new Error('Skill source exceeds the allowed size')
+
       if (ext === '.skill') {
         skillMdContent = fs.readFileSync(filePath, 'utf-8')
         // .skill 文件本身就是单个 SKILL.md 内容
         files = [{ path: 'SKILL.md', content: skillMdContent }]
       } else if (ext === '.zip') {
+        assertSafeSkillArchive(filePath)
         tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'clerkbox-skill-'))
-        const platform = process.platform
-        if (platform === 'win32') {
-          // PowerShell Expand-Archive 自带且路径兼容性好
-          await new Promise<void>((resolve, reject) => {
-            exec(
-              `powershell -NoProfile -Command "Expand-Archive -Path '${filePath.replace(/'/g, "''")}' -DestinationPath '${tempDir.replace(/'/g, "''")}' -Force"`,
-              (err, stdout, stderr) => (err ? reject(new Error(stderr || err.message)) : resolve())
-            )
+        const runExtractor = (command: string, args: string[]) => new Promise<void>((resolve, reject) => {
+          const child = spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })
+          let stderr = ''
+          child.stderr?.on('data', (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-8_192) })
+          child.on('error', reject)
+          child.on('close', (code) => {
+            if (code === 0) resolve()
+            else reject(new Error(stderr || `Archive extraction failed with exit code ${code ?? 'unknown'}`))
           })
+        })
+        if (process.platform === 'win32') {
+          await runExtractor('powershell.exe', [
+            '-NoProfile',
+            '-NonInteractive',
+            '-Command',
+            'param($source, $destination) Expand-Archive -LiteralPath $source -DestinationPath $destination -Force',
+            filePath,
+            tempDir,
+          ])
         } else {
-          await new Promise<void>((resolve, reject) => {
-            exec(`unzip -o ${JSON.stringify(filePath)} -d ${JSON.stringify(tempDir)}`, (err) =>
-              err ? reject(err) : resolve()
-            )
-          })
+          await runExtractor('unzip', ['-o', filePath, '-d', tempDir])
         }
         // 在解压目录中递归查找 SKILL.md（优先根级，其次任意层级）
         const skillMdPath = findSkillMd(tempDir)
@@ -335,11 +657,15 @@ function registerIpcHandlers() {
           const entries = listEntries(tempDir)
           throw new Error(`ZIP 中未找到 SKILL.md 文件，解压后包含：${entries.slice(0, 10).join(', ')}${entries.length > 10 ? ' ...' : ''}`)
         }
+        const skillMdStat = fs.statSync(skillMdPath)
+        if (skillMdStat.size > MAX_SKILL_FILE_BYTES) throw new Error('SKILL.md exceeds the allowed size')
         skillMdContent = fs.readFileSync(skillMdPath, 'utf-8')
 
         // 遍历解压目录所有文件，保留目录结构，读取文本文件内容
         const collected: Array<{ path: string; content: string }> = []
+        let totalBytes = 0
         const walk = (dir: string, base: string = '') => {
+          if (collected.length >= MAX_SKILL_FILES || totalBytes >= MAX_SKILL_DIRECTORY_BYTES) return
           let entries: fs.Dirent[]
           try {
             entries = fs.readdirSync(dir, { withFileTypes: true })
@@ -347,6 +673,7 @@ function registerIpcHandlers() {
             return
           }
           for (const e of entries) {
+            if (collected.length >= MAX_SKILL_FILES || totalBytes >= MAX_SKILL_DIRECTORY_BYTES) return
             const rel = base ? `${base}/${e.name}` : e.name
             if (e.isDirectory()) {
               walk(path.join(dir, e.name), rel)
@@ -354,6 +681,13 @@ function registerIpcHandlers() {
               const lower = path.extname(e.name).toLowerCase()
               if (binaryExt.has(lower)) continue
               const absPath = path.join(dir, e.name)
+              let stat: fs.Stats
+              try {
+                stat = fs.statSync(absPath)
+              } catch {
+                continue
+              }
+              if (stat.size > MAX_SKILL_FILE_BYTES || totalBytes + stat.size > MAX_SKILL_DIRECTORY_BYTES) continue
               let content: string
               try {
                 content = fs.readFileSync(absPath, 'utf-8')
@@ -362,6 +696,7 @@ function registerIpcHandlers() {
               }
               // 含 null 字节视为二进制，跳过
               if (content.indexOf('\u0000') !== -1) continue
+              totalBytes += stat.size
               collected.push({ path: rel, content })
             }
           }
@@ -384,8 +719,8 @@ function registerIpcHandlers() {
 
       const parsed = parseSkillMd(skillMdContent)
       return { success: true, ...parsed, skillMdContent, files }
-    } catch (err: any) {
-      return { success: false, error: err?.message || String(err) }
+    } catch (err: unknown) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) }
     } finally {
       if (tempDir) {
         try {
@@ -397,14 +732,14 @@ function registerIpcHandlers() {
 
   ipcMain.handle('fileExists', async (_event, filePath: string) => {
     try {
-      return fs.existsSync(filePath)
+      return fs.existsSync(assertSafePath(filePath))
     } catch {
       return false
     }
   })
 
   ipcMain.handle('openExternal', async (_event, url: string) => {
-    // S6: 仅允许 http/https scheme，防止 ms-msdt:/vbscript: 等协议处理器被利用（Follina 等 CVE）
+    // External links must not invoke local protocol handlers.
     try {
       const parsed = new URL(url)
       if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
@@ -440,13 +775,13 @@ function registerIpcHandlers() {
     event.returnValue = mainWindow?.isMaximized() ?? false
   })
 
-  // S3: 路径遍历防护 — 拒绝规范化后仍含 `..` 的路径，防止读到 ~/.ssh、写到启动项等
+  // File tool paths may be absolute, but cannot contain traversal segments or null bytes.
   const MAX_READ_BYTES = 10 * 1024 * 1024  // 10MB — 防止同步读大文件导致 OOM
   const MAX_WRITE_BYTES = 10 * 1024 * 1024 // 10MB — 防止填满磁盘
 
-  /** 规范化路径并拒绝包含 `..` 跳层的路径 */
+  /** Normalize a file-system path and reject traversal or null-byte input. */
   function assertSafePath(filePath: string): string {
-    if (typeof filePath !== 'string' || !filePath) {
+    if (typeof filePath !== 'string' || !filePath || filePath.includes('\0')) {
       throw new Error('Invalid path')
     }
     const normalized = path.normalize(filePath)
@@ -493,7 +828,7 @@ function registerIpcHandlers() {
   })
 
   ipcMain.handle('listDir', async (_event, dirPath: string) => {
-    const entries = fs.readdirSync(dirPath, { withFileTypes: true })
+    const entries = fs.readdirSync(assertSafePath(dirPath), { withFileTypes: true })
     return entries.map((entry) => ({
       name: entry.name,
       isDirectory: entry.isDirectory(),
@@ -501,7 +836,7 @@ function registerIpcHandlers() {
     }))
   })
 
-  // S4: 命令注入防护 — 主进程侧拒绝明显的危险模式（渲染进程的 isDangerousCommand 可被绕过）
+  // Defense in depth: renderer-side confirmation is not a security boundary.
   const DANGEROUS_CMD_PATTERNS: Array<{ regex: RegExp; reason: string }> = [
     // PowerShell 编码执行（绕过所有黑名单）
     { regex: /-\s*enc(?:odedcommand)?\s+/i, reason: 'PowerShell -EncodedCommand 被禁止' },
@@ -515,6 +850,13 @@ function registerIpcHandlers() {
     // 系统关机/重启
     { regex: /\b(?:Stop-Computer|Restart-Computer)\b/i, reason: '系统关机/重启命令被禁止' },
     { regex: /\bshutdown\b/i, reason: 'shutdown 命令被禁止' },
+    // Destructive filesystem operations and forced process termination.
+    { regex: /\brm\s+-rf\b/i, reason: '递归强制删除命令被禁止' },
+    { regex: /\brmdir\s+\/[sq]/i, reason: '递归删除目录命令被禁止' },
+    { regex: /\bdel\s+\/(?:[sq]|f\s+\/s\s+\/q)/i, reason: '强制删除命令被禁止' },
+    { regex: /\b(?:Remove-Item|ri)\b.*-(?:Recurse|r)\b.*-(?:Force|f)\b/i, reason: '递归强制删除命令被禁止' },
+    { regex: /\b(?:mkfs|format)\b/i, reason: '格式化文件系统命令被禁止' },
+    { regex: /\btaskkill\b.*\/f\b/i, reason: '强制结束进程命令被禁止' },
   ]
 
   /** 校验命令字符串，返回拒绝原因或 null */
@@ -541,9 +883,43 @@ function registerIpcHandlers() {
   }
 
   // Shell
+  // sessionId → 当前活动子进程集合。用户点中断按钮时通过 cancelSessionCommands 杀掉。
+  const sessionChildProcesses = new Map<string, Set<import('child_process').ChildProcess>>()
+  const registerChild = (sessionId: string | undefined, child: import('child_process').ChildProcess) => {
+    if (!sessionId) return
+    let set = sessionChildProcesses.get(sessionId)
+    if (!set) { set = new Set(); sessionChildProcesses.set(sessionId, set) }
+    set.add(child)
+  }
+  const unregisterChild = (sessionId: string | undefined, child: import('child_process').ChildProcess) => {
+    if (!sessionId) return
+    const set = sessionChildProcesses.get(sessionId)
+    if (!set) return
+    set.delete(child)
+    if (set.size === 0) sessionChildProcesses.delete(sessionId)
+  }
+  ipcMain.handle(
+    'cancelSessionCommands',
+    async (_event, sessionId: string) => {
+      const set = sessionChildProcesses.get(sessionId)
+      if (!set) return { killed: 0 }
+      let killed = 0
+      for (const child of set) {
+        try {
+          child.kill('SIGTERM')
+          // Windows 上 SIGTERM 不一定真杀掉，补一刀 SIGKILL
+          setTimeout(() => { try { child.kill('SIGKILL') } catch { /* already dead */ } }, 200)
+          killed++
+        } catch { /* ignore */ }
+      }
+      set.clear()
+      sessionChildProcesses.delete(sessionId)
+      return { killed }
+    }
+  )
   ipcMain.handle(
     'executeCommand',
-    async (_event, command: string, cwd?: string) => {
+    async (_event, command: string, cwd?: string, sessionId?: string) => {
       const blockReason = checkDangerousCommand(command)
       if (blockReason) {
         return { stdout: '', stderr: `命令被主进程拒绝：${blockReason}`, exitCode: -1 }
@@ -561,6 +937,7 @@ function registerIpcHandlers() {
           env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
           windowsHide: true,
         })
+        registerChild(sessionId, child)
         const stdoutChunks: Buffer[] = []
         const stderrChunks: Buffer[] = []
         let stdoutLen = 0
@@ -591,12 +968,14 @@ function registerIpcHandlers() {
           if (settled) return
           settled = true
           clearTimeout(timer)
+          unregisterChild(sessionId, child)
           resolve({ stdout: '', stderr: String(err), exitCode: 1, encodingFallback: false })
         })
         child.on('close', (code) => {
           if (settled) return
           settled = true
           clearTimeout(timer)
+          unregisterChild(sessionId, child)
           const out = decodeOutput(Buffer.concat(stdoutChunks))
           const err = decodeOutput(Buffer.concat(stderrChunks))
           resolve({
@@ -612,10 +991,13 @@ function registerIpcHandlers() {
 
   ipcMain.handle(
     'executeCommandWithShell',
-    async (_event, command: string, cwd: string | undefined, shellType: string) => {
+    async (_event, command: string, cwd: string | undefined, shellType: string, sessionId?: string) => {
       const blockReason = checkDangerousCommand(command)
       if (blockReason) {
         return { stdout: '', stderr: `命令被主进程拒绝：${blockReason}`, exitCode: -1 }
+      }
+      if (shellType !== 'cmd' && shellType !== 'powershell') {
+        return { stdout: '', stderr: 'Unsupported shell type', exitCode: -1 }
       }
       const isPS = shellType === 'powershell'
       const shellPath = isPS ? 'powershell.exe' : 'cmd.exe'
@@ -631,6 +1013,7 @@ function registerIpcHandlers() {
           env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
           windowsHide: true,
         })
+        registerChild(sessionId, child)
         const stdoutChunks: Buffer[] = []
         const stderrChunks: Buffer[] = []
         let stdoutLen = 0
@@ -661,12 +1044,14 @@ function registerIpcHandlers() {
           if (settled) return
           settled = true
           clearTimeout(timer)
+          unregisterChild(sessionId, child)
           resolve({ stdout: '', stderr: String(err), exitCode: 1, encodingFallback: false })
         })
         child.on('close', (code) => {
           if (settled) return
           settled = true
           clearTimeout(timer)
+          unregisterChild(sessionId, child)
           const out = decodeOutput(Buffer.concat(stdoutChunks))
           const err = decodeOutput(Buffer.concat(stderrChunks))
           resolve({
@@ -693,28 +1078,23 @@ function registerIpcHandlers() {
 
   // Web fetch
   ipcMain.handle('webFetch', async (_event, targetUrl: string, maxLength?: number) => {
-    const maxLen = maxLength ?? 30000
     try {
+      const safeUrl = assertPublicWebUrl(targetUrl).toString()
+      const requestedLength = typeof maxLength === 'number' && Number.isFinite(maxLength)
+        ? Math.trunc(maxLength)
+        : 30_000
+      const maxLen = Math.min(Math.max(requestedLength, 1), 100_000)
       // First try HTTP fetch (fast, works for SSR sites)
-      const raw = await fetchUrlRobust(targetUrl, maxLen + 5000)
+      const raw = await fetchUrlRobust(safeUrl, maxLen + 5000)
       let text = htmlToText(raw)
 
       // If HTTP extraction yielded enough content, return it
       if (text.length >= 200) {
-        return { content: text.substring(0, maxLen), url: targetUrl }
+        return { content: text.substring(0, maxLen), url: safeUrl }
       }
 
-      // Not enough content → likely a SPA, use BrowserWindow to render
-      try {
-        const renderedText = await fetchWithBrowser(targetUrl, maxLen + 2000)
-        if (renderedText && renderedText.length > 100) {
-          return { content: renderedText.substring(0, maxLen), url: targetUrl }
-        }
-      } catch (e) {
-        console.error('Browser fetch failed:', e)
-      }
-
-      // Browser also failed, try SPA pre-rendered data as last resort
+      // Use serialized SPA data as a safe fallback. Executing arbitrary remote
+      // page scripts in a BrowserWindow would reintroduce a DNS-rebinding path.
       if (text.length < 100) {
         const spaText = extractSpaContent(raw)
         if (spaText && spaText.length > 100) {
@@ -737,10 +1117,10 @@ function registerIpcHandlers() {
       }
 
       if (text.length === 0) {
-        return { error: '页面无有效内容，无法提取', url: targetUrl }
+        return { error: '页面无有效内容，无法提取', url: safeUrl }
       }
 
-      return { content: text.substring(0, maxLen), url: targetUrl }
+      return { content: text.substring(0, maxLen), url: safeUrl }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       return { error: msg }
@@ -780,7 +1160,6 @@ function registerIpcHandlers() {
 
   /** 扫描记忆目录，返回所有记忆条目（按 mtime 倒序，最多 200 条） */
   async function scanMemoryEntries(workingDir: string): Promise<MemoryEntry[]> {
-    const MAX_MEMORY_FILE_SIZE = 1024 * 1024 // 1 MB
     try {
       const memDir = path.join(workingDir, '.clerkbox', 'memory')
       if (!fs.existsSync(memDir)) return []
@@ -792,8 +1171,8 @@ function registerIpcHandlers() {
         try {
           const fullPath = path.join(memDir, filename)
           const stat = await fs.promises.stat(fullPath)
-          // P6: 跳过超大文件，避免一次性读入内存导致 OOM
-          if (stat.size > MAX_MEMORY_FILE_SIZE) continue
+          // Do not load oversized memory files into the renderer.
+          if (!stat.isFile() || stat.size > MAX_MEMORY_FILE_BYTES) continue
           const content = await fs.promises.readFile(fullPath, 'utf-8')
           // 读取前 30 行用于解析 frontmatter
           const headLines = content.split('\n').slice(0, 30).join('\n')
@@ -806,7 +1185,7 @@ function registerIpcHandlers() {
             content,
             mtime: stat.mtimeMs,
           })
-        } catch {}
+        } catch { /* Ignore one unreadable memory entry and continue scanning. */ }
       }
       entries.sort((a, b) => b.mtime - a.mtime)
       return entries.slice(0, 200)
@@ -825,12 +1204,19 @@ function registerIpcHandlers() {
     try {
       const agentsDir = path.join(workingDir, '.clerkbox', 'agents')
       if (!fs.existsSync(agentsDir)) return []
-      const files = fs.readdirSync(agentsDir).filter((f) => f.endsWith('.md'))
-      return files.map((filename) => {
+      const files = fs.readdirSync(agentsDir, { withFileTypes: true })
+        .filter((entry) => entry.isFile() && entry.name.endsWith('.md'))
+        .slice(0, MAX_CUSTOM_AGENT_FILES)
+      const agents: Array<{ filename: string; content: string }> = []
+      for (const file of files) {
+        const filename = file.name
         const fullPath = path.join(agentsDir, filename)
+        const stat = fs.statSync(fullPath)
+        if (stat.size > MAX_CUSTOM_AGENT_FILE_BYTES) continue
         const content = fs.readFileSync(fullPath, 'utf-8')
-        return { filename, content }
-      })
+        agents.push({ filename, content })
+      }
+      return agents
     } catch {
       return []
     }
@@ -845,6 +1231,28 @@ function registerIpcHandlers() {
         if (!fs.existsSync(indexPath)) {
           return { content: '', wasTruncated: false }
         }
+        const indexStat = fs.statSync(indexPath)
+        if (!indexStat.isFile()) return { content: '', wasTruncated: false }
+        if (indexStat.size > MAX_MEMORY_INDEX_BYTES) {
+          const fd = fs.openSync(indexPath, 'r')
+          try {
+            const buffer = Buffer.alloc(MAX_MEMORY_INDEX_BYTES)
+            const bytesRead = fs.readSync(fd, buffer, 0, MAX_MEMORY_INDEX_BYTES, 0)
+            const content = buffer
+              .subarray(0, bytesRead)
+              .toString('utf-8')
+              .split('\n')
+              .slice(0, 200)
+              .join('\n')
+            return {
+              content,
+              wasTruncated: true,
+              reason: `Memory index exceeds ${MAX_MEMORY_INDEX_BYTES} bytes`,
+            }
+          } finally {
+            fs.closeSync(fd)
+          }
+        }
         let raw = fs.readFileSync(indexPath, 'utf-8')
         let wasTruncated = false
         let reason: string | undefined
@@ -858,16 +1266,17 @@ function registerIpcHandlers() {
         }
 
         // 按 25000 字节截断（在最后一个换行符前截断）
-        const MAX_BYTES = 25000
-        if (Buffer.byteLength(raw, 'utf-8') > MAX_BYTES) {
-          let truncated = raw.substring(0, MAX_BYTES)
+        if (Buffer.byteLength(raw, 'utf-8') > MAX_MEMORY_INDEX_BYTES) {
+          let truncated = raw.substring(0, MAX_MEMORY_INDEX_BYTES)
           const lastNewline = truncated.lastIndexOf('\n')
           if (lastNewline > 0) {
             truncated = truncated.substring(0, lastNewline)
           }
           raw = truncated
           wasTruncated = true
-          reason = reason ? `${reason}; 字节数超过 ${MAX_BYTES}` : `字节数超过 ${MAX_BYTES}`
+          reason = reason
+            ? `${reason}; 字节数超过 ${MAX_MEMORY_INDEX_BYTES}`
+            : `字节数超过 ${MAX_MEMORY_INDEX_BYTES}`
         }
 
         return { content: raw, wasTruncated, reason }
@@ -886,10 +1295,16 @@ function registerIpcHandlers() {
         if (typeof slug !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(slug)) {
           throw new Error(`Invalid memory slug: ${slug}`)
         }
+        if (typeof frontmatter !== 'string' || typeof content !== 'string') {
+          throw new Error('Invalid memory content')
+        }
+        const fileContent = `---\n${frontmatter}\n---\n\n${content}`
+        if (Buffer.byteLength(fileContent, 'utf-8') > MAX_MEMORY_FILE_BYTES) {
+          throw new Error(`Memory entry exceeds the ${MAX_MEMORY_FILE_BYTES} byte limit`)
+        }
         const memDir = path.join(workingDir, '.clerkbox', 'memory')
         fs.mkdirSync(memDir, { recursive: true })
         const filePath = path.join(memDir, `${slug}.md`)
-        const fileContent = `---\n${frontmatter}\n---\n\n${content}`
         fs.writeFileSync(filePath, fileContent, 'utf-8')
       })
     }
@@ -901,12 +1316,20 @@ function registerIpcHandlers() {
     async (_event, workingDir: string, entryLine: string, slug: string): Promise<void> => {
       return enqueueMemWrite(async () => {
         const indexPath = path.join(workingDir, '.clerkbox', 'memory', 'MEMORY.md')
+        if (typeof entryLine !== 'string' || typeof slug !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(slug)) {
+          throw new Error('Invalid memory index entry')
+        }
+        if (Buffer.byteLength(entryLine, 'utf-8') > MAX_MEMORY_INDEX_BYTES) {
+          throw new Error(`Memory index entry exceeds the ${MAX_MEMORY_INDEX_BYTES} byte limit`)
+        }
         let existing = ''
-        try {
-          if (fs.existsSync(indexPath)) {
-            existing = fs.readFileSync(indexPath, 'utf-8')
+        if (fs.existsSync(indexPath)) {
+          const stat = fs.statSync(indexPath)
+          if (!stat.isFile() || stat.size > MAX_MEMORY_INDEX_BYTES) {
+            throw new Error('Memory index exceeds the allowed size')
           }
-        } catch {}
+          existing = fs.readFileSync(indexPath, 'utf-8')
+        }
 
         // 检查是否已有指向 <slug>.md 的索引行
         const escapedSlug = slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -920,6 +1343,9 @@ function registerIpcHandlers() {
             existing += '\n'
           }
           existing += entryLine
+        }
+        if (Buffer.byteLength(existing, 'utf-8') > MAX_MEMORY_INDEX_BYTES) {
+          throw new Error(`Memory index exceeds the ${MAX_MEMORY_INDEX_BYTES} byte limit`)
         }
         fs.mkdirSync(path.dirname(indexPath), { recursive: true })
         fs.writeFileSync(indexPath, existing, 'utf-8')
@@ -957,24 +1383,47 @@ function registerIpcHandlers() {
     }
   )
 
-  // Database operations (JSON-file based with write serialization)
+  // Database operations (JSON file with serialized, durable writes)
   const dbPath = path.join(app.getPath('userData'), 'clerkbox-db.json')
   let dbWriteQueue: Promise<void> = Promise.resolve()
 
-  /** Serialize DB writes to prevent concurrent read-modify-write data loss */
+  /** Serialize writes while allowing callers to observe failures. */
   function enqueueDbWrite(fn: () => void): Promise<void> {
-    dbWriteQueue = dbWriteQueue.then(() => {
-      fn()
-    }).catch((err) => {
+    const write = dbWriteQueue.then(fn)
+    dbWriteQueue = write.catch((err) => {
       console.error('DB write failed:', err)
     })
-    return dbWriteQueue
+    return write
   }
 
-  function readDb(): { sessions: any[]; messages: Record<string, any[]> } {
+  interface Database {
+    sessions: Record<string, unknown>[]
+    messages: Record<string, Record<string, unknown>[]>
+    recentsFolders?: string[]
+  }
+
+  function readDb(): Database {
     try {
       if (fs.existsSync(dbPath)) {
-        return JSON.parse(fs.readFileSync(dbPath, 'utf-8'))
+        const parsed: unknown = JSON.parse(fs.readFileSync(dbPath, 'utf-8'))
+        if (parsed && typeof parsed === 'object') {
+          const data = parsed as Record<string, unknown>
+          return {
+            sessions: Array.isArray(data.sessions) ? data.sessions.filter(isRecord) : [],
+            messages: isRecord(data.messages)
+              ? Object.fromEntries(
+                  Object.entries(data.messages).map(([id, rows]) => [
+                    id,
+                    Array.isArray(rows) ? rows.filter(isRecord) : [],
+                  ])
+                )
+              : {},
+            recentsFolders: Array.isArray(data.recentsFolders)
+              ? data.recentsFolders.filter((folder): folder is string => typeof folder === 'string')
+              : [],
+          }
+        }
+        throw new Error('Database root must be an object')
       }
     } catch {
       try {
@@ -983,20 +1432,35 @@ function registerIpcHandlers() {
           fs.copyFileSync(dbPath, backupPath)
           console.error('DB corrupt, backed up to:', backupPath)
         }
-      } catch {}
+      } catch { /* Preserve the original corruption error if backup creation also fails. */ }
     }
-    return { sessions: [], messages: {} }
+    return { sessions: [], messages: {}, recentsFolders: [] }
   }
 
-  function writeDb(db: any) {
-    fs.writeFileSync(dbPath, JSON.stringify(db, null, 2), 'utf-8')
+  /** Write through a sibling temporary file to avoid corrupting the database on interruption. */
+  function writeDb(db: Database) {
+    const tempPath = `${dbPath}.tmp-${process.pid}`
+    fs.writeFileSync(tempPath, JSON.stringify(db, null, 2), 'utf-8')
+    try {
+      fs.renameSync(tempPath, dbPath)
+    } catch (err) {
+      try {
+        fs.copyFileSync(tempPath, dbPath)
+      } finally {
+        fs.rmSync(tempPath, { force: true })
+      }
+      if (!fs.existsSync(dbPath)) throw err
+    }
   }
 
-  ipcMain.handle('dbCreateSession', async (_event, row: any) => {
+  ipcMain.handle('dbCreateSession', async (_event, row: Record<string, unknown>) => {
     await enqueueDbWrite(() => {
+      if (typeof row?.id !== 'string' || !row.id) throw new Error('Invalid session row')
       const db = readDb()
-      db.sessions.push(row)
-      db.messages[row.id] = []
+      const existingIndex = db.sessions.findIndex((session) => session.id === row.id)
+      if (existingIndex === -1) db.sessions.push(row)
+      else db.sessions[existingIndex] = { ...db.sessions[existingIndex], ...row }
+      if (!db.messages[row.id]) db.messages[row.id] = []
       writeDb(db)
     })
   })
@@ -1004,7 +1468,7 @@ function registerIpcHandlers() {
   ipcMain.handle('dbUpdateSessionTitle', async (_event, id: string, title: string, updatedAt: number) => {
     await enqueueDbWrite(() => {
       const db = readDb()
-      const session = db.sessions.find((s: any) => s.id === id)
+      const session = db.sessions.find((s) => s.id === id)
       if (session) {
         session.title = title
         session.updated_at = updatedAt
@@ -1016,7 +1480,7 @@ function registerIpcHandlers() {
   ipcMain.handle('dbDeleteSession', async (_event, id: string) => {
     await enqueueDbWrite(() => {
       const db = readDb()
-      db.sessions = db.sessions.filter((s: any) => s.id !== id)
+      db.sessions = db.sessions.filter((s) => s.id !== id)
       delete db.messages[id]
       writeDb(db)
     })
@@ -1028,15 +1492,33 @@ function registerIpcHandlers() {
     return readDb().sessions
   })
 
-  ipcMain.handle('dbAddMessage', async (_event, row: any) => {
+  ipcMain.handle('dbGetRecents', async () => {
+    await dbWriteQueue
+    return readDb().recentsFolders || []
+  })
+
+  ipcMain.handle('dbSetRecents', async (_event, recents: string[]) => {
     await enqueueDbWrite(() => {
+      const db = readDb()
+      db.recentsFolders = Array.isArray(recents)
+        ? recents.filter((folder) => typeof folder === 'string').slice(0, 8)
+        : []
+      writeDb(db)
+    })
+  })
+
+  ipcMain.handle('dbAddMessage', async (_event, row: Record<string, unknown>) => {
+    await enqueueDbWrite(() => {
+      if (typeof row?.id !== 'string' || !row.id || typeof row.session_id !== 'string' || !row.session_id) {
+        throw new Error('Invalid message row')
+      }
       const db = readDb()
       if (!db.messages[row.session_id]) {
         db.messages[row.session_id] = []
       }
       const msgs = db.messages[row.session_id]
-      // M10: 去重 — 若 id 已存在则更新（UPSERT），避免重复写入导致历史膨胀
-      const existingIdx = msgs.findIndex((m: any) => m.id === row.id)
+      // Upsert by message id so repeated stream writes do not duplicate history.
+      const existingIdx = msgs.findIndex((m) => m.id === row.id)
       if (existingIdx !== -1) {
         msgs[existingIdx] = { ...msgs[existingIdx], ...row }
       } else {
@@ -1060,8 +1542,8 @@ function registerIpcHandlers() {
       await enqueueDbWrite(() => {
         const db = readDb()
         let found = false
-        for (const msgs of Object.values(db.messages) as any[][]) {
-          const msg = msgs.find((m: any) => m.id === id)
+        for (const msgs of Object.values(db.messages)) {
+          const msg = msgs.find((m) => m.id === id)
           if (msg) {
             msg.content = content
             if (toolCalls !== undefined) msg.tool_calls = toolCalls
@@ -1090,7 +1572,7 @@ function registerIpcHandlers() {
       if (!msgs) return
 
       // Find the index of the message with beforeId
-      const idx = msgs.findIndex((m: any) => m.id === beforeId)
+      const idx = msgs.findIndex((m) => m.id === beforeId)
       if (idx === -1) return
 
       // deleteBeforeId means "delete everything that came before this message"
@@ -1110,7 +1592,7 @@ function registerIpcHandlers() {
     })
   })
 
-  // S2: slug 严格校验 — 只允许 [a-zA-Z0-9_-]，防止 "../../.." 路径遍历导致任意目录删除
+  // A restricted slug prevents skill-directory traversal.
   function assertSafeSlug(slug: string): string {
     if (typeof slug !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(slug)) {
       throw new Error(`Invalid slug: ${slug}`)
@@ -1125,7 +1607,9 @@ function registerIpcHandlers() {
   })
 
   ipcMain.handle('writeSkillMd', async (_event, projectDir: string, slug: string, content: string) => {
-    // 兼容封装：单文件场景，等价于 writeSkillDir 的单文件特例
+    if (typeof content !== 'string' || Buffer.byteLength(content, 'utf-8') > MAX_SKILL_FILE_BYTES) {
+      throw new Error('Invalid or oversized skill content')
+    }
     const safeSlug = assertSafeSlug(slug)
     const skillDir = path.join(projectDir, '.clerkbox', 'skills', safeSlug)
     fs.mkdirSync(skillDir, { recursive: true })
@@ -1134,15 +1618,33 @@ function registerIpcHandlers() {
 
   // 多文件写盘：把技能所有文件（含 SKILL.md 与子目录文件）写到 .clerkbox/skills/<slug>/ 下
   ipcMain.handle('writeSkillDir', async (_event, projectDir: string, slug: string, files: Array<{ path: string; content: string }>) => {
+    if (!Array.isArray(files) || files.length === 0 || files.length > MAX_SKILL_FILES) {
+      throw new Error('Invalid skill file list')
+    }
     const safeSlug = assertSafeSlug(slug)
     const skillDir = path.join(projectDir, '.clerkbox', 'skills', safeSlug)
     fs.mkdirSync(skillDir, { recursive: true })
-    // 路径安全校验：确保所有文件写在 skillDir 之下
     const expectedBase = path.resolve(skillDir)
+    let totalBytes = 0
     for (const f of files) {
-      // 防 path traversal：清理 path，禁止绝对路径和 ../
-      const cleaned = f.path.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\.\.\//g, '')
-      const target = path.resolve(skillDir, cleaned)
+      if (!isRecord(f) || typeof f.path !== 'string' || typeof f.content !== 'string') {
+        throw new Error('Invalid skill file')
+      }
+      const fileBytes = Buffer.byteLength(f.content, 'utf-8')
+      if (fileBytes > MAX_SKILL_FILE_BYTES || totalBytes + fileBytes > MAX_SKILL_DIRECTORY_BYTES) {
+        throw new Error('Skill files exceed the allowed size')
+      }
+      totalBytes += fileBytes
+
+      const segments = f.path.replace(/\\/g, '/').split('/')
+      if (
+        f.path.includes('\0') ||
+        f.path.startsWith('/') ||
+        segments.some((segment) => !segment || segment === '.' || segment === '..')
+      ) {
+        throw new Error(`Invalid skill file path: ${f.path}`)
+      }
+      const target = path.resolve(skillDir, ...segments)
       const rel = path.relative(expectedBase, target)
       if (rel.startsWith('..') || path.isAbsolute(rel)) {
         throw new Error(`Path traversal blocked in writeSkillDir: ${f.path}`)
@@ -1169,42 +1671,54 @@ function registerIpcHandlers() {
 
   // Skill marketplace: search via SkillHub API (https://skillhub.proclaw.cc)
   ipcMain.handle('skillsSearch', async (_event, query: string, page: number = 1, limit: number = 20) => {
+    const safeQuery = typeof query === 'string' ? query.trim().slice(0, 200) : ''
+    const toInteger = (value: unknown, fallback: number, min: number, max: number) =>
+      typeof value === 'number' && Number.isFinite(value)
+        ? Math.min(Math.max(Math.trunc(value), min), max)
+        : fallback
+    const safePage = toInteger(page, 1, 1, 1000)
+    const safeLimit = toInteger(limit, 20, 1, 50)
+
     try {
       const apiUrl = new URL('https://skillhub.proclaw.cc/api/search')
-      apiUrl.searchParams.set('q', query)
-      apiUrl.searchParams.set('page', String(page))
-      apiUrl.searchParams.set('pageSize', String(limit))
+      apiUrl.searchParams.set('q', safeQuery)
+      apiUrl.searchParams.set('page', String(safePage))
+      apiUrl.searchParams.set('pageSize', String(safeLimit))
 
-      const data = await new Promise<string>((resolve, reject) => {
-        https.get(apiUrl.toString(), {
-          headers: { 'Accept': 'application/json', 'User-Agent': 'ClerkBox/1.5' },
-          timeout: 15000,
-        }, (res) => {
-          let body = ''
-          res.on('data', (chunk) => (body += chunk))
-          res.on('end', () => resolve(body))
-          res.on('error', (err) => reject(err))
-        }).on('error', (err) => reject(err))
-      })
+      const response = await fetchHttpsText(
+        apiUrl.toString(),
+        { Accept: 'application/json', 'User-Agent': 'ClerkBox/1.5' }
+      )
+      if (response.statusCode !== 200) throw new Error(`SkillHub returned HTTP ${response.statusCode}`)
 
-      const json = JSON.parse(data)
-      const skills = (json.skills || []) as any[]
-      const total = json.total || 0
-      const totalPages = json.totalPages || 1
-      const currentPage = json.page || page
-      const pageSize = json.pageSize || limit
-
-      // Map SkillHub response → existing SkillsMPSkill format
-      const mapped = skills.map((s: any) => ({
-        id: s.id || s.slug || '',
-        name: s.name || '',
-        author: s.author?.name || s.author || 'unknown',
-        description: s.description || '',
-        githubUrl: s.repositoryUrl || '',
-        skillUrl: s.repositoryUrl || '',
-        stars: s.starCount || 0,
-        updatedAt: '',
-      }))
+      const parsed: unknown = JSON.parse(response.body)
+      if (!isRecord(parsed)) throw new Error('SkillHub returned an invalid payload')
+      const skills = Array.isArray(parsed.skills) ? parsed.skills.filter(isRecord) : []
+      const asString = (value: unknown) => (typeof value === 'string' ? value : '')
+      const asNumber = (value: unknown, fallback: number) =>
+        typeof value === 'number' && Number.isFinite(value) ? value : fallback
+      const mapped = skills
+        .map((skill) => {
+          const id = asString(skill.id) || asString(skill.slug)
+          const repositoryUrl = asString(skill.repositoryUrl)
+          const author = isRecord(skill.author) ? asString(skill.author.name) : asString(skill.author)
+          return {
+            id,
+            name: asString(skill.name),
+            author: author || 'unknown',
+            description: asString(skill.description),
+            githubUrl: repositoryUrl,
+            skillUrl: repositoryUrl,
+            stars: asNumber(skill.starCount, 0),
+            updatedAt: '',
+          }
+        })
+        .filter((skill) => skill.id && skill.githubUrl)
+        .slice(0, safeLimit)
+      const total = Math.max(0, Math.trunc(asNumber(parsed.total, mapped.length)))
+      const totalPages = Math.max(1, Math.trunc(asNumber(parsed.totalPages, 1)))
+      const currentPage = toInteger(parsed.page, safePage, 1, totalPages)
+      const pageSize = toInteger(parsed.pageSize, safeLimit, 1, 50)
 
       return JSON.stringify({
         success: true,
@@ -1218,17 +1732,16 @@ function registerIpcHandlers() {
             hasNext: currentPage < totalPages,
             hasPrev: currentPage > 1,
           },
-          filters: { search: query, sortBy: 'relevance' },
+          filters: { search: safeQuery, sortBy: 'relevance' },
         },
       })
-    } catch (e: any) {
-      // Fallback: if SkillHub API is unreachable, return empty result gracefully
+    } catch {
       return JSON.stringify({
         success: true,
         data: {
           skills: [],
-          pagination: { page: 1, limit, total: 0, totalPages: 0, hasNext: false, hasPrev: false },
-          filters: { search: query, sortBy: 'relevance' },
+          pagination: { page: safePage, limit: safeLimit, total: 0, totalPages: 0, hasNext: false, hasPrev: false },
+          filters: { search: safeQuery, sortBy: 'relevance' },
         },
       })
     }
@@ -1237,17 +1750,13 @@ function registerIpcHandlers() {
   // Fetch SKILL.md from a skill's GitHub repository
   // Tries multiple common locations and branches automatically
   ipcMain.handle('fetchSkillMd', async (_event, githubUrl: string) => {
-    // Parse owner/repo from GitHub URL
-    const ghMatch = githubUrl.match(/github\.com\/([^/]+)\/([^/]+)/)
-    if (!ghMatch) {
+    const repository = parseGitHubRepositoryUrl(githubUrl)
+    if (!repository) {
       return JSON.stringify({ error: 'Invalid GitHub URL' })
     }
 
-    const [, owner, repo] = ghMatch
-    const cleanRepo = repo.replace(/\.git$/, '').replace(/\/$/, '')
-
     // Use the robust multi-location fetcher
-    return await fetchSkillMdFromRepo(`${owner}/${cleanRepo}`)
+    return await fetchSkillMdFromRepo(`${repository.owner}/${repository.repo}`)
   })
 
   // 整目录拉取技能：用 GitHub Trees API 列出文件后逐个抓取，返回完整文件列表
@@ -1354,17 +1863,16 @@ async function fetchSkillMdFromRepo(ownerRepo: string): Promise<string> {
   // Branches to try
   const branches = ['main', 'master', 'HEAD']
 
-  const tryFetch = (branch: string, filePath: string): Promise<string> =>
-    new Promise((resolve) => {
-      const rawUrl = `https://raw.githubusercontent.com/${owner}/${cleanRepo}/${branch}/${filePath}`
-      https.get(rawUrl, { timeout: 15000, headers: { 'User-Agent': 'ClerkBox/1.5' } }, (res) => {
-        if (res.statusCode !== 200) { resolve(''); return }
-        let data = ''
-        res.on('data', (chunk) => (data += chunk))
-        res.on('end', () => resolve(data))
-        res.on('error', () => resolve(''))
-      }).on('error', () => resolve(''))
-    })
+  const tryFetch = async (branch: string, filePath: string): Promise<string> => {
+    const encodedPath = filePath.split('/').map(encodeURIComponent).join('/')
+    const rawUrl = `https://raw.githubusercontent.com/${owner}/${cleanRepo}/${encodeURIComponent(branch)}/${encodedPath}`
+    try {
+      const response = await fetchHttpsText(rawUrl, { 'User-Agent': 'ClerkBox/1.5' })
+      return response.statusCode === 200 ? response.body : ''
+    } catch {
+      return ''
+    }
+  }
 
   // Try all branch × path combinations
   for (const branch of branches) {
@@ -1388,18 +1896,16 @@ async function fetchSkillMdFromRepo(ownerRepo: string): Promise<string> {
 /** 整目录拉取技能：解析 GitHub URL，用 Trees API 列出文件后逐个抓取，返回完整文件列表。
  *  失败时回退到 fetchSkillMdFromRepo 拉单个 SKILL.md，保证健壮性。 */
 async function fetchSkillDirFromRepo(githubUrl: string): Promise<string> {
-  // 解析 GitHub URL：支持 github.com/owner/repo、/tree/branch/path、/blob/branch/file
-  const match = githubUrl.match(/github\.com\/([^/]+)\/([^/]+)(?:\/(tree|blob)\/([^/]+)(?:\/(.+))?)?/)
-  if (!match) {
+  const repository = parseGitHubRepositoryUrl(githubUrl)
+  if (!repository) {
     return JSON.stringify({ error: 'Invalid GitHub URL' })
   }
-  const [, owner, repoRaw, kind, branchRaw, subPathRaw] = match
-  const repo = (repoRaw || '').replace(/\.git$/, '').replace(/\/$/, '')
-  const branch = branchRaw || 'main'
+  const { owner, repo } = repository
+  const branch = repository.branch || 'main'
   // subPath：技能在仓库中的根路径（默认根目录）
-  let subPath = (subPathRaw || '').replace(/\/$/, '')
+  let subPath = repository.subPath
   // blob 单文件链接：取该文件所在目录作为 subPath，便于拉取同目录资源
-  if (kind === 'blob' && subPath) {
+  if (repository.kind === 'blob' && subPath) {
     const idx = subPath.lastIndexOf('/')
     subPath = idx >= 0 ? subPath.slice(0, idx) : ''
   }
@@ -1414,24 +1920,15 @@ async function fetchSkillDirFromRepo(githubUrl: string): Promise<string> {
   ])
 
   // 用 GitHub Trees API 列出文件
-  const treesApiUrl = `https://api.github.com/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`
+  const treesApiUrl = `https://api.github.com/repos/${owner}/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`
   let treeData = ''
   try {
-    treeData = await new Promise<string>((resolve, reject) => {
-      https.get(treesApiUrl, {
-        headers: {
-          'User-Agent': 'ClerkBox/1.5',
-          'Accept': 'application/vnd.github+json',
-        },
-        timeout: 15000,
-      }, (res) => {
-        if (res.statusCode !== 200) { resolve(''); return }
-        let body = ''
-        res.on('data', (chunk) => (body += chunk))
-        res.on('end', () => resolve(body))
-        res.on('error', (err) => reject(err))
-      }).on('error', (err) => reject(err))
-    })
+    const response = await fetchHttpsText(
+      treesApiUrl,
+      { 'User-Agent': 'ClerkBox/1.5', Accept: 'application/vnd.github+json' },
+      MAX_SKILL_TREE_BYTES
+    )
+    treeData = response.statusCode === 200 ? response.body : ''
   } catch {
     treeData = ''
   }
@@ -1452,20 +1949,21 @@ async function fetchSkillDirFromRepo(githubUrl: string): Promise<string> {
     return JSON.stringify({ error: 'SKILL.md not found' })
   }
 
-  // 解析 tree 响应
-  let treeJson: { tree?: Array<{ path: string; type: string; size?: number }> }
+  // Parse the tree response defensively because it is external data.
+  let treeJson: unknown
   try {
     treeJson = JSON.parse(treeData)
   } catch {
     return JSON.stringify({ error: 'Failed to parse Trees API response' })
   }
-  const tree = treeJson.tree || []
+  const tree = isRecord(treeJson) && Array.isArray(treeJson.tree) ? treeJson.tree : []
 
-  // 筛选技能目录下的文件
+  // Keep the manifest even if a repository has many auxiliary files.
   const prefix = subPath ? subPath + '/' : ''
-  const candidates: Array<{ path: string }> = []
+  const supplementaryCandidates: Array<{ path: string }> = []
+  let skillCandidate: { path: string } | null = null
   for (const item of tree) {
-    if (item.type !== 'blob') continue
+    if (!isRecord(item) || item.type !== 'blob' || typeof item.path !== 'string') continue
     let p = item.path
     if (prefix) {
       if (p.startsWith(prefix)) {
@@ -1475,45 +1973,38 @@ async function fetchSkillDirFromRepo(githubUrl: string): Promise<string> {
       }
     }
     if (!p) continue
-    // 跳过二进制扩展名
+    if (p.split('/').some((segment) => !segment || segment === '.' || segment === '..' || /[\\\0]/.test(segment))) {
+      continue
+    }
     const ext = path.extname(p).toLowerCase()
     if (binaryExt.has(ext)) continue
-    // 跳过大于 500KB 的文件
-    if (typeof item.size === 'number' && item.size > 500 * 1024) continue
-    candidates.push({ path: p })
-    if (candidates.length >= 50) break
+    if (typeof item.size === 'number' && (!Number.isFinite(item.size) || item.size > MAX_SKILL_FILE_BYTES)) continue
+    if (p === 'SKILL.md' || p.endsWith('/SKILL.md')) {
+      skillCandidate ??= { path: p }
+    } else if (supplementaryCandidates.length < 49) {
+      supplementaryCandidates.push({ path: p })
+    }
   }
+  const candidates = skillCandidate ? [skillCandidate, ...supplementaryCandidates] : supplementaryCandidates
 
-  // 必须找到 SKILL.md
-  const hasSkillMd = candidates.some((f) => f.path === 'SKILL.md' || f.path.endsWith('/SKILL.md'))
-  if (!hasSkillMd) {
+  if (!skillCandidate) {
     return JSON.stringify({ error: 'SKILL.md not found' })
   }
 
-  // 逐个从 raw.githubusercontent.com 拉取文件内容
+  // Fetch each text file with the same per-file size bound used for local imports.
   const warnings: string[] = []
   const files: Array<{ path: string; content: string }> = []
   for (const cand of candidates) {
     const fullPath = prefix ? `${prefix}${cand.path}` : cand.path
-    const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${fullPath}`
+    const encodedPath = fullPath.split('/').map(encodeURIComponent).join('/')
+    const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${encodeURIComponent(branch)}/${encodedPath}`
     try {
-      const content = await new Promise<string>((resolve) => {
-        https.get(rawUrl, {
-          headers: { 'User-Agent': 'ClerkBox/1.5' },
-          timeout: 15000,
-        }, (res) => {
-          if (res.statusCode !== 200) { resolve(''); return }
-          let data = ''
-          res.on('data', (chunk) => (data += chunk))
-          res.on('end', () => resolve(data))
-          res.on('error', () => resolve(''))
-        }).on('error', () => resolve(''))
-      })
-      if (!content) {
+      const response = await fetchHttpsText(rawUrl, { 'User-Agent': 'ClerkBox/1.5' })
+      if (response.statusCode !== 200 || !response.body) {
         warnings.push(`拉取失败: ${cand.path}`)
         continue
       }
-      files.push({ path: cand.path, content })
+      files.push({ path: cand.path, content: response.body })
     } catch {
       warnings.push(`拉取失败: ${cand.path}`)
     }
@@ -1576,8 +2067,9 @@ function scanSkillDirs(workingDir: string): Array<{
     '.pdf', '.exe', '.dll', '.so', '.dylib', '.class', '.jar',
     '.ttf', '.otf', '.woff', '.woff2', '.eot',
   ])
+  const MAX_SKILLS_PER_SOURCE = 100
 
-  // 扫描单个 skills 根目录
+  /** Scan a bounded set of local skill files so discovery cannot exhaust memory. */
   const scanOne = (skillsRoot: string, source: ScanSource) => {
     if (!fs.existsSync(skillsRoot)) return
     let entries: fs.Dirent[]
@@ -1586,18 +2078,21 @@ function scanSkillDirs(workingDir: string): Array<{
     } catch {
       return
     }
-    for (const e of entries) {
+    for (const e of entries.slice(0, MAX_SKILLS_PER_SOURCE)) {
       if (!e.isDirectory()) continue
       const slug = e.name
       const skillDir = path.join(skillsRoot, slug)
       const skillMdAbs = path.join(skillDir, 'SKILL.md')
       if (!fs.existsSync(skillMdAbs)) continue
       try {
+        const skillMdStat = fs.statSync(skillMdAbs)
+        if (!skillMdStat.isFile() || skillMdStat.size > MAX_SKILL_FILE_BYTES) continue
         const skillMdContent = fs.readFileSync(skillMdAbs, 'utf-8')
         const parsed = parseSkillMd(skillMdContent)
-        // 递归读取技能目录所有文件（保留目录结构，跳过二进制）
         const files: Array<{ path: string; content: string }> = []
+        let totalBytes = 0
         const walk = (dir: string, base: string = '') => {
+          if (files.length >= MAX_SKILL_FILES || totalBytes >= MAX_SKILL_DIRECTORY_BYTES) return
           let ents: fs.Dirent[]
           try {
             ents = fs.readdirSync(dir, { withFileTypes: true })
@@ -1605,20 +2100,29 @@ function scanSkillDirs(workingDir: string): Array<{
             return
           }
           for (const ent of ents) {
+            if (files.length >= MAX_SKILL_FILES || totalBytes >= MAX_SKILL_DIRECTORY_BYTES) return
             const rel = base ? `${base}/${ent.name}` : ent.name
             if (ent.isDirectory()) {
               walk(path.join(dir, ent.name), rel)
             } else if (ent.isFile()) {
               const lower = path.extname(ent.name).toLowerCase()
               if (binaryExt.has(lower)) continue
-              let content: string
+              const filePath = path.join(dir, ent.name)
+              let stat: fs.Stats
               try {
-                content = fs.readFileSync(path.join(dir, ent.name), 'utf-8')
+                stat = fs.statSync(filePath)
               } catch {
                 continue
               }
-              // 含 null 字节视为二进制，跳过
+              if (stat.size > MAX_SKILL_FILE_BYTES || totalBytes + stat.size > MAX_SKILL_DIRECTORY_BYTES) continue
+              let content: string
+              try {
+                content = fs.readFileSync(filePath, 'utf-8')
+              } catch {
+                continue
+              }
               if (content.indexOf('\u0000') !== -1) continue
+              totalBytes += stat.size
               files.push({ path: rel, content })
             }
           }
@@ -1662,6 +2166,125 @@ interface SearchResult {
   url: string
 }
 
+/** Return whether an IPv4 address is private, reserved, multicast, or otherwise non-public. */
+function isBlockedIpv4Address(address: string): boolean {
+  const [first, second] = address.split('.').map(Number)
+  return first === 0 ||
+    first === 10 ||
+    first === 127 ||
+    (first === 100 && second >= 64 && second <= 127) ||
+    (first === 169 && second === 254) ||
+    (first === 172 && second >= 16 && second <= 31) ||
+    (first === 192 && (second === 0 || second === 168)) ||
+    (first === 198 && (second === 18 || second === 19 || second === 51)) ||
+    (first === 203 && second === 0) ||
+    first >= 224
+}
+
+/** Expand a valid IPv6 address into eight 16-bit groups. */
+function expandIpv6Address(address: string): number[] | null {
+  let normalized = address.toLowerCase()
+  const lastColon = normalized.lastIndexOf(':')
+  if (lastColon !== -1 && normalized.includes('.')) {
+    const ipv4 = normalized.slice(lastColon + 1)
+    if (net.isIP(ipv4) !== 4) return null
+    const [a, b, c, d] = ipv4.split('.').map(Number)
+    normalized = `${normalized.slice(0, lastColon)}:${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`
+  }
+
+  const compressed = normalized.includes('::')
+  const [left, right = ''] = normalized.split('::')
+  const leftGroups = left ? left.split(':') : []
+  const rightGroups = compressed && right ? right.split(':') : []
+  const groups = compressed
+    ? [...leftGroups, ...Array(8 - leftGroups.length - rightGroups.length).fill('0'), ...rightGroups]
+    : leftGroups
+  if (groups.length !== 8 || groups.some((group) => !/^[0-9a-f]{1,4}$/.test(group))) return null
+  return groups.map((group) => Number.parseInt(group, 16))
+}
+
+/** Return whether an IP address can target a local or non-routable network. */
+function isBlockedNetworkAddress(address: string): boolean {
+  const normalized = address.toLowerCase().replace(/^\[|\]$/g, '')
+  const family = net.isIP(normalized)
+  if (family === 4) return isBlockedIpv4Address(normalized)
+  if (family !== 6) return true
+
+  const groups = expandIpv6Address(normalized)
+  if (!groups) return true
+  const isUnspecified = groups.every((group) => group === 0)
+  const isLoopback = groups.slice(0, 7).every((group) => group === 0) && groups[7] === 1
+  const isUniqueLocal = (groups[0] & 0xfe00) === 0xfc00
+  const isLinkLocal = (groups[0] & 0xffc0) === 0xfe80
+  const isMulticast = (groups[0] & 0xff00) === 0xff00
+  if (isUnspecified || isLoopback || isUniqueLocal || isLinkLocal || isMulticast) return true
+
+  // IPv4-mapped IPv6 addresses are routable as the embedded IPv4 address.
+  const isIpv4Mapped = groups.slice(0, 5).every((group) => group === 0) && groups[5] === 0xffff
+  if (isIpv4Mapped) {
+    const embeddedIpv4 = `${groups[6] >> 8}.${groups[6] & 0xff}.${groups[7] >> 8}.${groups[7] & 0xff}`
+    return isBlockedIpv4Address(embeddedIpv4)
+  }
+
+  return false
+}
+
+/** Reject schemes and literal hosts that could make the web tool reach local services. */
+function assertPublicWebUrl(value: string): URL {
+  if (typeof value !== 'string' || value.length > 8_192) {
+    throw new Error('Invalid URL')
+  }
+
+  let parsed: URL
+  try {
+    parsed = new URL(value)
+  } catch {
+    throw new Error('Invalid URL')
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`Blocked URL scheme: ${parsed.protocol}`)
+  }
+
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  if (!host || host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local')) {
+    throw new Error('Local network URLs are not allowed')
+  }
+
+  if (net.isIP(host) && isBlockedNetworkAddress(host)) {
+    throw new Error('Private network URLs are not allowed')
+  }
+
+  return parsed
+}
+
+/** Resolve each host immediately before connecting and reject private DNS answers. */
+function lookupPublicHost(
+  hostname: string,
+  options: number | dns.LookupOneOptions,
+  callback: (error: NodeJS.ErrnoException | null, address: string, family: number) => void
+): void {
+  const lookupOptions = typeof options === 'number' ? { family: options } : options
+  dns.lookup(hostname, {
+    family: lookupOptions.family,
+    hints: lookupOptions.hints,
+    verbatim: true,
+    all: true,
+  }, (error, addresses) => {
+    if (error) {
+      callback(error, '', 0)
+      return
+    }
+    const records = addresses as dns.LookupAddress[]
+    if (records.length === 0 || records.some((record) => isBlockedNetworkAddress(record.address))) {
+      callback(new Error('Private network DNS result is not allowed') as NodeJS.ErrnoException, '', 0)
+      return
+    }
+    const record = records[0]
+    callback(null, record.address, record.family)
+  })
+}
+
 /** Search with Bing HTML (no API key needed, China-accessible) */
 async function searchWithBingHtml(query: string, count: number): Promise<SearchResult[]> {
   const url = `https://cn.bing.com/search?q=${encodeURIComponent(query)}&count=${count}&setlang=zh-CN`
@@ -1670,7 +2293,7 @@ async function searchWithBingHtml(query: string, count: number): Promise<SearchR
   const $ = cheerio.load(html)
   const results: SearchResult[] = []
 
-  // M13: 使用 cheerio 解析 Bing 结果，避免脆弱的正则匹配
+  // DOM parsing tolerates small markup changes better than regular expressions.
   $('.b_algo').each((_i, el) => {
     if (results.length >= count) return false
     const $el = $(el)
@@ -1705,9 +2328,16 @@ function fetchUrl(targetUrl: string, maxBytes: number, customHeaders?: Record<st
         return
       }
 
-      const fetcher = url.startsWith('https') ? https : http
+      let parsed: URL
+      try {
+        parsed = assertPublicWebUrl(url)
+      } catch (err) {
+        reject(err)
+        return
+      }
+      const fetcher = parsed.protocol === 'https:' ? https : http
       const req = fetcher.get(
-        url,
+        parsed,
         {
           timeout: 15000,
           headers: {
@@ -1719,13 +2349,15 @@ function fetchUrl(targetUrl: string, maxBytes: number, customHeaders?: Record<st
             'Pragma': 'no-cache',
             ...customHeaders,
           },
+          // HTTP requests resolve one connection target at a time.
+          lookup: lookupPublicHost as net.LookupFunction,
         },
         (res) => {
           // Handle redirects
           if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
             const nextUrl = res.headers.location.startsWith('http')
               ? res.headers.location
-              : new URL(res.headers.location, url).toString()
+              : new URL(res.headers.location, parsed).toString()
             res.resume()
             doFetch(nextUrl, redirectsLeft - 1)
             return
@@ -1737,13 +2369,22 @@ function fetchUrl(targetUrl: string, maxBytes: number, customHeaders?: Record<st
             return
           }
 
-          // P5: 用 chunks 数组 + 一次 concat，避免 Buffer.concat 循环 O(n²)
+          // Accumulate chunks and concatenate once to avoid quadratic copying.
           const chunks: Buffer[] = []
           let receivedLength = 0
           res.on('data', (chunk: Buffer) => {
+            const remaining = maxBytes - receivedLength
+            if (remaining <= 0) return
+            if (chunk.length > remaining) {
+              chunks.push(chunk.subarray(0, remaining))
+              receivedLength += remaining
+              req.destroy()
+              resolve(Buffer.concat(chunks).toString('utf-8'))
+              return
+            }
             chunks.push(chunk)
             receivedLength += chunk.length
-            if (receivedLength > maxBytes) {
+            if (receivedLength >= maxBytes) {
               req.destroy()
               resolve(Buffer.concat(chunks).toString('utf-8'))
             }
@@ -1791,7 +2432,7 @@ function extractSpaContent(html: string): string | null {
       const data = JSON.parse(nextMatch[1])
       const text = extractTextFromJson(data)
       if (text && text.length > 200) return text
-    } catch {}
+    } catch { /* Invalid optional SPA payloads fall back to HTML extraction. */ }
   }
 
   // Vue/Nuxt: window.__NUXT__
@@ -1807,7 +2448,7 @@ function extractSpaContent(html: string): string | null {
       const data = JSON.parse(stateMatch[1])
       const text = extractTextFromJson(data)
       if (text && text.length > 200) return text
-    } catch {}
+    } catch { /* Invalid optional SPA payloads fall back to HTML extraction. */ }
   }
 
   // Try og:description meta tag
@@ -1820,7 +2461,7 @@ function extractSpaContent(html: string): string | null {
 }
 
 /** Recursively extract text content from a JSON object */
-function extractTextFromJson(obj: any, depth = 0): string {
+function extractTextFromJson(obj: unknown, depth = 0): string {
   if (depth > 10) return ''
   if (typeof obj === 'string') {
     // Only return strings that look like content (not URLs, not too short)
@@ -1834,125 +2475,15 @@ function extractTextFromJson(obj: any, depth = 0): string {
   }
   if (typeof obj === 'object' && obj !== null) {
     const parts: string[] = []
-    for (const key in obj) {
+    for (const [key, value] of Object.entries(obj)) {
       if (['content', 'text', 'description', 'body', 'article', 'html', 'summary', 'title', 'excerpt'].includes(key)) {
-        const text = extractTextFromJson(obj[key], depth + 1)
+        const text = extractTextFromJson(value, depth + 1)
         if (text) parts.push(text)
       }
     }
     return parts.join('\n')
   }
   return ''
-}
-
-/** Use a hidden BrowserWindow to render SPA pages and extract rendered text.
- *  Handles sites like 36氪/知乎/钛媒体 that render content via JavaScript. */
-async function fetchWithBrowser(targetUrl: string, maxLen: number): Promise<string> {
-  // S1: scheme 白名单 — 仅允许 http/https，防止加载 file:// 读取本地文件或内网 SSRF
-  try {
-    const parsed = new URL(targetUrl)
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      throw new Error(`blocked scheme: ${parsed.protocol}`)
-    }
-  } catch {
-    throw new Error(`Invalid URL or blocked scheme: ${targetUrl}`)
-  }
-
-  const { BrowserWindow } = require('electron')
-  let win: BrowserWindow | null = null
-  try {
-    const w = new BrowserWindow({
-      width: 1280,
-      height: 900,
-      show: false,
-      webPreferences: {
-        contextIsolation: true,
-        nodeIntegration: false,
-        sandbox: true,
-        // S1: 保留 webSecurity=true，不再为「加载混合内容」关闭整个同源策略。
-        // 混合内容(https 页面加载 http 资源)用 allowRunningInsecureContent 控制，更细粒度。
-        webSecurity: true,
-        allowRunningInsecureContent: true,
-        images: false,
-        offscreen: true,
-      },
-    })
-    win = w
-
-    // 仅允许 http/https 请求，拦截 file/data/ftp 等 scheme
-    w.webContents.session.webRequest.onBeforeRequest((details: any, cb: (response: any) => void) => {
-      const rt = details.resourceType
-      // 拦截无关资源类型
-      if (rt === 'image' || rt === 'media' || rt === 'font') {
-        cb({ cancel: true })
-        return
-      }
-      // 拦截非 http/https URL
-      try {
-        const u = new URL(details.url)
-        if (u.protocol !== 'http:' && u.protocol !== 'https:') {
-          cb({ cancel: true })
-          return
-        }
-      } catch {
-        cb({ cancel: true })
-        return
-      }
-      cb({})
-    })
-
-    // Load with desktop UA so sites return full content
-    await w.webContents.loadURL(targetUrl, {
-      userAgent:
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    })
-
-    // Wait for JS rendering: poll until document body has substantial text or timeout
-    const startTime = Date.now()
-    const TIMEOUT_MS = 15000
-    while (Date.now() - startTime < TIMEOUT_MS) {
-      await new Promise((r) => setTimeout(r, 800))
-      try {
-        const len = await w.webContents.executeJavaScript(
-          `(document.body && document.body.innerText) ? document.body.innerText.length : 0`
-        )
-        if (len > 500) break
-      } catch {
-        break
-      }
-    }
-
-    // Extract main article text preferentially, fall back to full body
-    let rendered = await w.webContents.executeJavaScript(`
-      (function() {
-        // Try common article containers first
-        var selectors = ['article', 'main', '[role="main"]', '.article-content', '.article', '.post-content', '.content', '#article', '#content', '.entry-content'];
-        for (var i = 0; i < selectors.length; i++) {
-          var el = document.querySelector(selectors[i]);
-          if (el && el.innerText && el.innerText.trim().length > 200) {
-            return el.innerText;
-          }
-        }
-        // Fallback: full body text
-        return document.body ? document.body.innerText : '';
-      })()
-    `)
-
-    // Clean up: remove excessive blank lines and trim
-    rendered = (rendered || '')
-      .replace(/\r\n/g, '\n')
-      .replace(/[ \t]+\n/g, '\n')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim()
-
-    return rendered.substring(0, maxLen)
-  } finally {
-    if (win) {
-      try {
-        win.destroy()
-      } catch {}
-    }
-  }
 }
 
 /** Strip HTML tags from a string */
@@ -2037,7 +2568,7 @@ function htmlToText(html: string): string {
 
 // ── App lifecycle ──
 
-// S8: 全局异常兜底，避免未捕获异常/未处理 Promise 直接崩溃主进程
+// Log uncaught failures instead of terminating the main process without diagnostics.
 process.on('uncaughtException', (err) => {
   console.error('Uncaught Exception:', err)
   if (mainWindow && !mainWindow.isDestroyed()) {

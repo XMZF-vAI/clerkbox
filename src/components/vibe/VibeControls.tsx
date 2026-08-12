@@ -28,7 +28,7 @@ export default function VibeControls() {
     if (document.fullscreenElement) {
       try {
         await document.exitFullscreen()
-      } catch {}
+      } catch { /* Leaving VIBE mode should continue even when fullscreen exit is denied. */ }
       setIsFullscreen(false)
     }
     toggleVibeMode(false)
@@ -45,6 +45,7 @@ export default function VibeControls() {
     <>
       {/* Fullscreen toggle - top left */}
       <button
+        type="button"
         onClick={handleToggleFullscreen}
         className="fixed top-4 left-4 z-50 flex items-center gap-2 px-3 py-2 liquid-glass-btn rounded-full text-white/90"
       >
@@ -54,6 +55,7 @@ export default function VibeControls() {
 
       {/* Customize button - bottom left */}
       <button
+        type="button"
         onClick={() => setShowMenu(true)}
         className="fixed bottom-4 left-4 z-50 flex items-center gap-2 px-4 py-2 liquid-glass-btn rounded-full text-white/90"
       >
@@ -63,6 +65,7 @@ export default function VibeControls() {
 
       {/* Exit button - bottom right */}
       <button
+        type="button"
         onClick={handleExitVibe}
         className="fixed bottom-4 right-4 z-50 flex items-center gap-2 px-4 py-2 liquid-glass-btn rounded-full text-white/90"
       >

@@ -23,6 +23,52 @@ export interface TransportConfig {
 /** 单次 IPC 分片订阅的收尾器，避免泄漏 */
 type Unsubscribe = () => void
 
+const DIRECT_STREAM_IDLE_TIMEOUT_MS = 60_000
+const DIRECT_RESPONSE_LIMIT = 20 * 1024 * 1024
+const DIRECT_ERROR_LIMIT = 8 * 1024
+const DIRECT_REQUEST_LIMIT = 10 * 1024 * 1024
+
+function redactApiKey(message: string, apiKey: string): string {
+  return apiKey ? message.split(apiKey).join('[REDACTED]') : message
+}
+
+function serializeRequestBody(body: unknown): string {
+  const serialized = JSON.stringify(body)
+  if (typeof serialized !== 'string') throw new Error('Request body must be serializable JSON')
+  if (new TextEncoder().encode(serialized).byteLength > DIRECT_REQUEST_LIMIT) {
+    throw new Error(`Request body exceeds the ${DIRECT_REQUEST_LIMIT} byte limit`)
+  }
+  return serialized
+}
+
+async function readBoundedText(response: Response, maxBytes: number): Promise<string> {
+  if (!response.body) return ''
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let received = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done || !value) break
+      if (value.byteLength > maxBytes - received) {
+        await reader.cancel()
+        throw new Error(`Response exceeds the ${maxBytes} byte limit`)
+      }
+      chunks.push(value)
+      received += value.byteLength
+    }
+  } finally {
+    reader.releaseLock()
+  }
+  const merged = new Uint8Array(received)
+  let offset = 0
+  for (const chunk of chunks) {
+    merged.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return new TextDecoder().decode(merged)
+}
+
 /**
  * 发起流式对话，返回文本分片的异步迭代器。
  * `signal` 触发时会中止底层请求（主进程路径经 apiAbort，直连路径经 fetch signal）。
@@ -128,13 +174,13 @@ async function openDirectStream(
   const response = await fetch(url, {
     method: 'POST',
     headers: headersFor(cfg.apiCompat, cfg.apiKey, { direct: true }),
-    body: JSON.stringify(body),
+    body: serializeRequestBody(body),
     signal,
   })
 
   if (!response.ok) {
     // 截断错误响应体到前 500 字符，避免超长错误信息撑爆 UI / 日志
-    const errText = (await response.text().catch(() => '')).slice(0, 500)
+    const errText = redactApiKey(await readBoundedText(response, DIRECT_ERROR_LIMIT).catch(() => ''), cfg.apiKey)
     throw new Error(`API Error ${response.status}: ${errText}`)
   }
   const stream = response.body
@@ -144,16 +190,40 @@ async function openDirectStream(
     async *[Symbol.asyncIterator]() {
       const reader = stream.getReader()
       const decoder = new TextDecoder()
+      let receivedBytes = 0
+      let idleTimer: ReturnType<typeof setTimeout> | undefined
+      const onAbort = () => { void reader.cancel() }
+      signal.addEventListener('abort', onAbort, { once: true })
+      const clearIdleTimer = () => {
+        if (idleTimer) clearTimeout(idleTimer)
+        idleTimer = undefined
+      }
       try {
         while (true) {
-          const { done, value } = await reader.read()
+          const { done, value } = await Promise.race([
+            reader.read(),
+            new Promise<ReadableStreamReadResult<Uint8Array>>((_, reject) => {
+              idleTimer = setTimeout(() => {
+                void reader.cancel()
+                reject(new Error(`Stream stalled for ${DIRECT_STREAM_IDLE_TIMEOUT_MS / 1000}s`))
+              }, DIRECT_STREAM_IDLE_TIMEOUT_MS)
+            }),
+          ])
+          clearIdleTimer()
           if (done) break
           if (signal.aborted) break
+          receivedBytes += value.byteLength
+          if (receivedBytes > DIRECT_RESPONSE_LIMIT) {
+            await reader.cancel()
+            throw new Error(`Stream exceeds the ${DIRECT_RESPONSE_LIMIT} byte limit`)
+          }
           yield decoder.decode(value, { stream: true })
         }
         const tail = decoder.decode()
         if (tail) yield tail
       } finally {
+        clearIdleTimer()
+        signal.removeEventListener('abort', onAbort)
         reader.releaseLock()
       }
     },
@@ -182,13 +252,18 @@ export async function postJson(cfg: TransportConfig, body: unknown): Promise<unk
   const response = await fetch(url, {
     method: 'POST',
     headers: headersFor(cfg.apiCompat, cfg.apiKey, { direct: true }),
-    body: JSON.stringify(body),
+    body: serializeRequestBody(body),
   })
   if (!response.ok) {
-    const errText = (await response.text().catch(() => '')).slice(0, 500)
+    const errText = redactApiKey(await readBoundedText(response, DIRECT_ERROR_LIMIT).catch(() => ''), cfg.apiKey)
     throw new Error(`API Error ${response.status}: ${errText}`)
   }
-  return response.json()
+  const text = await readBoundedText(response, DIRECT_RESPONSE_LIMIT)
+  try {
+    return JSON.parse(text)
+  } catch {
+    throw new Error('Invalid JSON response')
+  }
 }
 
 /**

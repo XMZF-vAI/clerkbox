@@ -61,28 +61,14 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
     }
   }, [workingDir])
 
-  // Sync active skills to disk when working directory or active skill ids change.
-  // 只依赖 sessionSkillIds（激活 id 列表）与 workingDir，避免整个 skills 数组引用变化触发重渲染与重复 IO。
-  // 用 useSkillsStore.getState() 快照取数，不订阅 skills，防止无关 skills 变化（如搜索/推荐）拖累 ChatPage。
+  // Sync active skills when the directory or enabled skill set changes.
   const sessionSkillIds = useSkillsStore((s) => s.sessionSkillIds)
+  const syncSessionSkills = useSkillsStore((s) => s.syncSessionSkills)
 
   useEffect(() => {
     if (!workingDir) return
-    // 快照取当前激活技能，不建立订阅
-    const allSkills = useSkillsStore.getState().skills
-    const activeSkills = allSkills.filter((s) => sessionSkillIds.includes(s.id))
-    for (const skill of activeSkills) {
-      // 标准路径技能（clerkbox/claude 全局+项目级）不写盘，直接引用原路径
-      if (skill.source === 'global-clerkbox' || skill.source === 'project-clerkbox' || skill.source === 'global-claude' || skill.source === 'project-claude') continue
-      // online/custom 技能写盘完整文件目录（files 空时回退单文件）
-      const files = skill.files && skill.files.length > 0
-        ? skill.files
-        : [{ path: 'SKILL.md', content: skill.skillMdContent }]
-      ipc.writeSkillDir(workingDir, skill.slug, files).catch((err) =>
-        console.error(`[ChatPage] writeSkillDir failed for ${skill.slug}:`, err)
-      )
-    }
-  }, [workingDir, sessionSkillIds])
+    void syncSessionSkills(workingDir)
+  }, [workingDir, sessionSkillIds, syncSessionSkills])
 
   const messages = currentSession?.messages || []
   const isCurrentSessionStreaming = streamingSessionIds.has(activeSessionId || '')
@@ -130,7 +116,7 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
           </div>
         </div>
         {error && (
-          <div className={`flex items-center gap-2 px-4 py-2 mx-4 mb-2 rounded-md3-sm text-sm ${
+          <div role="alert" className={`flex items-center gap-2 px-4 py-2 mx-4 mb-2 rounded-md3-sm text-sm ${
             vibe
               ? 'liquid-glass-subtle text-white/90'
               : 'bg-md-error/10 border border-md-error/20 text-md-error'
@@ -146,11 +132,11 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
 
   // Normal layout: message list + input at bottom, with optional detail panel on the right
   return (
-    <div className={`flex h-full ${vibe ? 'bg-transparent' : 'bg-dark-surface'}`}>
+    <div className={`relative flex h-full ${vibe ? 'bg-transparent' : 'bg-dark-surface'}`}>
       <div className="flex flex-1 flex-col min-h-0">
         <MessageList messages={messages} isStreaming={isCurrentSessionStreaming} vibe={vibe} />
         {error && (
-          <div className={`flex items-center gap-2 px-4 py-2 mx-4 rounded-md3-sm text-sm ${
+          <div role="alert" className={`flex items-center gap-2 px-4 py-2 mx-4 rounded-md3-sm text-sm ${
             vibe
               ? 'liquid-glass-subtle text-white/90'
               : 'bg-md-error/10 border border-md-error/20 text-md-error'

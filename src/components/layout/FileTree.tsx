@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import { FolderOpen, Folder, File, ChevronRight, ChevronDown, HardDrive } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { ipc } from '../../lib/ipc-client'
@@ -13,6 +13,31 @@ interface TreeNode {
   loading?: boolean
 }
 
+function appendPath(parent: string, name: string): string {
+  const separator = parent.includes('\\') ? '\\' : '/'
+  return parent.endsWith(separator) ? `${parent}${name}` : `${parent}${separator}${name}`
+}
+
+function displayName(filePath: string): string {
+  return filePath.split(/[\\/]/).filter(Boolean).pop() || filePath
+}
+
+function findNode(nodes: TreeNode[], targetPath: string): TreeNode | null {
+  for (const node of nodes) {
+    if (node.path === targetPath) return node
+    const child = node.children ? findNode(node.children, targetPath) : null
+    if (child) return child
+  }
+  return null
+}
+
+function updateNode(nodes: TreeNode[], targetPath: string, update: (node: TreeNode) => TreeNode): TreeNode[] {
+  return nodes.map((node) => {
+    if (node.path === targetPath) return update(node)
+    return node.children ? { ...node, children: updateNode(node.children, targetPath, update) } : node
+  })
+}
+
 function FileTreeNode({ node, depth = 0, onToggle }: { node: TreeNode; depth?: number; onToggle: (path: string) => void }) {
   const { t } = useTranslation()
   const paddingLeft = depth * 16 + 8
@@ -20,24 +45,29 @@ function FileTreeNode({ node, depth = 0, onToggle }: { node: TreeNode; depth?: n
   if (!node.isDirectory) {
     return (
       <div
-        className="flex items-center gap-2 py-1 px-2 rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors cursor-pointer text-sm text-dark-onSurfaceVariant"
+        title={node.path}
+        className="flex items-center gap-2 py-1 px-2 rounded-md3-sm text-sm text-dark-onSurfaceVariant"
         style={{ paddingLeft }}
       >
-        <File size={14} />
+        <File size={14} aria-hidden="true" />
         <span className="truncate">{node.name}</span>
       </div>
     )
   }
 
   return (
-    <div>
+    <>
       <button
+        type="button"
+        aria-expanded={node.expanded ?? false}
+        aria-busy={node.loading ?? false}
+        title={node.path}
         onClick={() => onToggle(node.path)}
         className="w-full flex items-center gap-2 py-1 px-2 rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-sm text-dark-onSurface"
         style={{ paddingLeft }}
       >
-        {node.expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-        {node.expanded ? <FolderOpen size={14} className="text-md-info" /> : <Folder size={14} className="text-md-info" />}
+        {node.expanded ? <ChevronDown size={14} aria-hidden="true" /> : <ChevronRight size={14} aria-hidden="true" />}
+        {node.expanded ? <FolderOpen size={14} className="text-md-info" aria-hidden="true" /> : <Folder size={14} className="text-md-info" aria-hidden="true" />}
         <span className="truncate font-medium">{node.name}</span>
       </button>
       {node.expanded && node.children && (
@@ -48,11 +78,11 @@ function FileTreeNode({ node, depth = 0, onToggle }: { node: TreeNode; depth?: n
         </div>
       )}
       {node.expanded && node.loading && (
-        <div className="py-1 text-xs text-dark-onSurfaceVariant/50" style={{ paddingLeft: paddingLeft + 20 }}>
+        <div role="status" className="py-1 text-xs text-dark-onSurfaceVariant/50" style={{ paddingLeft: paddingLeft + 20 }}>
           {t('fileTree.loading')}
         </div>
       )}
-    </div>
+    </>
   )
 }
 
@@ -60,6 +90,17 @@ export default function FileTree() {
   const { t } = useTranslation()
   const [rootPath, setRootPath] = useState<string | null>(null)
   const [tree, setTree] = useState<TreeNode[]>([])
+  const treeRef = useRef<TreeNode[]>([])
+  const rootRequestRef = useRef(0)
+  const pendingLoadsRef = useRef(new Set<string>())
+
+  const updateTree = useCallback((updater: (nodes: TreeNode[]) => TreeNode[]) => {
+    setTree((previous) => {
+      const next = updater(previous)
+      treeRef.current = next
+      return next
+    })
+  }, [])
 
   const loadDir = useCallback(async (dirPath: string): Promise<TreeNode[]> => {
     try {
@@ -70,10 +111,10 @@ export default function FileTree() {
           if (!a.isDirectory && b.isDirectory) return 1
           return a.name.localeCompare(b.name)
         })
-        .map((e: FileEntry) => ({
-          name: e.name,
-          path: `${dirPath}\\${e.name}`,
-          isDirectory: e.isDirectory,
+        .map((entry: FileEntry) => ({
+          name: entry.name,
+          path: appendPath(dirPath, entry.name),
+          isDirectory: entry.isDirectory,
           expanded: false,
         }))
     } catch {
@@ -82,77 +123,52 @@ export default function FileTree() {
   }, [])
 
   const handleSelectFolder = async () => {
-    const path = await ipc.selectFolder()
-    if (path) {
-      setRootPath(path)
-      const children = await loadDir(path)
-      setTree([{ name: path.split('\\').pop() || path, path, isDirectory: true, expanded: true, children }])
-    }
+    const selectedPath = await ipc.selectFolder()
+    if (!selectedPath) return
+
+    const requestId = ++rootRequestRef.current
+    setRootPath(selectedPath)
+    updateTree(() => [{
+      name: displayName(selectedPath),
+      path: selectedPath,
+      isDirectory: true,
+      expanded: true,
+      loading: true,
+      children: [],
+    }])
+
+    const children = await loadDir(selectedPath)
+    if (requestId !== rootRequestRef.current) return
+    updateTree((nodes) => updateNode(nodes, selectedPath, (node) => ({ ...node, children, loading: false })))
   }
 
-  const handleToggle = useCallback(
-    async (path: string) => {
-      const toggleNode = (nodes: TreeNode[]): TreeNode[] => {
-        return nodes.map((node) => {
-          if (node.path === path) {
-            const newExpanded = !node.expanded
-            return { ...node, expanded: newExpanded }
-          }
-          if (node.children) {
-            return { ...node, children: toggleNode(node.children) }
-          }
-          return node
-        })
-      }
+  const handleToggle = useCallback(async (targetPath: string) => {
+    const currentNode = findNode(treeRef.current, targetPath)
+    if (!currentNode?.isDirectory) return
 
-      setTree((prev) => toggleNode(prev))
+    const nextExpanded = !currentNode.expanded
+    const shouldLoad = nextExpanded && !currentNode.children && !currentNode.loading && !pendingLoadsRef.current.has(targetPath)
+    if (shouldLoad) pendingLoadsRef.current.add(targetPath)
 
-      // Lazy load children
-      const findNode = (nodes: TreeNode[]): TreeNode | null => {
-        for (const node of nodes) {
-          if (node.path === path) return node
-          if (node.children) {
-            const found = findNode(node.children)
-            if (found) return found
-          }
-        }
-        return null
-      }
+    updateTree((nodes) => updateNode(nodes, targetPath, (node) => ({
+      ...node,
+      expanded: !node.expanded,
+      ...(shouldLoad ? { loading: true } : {}),
+    })))
+    if (!shouldLoad) return
 
-      const currentTree = tree
-      const node = findNode(currentTree)
-      if (node && node.isDirectory && !node.children && !node.expanded) {
-        setTree((prev) => {
-          const setLoading = (nodes: TreeNode[]): TreeNode[] =>
-            nodes.map((n) =>
-              n.path === path ? { ...n, loading: true } : n.children ? { ...n, children: setLoading(n.children) } : n
-            )
-          return setLoading(prev)
-        })
-
-        const children = await loadDir(path)
-        setTree((prev) => {
-          const updateNode = (nodes: TreeNode[]): TreeNode[] =>
-            nodes.map((n) =>
-              n.path === path
-                ? { ...n, children, loading: false }
-                : n.children
-                ? { ...n, children: updateNode(n.children) }
-                : n
-            )
-          return updateNode(prev)
-        })
-      }
-    },
-    [loadDir, tree]
-  )
+    const children = await loadDir(targetPath)
+    pendingLoadsRef.current.delete(targetPath)
+    updateTree((nodes) => updateNode(nodes, targetPath, (node) => ({ ...node, children, loading: false })))
+  }, [loadDir, updateTree])
 
   if (!rootPath) {
     return (
       <div className="flex flex-col items-center justify-center h-48 gap-3 text-dark-onSurfaceVariant">
-        <HardDrive size={32} className="opacity-30" />
+        <HardDrive size={32} className="opacity-30" aria-hidden="true" />
         <p className="text-sm opacity-50">{t('fileTree.selectWorkspace')}</p>
         <button
+          type="button"
           onClick={handleSelectFolder}
           className="px-4 py-2 bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer rounded-md3-sm text-sm transition-colors"
         >
@@ -165,17 +181,20 @@ export default function FileTree() {
   return (
     <div className="py-1">
       <div className="flex items-center justify-between px-2 mb-2">
-        <span className="text-xs text-dark-onSurfaceVariant/50 truncate flex-1">{rootPath}</span>
+        <span title={rootPath} className="text-xs text-dark-onSurfaceVariant/50 truncate flex-1">{rootPath}</span>
         <button
+          type="button"
           onClick={handleSelectFolder}
           className="text-xs text-md-info hover:underline"
         >
           {t('fileTree.change')}
         </button>
       </div>
-      {tree.map((node) => (
-        <FileTreeNode key={node.path} node={node} onToggle={handleToggle} />
-      ))}
+      <div>
+        {tree.map((node) => (
+          <FileTreeNode key={node.path} node={node} onToggle={handleToggle} />
+        ))}
+      </div>
     </div>
   )
 }

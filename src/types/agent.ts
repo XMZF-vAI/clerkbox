@@ -7,12 +7,14 @@ export interface Message {
   toolCalls?: ToolCall[]
   toolResults?: ToolResult[]
   finishReason?: string
+  usage?: TokenUsage
   collapsed?: boolean  // When true, this message is collapsed (hidden by default, expandable)
   isCompactSummary?: boolean  // Marks compact boundary/summary messages
   compactMetadata?: CompactMetadata  // Metadata for compact boundary messages
   streamingToolCalls?: StreamingToolCall[]  // Tool calls currently being streamed (transient, not persisted)
   _isCompacting?: boolean  // Transient: true 表示该消息是"正在压缩上下文"的过程占位（不入库，压缩完成后被替换）
   _isStreaming?: boolean  // Transient: true while this message is being streamed from API
+  _retrying?: { attempt: number }  // Transient: 请求失败后正在重试（第 attempt 次），用于 UI 展示
   subAgentId?: string        // 标记此消息属于哪个子 agent（主对话消息不带此字段）
   isSubAgentCard?: boolean   // 标记此消息是子 agent 卡片占位（用于 UI 渲染）
 }
@@ -184,6 +186,10 @@ export interface AppSettings {
   providersMigratedAt?: number
   /** 首次启动欢迎流程是否已完成（true = 不再展示） */
   hasCompletedOnboarding: boolean
+  /** 是否注入工作目录下的 AGENTS.md 到系统提示词 */
+  agentsMdEnabled: boolean
+  /** 是否兼容读取 CLAUDE.md（AGENTS.md 不存在时回退） */
+  claudeMdCompat: boolean
 }
 
 /** OpenAI-compatible stream chunk delta */
@@ -215,6 +221,8 @@ export interface TokenUsage {
   prompt_tokens: number
   completion_tokens: number
   total_tokens: number
+  cache_creation_input_tokens?: number
+  cache_read_input_tokens?: number
 }
 
 // ── 结构化记忆系统类型 ──

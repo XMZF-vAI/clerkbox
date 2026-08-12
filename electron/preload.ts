@@ -1,4 +1,13 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type {
+  ApiChunkPayload,
+  ApiConnConfig,
+  FetchedModel,
+  MessageRow,
+  SessionRow,
+  WebSearchResult,
+} from '../src/types/ipc'
+import type { MemoryEntry } from '../src/types/agent'
 
 contextBridge.exposeInMainWorld('clerkbox', {
   // File system
@@ -32,41 +41,50 @@ contextBridge.exposeInMainWorld('clerkbox', {
   // Shell
   executeCommand: (
     command: string,
-    cwd?: string
+    cwd?: string,
+    sessionId?: string
   ): Promise<{ stdout: string; stderr: string; exitCode: number }> =>
-    ipcRenderer.invoke('executeCommand', command, cwd),
+    ipcRenderer.invoke('executeCommand', command, cwd, sessionId),
   executeCommandWithShell: (
     command: string,
     cwd: string | undefined,
-    shellType: string
+    shellType: string,
+    sessionId?: string
   ): Promise<{ stdout: string; stderr: string; exitCode: number }> =>
-    ipcRenderer.invoke('executeCommandWithShell', command, cwd, shellType),
+    ipcRenderer.invoke('executeCommandWithShell', command, cwd, shellType, sessionId),
+  cancelSessionCommands: (sessionId: string): Promise<{ killed: number }> =>
+    ipcRenderer.invoke('cancelSessionCommands', sessionId),
 
   // Web
-  webSearch: (query: string, count?: number): Promise<any> =>
+  webSearch: (query: string, count?: number): Promise<WebSearchResult[] | { error: string }> =>
     ipcRenderer.invoke('webSearch', query, count),
-  webFetch: (url: string, maxLength?: number): Promise<any> =>
+  webFetch: (url: string, maxLength?: number): Promise<{ content: string; url: string } | { error: string }> =>
     ipcRenderer.invoke('webFetch', url, maxLength),
 
   // 模型 API 代理（主进程 fetch，绕开渲染进程同源策略）
-  apiFetchModels: (cfg: { baseUrl: string; apiKey: string; apiCompat: string }): Promise<any> =>
+  apiFetchModels: (cfg: ApiConnConfig): Promise<{ models: FetchedModel[] } | { error: string }> =>
     ipcRenderer.invoke('apiFetchModels', cfg),
-  apiTestConnection: (cfg: { baseUrl: string; apiKey: string; apiCompat: string }): Promise<any> =>
+  apiTestConnection: (cfg: ApiConnConfig): Promise<{ ok: true; latencyMs: number } | { error: string }> =>
     ipcRenderer.invoke('apiTestConnection', cfg),
-  apiChatStream: (cfg: { baseUrl: string; apiKey: string; apiCompat: string }, body: unknown): Promise<{ requestId: string }> =>
+  apiChatStream: (cfg: ApiConnConfig, body: unknown): Promise<{ requestId: string }> =>
     ipcRenderer.invoke('apiChatStream', cfg, body),
   apiAbort: (requestId: string): Promise<void> => ipcRenderer.invoke('apiAbort', requestId),
   /** 订阅流式分片；返回退订函数 */
   onApiChunk: (
-    callback: (payload: { requestId: string; chunk?: string; done?: boolean; error?: string }) => void
+    callback: (payload: ApiChunkPayload) => void
   ): (() => void) => {
-    const listener = (_e: Electron.IpcRendererEvent, payload: any) => callback(payload)
+    const listener = (_e: Electron.IpcRendererEvent, payload: ApiChunkPayload) => callback(payload)
     ipcRenderer.on('apiChunk', listener)
     return () => ipcRenderer.removeListener('apiChunk', listener)
   },
 
+  // Credentials are encrypted by Electron's OS-backed safeStorage in the main process.
+  loadApiKeys: (): Promise<Record<string, string>> => ipcRenderer.invoke('loadApiKeys'),
+  saveApiKey: (id: string, apiKey: string): Promise<void> => ipcRenderer.invoke('saveApiKey', id, apiKey),
+  removeApiKey: (id: string): Promise<void> => ipcRenderer.invoke('removeApiKey', id),
+
   // Memory system
-  scanMemory: (workingDir: string): Promise<any[]> =>
+  scanMemory: (workingDir: string): Promise<MemoryEntry[]> =>
     ipcRenderer.invoke('scanMemory', workingDir),
   scanAgents: (workingDir: string) => ipcRenderer.invoke('scanAgents', workingDir),
   readMemoryIndex: (workingDir: string): Promise<{ content: string; wasTruncated: boolean; reason?: string }> =>
@@ -75,16 +93,18 @@ contextBridge.exposeInMainWorld('clerkbox', {
     ipcRenderer.invoke('writeMemoryFile', workingDir, slug, frontmatter, content),
   updateMemoryIndex: (workingDir: string, entryLine: string, slug: string): Promise<void> =>
     ipcRenderer.invoke('updateMemoryIndex', workingDir, entryLine, slug),
-  searchMemoryFiles: (workingDir: string, query?: string, type?: string): Promise<any[]> =>
+  searchMemoryFiles: (workingDir: string, query?: string, type?: string): Promise<MemoryEntry[]> =>
     ipcRenderer.invoke('searchMemoryFiles', workingDir, query, type),
 
   // Database
-  dbCreateSession: (row: any): Promise<void> => ipcRenderer.invoke('dbCreateSession', row),
+  dbCreateSession: (row: SessionRow): Promise<void> => ipcRenderer.invoke('dbCreateSession', row),
   dbUpdateSessionTitle: (id: string, title: string, updatedAt: number): Promise<void> =>
     ipcRenderer.invoke('dbUpdateSessionTitle', id, title, updatedAt),
   dbDeleteSession: (id: string): Promise<void> => ipcRenderer.invoke('dbDeleteSession', id),
-  dbGetAllSessions: (): Promise<any[]> => ipcRenderer.invoke('dbGetAllSessions'),
-  dbAddMessage: (row: any): Promise<void> => ipcRenderer.invoke('dbAddMessage', row),
+  dbGetAllSessions: (): Promise<SessionRow[]> => ipcRenderer.invoke('dbGetAllSessions'),
+  dbGetRecents: (): Promise<string[]> => ipcRenderer.invoke('dbGetRecents'),
+  dbSetRecents: (recents: string[]): Promise<void> => ipcRenderer.invoke('dbSetRecents', recents),
+  dbAddMessage: (row: MessageRow): Promise<void> => ipcRenderer.invoke('dbAddMessage', row),
   dbUpdateMessage: (
     id: string,
     content: string,
@@ -94,7 +114,7 @@ contextBridge.exposeInMainWorld('clerkbox', {
     finishReason?: string | null
   ): Promise<void> =>
     ipcRenderer.invoke('dbUpdateMessage', id, content, toolCalls, toolResults, thinkingContent, finishReason),
-  dbGetMessages: (sessionId: string): Promise<any[]> =>
+  dbGetMessages: (sessionId: string): Promise<MessageRow[]> =>
     ipcRenderer.invoke('dbGetMessages', sessionId),
   dbDeleteMessagesBefore: (sessionId: string, beforeId: string): Promise<void> =>
     ipcRenderer.invoke('dbDeleteMessagesBefore', sessionId, beforeId),
@@ -118,7 +138,7 @@ contextBridge.exposeInMainWorld('clerkbox', {
   scanSkillDirs: (workingDir: string): Promise<string> => ipcRenderer.invoke('scanSkillDirs', workingDir),
 
   // Platform
-  // S7: sandbox: true 后 preload 无法直接 require('os')，改用同步 IPC 获取。
+  // The sandboxed preload cannot access OS APIs directly.
   platform: ipcRenderer.sendSync('getPlatform'),
   homeDir: ipcRenderer.sendSync('getHomeDir'),
 })

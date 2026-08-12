@@ -509,7 +509,7 @@ class ToolRegistry {
         const cwd = args.cwd ? String(args.cwd) : undefined
         const shellType = args.shell ? String(args.shell) : 'cmd'
         try {
-          const result = await ipc.executeCommandWithShell(command, cwd, shellType)
+          const result = await ipc.executeCommandWithShell(command, cwd, shellType, ctx?.sessionId)
           let output = ''
           if (result.stdout?.trim()) output += result.stdout.trim()
           if (result.stderr?.trim()) output += `\n[STDERR] ${result.stderr.trim()}`
@@ -562,6 +562,15 @@ class ToolRegistry {
         const memDesc = String(args.description)
         const memContent = String(args.content)
         const scope = (args.scope as string) || 'user'
+        if (!memName.trim() || memName.length > 200 || memDesc.length > 500 || memContent.length > 900_000) {
+          return 'Error: 记忆名称、描述或内容长度无效'
+        }
+        if (!['user', 'project'].includes(scope)) {
+          return 'Error: 记忆 scope 必须是 user 或 project'
+        }
+        if (!['user', 'feedback', 'project', 'reference'].includes(memType)) {
+          return 'Error: 记忆 type 无效'
+        }
         // 根据 scope 选择目标目录
         const targetDir = scope === 'project' ? ctx?.workingDir : ctx?.homeDir
         if (!targetDir) {
@@ -582,7 +591,7 @@ class ToolRegistry {
         }
       }
       case 'search_memory': {
-        const query = args.query ? String(args.query) : undefined
+        const query = args.query ? String(args.query).slice(0, 200) : undefined
         const memType = args.type ? String(args.type) : undefined
         if (!ctx?.homeDir && !ctx?.workingDir) {
           return 'Error: 未设置工作目录和主目录，无法搜索记忆'

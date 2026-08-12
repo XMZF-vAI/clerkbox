@@ -15,6 +15,11 @@ function ToolCallBar({ tc, result, vibe }: { tc: ToolCall; result?: ToolResult; 
   const [expanded, setExpanded] = useState(false)
   const isRunning = !result
   const isError = result?.isError
+  const status = isRunning
+    ? t('toolPreview.statusExecuting')
+    : isError
+      ? t('toolPreview.statusFailed')
+      : t('toolPreview.statusComplete')
 
   const name = t(`tools.${tc.name}`, { defaultValue: tc.name })
 
@@ -31,11 +36,12 @@ function ToolCallBar({ tc, result, vibe }: { tc: ToolCall; result?: ToolResult; 
   return (
     <div className={`my-1 rounded border overflow-hidden ${vibe ? 'liquid-glass-subtle border-white/[0.03]' : 'border-dark-onSurfaceVariant/[0.03] bg-dark-surfaceContainer/40'}`}>
       <button
+        type="button"
         className={`flex w-full items-center gap-2 px-2 py-1.5 text-left ${vibe ? 'hover:bg-white/10' : 'hover:bg-md-primaryContainer/20'}`}
-        onClick={() => setExpanded(!expanded)}
+        onClick={() => setExpanded((value) => !value)}
         aria-expanded={expanded}
         aria-controls={`sub-tc-detail-${tc.id}`}
-        aria-label={t('toolPreview.toolCallStatus', { name, status: '' })}
+        aria-label={t('toolPreview.toolCallStatus', { name, status })}
       >
         <Wrench className={`h-3 w-3 ${isRunning ? 'animate-pulse text-md-primary' : isError ? 'text-md-error' : 'text-md-success'}`} />
         <span className={`text-xs font-medium ${vibe ? 'text-white/90' : 'text-md-onSurface'}`}>{name}</span>
@@ -92,12 +98,12 @@ function SubAgentMessage({ msg, vibe }: { msg: Message; vibe?: boolean }) {
           <summary className="flex cursor-pointer items-center gap-1 text-[11px] text-md-tertiary">
             <Brain className="h-3 w-3" /> {t('chat.thinkingProcess')}
           </summary>
-          <div className={`mt-1 whitespace-pre-wrap text-[11px] ${vibe ? 'text-white/60' : 'text-md-tertiary/80'}`}>{msg.thinkingContent}</div>
+          <div className={`mt-1 whitespace-pre-wrap break-words text-[11px] ${vibe ? 'text-white/60' : 'text-md-tertiary/80'}`}>{msg.thinkingContent}</div>
         </details>
       )}
       {/* content */}
       {hasContent && (
-        <div className={`whitespace-pre-wrap text-xs ${vibe ? 'text-white/90' : 'text-md-onSurface'}`}>{msg.content}</div>
+        <div className={`whitespace-pre-wrap break-words text-xs ${vibe ? 'text-white/90' : 'text-md-onSurface'}`}>{msg.content}</div>
       )}
       {/* 流式工具调用预览 */}
       {msg.streamingToolCalls && msg.streamingToolCalls.length > 0 && (
@@ -132,10 +138,15 @@ export function SubAgentDetailPanel({ sessionId, vibe }: SubAgentDetailPanelProp
   const panelRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    if (!run || run.status !== 'running') return
-    const timer = setInterval(() => {
+    if (!run || run.status !== 'running') {
+      setElapsed(0)
+      return
+    }
+    const updateElapsed = () => {
       setElapsed(Math.floor((Date.now() - run.startedAt) / 1000))
-    }, 1000)
+    }
+    updateElapsed()
+    const timer = setInterval(updateElapsed, 1000)
     return () => clearInterval(timer)
   }, [run?.status, run?.startedAt])
 
@@ -143,6 +154,7 @@ export function SubAgentDetailPanel({ sessionId, vibe }: SubAgentDetailPanelProp
   // 依赖 run?.id 而非 run 引用，避免流式期间每 50ms 重新挂载/卸载 keydown 监听器
   useEffect(() => {
     if (!run) return
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
     const panel = panelRef.current
     if (panel) {
       // 聚焦面板使其可接收键盘事件
@@ -155,7 +167,10 @@ export function SubAgentDetailPanel({ sessionId, vibe }: SubAgentDetailPanelProp
       }
     }
     document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      previousFocus?.focus()
+    }
   }, [run?.id, selectRun])
 
   if (!run) return null
@@ -173,11 +188,12 @@ export function SubAgentDetailPanel({ sessionId, vibe }: SubAgentDetailPanelProp
       tabIndex={-1}
       role="complementary"
       aria-label={t('chat.subAgentDetailAria', { name: run.agentName })}
-      className={`flex h-full w-[min(480px,40vw)] min-w-[320px] flex-col border-l focus:outline-none ${vibe ? 'liquid-glass-strong border-white/20' : 'border-md-outlineVariant/30 bg-dark-surfaceContainer'}`}
+      className={`absolute inset-0 z-30 flex h-full w-full max-w-none flex-col border-l focus:outline-none sm:static sm:z-auto sm:w-[min(480px,40vw)] sm:min-w-[320px] sm:max-w-[480px] ${vibe ? 'liquid-glass-strong border-white/20' : 'border-md-outlineVariant/30 bg-dark-surfaceContainer'}`}
     >
       {/* 头部 */}
       <div className={`flex items-center gap-2 border-b px-3 py-2 ${vibe ? 'border-white/10' : 'border-md-outlineVariant/30'}`}>
         <button
+          type="button"
           className={`rounded p-1 ${vibe ? 'hover:bg-white/10' : 'hover:bg-md-primaryContainer/20'}`}
           onClick={() => selectRun(null)}
           title={t('chat.closePanelTitle')}
@@ -186,14 +202,14 @@ export function SubAgentDetailPanel({ sessionId, vibe }: SubAgentDetailPanelProp
           <ArrowLeft className={`h-4 w-4 ${vibe ? 'text-white/60' : 'text-md-onSurfaceVariant'}`} />
         </button>
         <Bot className="h-4 w-4 text-md-primary" />
-        <span className={`text-sm font-medium ${vibe ? 'text-white/90' : 'text-md-onSurface'}`}>{run.agentName}</span>
-        <span className="rounded bg-md-primaryContainer/30 px-1.5 py-0.5 text-[10px] text-md-primary">{run.agentType}</span>
+        <span className={`min-w-0 truncate text-sm font-medium ${vibe ? 'text-white/90' : 'text-md-onSurface'}`}>{run.agentName}</span>
+        <span className="shrink-0 rounded bg-md-primaryContainer/30 px-1.5 py-0.5 text-[10px] text-md-primary">{run.agentType}</span>
       </div>
 
       {/* 任务摘要 */}
       <div className={`border-b px-3 py-2 ${vibe ? 'border-white/10' : 'border-md-outlineVariant/30'}`}>
         <div className={`text-[10px] ${vibe ? 'text-white/50' : 'text-md-onSurfaceVariant'}`}>{t('chat.subAgentTask')}</div>
-        <div className={`mt-0.5 text-xs ${vibe ? 'text-white/90' : 'text-md-onSurface'}`}>{run.prompt}</div>
+        <div className={`mt-0.5 whitespace-pre-wrap break-words text-xs ${vibe ? 'text-white/90' : 'text-md-onSurface'}`}>{run.prompt}</div>
         <div className="mt-1.5 flex items-center gap-2 text-[11px]">
           {statusConfig.icon}
           <span className={statusConfig.class}>{statusConfig.label}</span>
@@ -203,7 +219,7 @@ export function SubAgentDetailPanel({ sessionId, vibe }: SubAgentDetailPanelProp
           )}
         </div>
         {run.status === 'failed' && run.error && (
-          <div className="mt-1 rounded bg-md-error/10 p-1.5 text-[11px] text-md-error">{run.error}</div>
+          <div className="mt-1 whitespace-pre-wrap break-words rounded bg-md-error/10 p-1.5 text-[11px] text-md-error">{run.error}</div>
         )}
       </div>
 
@@ -220,7 +236,7 @@ export function SubAgentDetailPanel({ sessionId, vibe }: SubAgentDetailPanelProp
       {run.status === 'completed' && run.result && (
         <div className={`border-t px-3 py-2 ${vibe ? 'border-white/10' : 'border-md-outlineVariant/30'}`}>
           <div className={`text-[10px] ${vibe ? 'text-white/50' : 'text-md-onSurfaceVariant'}`}>{t('chat.subAgentFinalResult')}</div>
-          <div className={`mt-1 max-h-40 overflow-y-auto rounded p-1.5 text-xs ${vibe ? 'bg-white/5 text-white/90' : 'bg-md-success/5 text-md-onSurface'}`}>{run.result.slice(0, 1000)}{run.result.length > 1000 && '...'}</div>
+          <div className={`mt-1 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded p-1.5 text-xs ${vibe ? 'bg-white/5 text-white/90' : 'bg-md-success/5 text-md-onSurface'}`}>{run.result.slice(0, 1000)}{run.result.length > 1000 && '...'}</div>
         </div>
       )}
     </div>

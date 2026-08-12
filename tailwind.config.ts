@@ -5,7 +5,6 @@ const config: Config = {
   content: [
     './index.html',
     './src/**/*.{ts,tsx}',
-    './electron/**/*.ts',
   ],
   theme: {
     extend: {

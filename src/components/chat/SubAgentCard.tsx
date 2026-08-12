@@ -53,9 +53,11 @@ export function SubAgentCard({ message, sessionId, vibe }: SubAgentCardProps) {
   // 运行中时计时（必须在 early return 之前调用，遵守 React Hooks 规则）
   useEffect(() => {
     if (!run || run.status !== 'running') return
-    const timer = setInterval(() => {
+    const updateElapsed = () => {
       setElapsed(Math.floor((Date.now() - run.startedAt) / 1000))
-    }, 1000)
+    }
+    updateElapsed()
+    const timer = setInterval(updateElapsed, 1000)
     return () => clearInterval(timer)
   }, [run?.status, run?.startedAt])
 

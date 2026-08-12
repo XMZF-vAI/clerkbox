@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react'
-import { Cpu, Palette, RotateCcw, Check, AlertCircle, Info, X, Plus, Pencil, Trash2, Sparkles, Languages } from 'lucide-react'
+import { useState, useEffect, useId, useRef } from 'react'
+import { Cpu, Palette, RotateCcw, Check, AlertCircle, Info, X, Plus, Pencil, Trash2, Sparkles, Languages, FileText } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useSettingsStore } from '../../stores/settings-store'
 import { useVibeStore } from '../../stores/vibe-store'
@@ -7,6 +7,7 @@ import { MACARON_PRESETS, schemeSwatches } from '../../lib/theme-engine'
 import { SUPPORTED_LANGUAGES } from '../../i18n'
 import { ipc } from '../../lib/ipc-client'
 import ProvidersSection from './ProvidersSection'
+import ConfirmDialog from '../ui/ConfirmDialog'
 
 import APP_ICON from '../../assets/icon.png'
 
@@ -25,6 +26,10 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
   const isVibeMode = useVibeStore((s) => s.isVibeMode)
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle')
   const [testError, setTestError] = useState('')
+  const [showResetConfirmation, setShowResetConfirmation] = useState(false)
+  const titleId = useId()
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const closeButtonRef = useRef<HTMLButtonElement>(null)
 
   const activeProvider = settings.providers.find((p) => p.id === settings.activeProviderId)
   const activeLabel =
@@ -33,27 +38,64 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
     t('settings.api.noActive')
 
   useEffect(() => {
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const dialog = dialogRef.current
+    const focusableSelector = [
+      'button:not([disabled])',
+      '[href]',
+      'input:not([disabled])',
+      'select:not([disabled])',
+      'textarea:not([disabled])',
+      '[tabindex]:not([tabindex="-1"])',
+    ].join(',')
+    closeButtonRef.current?.focus()
+
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        onClose()
+        return
+      }
+      if (e.key !== 'Tab' || !dialog) return
+
+      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(focusableSelector))
+      if (focusable.length === 0) return
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault()
+        last.focus()
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault()
+        first.focus()
+      }
     }
     document.addEventListener('keydown', handleKeyDown)
-    return () => document.removeEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown)
+      if (previousFocus && document.contains(previousFocus)) previousFocus.focus()
+    }
   }, [onClose])
 
   // 走主进程代理，两种协议共用一条路径（直连由 provider.directFetch 单独控制）
   const handleTestConnection = async () => {
     setTestStatus('testing')
     setTestError('')
-    const res = await ipc.apiTestConnection({
-      baseUrl: settings.baseUrl,
-      apiKey: settings.apiKey,
-      apiCompat: settings.apiCompat || 'openai',
-    })
-    if ('error' in res) {
-      setTestError(res.error)
+    try {
+      const res = await ipc.apiTestConnection({
+        baseUrl: settings.baseUrl,
+        apiKey: settings.apiKey,
+        apiCompat: settings.apiCompat || 'openai',
+      })
+      if ('error' in res) {
+        setTestError(res.error)
+        setTestStatus('error')
+      } else {
+        setTestStatus('success')
+      }
+    } catch (error) {
+      setTestError(error instanceof Error ? error.message : String(error))
       setTestStatus('error')
-    } else {
-      setTestStatus('success')
     }
   }
 
@@ -63,13 +105,43 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
     { key: 'about', label: t('settings.tabs.about'), icon: Info },
   ]
 
+  const handleTabKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>, currentTab: Tab) => {
+    const currentIndex = tabs.findIndex((tab) => tab.key === currentTab)
+    const nextIndex = event.key === 'ArrowDown'
+      ? (currentIndex + 1) % tabs.length
+      : event.key === 'ArrowUp'
+        ? (currentIndex - 1 + tabs.length) % tabs.length
+        : event.key === 'Home'
+          ? 0
+          : event.key === 'End'
+            ? tabs.length - 1
+            : -1
+    if (nextIndex === -1) return
+
+    event.preventDefault()
+    const nextTab = tabs[nextIndex].key
+    setActiveTab(nextTab)
+    document.getElementById(`settings-tab-${nextTab}`)?.focus()
+  }
+
   return (
     <div className={`fixed ${isVibeMode ? 'inset-0' : 'inset-x-0 bottom-0 top-11'} z-50 flex items-center justify-center ${isVibeMode ? 'bg-black/50 backdrop-blur-sm' : 'bg-black/60'}`}>
-      <div className="w-[720px] max-w-[92vw] h-[560px] max-h-[82vh] bg-dark-surfaceDim rounded-md3-xl border border-dark-onSurfaceVariant/10 flex flex-col shadow-2xl">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        className="w-[720px] max-w-[92vw] h-[560px] max-h-[82vh] bg-dark-surfaceDim rounded-md3-xl border border-dark-onSurfaceVariant/10 flex flex-col shadow-2xl"
+      >
         <div className="flex items-center justify-between px-6 py-4 border-b border-dark-onSurfaceVariant/10">
-          <h2 className="text-lg font-semibold">{t('settings.title')}</h2>
+          <h2 id={titleId} className="text-lg font-semibold">{t('settings.title')}</h2>
           <button
+            ref={closeButtonRef}
+            type="button"
             onClick={onClose}
+            aria-label={t('common.close')}
+            title={t('common.close')}
             className="w-8 h-8 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-dark-onSurfaceVariant"
           >
             <X size={16} />
@@ -77,11 +149,17 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
         </div>
 
         <div className="flex flex-1 min-h-0">
-          <div className="w-44 flex flex-col gap-1 p-3 border-r border-dark-onSurfaceVariant/10">
+          <div role="tablist" aria-orientation="vertical" className="w-44 flex flex-col gap-1 p-3 border-r border-dark-onSurfaceVariant/10">
             {tabs.map((tab) => (
               <button
                 key={tab.key}
+                type="button"
+                id={`settings-tab-${tab.key}`}
+                role="tab"
+                aria-selected={activeTab === tab.key}
+                aria-controls="settings-tabpanel"
                 onClick={() => setActiveTab(tab.key)}
+                onKeyDown={(event) => handleTabKeyDown(event, tab.key)}
                 className={`flex items-center gap-2.5 px-3 py-2.5 rounded-md3-sm text-sm transition-colors text-left ${
                   activeTab === tab.key
                     ? 'bg-dark-surfaceContainerHigh text-dark-onSurface'
@@ -94,7 +172,12 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
             ))}
           </div>
 
-          <div className="flex-1 overflow-y-auto p-6">
+          <div
+            id="settings-tabpanel"
+            role="tabpanel"
+            aria-labelledby={`settings-tab-${activeTab}`}
+            className="flex-1 overflow-y-auto p-6"
+          >
             {activeTab === 'api' && (
               <div className="space-y-5">
                 {/* 当前生效 */}
@@ -114,6 +197,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                     </div>
                   </div>
                   <button
+                    type="button"
                     onClick={handleTestConnection}
                     disabled={testStatus === 'testing' || !settings.baseUrl}
                     className="px-3 py-1.5 bg-md-primary text-md-onPrimary rounded-md3-sm text-xs font-medium hover:bg-md-primary/90 transition-colors disabled:opacity-50 flex-shrink-0"
@@ -122,13 +206,44 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                   </button>
                 </div>
                 {testStatus === 'success' && (
-                  <span className="flex items-center gap-1 text-sm text-md-success"><Check size={14} /> {t('settings.api.testSuccess')}</span>
+                  <span role="status" className="flex items-center gap-1 text-sm text-md-success"><Check size={14} /> {t('settings.api.testSuccess')}</span>
                 )}
                 {testStatus === 'error' && (
-                  <span className="flex items-center gap-1 text-sm text-md-error max-w-full truncate"><AlertCircle size={14} /> {testError}</span>
+                  <span role="alert" className="flex items-center gap-1 text-sm text-md-error max-w-full truncate"><AlertCircle size={14} /> {testError}</span>
                 )}
 
                 <ProvidersSection />
+
+                {/* 项目指令 AGENTS.md */}
+                <div className="space-y-3 p-4 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10">
+                  <div className="flex items-center gap-2">
+                    <FileText size={14} className="text-md-primary flex-shrink-0" />
+                    <span className="text-sm font-medium text-dark-onSurface">项目指令</span>
+                  </div>
+                  <p className="text-xs text-dark-onSurfaceVariant/70 leading-relaxed">
+                    启用后，工作目录根目录下的 AGENTS.md 会被注入到系统提示词。AGENTS.md 是跨工具标准（Codex / OpenCode / Qwen 原生支持），用于向 AI 描述项目技术栈、构建命令和编码规范。
+                  </p>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={settings.agentsMdEnabled}
+                      onChange={(e) => settings.updateSettings({ agentsMdEnabled: e.target.checked })}
+                      className="accent-md-primary"
+                    />
+                    <span className="text-xs text-dark-onSurfaceVariant">注入 AGENTS.md</span>
+                  </label>
+                  {settings.agentsMdEnabled && (
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={settings.claudeMdCompat}
+                        onChange={(e) => settings.updateSettings({ claudeMdCompat: e.target.checked })}
+                        className="accent-md-primary"
+                      />
+                      <span className="text-xs text-dark-onSurfaceVariant">兼容 CLAUDE.md（AGENTS.md 不存在时回退读取）</span>
+                    </label>
+                  )}
+                </div>
               </div>
             )}
 
@@ -144,6 +259,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                     {SUPPORTED_LANGUAGES.map((lang) => (
                       <button
                         key={lang.code}
+                        type="button"
                         onClick={() => settings.updateSettings({ language: lang.code })}
                         className={`flex-1 px-3 py-2 rounded-md3-sm text-sm transition-colors border ${
                           settings.language === lang.code
@@ -165,6 +281,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                     {(['light', 'dark', 'system'] as const).map((theme) => (
                       <button
                         key={theme}
+                        type="button"
                         onClick={() => settings.updateSettings({ theme })}
                         className={`flex-1 py-2 rounded-md3-sm text-sm border transition-colors ${
                           settings.theme === theme
@@ -190,6 +307,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                       return (
                         <button
                           key={p.id}
+                          type="button"
                           onClick={() => settings.updateSettings({ colorScheme: p.id })}
                           className="flex flex-col items-center gap-1.5 group"
                           aria-pressed={selected}
@@ -219,7 +337,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                       const selected = settings.colorScheme === 'custom'
                       return (
                         <label
-                          className="flex flex-col items-center gap-1.5 group cursor-pointer"
+                          className="flex flex-col items-center gap-1.5 group cursor-pointer focus-within:outline focus-within:outline-2 focus-within:outline-md-primary focus-within:outline-offset-2 rounded-md3-sm"
                           title={t('settings.appearance.customColor')}
                         >
                           <span
@@ -247,7 +365,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                             onChange={(e) =>
                               settings.updateSettings({ customSeedColor: e.target.value, colorScheme: 'custom' })
                             }
-                            className="absolute opacity-0 w-0 h-0 pointer-events-none"
+                            className="sr-only"
                             aria-label={t('settings.appearance.customSeedAriaLabel')}
                           />
                         </label>
@@ -275,13 +393,14 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                   </div>
                   <div className="flex justify-between py-2">
                     <span className="text-dark-onSurfaceVariant/60">{t('settings.about.license')}</span>
-                    <span>MIT</span>
+                    <span>Apache-2.0</span>
                   </div>
                 </div>
                 <p className="mt-8 text-[11px] text-dark-onSurfaceVariant/30 text-center">
                   {t('settings.about.copyright')}
                 </p>
                 <button
+                  type="button"
                   onClick={() => settings.updateSettings({ hasCompletedOnboarding: false, showSettings: false })}
                   className="mt-4 flex items-center gap-1.5 text-xs text-md-primary/80 hover:text-md-primary transition-colors"
                 >
@@ -293,12 +412,8 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
 
             <div className="mt-8 pt-4 border-t border-dark-onSurfaceVariant/10">
               <button
-                onClick={() => {
-                  if (window.confirm(t('settings.resetConfirm'))) {
-                    settings.resetSettings()
-                    setTestStatus('idle')
-                  }
-                }}
+                type="button"
+                  onClick={() => setShowResetConfirmation(true)}
                 className="flex items-center gap-2 text-sm text-dark-onSurfaceVariant hover:text-md-error transition-colors"
               >
                 <RotateCcw size={14} />
@@ -308,6 +423,20 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
           </div>
         </div>
       </div>
+      {showResetConfirmation && (
+        <ConfirmDialog
+          title={t('settings.resetSettings')}
+          message={t('settings.resetConfirm')}
+          confirmText={t('settings.resetSettings')}
+          variant="danger"
+          onConfirm={() => {
+            settings.resetSettings()
+            setTestStatus('idle')
+            setShowResetConfirmation(false)
+          }}
+          onCancel={() => setShowResetConfirmation(false)}
+        />
+      )}
     </div>
   )
 }

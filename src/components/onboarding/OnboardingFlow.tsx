@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ArrowLeft, ArrowRight, Check, Minus, Moon, Monitor, Palette, Sparkles, Sun, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useSettingsStore } from '../../stores/settings-store'
@@ -21,11 +21,21 @@ const THEME_LABEL_KEY: Record<string, string> = {
 }
 
 /** 主按钮：MD3 filled 风格，跟随当前种子色实时变化 */
-function PrimaryButton({ onClick, children }: { onClick: () => void; children: React.ReactNode }) {
+function PrimaryButton({
+  onClick,
+  children,
+  disabled = false,
+}: {
+  onClick: () => void
+  children: React.ReactNode
+  disabled?: boolean
+}) {
   return (
     <button
+      type="button"
       onClick={onClick}
-      className="inline-flex items-center gap-2 rounded-full bg-md-primary px-8 py-2.5 text-sm font-medium text-md-onPrimary shadow-lg shadow-md-primary/25 transition-all hover:brightness-110 hover:shadow-md-primary/40 active:scale-95"
+      disabled={disabled}
+      className="inline-flex items-center gap-2 rounded-full bg-md-primary px-8 py-2.5 text-sm font-medium text-md-onPrimary shadow-lg shadow-md-primary/25 transition-all hover:brightness-110 hover:shadow-md-primary/40 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
     >
       {children}
     </button>
@@ -37,6 +47,7 @@ export default function OnboardingFlow() {
   const { t } = useTranslation()
   const [step, setStep] = useState(0)
   const [leaving, setLeaving] = useState(false)
+  const completionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const theme = useSettingsStore((s) => s.theme)
   const colorScheme = useSettingsStore((s) => s.colorScheme)
   const customSeedColor = useSettingsStore((s) => s.customSeedColor)
@@ -44,14 +55,19 @@ export default function OnboardingFlow() {
   const updateSettings = useSettingsStore((s) => s.updateSettings)
 
   const finish = () => {
+    if (leaving) return
     setLeaving(true)
-    // 等淡出动画播完再写入完成标记，切换到主界面
-    setTimeout(() => updateSettings({ hasCompletedOnboarding: true }), 320)
+    // Wait for the exit transition before rendering the main application.
+    completionTimerRef.current = setTimeout(() => updateSettings({ hasCompletedOnboarding: true }), 320)
   }
+
+  useEffect(() => () => {
+    if (completionTimerRef.current) clearTimeout(completionTimerRef.current)
+  }, [])
 
   return (
     <div
-      className={`relative h-full w-full transition-opacity duration-300 ${leaving ? 'opacity-0' : 'opacity-100'}`}
+      className={`relative h-full w-full overflow-y-auto transition-opacity duration-300 ${leaving ? 'opacity-0' : 'opacity-100'}`}
     >
       {/* 顶部拖拽区 + 窗口控制（欢迎页不渲染 TitleBar，需自带） */}
       <div
@@ -60,16 +76,18 @@ export default function OnboardingFlow() {
       >
         <div className="flex items-center gap-1" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
           <button
+            type="button"
             onClick={() => window.clerkbox?.windowAction('minimize')}
             className="rounded-md p-1.5 text-dark-onSurfaceVariant/70 transition-colors hover:bg-dark-onSurfaceVariant/10"
-            aria-label={t('common.close')}
+            aria-label={t('titlebar.windowMinimize')}
           >
             <Minus size={15} />
           </button>
           <button
+            type="button"
             onClick={() => window.clerkbox?.windowAction('close')}
             className="rounded-md p-1.5 text-dark-onSurfaceVariant/70 transition-colors hover:bg-md-error hover:text-md-onError"
-            aria-label={t('common.close')}
+            aria-label={t('titlebar.windowClose')}
           >
             <X size={15} />
           </button>
@@ -77,11 +95,10 @@ export default function OnboardingFlow() {
       </div>
 
       {/* 步骤内容（key 驱动重挂载，实现切换动画） */}
-      <div key={step} className="relative z-10 flex h-full flex-col items-center justify-center px-10 animate-fade-in">
+      <div key={step} className="relative z-10 flex min-h-full flex-col items-center justify-center px-4 py-16 sm:px-10 animate-fade-in">
         {step === 0 && (
           <div className="flex flex-col items-center animate-slide-up">
             <div className="relative mb-8">
-              <div className="absolute inset-0 scale-125 rounded-[28px] bg-md-primary/30 blur-2xl" aria-hidden="true" />
               <img src={APP_ICON} alt="ClerkBox" className="relative h-24 w-24 rounded-[28px] shadow-xl" />
             </div>
             <h1 className="text-4xl font-bold tracking-wide">{t('onboarding.welcome.title')}</h1>
@@ -95,6 +112,7 @@ export default function OnboardingFlow() {
               <div className="flex gap-2">
                 {SUPPORTED_LANGUAGES.map((lang) => (
                   <button
+                    type="button"
                     key={lang.code}
                     onClick={() => updateSettings({ language: lang.code })}
                     className={`px-4 py-1.5 rounded-full text-xs font-medium transition ${
@@ -128,6 +146,7 @@ export default function OnboardingFlow() {
             <div className="mt-8 flex gap-2">
               {THEME_OPTIONS.map(({ value, icon: Icon }) => (
                 <button
+                  type="button"
                   key={value}
                   onClick={() => updateSettings({ theme: value })}
                   aria-pressed={theme === value}
@@ -152,6 +171,7 @@ export default function OnboardingFlow() {
                   const selected = colorScheme === p.id
                   return (
                     <button
+                      type="button"
                       key={p.id}
                       onClick={() => updateSettings({ colorScheme: p.id })}
                       className="group flex flex-col items-center gap-1.5"
@@ -195,7 +215,7 @@ export default function OnboardingFlow() {
                         type="color"
                         value={customSeedColor}
                         onChange={(e) => updateSettings({ customSeedColor: e.target.value, colorScheme: 'custom' })}
-                        className="pointer-events-none absolute h-0 w-0 opacity-0"
+                        className="sr-only"
                         aria-label={t('onboarding.theme.customSeedAriaLabel')}
                       />
                     </label>
@@ -206,6 +226,7 @@ export default function OnboardingFlow() {
 
             <div className="mt-10 flex items-center justify-center gap-3">
               <button
+                type="button"
                 onClick={() => setStep(0)}
                 className="inline-flex items-center gap-1.5 rounded-full border border-dark-onSurfaceVariant/20 px-6 py-2.5 text-sm text-dark-onSurfaceVariant transition-colors hover:bg-dark-surfaceContainer"
               >
@@ -223,7 +244,6 @@ export default function OnboardingFlow() {
         {step === 2 && (
           <div className="flex flex-col items-center animate-slide-up">
             <div className="relative mb-8">
-              <div className="absolute inset-0 scale-125 rounded-full bg-md-tertiary/25 blur-2xl" aria-hidden="true" />
               <div className="relative flex h-24 w-24 items-center justify-center rounded-full bg-md-primary/15 ring-1 ring-md-primary/30">
                 <Sparkles size={44} className="text-md-primary" />
               </div>
@@ -231,7 +251,7 @@ export default function OnboardingFlow() {
             <h2 className="text-3xl font-semibold">{t('onboarding.done.title')}</h2>
             <p className="mt-3 text-sm text-dark-onSurfaceVariant/70">{t('onboarding.done.subtitle')}</p>
             <div className="mt-12">
-              <PrimaryButton onClick={finish}>
+              <PrimaryButton onClick={finish} disabled={leaving}>
                 <Sparkles size={16} />
                 {t('onboarding.done.start')}
               </PrimaryButton>
@@ -241,7 +261,7 @@ export default function OnboardingFlow() {
       </div>
 
       {/* 进度指示 */}
-      <div className="absolute bottom-10 left-1/2 z-10 flex -translate-x-1/2 items-center gap-2">
+      <div className="absolute bottom-10 left-1/2 z-10 flex -translate-x-1/2 items-center gap-2" aria-hidden="true">
         {[0, 1, 2].map((i) => (
           <span
             key={i}

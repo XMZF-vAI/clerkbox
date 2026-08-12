@@ -21,10 +21,12 @@ export default function VibeCustomizeMenu({ onClose }: VibeCustomizeMenuProps) {
   const [musicUrl, setMusicUrl] = useState(music?.type === 'url' ? music.value : '')
 
   const dialogRef = useRef<HTMLDivElement>(null)
+  const previousFocusRef = useRef<HTMLElement | null>(null)
 
-  // Escape 关闭 + 焦点陷阱
+  /** Trap modal focus while preserving the trigger for keyboard users. */
   useEffect(() => {
     const dialog = dialogRef.current
+    previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
     if (dialog) dialog.focus()
 
     const onKey = (e: KeyboardEvent) => {
@@ -51,7 +53,11 @@ export default function VibeCustomizeMenu({ onClose }: VibeCustomizeMenuProps) {
       }
     }
     document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      const previousFocus = previousFocusRef.current
+      if (previousFocus && document.contains(previousFocus)) previousFocus.focus()
+    }
   }, [onClose])
 
   const handleSelectLocalBackground = async () => {
@@ -122,6 +128,7 @@ export default function VibeCustomizeMenu({ onClose }: VibeCustomizeMenuProps) {
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-sm font-medium">{t('vibe.customizeTitle')}</h3>
           <button
+            type="button"
             onClick={onClose}
             aria-label={t('common.close')}
             className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-white/15 transition-colors"
@@ -139,13 +146,15 @@ export default function VibeCustomizeMenu({ onClose }: VibeCustomizeMenuProps) {
 
           <div className="flex gap-2">
             <input
-              type="text"
+              type="url"
+              aria-label={t('vibe.bgUrlPlaceholder')}
               value={bgUrl}
               onChange={(e) => setBgUrl(e.target.value)}
               placeholder={t('vibe.bgUrlPlaceholder')}
               className="flex-1 px-3 py-1.5 text-xs bg-white/10 border border-white/20 rounded-lg placeholder-white/40 outline-none focus:border-white/40 transition-colors"
             />
             <button
+              type="button"
               onClick={handleApplyBackgroundUrl}
               disabled={!bgUrl.trim()}
               className="px-3 py-1.5 text-xs rounded-lg bg-white/20 hover:bg-white/30 disabled:opacity-40 transition-colors"
@@ -156,6 +165,7 @@ export default function VibeCustomizeMenu({ onClose }: VibeCustomizeMenuProps) {
 
           <div className="flex gap-2">
             <button
+              type="button"
               onClick={handleSelectLocalBackground}
               className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/15 border border-white/20 transition-colors"
             >
@@ -163,6 +173,7 @@ export default function VibeCustomizeMenu({ onClose }: VibeCustomizeMenuProps) {
               {t('vibe.selectLocalImage')}
             </button>
             <button
+              type="button"
               onClick={handleResetBackground}
               className="px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/15 border border-white/20 transition-colors"
             >
@@ -187,13 +198,15 @@ export default function VibeCustomizeMenu({ onClose }: VibeCustomizeMenuProps) {
 
           <div className="flex gap-2">
             <input
-              type="text"
+              type="url"
+              aria-label={t('vibe.musicUrlPlaceholder')}
               value={musicUrl}
               onChange={(e) => setMusicUrl(e.target.value)}
               placeholder={t('vibe.musicUrlPlaceholder')}
               className="flex-1 px-3 py-1.5 text-xs bg-white/10 border border-white/20 rounded-lg placeholder-white/40 outline-none focus:border-white/40 transition-colors"
             />
             <button
+              type="button"
               onClick={handleApplyMusicUrl}
               disabled={!musicUrl.trim()}
               className="px-3 py-1.5 text-xs rounded-lg bg-white/20 hover:bg-white/30 disabled:opacity-40 transition-colors"
@@ -204,6 +217,7 @@ export default function VibeCustomizeMenu({ onClose }: VibeCustomizeMenuProps) {
 
           <div className="flex gap-2">
             <button
+              type="button"
               onClick={handleSelectLocalMusic}
               className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/15 border border-white/20 transition-colors"
             >
@@ -211,6 +225,7 @@ export default function VibeCustomizeMenu({ onClose }: VibeCustomizeMenuProps) {
               {t('vibe.selectLocalAudio')}
             </button>
             <button
+              type="button"
               onClick={handleResetMusic}
               className="px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/15 border border-white/20 transition-colors"
             >
@@ -227,6 +242,7 @@ export default function VibeCustomizeMenu({ onClose }: VibeCustomizeMenuProps) {
             </div>
             <div className="flex gap-2">
               <button
+                type="button"
                 onClick={handleSelectMusicFolder}
                 className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/15 border border-white/20 transition-colors"
               >
@@ -235,6 +251,7 @@ export default function VibeCustomizeMenu({ onClose }: VibeCustomizeMenuProps) {
               </button>
               {musicFolder && (
                 <button
+                  type="button"
                   onClick={handleClearMusicFolder}
                   className="px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/15 border border-white/20 transition-colors"
                 >

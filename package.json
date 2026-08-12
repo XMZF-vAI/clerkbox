@@ -17,7 +17,7 @@
     "xmzf"
   ],
   "author": "XMZF Studio",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "type": "module",
   "dependencies": {
     "@material/material-color-utilities": "^0.4.0",
@@ -25,7 +25,7 @@
     "cheerio": "^1.2.0",
     "i18next": "^26.3.6",
     "iconv-lite": "^0.7.3",
-    "js-yaml": "^4.1.0",
+    "js-yaml": "^4.3.1",
     "lucide-react": "^1.17.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
@@ -48,7 +48,7 @@
     "cross-env": "^10.1.0",
     "electron": "^42.3.2",
     "electron-builder": "^26.8.1",
-    "postcss": "8.5",
+    "postcss": "^8.5.26",
     "tailwindcss": "^3.4.17",
     "typescript": "^6.0.3",
     "vite": "^5.4.21",

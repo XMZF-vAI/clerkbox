@@ -25,6 +25,83 @@ import {
 } from '../lib/api-adapters'
 import type { ApiCompat, Message, ToolCall, ToolResult, StreamingToolCall, TokenUsage } from '../types/agent'
 
+/** Normalize separators and dot segments for path-comparison only. */
+function normalizePathForComparison(value: string): string {
+  const slashNormalized = value.replace(/\\/g, '/').replace(/\/+/g, '/')
+  const driveMatch = slashNormalized.match(/^[A-Za-z]:\//)
+  const prefix = driveMatch ? driveMatch[0] : slashNormalized.startsWith('//') ? '//' : slashNormalized.startsWith('/') ? '/' : ''
+  const remainder = prefix ? slashNormalized.slice(prefix.length) : slashNormalized
+  const segments: string[] = []
+  for (const segment of remainder.split('/')) {
+    if (!segment || segment === '.') continue
+    if (segment === '..') {
+      if (segments.length > 0 && segments[segments.length - 1] !== '..') segments.pop()
+      else if (!prefix) segments.push(segment)
+      continue
+    }
+    segments.push(segment)
+  }
+  const normalized = `${prefix}${segments.join('/')}`
+  return normalized.length > prefix.length ? normalized.replace(/\/$/, '') : normalized
+}
+
+/** Determine whether one normalized path is inside another across supported platforms. */
+function isPathInside(child: string, parent: string): boolean {
+  if (!child || !parent) return false
+  const normalizedChild = normalizePathForComparison(child)
+  const normalizedParent = normalizePathForComparison(parent)
+  const usesWindowsCaseRules = /^[A-Za-z]:\//.test(normalizedChild) ||
+    /^[A-Za-z]:\//.test(normalizedParent) ||
+    normalizedChild.startsWith('//') ||
+    normalizedParent.startsWith('//')
+  const a = usesWindowsCaseRules ? normalizedChild.toLowerCase() : normalizedChild
+  const b = usesWindowsCaseRules ? normalizedParent.toLowerCase() : normalizedParent
+  if (a === b) return true
+  return a.startsWith(b.endsWith('/') ? b : `${b}/`)
+}
+
+/** Recognize absolute Windows, UNC, and POSIX paths before resolving tool input. */
+function isAbsolutePath(value: string): boolean {
+  return /^(?:[a-zA-Z]:[\\/]|[\\/]{1,2})/.test(value)
+}
+
+/** Protect platform directories regardless of slash style or letter casing. */
+function isSystemPath(value: string): boolean {
+  const normalized = normalizePathForComparison(value).toLowerCase()
+  return normalized === '/etc' || normalized.startsWith('/etc/') ||
+    normalized === 'c:/windows' || normalized.startsWith('c:/windows/') ||
+    normalized === 'c:/program files' || normalized.startsWith('c:/program files/')
+}
+
+function resolveToolPath(workingDir: string, input: unknown): string {
+  const requested = String(input || '')
+  if (!workingDir || isAbsolutePath(requested)) return requested
+  const separator = workingDir.includes('\\') ? '\\' : '/'
+  return `${workingDir}${separator}${requested}`
+}
+
+/** Combine cancellation sources on platforms that do not implement AbortSignal.any. */
+function combineAbortSignals(signals: AbortSignal[]): { signal: AbortSignal; dispose: () => void } {
+  const abortSignalWithAny = AbortSignal as typeof AbortSignal & {
+    any?: (sources: AbortSignal[]) => AbortSignal
+  }
+  if (typeof abortSignalWithAny.any === 'function') {
+    return { signal: abortSignalWithAny.any(signals), dispose: () => {} }
+  }
+
+  const combined = new AbortController()
+  const listeners = signals.map((source) => {
+    const abort = () => combined.abort(source.reason)
+    if (source.aborted) abort()
+    else source.addEventListener('abort', abort, { once: true })
+    return { source, abort }
+  })
+  return {
+    signal: combined.signal,
+    dispose: () => listeners.forEach(({ source, abort }) => source.removeEventListener('abort', abort)),
+  }
+}
+
 const SYSTEM_PROMPT = `You are ClerkBox, a powerful AI assistant running on the user's desktop. You interact with the user's file system and terminal through tools.
 
 ## Your Capabilities
@@ -39,7 +116,7 @@ const SYSTEM_PROMPT = `You are ClerkBox, a powerful AI assistant running on the 
 2. Verify correct paths before operating on files
 3. Warn the user before executing dangerous commands
 4. When encountering errors, analyze the cause and attempt to fix
-5. Reply to the user in Chinese
+5. Reply in the same language the user uses (e.g., Chinese for Chinese messages, English for English messages)
 6. When the user asks about real-time info, news, or latest information, use the web_search tool
 7. When you need detailed content from a specific webpage, first use web_search then use web_fetch on individual pages
 
@@ -136,6 +213,54 @@ You are now in Plan Mode. In this mode:
 5. If the user asks to modify the plan, rewrite plan.md and include \`[PLAN_COMPLETE]\` again.`
 
 const MAX_REACT_ITERATIONS = 100 // Loop exits when model stops calling tools or hits this cap
+
+/** 可重试的 HTTP 状态码（瞬时故障，退避重试） */
+const RETRYABLE_CODES = [408, 429, 500, 502, 503, 504]
+
+/** 判断错误是否属于「瞬时、值得重试」的类型（429/502/超时/网络中断等）。 */
+export function isRetryableError(err: unknown): boolean {
+  if (err instanceof Error && err.name === 'AbortError') return false
+  const msg = err instanceof Error ? err.message : String(err)
+  // 网络 / 超时 / 连接类
+  if (/timeout|abort|network|fetch failed|ECONNRESET|socket hang up|ENOTFOUND/i.test(msg)) return true
+  // HTTP 状态码（API Error 429 / HTTP 502 等）
+  const m = msg.match(/API Error\s+(\d+)/i) || msg.match(/HTTP\s+(\d+)/i)
+  if (m && RETRYABLE_CODES.includes(Number(m[1]))) return true
+  return false
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * 带指数退避的重试：最多 retries 次，间隔按 baseDelayMs 倍增（低增）。
+ * 默认间隔 1s → 2s → 4s → 8s → 16s。shouldRetry 返回 false 时立即抛出不再重试。
+ * onRetry 在每次「将要重试」时调用（已确定可重试、等待退避前），可用来更新 UI 提示。
+ */
+export async function runWithRetry<T>(
+  fn: () => Promise<T>,
+  opts: {
+    retries?: number
+    baseDelayMs?: number
+    shouldRetry?: (err: unknown) => boolean
+    onRetry?: (attempt: number, delayMs: number, err: unknown) => void
+  } = {}
+): Promise<T> {
+  const { retries = 5, baseDelayMs = 1000, shouldRetry = () => true, onRetry } = opts
+  let attempt = 0
+  for (;;) {
+    try {
+      return await fn()
+    } catch (err) {
+      attempt++
+      if (attempt > retries || !shouldRetry(err)) throw err
+      const delay = baseDelayMs * 2 ** (attempt - 1)
+      onRetry?.(attempt, delay, err)
+      await sleep(delay)
+    }
+  }
+}
 
 export function useAgent(sessionId: string) {
   const settings = useSettingsStore()
@@ -291,17 +416,10 @@ export function useAgent(sessionId: string) {
         thinkingBlocks: opts.thinkingBlocks,
       })
 
-      // M6: 120s timeout 使用独立的 AbortController，避免 abort 整个 ReAct 循环的 controller。
-      // 旧实现直接用 controller.abort()，一次慢响应会让整个会话后续都无法继续。
-      // 注意：主进程代理路径的超时由主进程自己管，这里的超时只覆盖「建立连接」阶段。
+      // A connection timeout must not abort the controller that owns the full agent run.
       const timeoutController = new AbortController()
       const timeoutId = setTimeout(() => timeoutController.abort(new Error('Request timeout after 120s')), 120_000)
-      // 组合信号：外层 controller 或 timeout 任一触发都中止当前请求
-      const combinedSignal: AbortSignal = (AbortSignal as any).any
-        ? (AbortSignal as any).any([controller.signal, timeoutController.signal])
-        : controller.signal
-      const forwardAbort = () => timeoutController.abort()
-      controller.signal.addEventListener('abort', forwardAbort)
+      const { signal: combinedSignal, dispose } = combineAbortSignals([controller.signal, timeoutController.signal])
 
       let opened = false
       try {
@@ -318,10 +436,9 @@ export function useAgent(sessionId: string) {
         opened = true
         return { chunks, compat }
       } finally {
-        controller.signal.removeEventListener('abort', forwardAbort)
+        dispose()
         clearTimeout(timeoutId)
-        // 仅在建连失败时 abort timeoutController（避免泄漏）。
-        // 成功时不 abort —— 流尚未读取，abort 会中断流。
+        // The stream may still consume the successful connection, so only abort on failure.
         if (!opened) timeoutController.abort()
       }
     },
@@ -347,6 +464,7 @@ export function useAgent(sessionId: string) {
     let totalTokens = 0
     for (const m of msgs) {
       totalTokens += estimateTokens(m.content || '')
+      totalTokens += estimateTokens(m._systemSuffix || '')
       if (m.tool_calls) {
         totalTokens += estimateTokens(JSON.stringify(m.tool_calls))
       }
@@ -371,7 +489,7 @@ export function useAgent(sessionId: string) {
 
     for (let i = rest.length - 1; i >= 0; i--) {
       const m = rest[i]
-      const mTokens = estimateTokens(m.content || '') + estimateTokens(m.tool_calls ? JSON.stringify(m.tool_calls) : '') + estimateTokens(m.reasoning_content || '')
+      const mTokens = estimateTokens(m.content || '') + estimateTokens(m._systemSuffix || '') + estimateTokens(m.tool_calls ? JSON.stringify(m.tool_calls) : '') + estimateTokens(m.reasoning_content || '')
 
       if (runningTokens + mTokens > MAX_INPUT_TOKENS && (rest.length - i) >= 4) {
         // We've hit the budget, cut here — but check if this is a safe cut point
@@ -443,6 +561,7 @@ export function useAgent(sessionId: string) {
         chainsTo: string[]
       }>
       extraSystemPrompt?: string
+      agentsMdContent?: string
     } = {}
   ): NeutralMessage[] => {
     const {
@@ -451,22 +570,20 @@ export function useAgent(sessionId: string) {
       permissionMode = settings.permissionMode,
       activeSkillIndex = useSkillsStore.getState().getActiveSkillIndex(),
       extraSystemPrompt,
+      agentsMdContent = '',
     } = opts
 
-    let systemContent: string
+    let staticSystemContent: string
+    let dynamicSystemContent = `## Current Working Directory\n${workingDir || '(not set — treat all paths as relative)'}`
     if (extraSystemPrompt) {
-      // 子 agent 模式：用 agent 自己的 system prompt 覆盖
-      systemContent = extraSystemPrompt
-      if (workingDir) {
-        systemContent += `\n\n## 当前工作目录\n${workingDir}`
-      }
+      staticSystemContent = extraSystemPrompt
     } else {
-      // 主 agent 模式：保留原有逻辑
-      systemContent = SYSTEM_PROMPT
+      staticSystemContent = SYSTEM_PROMPT
       if (workingDir) {
-        systemContent += `\n\n## 当前工作目录\n${workingDir}\n\n用户的文件操作默认在此目录下执行。`
-        systemContent += CLERKBOX_PROMPT
-        if (memoryPrompt) systemContent += '\n\n' + memoryPrompt
+        dynamicSystemContent += `\n\nFile operations default to this directory. Do NOT write outside it unless the user explicitly provides an absolute path elsewhere.`
+        dynamicSystemContent += CLERKBOX_PROMPT
+        if (agentsMdContent) dynamicSystemContent += agentsMdContent
+        if (memoryPrompt) dynamicSystemContent += '\n\n' + memoryPrompt
         if (activeSkillIndex.length > 0) {
           const indexLines = activeSkillIndex.map((s) => {
             const kw = s.triggerKeywords.length > 0 ? ` | keywords: ${s.triggerKeywords.join(', ')}` : ''
@@ -474,14 +591,19 @@ export function useAgent(sessionId: string) {
             const chain = s.chainsTo.length > 0 ? ` | chains_to: ${s.chainsTo.join(', ')}` : ''
             return `- \`${s.slug}\`${ver} → ${s.skillMdPath} | ${s.name}: ${s.description}${kw}${chain}`
           })
-          systemContent += `\n\n### ⚡ Currently Active Skills (Index)\n${indexLines.join('\n')}\n\n**Follow the Skill Router rules above. Do NOT read all skills — only read those matching the current task.**`
+          dynamicSystemContent += `\n\n### ⚡ Currently Active Skills (Index)\n${indexLines.join('\n')}\n\n**Follow the Skill Router rules above. Do NOT read all skills — only read those matching the current task.**`
         }
       }
-      if (permissionMode === 'plan') systemContent += PLAN_MODE_PROMPT
+      if (permissionMode === 'plan') dynamicSystemContent += PLAN_MODE_PROMPT
     }
 
     const result: NeutralMessage[] = [
-      { role: 'system', content: systemContent },
+      {
+        role: 'system',
+        content: staticSystemContent,
+        _cacheControl: true,
+        _systemSuffix: dynamicSystemContent,
+      },
     ]
 
     for (const m of msgs) {
@@ -654,7 +776,7 @@ export function useAgent(sessionId: string) {
         setSessionStatus(sessionId, 'error')
         notifyIfNotViewing(sessionId, 'error', msg.slice(0, 200))
       } finally {
-        // B3: 只清当前 controller 的引用，避免误清新会话的 controller。
+        // Do not clear a controller installed by a newer request for this session.
         if (getSessionAbortController(sessionId) === controller) {
           setSessionAbortController(sessionId, null)
         }
@@ -693,6 +815,27 @@ export function useAgent(sessionId: string) {
         memoryPrompt = await buildMemoryPrompt(workingDir, homeDir)
       } catch {
         memoryPrompt = ''
+      }
+    }
+
+    // Pre-fetch AGENTS.md (项目根指令) — 跨工具标准，Codex/OpenCode/Qwen 原生支持
+    // 开启 claudeMdCompat 时，AGENTS.md 不存在则回退读取 CLAUDE.md
+    let agentsMdContent = ''
+    if (settings.agentsMdEnabled && workingDir) {
+      try {
+        const candidates = settings.claudeMdCompat
+          ? ['AGENTS.md', 'CLAUDE.md']
+          : ['AGENTS.md']
+        for (const name of candidates) {
+          const fullPath = workingDir + '\\' + name
+          const text = await ipc.readFile(fullPath)
+          if (text && text.trim()) {
+            agentsMdContent = `\n\n### 📋 Project Instructions (${name})\n${text.trim()}`
+            break
+          }
+        }
+      } catch {
+        agentsMdContent = ''
       }
     }
 
@@ -764,7 +907,7 @@ export function useAgent(sessionId: string) {
 
           // Clear the read file state (it's now in file attachments)
           sessionReadFilesRef.current = new Map()
-          // M2: 压缩成功后重置主 agent 的 token tracker。若保留压缩前的大 usage.lastUsage，
+          // Reset the token tracker after compaction so stale usage cannot retrigger it.
           // 下一轮 getTokenCount 会取 max(lastUsage, estimated)，导致继续误判超过阈值，
           // 反复进入 compactConversation 并抛 "Not enough messages to compact"。
           tokenTrackerRef.current.reset()
@@ -782,73 +925,111 @@ export function useAgent(sessionId: string) {
       }
 
       // Build API messages from conversation history (with auto-truncation for long conversations)
-      const apiMessages = truncateMessages(buildAPIMessages(conversationMessages, { memoryPrompt }))
-
-      // Call API
-      const response = await callAPI(apiMessages, controller, { thinkingBlocks })
+      const apiMessages = truncateMessages(buildAPIMessages(conversationMessages, { memoryPrompt, agentsMdContent }))
 
       // Parse streaming response
       let content = ''
       let thinkingContent = ''
       let finishReason: string | null = null
+      let turnUsage: TokenUsage | undefined
       const assistantId = makeId()
       let lastStreamUpdate = 0  // Throttle for streaming tool call updates
+      let placeholderAdded = false
 
-      // Create assistant message placeholder
-      addMessage(sessionId, {
-        id: assistantId,
-        role: 'assistant',
-        content: '',
-        thinkingContent: '',
-        timestamp: Date.now(),
-        _isStreaming: true,  // Mark as currently streaming
-      })
+      // 单轮模型调用（可重试）：callAPI 建流 + 占位消息 + parseStream 解析。
+      // 429/502/超时/网络中断等瞬时错误用指数退避自动重试（最多 5 次）。
+      // 占位消息只 add 一次，重试时复用同一 assistantId，避免残留多条空消息。
+      const runModelTurn = async (): Promise<Awaited<ReturnType<typeof parseStream>>> => {
+        const response = await callAPI(apiMessages, controller, { thinkingBlocks })
+        if (!placeholderAdded) {
+          // Create assistant message placeholder
+          addMessage(sessionId, {
+            id: assistantId,
+            role: 'assistant',
+            content: '',
+            thinkingContent: '',
+            timestamp: Date.now(),
+            _isStreaming: true,  // Mark as currently streaming
+          })
+          placeholderAdded = true
+        }
+        // 每轮重试前重置累计，避免上一轮残留内容污染本轮
+        content = ''
+        thinkingContent = ''
+        finishReason = null
+        turnUsage = undefined
+        return parseStream(response, controller, {
+          onContent: (text) => {
+            content += text
+            // Throttle stream updates to limit whole-database writes and React renders.
+            // 旧实现每个 SSE chunk 都触发 updateMessage → 同步写整个 DB 文件 + React 重渲染，
+            // 10K 字回答会触发上千次 DB 写入。节流后只在 ~20fps 更新 UI，DB 写入也相应减少。
+            const now = Date.now()
+            if (now - lastStreamUpdate < 50) return
+            lastStreamUpdate = now
+            updateMessage(sessionId, assistantId, { content })
+          },
+          onThinking: (text) => {
+            thinkingContent += text
+            const now = Date.now()
+            if (now - lastStreamUpdate < 50) return
+            lastStreamUpdate = now
+            updateMessage(sessionId, assistantId, { thinkingContent })
+          },
+          onToolCallUpdate: (calls) => {
+            // Throttle streaming tool call updates to ~20fps for performance
+            const now = Date.now()
+            if (now - lastStreamUpdate < 50) return
+            lastStreamUpdate = now
+            const streamingCalls: StreamingToolCall[] = []
+            for (const [, tc] of calls) {
+              streamingCalls.push({ id: tc.id, name: tc.name, argsSoFar: tc.args })
+            }
+            updateMessage(sessionId, assistantId, { streamingToolCalls: streamingCalls })
+          },
+          onFinish: (reason) => {
+            // Flush the final buffered content so the persisted response is complete.
+            updateMessage(sessionId, assistantId, { content, thinkingContent })
+            finishReason = reason
+          },
+          onUsage: (usage: TokenUsage) => {
+            turnUsage = usage
+            tokenTrackerRef.current.recordUsage(usage)
+          },
+          onThinkingBlock: (block) => {
+            const list = thinkingBlocks.get(assistantId)
+            if (list) list.push(block)
+            else thinkingBlocks.set(assistantId, [block])
+          },
+        })
+      }
 
-      const toolCallBuffers = await parseStream(response, controller, {
-        onContent: (text) => {
-          content += text
-          // B2: 主 agent 流式回调加 50ms 节流，对齐子 agent 实现。
-          // 旧实现每个 SSE chunk 都触发 updateMessage → 同步写整个 DB 文件 + React 重渲染，
-          // 10K 字回答会触发上千次 DB 写入。节流后只在 ~20fps 更新 UI，DB 写入也相应减少。
-          const now = Date.now()
-          if (now - lastStreamUpdate < 50) return
-          lastStreamUpdate = now
-          updateMessage(sessionId, assistantId, { content })
-        },
-        onThinking: (text) => {
-          thinkingContent += text
-          const now = Date.now()
-          if (now - lastStreamUpdate < 50) return
-          lastStreamUpdate = now
-          updateMessage(sessionId, assistantId, { thinkingContent })
-        },
-        onToolCallUpdate: (calls) => {
-          // Throttle streaming tool call updates to ~20fps for performance
-          const now = Date.now()
-          if (now - lastStreamUpdate < 50) return
-          lastStreamUpdate = now
-          const streamingCalls: StreamingToolCall[] = []
-          for (const [, tc] of calls) {
-            streamingCalls.push({ id: tc.id, name: tc.name, argsSoFar: tc.args })
-          }
-          updateMessage(sessionId, assistantId, { streamingToolCalls: streamingCalls })
-        },
-        onFinish: (reason) => {
-          // B2: 节流期间累积的 content/thinkingContent 需要强制 flush 一次，确保最终内容完整写入 UI 和 DB
-          updateMessage(sessionId, assistantId, { content, thinkingContent })
-          finishReason = reason
-        },
-        onUsage: (usage: TokenUsage) => {
-          tokenTrackerRef.current.recordUsage(usage)
-        },
-        onThinkingBlock: (block) => {
-          const list = thinkingBlocks.get(assistantId)
-          if (list) list.push(block)
-          else thinkingBlocks.set(assistantId, [block])
-        },
-      })
+      let toolCallBuffers: Awaited<ReturnType<typeof parseStream>>
+      try {
+        toolCallBuffers = await runWithRetry(runModelTurn, {
+          retries: 5,
+          shouldRetry: (err) => !controller.signal.aborted && isRetryableError(err),
+          onRetry: (attempt) => {
+            // 重试过程中在占位消息上展示「正在重试」提示
+            if (placeholderAdded) {
+              updateMessage(sessionId, assistantId, {
+                _isStreaming: true,
+                _retrying: { attempt },
+                content,
+                thinkingContent,
+              })
+            }
+          },
+        })
+        // 重试成功：清除重试标记
+        updateMessage(sessionId, assistantId, { _retrying: undefined })
+      } catch (err) {
+        // 重试全部失败：把已添加的占位消息标记为非流式，避免残留一条永远 loading 的空消息
+        if (placeholderAdded) updateMessage(sessionId, assistantId, { _isStreaming: false, _retrying: undefined })
+        throw err
+      }
 
-      // B4: abort 后不执行 toolCalls。parseStream 返回后立即检查 abort 状态，
+      // A canceled stream must not continue into side-effecting tool calls.
       // 若已中断则跳过工具调用执行（包括 execute_command/write_file 等有副作用的工具），
       // 直接退出循环。仍会写入最终内容（已在上面的 updateMessage 完成）。
       if (controller.signal.aborted) {
@@ -883,6 +1064,7 @@ export function useAgent(sessionId: string) {
         thinkingContent: thinkingContent || undefined,
         toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
         finishReason: finishReason || undefined,
+        usage: turnUsage,
         timestamp: Date.now(),
         streamingToolCalls: undefined,  // Clear streaming data after completion
         _isStreaming: false,  // Stream completed
@@ -926,10 +1108,23 @@ export function useAgent(sessionId: string) {
       }
 
       // Execute tool calls (并行执行：同一批 toolCalls 互相独立，尤其 spawn_agent 需要并行)
+      // 中断后立即跳过工具执行，避免点停止后还在跑命令
+      if (controller.signal.aborted) {
+        updateMessage(sessionId, assistantId, { _isStreaming: false })
+        return
+      }
       const results: ToolResult[] = []
       // L1: 复用循环顶部已声明的 workingDir，避免变量 shadow
 
-      const execOne = async (tc: ToolCall): Promise<ToolResult> => {
+      const execOne = async (tc: ToolCall, runController: AbortController): Promise<ToolResult> => {
+        // 中断后立即返回，不再派发新工具
+        if (runController.signal.aborted) {
+          return {
+            toolCallId: tc.id,
+            content: '⏹ 已中断：用户停止了生成',
+            isError: true,
+          }
+        }
         // Permission check
         const permResult = await checkToolPermission(tc.name, tc.arguments)
         if (!permResult.allowed) {
@@ -943,15 +1138,14 @@ export function useAgent(sessionId: string) {
         // Inject working dir for tools that support cwd
         const argsWithCwd = { ...tc.arguments }
         if (workingDir) {
-          if (tc.name === 'execute_command' && !argsWithCwd.cwd) {
-            argsWithCwd.cwd = workingDir
+          if (tc.name === 'execute_command') {
+            argsWithCwd.cwd = resolveToolPath(workingDir, argsWithCwd.cwd || workingDir)
           }
-          if ((tc.name === 'read_file' || tc.name === 'write_file' || tc.name === 'search_replace') && !String(argsWithCwd.path).includes(':')) {
-            // Relative path → make absolute
-            argsWithCwd.path = workingDir + '\\' + argsWithCwd.path
+          if (tc.name === 'read_file' || tc.name === 'write_file' || tc.name === 'search_replace') {
+            argsWithCwd.path = resolveToolPath(workingDir, argsWithCwd.path)
           }
-          if ((tc.name === 'list_dir' || tc.name === 'search_files' || tc.name === 'search_content') && !String(argsWithCwd.path).includes(':')) {
-            argsWithCwd.path = workingDir + '\\' + argsWithCwd.path
+          if (tc.name === 'list_dir' || tc.name === 'search_files' || tc.name === 'search_content') {
+            argsWithCwd.path = resolveToolPath(workingDir, argsWithCwd.path)
           }
         }
 
@@ -962,7 +1156,7 @@ export function useAgent(sessionId: string) {
             sessionId,
             readFileState: sessionReadFilesRef.current,
             spawnSubAgent: async (agentType: string, subPrompt: string) => {
-              // B6: 先验证 agent 类型存在，再插入卡片消息。旧实现先插卡片再 runSubAgent，
+              // Validate the agent before persisting a card that must reference its run.
               // 若 findAgent 失败则卡片已持久化但 runs store 无记录，成为永久孤儿。
               const agent = await findAgent(agentType, getWorkingDir())
               if (!agent) {
@@ -1000,9 +1194,28 @@ export function useAgent(sessionId: string) {
         }
       }
 
-      // 并行执行所有 tool calls，保持原始顺序
-      const parallelResults = await Promise.all(toolCalls.map((tc) => execOne(tc)))
-      results.push(...parallelResults)
+      // Preserve model order for side-effecting tools; read-only calls can still run concurrently.
+      const sideEffectingTools = new Set(['write_file', 'search_replace', 'execute_command', 'save_memory', 'spawn_agent'])
+      const orderedResults: Array<ToolResult | undefined> = Array.from({ length: toolCalls.length })
+      const readOnlyJobs: Array<Promise<void>> = []
+      for (const [index, toolCall] of toolCalls.entries()) {
+        // 中断后立即停止派发后续工具
+        if (controller.signal.aborted) {
+          orderedResults[index] = {
+            toolCallId: toolCall.id,
+            content: '⏹ 已中断：用户停止了生成',
+            isError: true,
+          }
+          continue
+        }
+        if (sideEffectingTools.has(toolCall.name)) {
+          orderedResults[index] = await execOne(toolCall, controller)
+        } else {
+          readOnlyJobs.push(execOne(toolCall, controller).then((result) => { orderedResults[index] = result }))
+        }
+      }
+      await Promise.all(readOnlyJobs)
+      results.push(...orderedResults.filter((result): result is ToolResult => result !== undefined))
 
       // Update assistant message with tool results
       updateMessage(sessionId, assistantId, { toolResults: results })
@@ -1020,6 +1233,9 @@ export function useAgent(sessionId: string) {
         conversationMessages.push(toolMsg)
       }
 
+      // 中断后不再发起新一轮 LLM 请求，直接退出循环
+      if (controller.signal.aborted) return
+
       // Continue the ReAct loop → model will process tool results and decide next action
     }
 
@@ -1027,13 +1243,13 @@ export function useAgent(sessionId: string) {
     addMessage(sessionId, {
       id: makeId(),
       role: 'assistant',
-      content: '⚠️ 已达到安全轮次上限（999轮），对话可能异常。请重新开始会话。',
+      content: `⚠️ 已达到安全轮次上限（${MAX_REACT_ITERATIONS} 轮），对话可能异常。请重新开始会话。`,
       timestamp: Date.now(),
     })
   }
 
   /** Check permission for a tool call.
-   *  opts.allowedTools / opts.disallowedTools: 子 agent 工具白/黑名单（存在时跳过主 agent 的精细检查）。
+   *  Agent allowlists and denylists can further restrict access, never elevate it.
    *  opts.permissionMode: 覆盖权限模式（默认 settings.permissionMode）。 */
   const checkToolPermission = async (
     toolName: string,
@@ -1050,36 +1266,13 @@ export function useAgent(sessionId: string) {
       disallowedTools,
     } = opts
 
-    // 子 agent 工具白名单检查（优先）
-    if (allowedTools && !allowedTools.includes('*') && !allowedTools.includes(toolName)) {
+    // An explicitly empty allowlist means no tools. Omitted tools retain the default policy.
+    if (allowedTools !== undefined && !allowedTools.includes('*') && !allowedTools.includes(toolName)) {
       return { allowed: false, reason: `子 agent 工具白名单不允许: ${toolName}` }
     }
     // 子 agent 工具黑名单检查
-    if (disallowedTools && disallowedTools.includes(toolName)) {
+    if (disallowedTools?.includes(toolName)) {
       return { allowed: false, reason: `子 agent 工具黑名单禁止: ${toolName}` }
-    }
-
-    // 子 agent 模式（传入了 allowedTools/disallowedTools）：默认不弹权限确认，
-    // 但仍保留危险命令检查，避免子 agent 无确认执行 rm -rf 等高危命令。
-    if (allowedTools || disallowedTools) {
-      if (toolName === 'execute_command') {
-        const cmd = String(args.command || '')
-        if (isDangerousCommand(cmd)) {
-          return {
-            allowed: false,
-            reason: `子 agent 不允许执行高风险命令：${cmd.slice(0, 100)}`,
-          }
-        }
-      }
-      // 危险路径写入同样禁止
-      if (toolName === 'write_file' || toolName === 'search_replace') {
-        const filePath = String(args.path || '')
-        const dangerousPaths = ['/etc/', 'C:\\Windows\\', 'C:\\Program Files']
-        if (dangerousPaths.some((p) => filePath.startsWith(p))) {
-          return { allowed: false, reason: `子 agent 不允许写入系统目录：${filePath}` }
-        }
-      }
-      return { allowed: true }
     }
 
     const mode = permissionMode
@@ -1101,21 +1294,14 @@ export function useAgent(sessionId: string) {
         return { allowed: true }
       }
       if (toolName === 'write_file' || toolName === 'search_replace') {
-        const filePath = String(args.path || '')
-        // S5: 旧实现用 path.includes('.clerkbox') && path.includes('plan') 子串匹配，
-        // 可被 D:\project\.clerkbox\plan-evil\malicious.md 或 ..\other\exploit.md 绕过。
-        // 改用规范化后的路径前缀严格判断：必须落在 <workingDir>/.clerkbox/plan/ 之下。
         const isInsidePlanDir = (() => {
           const wd = getWorkingDir()
           if (!wd) return false
-          // 统一分隔符为 /，规范化（合并连续分隔符、去除尾部分隔符）
-          const normalize = (p: string) => p.replace(/\\/g, '/').replace(/\/+/g, '/').replace(/\/$/, '')
-          const normalizedPath = normalize(filePath)
-          const planBase = normalize(wd) + '/.clerkbox/plan/'
-          if (!normalizedPath.toLowerCase().startsWith(planBase.toLowerCase())) return false
-          // 剩余部分不得以 .. 开头或含 /../ 段（防止 plan/../other 绕过）
-          const rel = normalizedPath.slice(planBase.length)
-          return !rel.startsWith('..') && !rel.includes('/../') && !rel.startsWith('/')
+          const filePath = resolveToolPath(wd, args.path)
+          const separator = wd.includes('\\') ? '\\' : '/'
+          const planDir = `${wd}${separator}.clerkbox${separator}plan`
+          return isPathInside(filePath, planDir) &&
+            !isPathInside(planDir, filePath)
         })()
         if (isInsidePlanDir) {
           return { allowed: true }
@@ -1131,6 +1317,8 @@ export function useAgent(sessionId: string) {
     // Craft mode: allow everything, but dangerous commands need user confirmation
     if (toolName === 'execute_command') {
       const cmd = String(args.command || '')
+      const workingDir = getWorkingDir()
+      const commandCwd = workingDir ? resolveToolPath(workingDir, args.cwd || workingDir) : String(args.cwd || '')
       if (isDangerousCommand(cmd)) {
         // 危险命令确认前：标记 confirm-danger + 通知（仅当用户不在此会话时）
         setSessionStatus(sessionId, 'confirm-danger')
@@ -1145,19 +1333,40 @@ export function useAgent(sessionId: string) {
           return { allowed: false, reason: '用户取消了高风险命令的执行' }
         }
       }
+      if (workingDir && commandCwd && !isPathInside(commandCwd, workingDir)) {
+        const confirmed = await ipc.confirmDialog(
+          '工作目录外执行确认',
+          `ClerkBox 即将在工作目录外执行命令：\n${commandCwd}\n\n当前工作目录：${workingDir}\n\n是否允许此次执行？`
+        )
+        if (!confirmed) return { allowed: false, reason: '用户取消了工作目录外命令执行' }
+      }
     }
 
     // Check dangerous file writes in craft mode too
     if (toolName === 'write_file' || toolName === 'search_replace') {
-      const path = String(args.path || '')
-      const dangerousPaths = ['/etc/', 'C:\\Windows\\', 'C:\\Program Files']
-      if (dangerousPaths.some((p) => path.startsWith(p))) {
+      const workingDir = getWorkingDir()
+      const path = resolveToolPath(workingDir, args.path)
+      if (isSystemPath(path)) {
         const confirmed = await ipc.confirmDialog(
           '系统目录写入确认',
           `ClerkBox 即将写入系统目录：\n${path}\n\n此操作可能影响系统稳定性，是否确认？`
         )
         if (!confirmed) {
           return { allowed: false, reason: '用户取消了系统目录写入' }
+        }
+      }
+
+      // Confirm writes outside the selected workspace after resolving relative paths.
+      if (workingDir) {
+        const isOutside = !isPathInside(path, workingDir)
+        if (isOutside) {
+          const confirmed = await ipc.confirmDialog(
+            '工作目录外写入确认',
+            `ClerkBox 即将写入工作目录外的文件：\n${path}\n\n当前工作目录：${workingDir}\n\n是否允许此次写入？`
+          )
+          if (!confirmed) {
+            return { allowed: false, reason: '用户取消了工作目录外写入' }
+          }
         }
       }
     }
@@ -1170,6 +1379,10 @@ export function useAgent(sessionId: string) {
     const ctrl = getSessionAbortController(sessionId)
     if (ctrl) {
       ctrl.abort()
+    }
+    // 杀掉该会话在主进程里还在跑的 shell 子进程，让阻塞中的 execute_command 立即返回
+    if (sessionId) {
+      void ipc.cancelSessionCommands(sessionId).catch(() => { /* ignore */ })
     }
     // 仅清当前会话的 streaming 状态
     useChatStore.getState().setStreaming(false, sessionId)
@@ -1224,7 +1437,7 @@ export function useAgent(sessionId: string) {
 
     // 子 agent 自己的 readFileState（用于 auto-compact 时的文件附件恢复）
     let subReadFileState = new Map<string, { content: string; timestamp: number }>()
-    // M1: 子 agent 独立的 token tracker，避免 usage 污染主 agent 的 token 估算
+    // Each subagent tracks its own usage to keep the parent estimate independent.
     const subTokenTracker = new TokenTracker()
     // 子 agent 自己的 settings 副本（覆盖 model）
     const subSettings = agent.model ? { ...settings, model: agent.model } : settings
@@ -1297,66 +1510,98 @@ export function useAgent(sessionId: string) {
           extraSystemPrompt: agent.systemPrompt,
         }))
 
-        const response = await callAPI(apiMessages, subController, { modelOverride: agent.model, thinkingBlocks })
-
-        // 解析流（复用 parseStream）
+        // 单轮子 Agent 模型调用（可重试）：与主 agent 一致，429/502 等瞬时错误指数退避重试。
         let content = ''
         let thinkingContent = ''
         let finishReason: string | null = null
         const assistantId = makeId()
         let lastStreamUpdate = 0
+        let placeholderAdded = false
 
-        // 添加占位消息到 store
-        const placeholderMsg: Message = {
-          id: assistantId,
-          role: 'assistant',
-          content: '',
-          thinkingContent: '',
-          timestamp: Date.now(),
-          _isStreaming: true,
-          subAgentId,
-        }
-        useAgentRunsStore.getState().appendSubAgentMessage(sessionId, subAgentId, placeholderMsg)
-
-        const toolCallBuffers = await parseStream(response, subController, {
-          onContent: (text) => {
-            content += text
-            const now = Date.now()
-            if (now - lastStreamUpdate < 50) return
-            lastStreamUpdate = now
-            useAgentRunsStore.getState().updateSubAgentMessage(sessionId, subAgentId, assistantId, { content })
-          },
-          onThinking: (text) => {
-            thinkingContent += text
-            const now = Date.now()
-            if (now - lastStreamUpdate < 50) return
-            lastStreamUpdate = now
-            useAgentRunsStore.getState().updateSubAgentMessage(sessionId, subAgentId, assistantId, { thinkingContent })
-          },
-          onToolCallUpdate: (calls) => {
-            const now = Date.now()
-            if (now - lastStreamUpdate < 50) return
-            lastStreamUpdate = now
-            const streamingCalls: StreamingToolCall[] = []
-            for (const [, tc] of calls) {
-              streamingCalls.push({ id: tc.id, name: tc.name, argsSoFar: tc.args })
+        const runSubModelTurn = async (): Promise<Awaited<ReturnType<typeof parseStream>>> => {
+          const response = await callAPI(apiMessages, subController, { modelOverride: agent.model, thinkingBlocks })
+          if (!placeholderAdded) {
+            // 添加占位消息到 store
+            const placeholderMsg: Message = {
+              id: assistantId,
+              role: 'assistant',
+              content: '',
+              thinkingContent: '',
+              timestamp: Date.now(),
+              _isStreaming: true,
+              subAgentId,
             }
-            useAgentRunsStore.getState().updateSubAgentMessage(sessionId, subAgentId, assistantId, { streamingToolCalls: streamingCalls })
-          },
-          onFinish: (reason) => {
-            // 最终结果完整更新一次（throttle 期间累积的 content 需要刷到 UI）
-            useAgentRunsStore.getState().updateSubAgentMessage(sessionId, subAgentId, assistantId, { content, thinkingContent })
-            finishReason = reason
-          },
-          onUsage: (usage: TokenUsage) => { subTokenTracker.recordUsage(usage) },
-          onThinkingBlock: (block) => {
-            const list = thinkingBlocks.get(assistantId)
-            if (list) list.push(block)
-            else thinkingBlocks.set(assistantId, [block])
-          },
-        })
+            useAgentRunsStore.getState().appendSubAgentMessage(sessionId, subAgentId, placeholderMsg)
+            placeholderAdded = true
+          }
+          // 每轮重试前重置累计，避免上一轮残留内容污染本轮
+          content = ''
+          thinkingContent = ''
+          finishReason = null
+          return parseStream(response, subController, {
+            onContent: (text) => {
+              content += text
+              const now = Date.now()
+              if (now - lastStreamUpdate < 50) return
+              lastStreamUpdate = now
+              useAgentRunsStore.getState().updateSubAgentMessage(sessionId, subAgentId, assistantId, { content })
+            },
+            onThinking: (text) => {
+              thinkingContent += text
+              const now = Date.now()
+              if (now - lastStreamUpdate < 50) return
+              lastStreamUpdate = now
+              useAgentRunsStore.getState().updateSubAgentMessage(sessionId, subAgentId, assistantId, { thinkingContent })
+            },
+            onToolCallUpdate: (calls) => {
+              const now = Date.now()
+              if (now - lastStreamUpdate < 50) return
+              lastStreamUpdate = now
+              const streamingCalls: StreamingToolCall[] = []
+              for (const [, tc] of calls) {
+                streamingCalls.push({ id: tc.id, name: tc.name, argsSoFar: tc.args })
+              }
+              useAgentRunsStore.getState().updateSubAgentMessage(sessionId, subAgentId, assistantId, { streamingToolCalls: streamingCalls })
+            },
+            onFinish: (reason) => {
+              // 最终结果完整更新一次（throttle 期间累积的 content 需要刷到 UI）
+              useAgentRunsStore.getState().updateSubAgentMessage(sessionId, subAgentId, assistantId, { content, thinkingContent })
+              finishReason = reason
+            },
+            onUsage: (usage: TokenUsage) => { subTokenTracker.recordUsage(usage) },
+            onThinkingBlock: (block) => {
+              const list = thinkingBlocks.get(assistantId)
+              if (list) list.push(block)
+              else thinkingBlocks.set(assistantId, [block])
+            },
+          })
+        }
 
-        // B4: abort 后不执行 toolCalls（与主 agent 一致）
+        let toolCallBuffers: Awaited<ReturnType<typeof parseStream>>
+        try {
+          toolCallBuffers = await runWithRetry(runSubModelTurn, {
+            retries: 5,
+            shouldRetry: (err) => !subController.signal.aborted && isRetryableError(err),
+            onRetry: (attempt) => {
+              if (placeholderAdded) {
+                useAgentRunsStore.getState().updateSubAgentMessage(sessionId, subAgentId, assistantId, {
+                  _isStreaming: true,
+                  _retrying: { attempt },
+                  content,
+                  thinkingContent,
+                })
+              }
+            },
+          })
+          useAgentRunsStore.getState().updateSubAgentMessage(sessionId, subAgentId, assistantId, { _retrying: undefined })
+        } catch (err) {
+          if (placeholderAdded) {
+            useAgentRunsStore.getState().updateSubAgentMessage(sessionId, subAgentId, assistantId, { _isStreaming: false, _retrying: undefined })
+          }
+          throw err
+        }
+
+        // Match the parent behavior: cancellation stops tool execution.
         if (subController.signal.aborted) {
           useAgentRunsStore.getState().updateSubAgentMessage(sessionId, subAgentId, assistantId, { _isStreaming: false })
           break
@@ -1404,7 +1649,7 @@ export function useAgent(sessionId: string) {
         const results: ToolResult[] = []
         for (const tc of toolCalls) {
           const permResult = await checkToolPermission(tc.name, tc.arguments, {
-            permissionMode: 'craft',
+            permissionMode: settings.permissionMode,
             allowedTools: agent.tools,
             disallowedTools: agent.disallowedTools,
           })
@@ -1415,12 +1660,12 @@ export function useAgent(sessionId: string) {
 
           const argsWithCwd = { ...tc.arguments }
           if (workingDir) {
-            if (tc.name === 'execute_command' && !argsWithCwd.cwd) argsWithCwd.cwd = workingDir
-            if ((tc.name === 'read_file' || tc.name === 'write_file' || tc.name === 'search_replace') && !String(argsWithCwd.path || '').includes(':')) {
-              argsWithCwd.path = workingDir + '\\' + argsWithCwd.path
+            if (tc.name === 'execute_command') argsWithCwd.cwd = resolveToolPath(workingDir, argsWithCwd.cwd || workingDir)
+            if (tc.name === 'read_file' || tc.name === 'write_file' || tc.name === 'search_replace') {
+              argsWithCwd.path = resolveToolPath(workingDir, argsWithCwd.path)
             }
-            if ((tc.name === 'list_dir' || tc.name === 'search_files' || tc.name === 'search_content') && !String(argsWithCwd.path || '').includes(':')) {
-              argsWithCwd.path = workingDir + '\\' + argsWithCwd.path
+            if (tc.name === 'list_dir' || tc.name === 'search_files' || tc.name === 'search_content') {
+              argsWithCwd.path = resolveToolPath(workingDir, argsWithCwd.path)
             }
           }
 
@@ -1455,7 +1700,7 @@ export function useAgent(sessionId: string) {
 
       // 达到 maxTurns
       const partialResult = conversationMessages[conversationMessages.length - 1]?.content || '子 agent 达到最大迭代数，未产生最终结果'
-      // B5: 若已中断，标记为 aborted 而非 completed；原来 break 后直接落到这里会误标 completed。
+      // Preserve an aborted terminal state instead of reporting a completed run.
       if (subController.signal.aborted) {
         useAgentRunsStore.getState().abortSubAgentRun(sessionId, subAgentId)
         return '[aborted]'
@@ -1464,7 +1709,7 @@ export function useAgent(sessionId: string) {
       return partialResult
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err)
-      // B5: 区分 AbortError 与真实失败
+      // Abort signals represent cancellation, not a failed subagent run.
       if (subController.signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
         useAgentRunsStore.getState().abortSubAgentRun(sessionId, subAgentId)
         throw new Error('[aborted]')

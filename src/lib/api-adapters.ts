@@ -21,6 +21,8 @@ export interface NeutralMessage {
   reasoning_content?: string
   /** 消息 id，用于在思考签名缓存里查回原始 thinking block（仅 anthropic 需要） */
   _msgId?: string
+  _cacheControl?: boolean
+  _systemSuffix?: string
 }
 
 export interface NeutralTool {
@@ -45,6 +47,7 @@ export interface BuildBodyOptions {
   stream: boolean
   /** anthropic 专用：messageId → 带 signature 的原始 thinking block */
   thinkingBlocks?: Map<string, AnthropicThinkingBlock[]>
+  promptCaching?: boolean
 }
 
 /** Anthropic 原始 thinking block（含签名，回放时必须原样带上） */
@@ -153,13 +156,18 @@ function buildOpenAIBody(o: BuildBodyOptions): Record<string, unknown> {
 
 /** 去掉只在前端流转的内部字段，别发给服务端 */
 function stripInternal(m: NeutralMessage) {
-  const { _msgId: _, ...rest } = m
+  const { _msgId: _, _cacheControl: __, _systemSuffix, ...rest } = m
+  if (m.role === 'system' && _systemSuffix) {
+    return { ...rest, content: `${m.content}\n\n${_systemSuffix}` }
+  }
   return rest
 }
 
 /** Anthropic content block（请求侧） */
+type AnthropicCacheControl = { type: 'ephemeral' }
+type AnthropicTextBlock = { type: 'text'; text: string; cache_control?: AnthropicCacheControl }
 type AnthropicBlock =
-  | { type: 'text'; text: string }
+  | AnthropicTextBlock
   | { type: 'tool_use'; id: string; name: string; input: unknown }
   | { type: 'tool_result'; tool_use_id: string; content: string }
   | AnthropicThinkingBlock
@@ -187,7 +195,7 @@ const EFFORT_BUDGET: Record<string, number> = {
 }
 
 function buildAnthropicBody(o: BuildBodyOptions): Record<string, unknown> {
-  const { system, messages } = toAnthropicMessages(o.messages, o.thinkingBlocks)
+  const { system, messages } = toAnthropicMessages(o.messages, o.thinkingBlocks, o.promptCaching !== false)
 
   const body: Record<string, unknown> = {
     model: o.model,
@@ -196,7 +204,7 @@ function buildAnthropicBody(o: BuildBodyOptions): Record<string, unknown> {
     max_tokens: o.maxTokens,
     stream: o.stream,
   }
-  if (system) body.system = system
+  if (system.length > 0) body.system = system
 
   if (o.tools.length > 0) {
     // 扁平结构 + input_schema（不是 OpenAI 的 function 包装 + parameters）
@@ -239,9 +247,10 @@ function buildAnthropicBody(o: BuildBodyOptions): Record<string, unknown> {
  */
 export function toAnthropicMessages(
   msgs: NeutralMessage[],
-  thinkingBlocks?: Map<string, AnthropicThinkingBlock[]>
-): { system: string; messages: AnthropicMessage[] } {
-  let system = ''
+  thinkingBlocks?: Map<string, AnthropicThinkingBlock[]>,
+  promptCaching = true
+): { system: AnthropicTextBlock[]; messages: AnthropicMessage[] } {
+  const system: AnthropicTextBlock[] = []
   const out: AnthropicMessage[] = []
 
   /** 追加 block；与上一条同角色则合并，避免出现连续同角色消息 */
@@ -254,7 +263,14 @@ export function toAnthropicMessages(
 
   for (const m of msgs) {
     if (m.role === 'system') {
-      system += (system ? '\n\n' : '') + (m.content || '')
+      if (m.content) {
+        system.push({
+          type: 'text',
+          text: m.content,
+          ...(promptCaching && m._cacheControl ? { cache_control: { type: 'ephemeral' as const } } : {}),
+        })
+      }
+      if (m._systemSuffix) system.push({ type: 'text', text: m._systemSuffix })
       continue
     }
 
@@ -359,6 +375,8 @@ export interface ParserState {
   inputTokens: number
   /** anthropic: 累计的 output_tokens */
   outputTokens: number
+  cacheCreationInputTokens: number
+  cacheReadInputTokens: number
 }
 
 export const createParserState = (): ParserState => ({
@@ -367,6 +385,8 @@ export const createParserState = (): ParserState => ({
   thinkingSignatures: new Map(),
   inputTokens: 0,
   outputTokens: 0,
+  cacheCreationInputTokens: 0,
+  cacheReadInputTokens: 0,
 })
 
 /**
@@ -440,12 +460,19 @@ export function mapStopReason(stop: string): string {
   }
 }
 
+interface AnthropicUsage {
+  input_tokens?: number
+  output_tokens?: number
+  cache_creation_input_tokens?: number
+  cache_read_input_tokens?: number
+}
+
 function parseAnthropicEvent(json: unknown, state: ParserState): NormalizedEvent[] {
   const events: NormalizedEvent[] = []
   const ev = json as {
     type?: string
     index?: number
-    message?: { usage?: { input_tokens?: number; output_tokens?: number } }
+    message?: { usage?: AnthropicUsage }
     content_block?: { type?: string; id?: string; name?: string }
     delta?: {
       type?: string
@@ -455,7 +482,7 @@ function parseAnthropicEvent(json: unknown, state: ParserState): NormalizedEvent
       partial_json?: string
       stop_reason?: string
     }
-    usage?: { input_tokens?: number; output_tokens?: number }
+    usage?: AnthropicUsage
     error?: { message?: string; type?: string }
   }
 
@@ -465,6 +492,8 @@ function parseAnthropicEvent(json: unknown, state: ParserState): NormalizedEvent
       if (u) {
         state.inputTokens = u.input_tokens ?? 0
         state.outputTokens = u.output_tokens ?? 0
+        state.cacheCreationInputTokens = u.cache_creation_input_tokens ?? 0
+        state.cacheReadInputTokens = u.cache_read_input_tokens ?? 0
         events.push({ kind: 'usage', usage: usageFrom(state) })
       }
       break
@@ -540,9 +569,11 @@ function parseAnthropicEvent(json: unknown, state: ParserState): NormalizedEvent
 }
 
 const usageFrom = (s: ParserState): TokenUsage => ({
-  prompt_tokens: s.inputTokens,
+  prompt_tokens: s.inputTokens + s.cacheCreationInputTokens + s.cacheReadInputTokens,
   completion_tokens: s.outputTokens,
-  total_tokens: s.inputTokens + s.outputTokens,
+  total_tokens: s.inputTokens + s.cacheCreationInputTokens + s.cacheReadInputTokens + s.outputTokens,
+  cache_creation_input_tokens: s.cacheCreationInputTokens,
+  cache_read_input_tokens: s.cacheReadInputTokens,
 })
 
 // ── 非流式响应（compact 用） ──
