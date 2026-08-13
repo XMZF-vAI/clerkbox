@@ -13,6 +13,7 @@ import { useUIStore } from './stores/ui-store'
 import { useVibeStore } from './stores/vibe-store'
 import { applyColorScheme, resolveSeed } from './lib/theme-engine'
 import { I18nProvider } from './components/I18nProvider'
+import { isWebUIMode } from './lib/ipc-client'
 
 function ThemeProvider({ children }: { children: React.ReactNode }) {
   const theme = useSettingsStore((s) => s.theme)
@@ -74,7 +75,8 @@ export default function App() {
   }, [hydrated])
 
   // 圆角 + transform 创建包含块，使内部 fixed 元素（弹窗、VIBE 控件）也被圆角裁剪
-  const windowShape = isMaximized ? '' : 'rounded-xl [transform:translateZ(0)]'
+  // WebUI 模式运行在浏览器标签页中，不需要窗口圆角和细边框
+  const windowShape = isWebUIMode || isMaximized ? '' : 'rounded-xl [transform:translateZ(0)]'
 
   if (!hydrated) return null
 
@@ -83,13 +85,13 @@ export default function App() {
   let content: React.ReactNode
   if (!hasCompletedOnboarding) {
     content = (
-      <div className={`app-window relative h-screen w-screen overflow-hidden bg-dark-surface text-dark-onSurface ${windowShape} ${isMaximized ? '' : 'border border-dark-onSurfaceVariant/20'}`}>
+      <div className={`app-window relative h-screen w-screen overflow-hidden bg-dark-surface text-dark-onSurface ${windowShape} ${isWebUIMode || isMaximized ? '' : 'border border-dark-onSurfaceVariant/20'}`}>
         <OnboardingFlow />
       </div>
     )
   } else if (isVibeMode) {
     content = (
-      <div className={`app-window relative h-screen w-screen overflow-hidden text-white ${windowShape} ${isMaximized ? '' : 'border border-white/15'}`}>
+      <div className={`app-window relative h-screen w-screen overflow-hidden text-white ${windowShape} ${isWebUIMode || isMaximized ? '' : 'border border-white/15'}`}>
         <VibeBackground />
         <VibeMusicPlayer />
         <main className="relative z-10 h-full w-full">
@@ -101,7 +103,7 @@ export default function App() {
     )
   } else {
     content = (
-      <div className={`app-window flex h-screen w-screen bg-dark-surface text-dark-onSurface overflow-hidden ${windowShape} ${isMaximized ? '' : 'border border-dark-onSurfaceVariant/20'}`}>
+      <div className={`app-window flex h-screen w-screen bg-dark-surface text-dark-onSurface overflow-hidden ${windowShape} ${isWebUIMode || isMaximized ? '' : 'border border-dark-onSurfaceVariant/20'}`}>
         <Sidebar
           collapsed={sidebarCollapsed}
           onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
