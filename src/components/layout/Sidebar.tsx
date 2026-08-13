@@ -174,7 +174,14 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
       <div className="flex items-center justify-between px-4 py-3">
         <div className="flex items-center gap-2.5">
           <img src={APP_ICON} alt="ClerkBox" className="w-8 h-8 rounded" />
-          <span className="text-base font-semibold tracking-wide text-dark-onSurfaceVariant">ClerkBox</span>
+          <div className="flex items-center gap-2">
+            <span className="text-base font-semibold tracking-wide text-dark-onSurfaceVariant">ClerkBox</span>
+            {isWebUIMode && (
+              <span className="px-1.5 py-0.5 rounded-md3-xs bg-md-tertiary/15 text-md-tertiary text-[10px] font-medium whitespace-nowrap">
+                Web UI [BETA]
+              </span>
+            )}
+          </div>
         </div>
       </div>
 
