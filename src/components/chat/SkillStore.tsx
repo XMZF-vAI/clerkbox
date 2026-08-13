@@ -100,6 +100,8 @@ export default function SkillStore() {
   const [uploadFileName, setUploadFileName] = useState<string | null>(null)
   const [uploadLoading, setUploadLoading] = useState(false)
   const [uploadError, setUploadError] = useState<string | null>(null)
+  // 在线技能安装失败时的错误提示（显示在主内容区顶部）
+  const [installError, setInstallError] = useState<string | null>(null)
   const uploadLoadingRef = useRef(false)
   const uploadTriggerRef = useRef<HTMLButtonElement>(null)
   const uploadDialogRef = useRef<HTMLDivElement>(null)
@@ -180,10 +182,15 @@ export default function SkillStore() {
   const handleInstall = async (mpSkill: SkillsMPSkill) => {
     const id = 'online-' + mpSkill.id.replace(/[^a-zA-Z0-9-_]/g, '_')
     setInstallingIds((prev) => new Set(prev).add(id))
+    setInstallError(null)
     try {
-      await installOnlineSkill(mpSkill)
+      const ok = await installOnlineSkill(mpSkill)
+      if (!ok) {
+        setInstallError(t('skillstore.installFailed'))
+      }
     } catch (e) {
       console.error('Install skill failed:', e)
+      setInstallError(t('skillstore.installFailed'))
     }
     setInstallingIds((prev) => {
       const next = new Set(prev)
@@ -420,6 +427,24 @@ export default function SkillStore() {
       {/* Content */}
       <div className="flex-1 overflow-y-auto px-6 py-4">
         <div className="max-w-md mx-auto">
+          {/* 在线技能安装失败提示 */}
+          {installError && (
+            <div
+              role="alert"
+              className="flex items-center gap-2 mb-4 px-3 py-2.5 rounded-lg text-xs text-md-error bg-md-error/10 border border-md-error/20"
+            >
+              <AlertTriangle size={14} className="flex-shrink-0" />
+              <span className="flex-1">{installError}</span>
+              <button
+                type="button"
+                onClick={() => setInstallError(null)}
+                className="p-0.5 rounded hover:bg-md-error/20 transition-colors"
+                aria-label={t('common.close')}
+              >
+                <X size={12} />
+              </button>
+            </div>
+          )}
           {/* ── INSTALLED SECTION (可折叠，搜索时默认折叠) ── */}
           {installedSkills.length > 0 && (
             <div className="mb-6">

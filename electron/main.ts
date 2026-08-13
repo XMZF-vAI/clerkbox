@@ -2046,11 +2046,20 @@ async function extractSkillZip(zipPath: string): Promise<{
       })
     })
     if (process.platform === 'win32') {
-      await runExtractor('powershell.exe', [
-        '-NoProfile', '-NonInteractive', '-Command',
-        'param($source, $destination) Expand-Archive -LiteralPath $source -DestinationPath $destination -Force',
-        zipPath, tempDir,
-      ])
+      // 注意：Node spawn 传额外参数给 PowerShell -Command 的 param() 绑定不可靠，
+      // 改用 -File 脚本文件方式，避免参数丢失导致 Expand-Archive 收到 null。
+      const scriptPath = path.join(os.tmpdir(), `clerkbox-extract-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.ps1`)
+      fs.writeFileSync(scriptPath, `param([string]$source, [string]$destination) Expand-Archive -LiteralPath $source -DestinationPath $destination -Force`, 'utf-8')
+      try {
+        await runExtractor('powershell.exe', [
+          '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+          '-File', scriptPath,
+          '-source', zipPath,
+          '-destination', tempDir,
+        ])
+      } finally {
+        try { fs.unlinkSync(scriptPath) } catch { /* ignore */ }
+      }
     } else {
       await runExtractor('unzip', ['-o', zipPath, '-d', tempDir])
     }
