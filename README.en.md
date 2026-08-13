@@ -43,6 +43,7 @@
 - [Sub-Agents](#sub-agents)
 - [Skills System](#skills-system)
 - [Long-Term Memory](#long-term-memory)
+- [WebUI Remote Access](#webui-remote-access)
 - [VIBE Immersive Mode](#vibe-immersive-mode)
 - [Theme & Appearance](#theme--appearance)
 - [Project Structure](#project-structure)
@@ -66,6 +67,7 @@
 | **VIBE immersive mode** | Fullscreen background + liquid-glass UI + built-in music player for focused conversations |
 | **MD3 dynamic theming** | Material Design 3 color engine, light / dark / system modes, customizable seed color |
 | **Native rounded window** | Custom title bar + 12px rounded corners, auto-resets to square when maximized |
+| **WebUI remote access** | One-click built-in web server to control the full UI from any browser, with real-time data sync between desktop and web — ideal for server deployment |
 | **Local-first** | All data stored locally in SQLite/JSON, zero cloud dependency, fully offline |
 | **Apache 2.0 open source** | Free to use, modify, and distribute; includes patent grant, derivative works may choose their own license |
 
@@ -435,6 +437,30 @@ The agent writes entries via the `save_memory` tool, and scans the frontmatter i
 
 ---
 
+## WebUI Remote Access
+
+ClerkBox ships with a built-in web server that exposes the full UI to any browser for remote control — perfect for deploying the app on a server and accessing it from any device.
+
+### How to Start
+
+- **Manual start from desktop**: click the 🌐 icon above the settings button in the sidebar. A dialog shows the tokenized access URL — copy it with one click or open it directly in your default browser. The service can be stopped from the same dialog at any time.
+- **Auto start for servers**: set the environment variable `CLERKBOX_WEBUI_AUTO=1` before launching the app; the WebUI starts automatically and prints the access URL to the console.
+
+### Features
+
+- **Full functionality**: chat, tool calls, streaming output (SSE), settings, and skills work the same as on desktop
+- **Real-time data sync**: settings, skills, VIBE config, and token usage are synchronized between desktop and web via a shared main-process store; sessions and messages share the same local database
+- **Security**: a random token is generated on every start and required for all API requests; the static file server includes path-traversal protection
+- **Adaptive UI**: window control buttons (minimize / maximize / close) are automatically hidden in WebUI mode
+
+### Notes
+
+- The WebUI listens on a random port on `0.0.0.0`, reachable within the LAN; for public deployment, use a reverse proxy with HTTPS
+- Native file-picker dialogs cannot be opened in the browser; those operations fall back to manual path input
+- API keys are kept in OS-level encryption (safeStorage) and never enter the shared store in plaintext
+
+---
+
 ## VIBE Immersive Mode
 
 Switch to a distraction-free focus environment with one click.
@@ -492,6 +518,8 @@ Built-in MD3 palette presets:
 ClerkBox/
 ├── electron/                    # Electron main process
 │   ├── main.ts                  # main entry (IPC, filesystem, command execution, etc.)
+│   ├── api-proxy.ts             # model API proxy (streaming chat, connection test)
+│   ├── webui-server.ts          # WebUI server (HTTP + SSE + token auth)
 │   └── preload.ts               # preload script (contextBridge)
 ├── src/                         # renderer process (React app)
 │   ├── components/
@@ -522,7 +550,8 @@ ClerkBox/
 │   │   ├── token-tracker.ts     # token usage tracking
 │   │   ├── model-presets.ts     # model presets
 │   │   ├── memory.ts            # memory system
-│   │   └── ipc-client.ts        # IPC client
+│   │   ├── ipc-client.ts        # IPC client (Electron / WebUI dual mode)
+│   │   └── shared-storage.ts    # cross-mode shared persistence (main-process KV bridge)
 │   ├── stores/                  # Zustand state
 │   │   ├── chat-store.ts
 │   │   ├── settings-store.ts
@@ -596,6 +625,7 @@ ClerkBox/
 - [x] Dangerous command blocking
 - [x] Automatic file write backup
 - [x] i18n (Chinese / English)
+- [x] WebUI remote access (browser control + dual-mode data sync + auto-start for server deployment)
 
 ### Planned (v1.8+)
 
