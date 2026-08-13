@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import { sharedStorage } from '../lib/shared-storage'
 
 export interface VibeBackground {
   type: 'url' | 'local'
@@ -47,6 +48,7 @@ export const useVibeStore = create<VibeState>()(
     }),
     {
       name: 'clerkbox-vibe',
+      storage: sharedStorage,
       partialize: (state) => ({
         background: state.background,
         music: state.music,

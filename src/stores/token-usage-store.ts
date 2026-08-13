@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { TokenUsage } from '../types/agent'
+import { sharedStorage } from '../lib/shared-storage'
 
 /** 单次调用记录：用于明细展示 */
 export interface UsageRecord {
@@ -95,6 +96,7 @@ export const useTokenUsageStore = create<TokenUsageState>()(
     }),
     {
       name: 'clerkbox-token-usage',
+      storage: sharedStorage,
     }
   )
 )

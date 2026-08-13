@@ -10,10 +10,16 @@ import {
   Loader2,
   AlertTriangle,
   ShieldAlert,
+  Globe,
+  Copy,
+  Check,
+  ExternalLink,
+  X,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useChatStore } from '../../stores/chat-store'
 import ConfirmDialog from '../ui/ConfirmDialog'
+import { ipc, isWebUIMode } from '../../lib/ipc-client'
 
 import APP_ICON from '../../assets/icon.png'
 import { useShallow } from 'zustand/react/shallow'
@@ -41,6 +47,44 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
   const [hoveredSessionId, setHoveredSessionId] = useState<string | null>(null)
   const pickerRef = useRef<HTMLDivElement>(null)
+
+  // ── WebUI 控制 ──
+  const [webuiStarting, setWebuiStarting] = useState(false)
+  const [webuiInfo, setWebuiInfo] = useState<{ url: string } | null>(null)
+  const [webuiCopied, setWebuiCopied] = useState(false)
+
+  const handleStartWebUI = async () => {
+    if (webuiStarting) return
+    setWebuiStarting(true)
+    try {
+      const result = await ipc.startWebUI()
+      if ('error' in result && result.error) {
+        alert(t('sidebar.webuiError'))
+      } else if ('url' in result) {
+        setWebuiInfo({ url: result.url })
+      }
+    } catch {
+      alert(t('sidebar.webuiError'))
+    } finally {
+      setWebuiStarting(false)
+    }
+  }
+
+  const handleStopWebUI = async () => {
+    await ipc.stopWebUI()
+    setWebuiInfo(null)
+  }
+
+  const handleCopyWebUIUrl = async () => {
+    if (!webuiInfo) return
+    try {
+      await navigator.clipboard.writeText(webuiInfo.url)
+      setWebuiCopied(true)
+      setTimeout(() => setWebuiCopied(false), 2000)
+    } catch {
+      /* 剪贴板不可用时忽略 */
+    }
+  }
 
   // Close picker on outside click
   useEffect(() => {
@@ -99,6 +143,18 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
               {enabledSkills.length}
             </span>
           </div>
+        )}
+        {!isWebUIMode && (
+          <button
+            type="button"
+            onClick={handleStartWebUI}
+            disabled={webuiStarting}
+            className="w-8 h-8 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors mb-1 disabled:opacity-50"
+            aria-label={t('sidebar.webuiAria')}
+            title={t('sidebar.webui')}
+          >
+            {webuiStarting ? <Loader2 size={18} className="animate-spin" /> : <Globe size={18} />}
+          </button>
         )}
         <button
           type="button"
@@ -235,7 +291,18 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
         </div>
       </div>
 
-      <div className="border-t border-dark-onSurfaceVariant/10 px-3 py-2">
+      <div className="border-t border-dark-onSurfaceVariant/10 px-3 py-2 flex flex-col gap-0.5">
+        {!isWebUIMode && (
+          <button
+            onClick={handleStartWebUI}
+            disabled={webuiStarting}
+            className="w-full flex items-center gap-2 px-3 py-2 rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-sm text-dark-onSurfaceVariant disabled:opacity-50"
+            aria-label={t('sidebar.webuiAria')}
+          >
+            {webuiStarting ? <Loader2 size={16} className="animate-spin" /> : <Globe size={16} />}
+            <span>{webuiStarting ? t('sidebar.webuiStarting') : t('sidebar.webui')}</span>
+          </button>
+        )}
         <button
           onClick={() => useSettingsStore.getState().updateSettings({ showSettings: true })}
           className="w-full flex items-center gap-2 px-3 py-2 rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-sm text-dark-onSurfaceVariant"
@@ -259,6 +326,74 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
           }}
           onCancel={() => setConfirmDeleteId(null)}
         />
+      )}
+
+      {/* WebUI info modal */}
+      {webuiInfo && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setWebuiInfo(null)
+          }}
+        >
+          <div className="w-[440px] max-w-[90vw] rounded-md3-lg bg-dark-surfaceContainer p-6 shadow-xl">
+            <div className="flex items-start justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <Globe size={20} className="text-md-primary" />
+                <h2 className="text-base font-semibold">{t('sidebar.webuiTitle')}</h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setWebuiInfo(null)}
+                className="w-7 h-7 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors"
+                aria-label={t('common.close')}
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <p className="text-sm text-dark-onSurfaceVariant mb-3">{t('sidebar.webuiDesc')}</p>
+
+            <div className="flex items-center gap-2 p-2.5 rounded-md3-md bg-dark-surfaceContainerHigh mb-1">
+              <code className="flex-1 text-xs break-all text-dark-onSurfaceVariant select-all">
+                {webuiInfo.url}
+              </code>
+              <button
+                type="button"
+                onClick={handleCopyWebUIUrl}
+                className="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainer transition-colors"
+                aria-label={t('sidebar.webuiCopy')}
+                title={t('sidebar.webuiCopy')}
+              >
+                {webuiCopied ? <Check size={14} className="text-md-primary" /> : <Copy size={14} />}
+              </button>
+            </div>
+            {webuiCopied && (
+              <p className="text-xs text-md-primary mb-1">{t('sidebar.webuiCopied')}</p>
+            )}
+            <p className="text-xs text-dark-onSurfaceVariant/60 mb-4">
+              {t('sidebar.webuiSecurityNote')}
+            </p>
+
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => ipc.openExternal(webuiInfo.url)}
+                className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-md3-md bg-md-primary text-md-onPrimary hover:opacity-90 transition-opacity text-sm"
+              >
+                <ExternalLink size={15} />
+                <span>{t('sidebar.webuiOpen')}</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleStopWebUI}
+                className="px-3 py-2 rounded-md3-md bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer transition-colors text-sm"
+              >
+                {t('sidebar.webuiStop')}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

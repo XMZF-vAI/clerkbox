@@ -141,4 +141,15 @@ contextBridge.exposeInMainWorld('clerkbox', {
   // The sandboxed preload cannot access OS APIs directly.
   platform: ipcRenderer.sendSync('getPlatform'),
   homeDir: ipcRenderer.sendSync('getHomeDir'),
+
+  // WebUI 控制
+  startWebUI: (): Promise<{ port: number; token: string; url: string } | { error: string }> =>
+    ipcRenderer.invoke('startWebUI'),
+  stopWebUI: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('stopWebUI'),
+  getWebUIStatus: (): Promise<{ running: boolean; url?: string }> => ipcRenderer.invoke('getWebUIStatus'),
+
+  // 共享 KV 存储（Electron 与 WebUI 双模式同步持久化）
+  kvGet: (key: string): Promise<string | null> => ipcRenderer.invoke('kvGet', key),
+  kvSet: (key: string, value: string): Promise<void> => ipcRenderer.invoke('kvSet', key, value),
+  kvRemove: (key: string): Promise<void> => ipcRenderer.invoke('kvRemove', key),
 })

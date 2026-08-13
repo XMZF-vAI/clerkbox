@@ -90,6 +90,14 @@ export interface ClerkBoxAPI {
   scanSkillDirs: (workingDir: string) => Promise<string>
   platform: string
   homeDir: string
+  // WebUI 控制
+  startWebUI: () => Promise<{ port: number; token: string; url: string } | { error: string }>
+  stopWebUI: () => Promise<{ ok: boolean }>
+  getWebUIStatus: () => Promise<{ running: boolean; url?: string }>
+  // 共享 KV 存储（Electron 与 WebUI 双模式同步持久化）
+  kvGet: (key: string) => Promise<string | null>
+  kvSet: (key: string, value: string) => Promise<void>
+  kvRemove: (key: string) => Promise<void>
 }
 
 /** 模型 API 连接配置（主进程代理入参） */

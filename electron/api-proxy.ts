@@ -223,118 +223,135 @@ export function registerApiProxyHandlers() {
    */
   ipcMain.handle('apiChatStream', async (event, cfg: ApiConnConfig, body: unknown) => {
     const requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-    const controller = new AbortController()
-    inflight.set(requestId, controller)
-
     const wc = event.sender
     const send = (payload: Record<string, unknown>) => {
       if (!wc.isDestroyed()) wc.send('apiChunk', { requestId, ...payload })
     }
-
     // 后台跑，不阻塞 invoke 返回
-    void (async () => {
-      let timer: NodeJS.Timeout | undefined
-      try {
-        assertApiConfig(cfg)
-        const url = endpointFor(cfg.apiCompat, cfg.baseUrl, 'chat')
-        const serializedBody = JSON.stringify(body)
-        if (typeof serializedBody !== 'string') {
-          throw new Error('Request body must be serializable JSON')
-        }
-        if (Buffer.byteLength(serializedBody, 'utf-8') > REQUEST_BODY_LIMIT) {
-          throw new Error(`Request body exceeds the ${REQUEST_BODY_LIMIT} byte limit`)
-        }
-        timer = setTimeout(
-          () => controller.abort(new Error(`Request timeout after ${REQUEST_TIMEOUT_MS / 1000}s`)),
-          REQUEST_TIMEOUT_MS
-        )
-
-        const res = await fetch(url, {
-          method: 'POST',
-          headers: headersFor(cfg),
-          body: serializedBody,
-          signal: controller.signal,
-        })
-
-        if (!res.ok) {
-          const errText = redactApiKey(await readResponseText(res, ERROR_BODY_LIMIT).catch(() => ''), apiKeyFromConfig(cfg))
-          send({ error: `API Error ${res.status}: ${errText}` })
-          return
-        }
-        if (!res.body) {
-          send({ error: 'No response body' })
-          return
-        }
-
-        // After headers, replace the connection timeout with a resettable idle timeout.
-        const resetIdleTimeout = () => {
-          if (timer) clearTimeout(timer)
-          timer = setTimeout(
-            () => controller.abort(new Error(`Stream stalled for ${STREAM_IDLE_TIMEOUT_MS / 1000}s`)),
-            STREAM_IDLE_TIMEOUT_MS
-          )
-        }
-        resetIdleTimeout()
-
-        const reader = res.body.getReader()
-        const decoder = new TextDecoder()
-        let pending = ''
-        let lastFlush = Date.now()
-        let receivedBytes = 0
-
-        const flush = () => {
-          if (!pending) return
-          send({ chunk: pending })
-          pending = ''
-          lastFlush = Date.now()
-        }
-
-        try {
-          while (true) {
-            const { done, value } = await reader.read()
-            if (done) break
-            if (controller.signal.aborted) {
-              if (userAborted.has(requestId)) break
-              throw controller.signal.reason instanceof Error
-                ? controller.signal.reason
-                : new Error('API stream aborted')
-            }
-            receivedBytes += value.byteLength
-            if (receivedBytes > STREAM_RESPONSE_LIMIT) {
-              await reader.cancel()
-              throw new Error(`Stream exceeds the ${STREAM_RESPONSE_LIMIT} byte limit`)
-            }
-            resetIdleTimeout()
-            pending += decoder.decode(value, { stream: true })
-            if (pending.length >= FLUSH_BYTES || Date.now() - lastFlush >= FLUSH_INTERVAL_MS) flush()
-          }
-          pending += decoder.decode()
-          flush()
-        } finally {
-          reader.releaseLock()
-        }
-
-        send({ done: true })
-      } catch (e) {
-        // 主动 abort 不算错误，渲染进程侧已经知道自己取消了
-        if (userAborted.has(requestId)) send({ done: true })
-        else send({ error: redactApiKey(errMsg(e), apiKeyFromConfig(cfg)) })
-      } finally {
-        if (timer) clearTimeout(timer)
-        inflight.delete(requestId)
-        userAborted.delete(requestId)
-      }
-    })()
-
+    startChatStream(cfg, body, requestId, send)
     return { requestId }
   })
 
   /** 中止在途请求 */
   ipcMain.handle('apiAbort', (_e, requestId: string) => {
-    if (inflight.has(requestId)) userAborted.add(requestId)
-    inflight.get(requestId)?.abort()
-    inflight.delete(requestId)
+    abortChatStream(requestId)
   })
+}
+
+/**
+ * 发起流式对话的核心逻辑。IPC 与 WebUI 共用此函数。
+ * 分片通过 send 回调推回（IPC 走 webContents.send，WebUI 走 SSE res.write）。
+ * 负载：{chunk?} | {done: true} | {error}
+ */
+export function startChatStream(
+  cfg: ApiConnConfig,
+  body: unknown,
+  requestId: string,
+  send: (payload: Record<string, unknown>) => void
+): void {
+  const controller = new AbortController()
+  inflight.set(requestId, controller)
+
+  void (async () => {
+    let timer: NodeJS.Timeout | undefined
+    try {
+      assertApiConfig(cfg)
+      const url = endpointFor(cfg.apiCompat, cfg.baseUrl, 'chat')
+      const serializedBody = JSON.stringify(body)
+      if (typeof serializedBody !== 'string') {
+        throw new Error('Request body must be serializable JSON')
+      }
+      if (Buffer.byteLength(serializedBody, 'utf-8') > REQUEST_BODY_LIMIT) {
+        throw new Error(`Request body exceeds the ${REQUEST_BODY_LIMIT} byte limit`)
+      }
+      timer = setTimeout(
+        () => controller.abort(new Error(`Request timeout after ${REQUEST_TIMEOUT_MS / 1000}s`)),
+        REQUEST_TIMEOUT_MS
+      )
+
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: headersFor(cfg),
+        body: serializedBody,
+        signal: controller.signal,
+      })
+
+      if (!res.ok) {
+        const errText = redactApiKey(await readResponseText(res, ERROR_BODY_LIMIT).catch(() => ''), apiKeyFromConfig(cfg))
+        send({ error: `API Error ${res.status}: ${errText}` })
+        return
+      }
+      if (!res.body) {
+        send({ error: 'No response body' })
+        return
+      }
+
+      // After headers, replace the connection timeout with a resettable idle timeout.
+      const resetIdleTimeout = () => {
+        if (timer) clearTimeout(timer)
+        timer = setTimeout(
+          () => controller.abort(new Error(`Stream stalled for ${STREAM_IDLE_TIMEOUT_MS / 1000}s`)),
+          STREAM_IDLE_TIMEOUT_MS
+        )
+      }
+      resetIdleTimeout()
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let pending = ''
+      let lastFlush = Date.now()
+      let receivedBytes = 0
+
+      const flush = () => {
+        if (!pending) return
+        send({ chunk: pending })
+        pending = ''
+        lastFlush = Date.now()
+      }
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          if (controller.signal.aborted) {
+            if (userAborted.has(requestId)) break
+            throw controller.signal.reason instanceof Error
+              ? controller.signal.reason
+              : new Error('API stream aborted')
+          }
+          receivedBytes += value.byteLength
+          if (receivedBytes > STREAM_RESPONSE_LIMIT) {
+            await reader.cancel()
+            throw new Error(`Stream exceeds the ${STREAM_RESPONSE_LIMIT} byte limit`)
+          }
+          resetIdleTimeout()
+          pending += decoder.decode(value, { stream: true })
+          if (pending.length >= FLUSH_BYTES || Date.now() - lastFlush >= FLUSH_INTERVAL_MS) flush()
+        }
+        pending += decoder.decode()
+        flush()
+      } finally {
+        reader.releaseLock()
+      }
+
+      send({ done: true })
+    } catch (e) {
+      // 主动 abort 不算错误，渲染进程侧已经知道自己取消了
+      if (userAborted.has(requestId)) send({ done: true })
+      else send({ error: redactApiKey(errMsg(e), apiKeyFromConfig(cfg)) })
+    } finally {
+      if (timer) clearTimeout(timer)
+      inflight.delete(requestId)
+      userAborted.delete(requestId)
+    }
+  })()
+}
+
+/** 中止指定在途请求。IPC 与 WebUI 共用。 */
+export function abortChatStream(requestId: string): void {
+  if (inflight.has(requestId)) userAborted.add(requestId)
+  inflight.get(requestId)?.abort()
+  inflight.delete(requestId)
 }
 
 /** 窗口销毁 / reload 时清理所有在途请求，避免流写向已销毁的 webContents */

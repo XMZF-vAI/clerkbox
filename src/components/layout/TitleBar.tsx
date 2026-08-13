@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useChatStore } from '../../stores/chat-store'
 import { useVibeStore } from '../../stores/vibe-store'
+import { isWebUIMode } from '../../lib/ipc-client'
 import pkg from '../../../package.json'
 
 interface TitleBarProps {
@@ -70,34 +71,38 @@ export default function TitleBar({ onToggleSidebar }: TitleBarProps) {
           </span>
         </div>
 
-        {/* Window controls */}
-        <button
-          type="button"
-          onClick={() => window.clerkbox?.windowAction('minimize')}
-          aria-label={t('titlebar.windowMinimize')}
-          title={t('titlebar.windowMinimize')}
-          className="w-8 h-8 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors"
-        >
-          <Minus size={16} />
-        </button>
-        <button
-          type="button"
-          onClick={() => window.clerkbox?.windowAction('maximize')}
-          title={isMaximized ? t('titlebar.windowRestore') : t('titlebar.windowMaximize')}
-          aria-label={isMaximized ? t('titlebar.windowRestore') : t('titlebar.windowMaximize')}
-          className="w-8 h-8 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors"
-        >
-          {isMaximized ? <Copy size={14} /> : <Square size={14} />}
-        </button>
-        <button
-          type="button"
-          onClick={() => window.clerkbox?.windowAction('close')}
-          aria-label={t('titlebar.windowClose')}
-          title={t('titlebar.windowClose')}
-          className="w-8 h-8 flex items-center justify-center rounded-md3-sm hover:bg-md-error/20 hover:text-md-error transition-colors"
-        >
-          <X size={16} />
-        </button>
+        {/* Window controls：WebUI 模式下隐藏（浏览器无窗口控制） */}
+        {!isWebUIMode && (
+          <>
+            <button
+              type="button"
+              onClick={() => window.clerkbox?.windowAction('minimize')}
+              aria-label={t('titlebar.windowMinimize')}
+              title={t('titlebar.windowMinimize')}
+              className="w-8 h-8 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors"
+            >
+              <Minus size={16} />
+            </button>
+            <button
+              type="button"
+              onClick={() => window.clerkbox?.windowAction('maximize')}
+              title={isMaximized ? t('titlebar.windowRestore') : t('titlebar.windowMaximize')}
+              aria-label={isMaximized ? t('titlebar.windowRestore') : t('titlebar.windowMaximize')}
+              className="w-8 h-8 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors"
+            >
+              {isMaximized ? <Copy size={14} /> : <Square size={14} />}
+            </button>
+            <button
+              type="button"
+              onClick={() => window.clerkbox?.windowAction('close')}
+              aria-label={t('titlebar.windowClose')}
+              title={t('titlebar.windowClose')}
+              className="w-8 h-8 flex items-center justify-center rounded-md3-sm hover:bg-md-error/20 hover:text-md-error transition-colors"
+            >
+              <X size={16} />
+            </button>
+          </>
+        )}
       </div>
     </div>
   )

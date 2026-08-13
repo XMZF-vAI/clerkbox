@@ -141,8 +141,9 @@ const formatTimestamp = (ts: number): string => {
 /** Get platform-aware default working directory base */
 const getDefaultWorkDirBase = (): { base: string; sep: string } => {
   try {
-    const platform = window?.clerkbox?.platform
-    const home = window?.clerkbox?.homeDir || ''
+    // 使用 ipc 抽象层，兼容 Electron 与 WebUI 两种模式
+    const platform = ipc.platform()
+    const home = ipc.homeDir() || ''
     if (platform === 'darwin') return { base: home ? `${home}/clerkbox-work` : '/tmp/clerkbox-work', sep: '/' }
     if (platform === 'linux') return { base: home ? `${home}/clerkbox-work` : '/tmp/clerkbox-work', sep: '/' }
     return { base: home ? `${home}\\clerkbox-work` : 'C:\\clerkbox-work', sep: '\\' }

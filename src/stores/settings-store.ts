@@ -4,6 +4,7 @@ import type { AppSettings, ApiCompat, CustomModel, ModelProvider, ProviderModel 
 import { normalizeEffort } from '../types/agent'
 import { guessApiCompat, guessPresetByBaseUrl, fallbackNameFromBaseUrl } from '../lib/provider-catalog'
 import { ipc } from '../lib/ipc-client'
+import { sharedStorage } from '../lib/shared-storage'
 
 interface SettingsState extends AppSettings {
   showSettings: boolean
@@ -188,6 +189,7 @@ export const useSettingsStore = create<SettingsState>()(
     }),
     {
       name: 'clerkbox-settings',
+      storage: sharedStorage,
       partialize: (state) => {
         // Keep credentials only in Electron's OS-backed safeStorage.
         const { showSettings: _, apiKey: _apiKey, providers, customModels, ...rest } = state

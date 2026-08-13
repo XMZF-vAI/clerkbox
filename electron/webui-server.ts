@@ -1,0 +1,335 @@
+import * as http from 'http'
+import * as fs from 'fs'
+import * as path from 'path'
+import * as crypto from 'crypto'
+import * as os from 'os'
+import { app } from 'electron'
+
+/**
+ * WebUI 服务器：把 ClerkBox 的完整界面通过 HTTP 暴露给浏览器。
+ *
+ * 设计要点：
+ * - 复用主进程已注册的 IPC handler（通过 handlerRegistry），不重复实现业务逻辑
+ * - 流式对话走 SSE（Server-Sent Events），与 Electron IPC 的 apiChunk 事件语义对齐
+ * - 随机 token 认证，防止局域网内未授权访问
+ * - 开发模式代理到 Vite dev server，生产模式直接 serve dist/ 静态文件
+ */
+
+// ── Handler 注册表 ──
+// main.ts / api-proxy.ts 在注册 ipcMain.handle 的同时，把 handler 写入此表。
+// WebUI 的 /api/invoke 路由通过此表调用同一份业务逻辑。
+export const handlerRegistry = new Map<string, (...args: unknown[]) => unknown>()
+
+// ── 流式对话桥接 ──
+// api-proxy.ts 导出 startChatStream / abortChatStream，main.ts 启动时注入。
+export type StreamSendFn = (payload: Record<string, unknown>) => void
+let startChatStreamFn: ((cfg: unknown, body: unknown, requestId: string, send: StreamSendFn) => void) | null = null
+let abortChatStreamFn: ((requestId: string) => void) | null = null
+
+export function setStreamHandlers(
+  startFn: (cfg: unknown, body: unknown, requestId: string, send: StreamSendFn) => void,
+  abortFn: (requestId: string) => void
+): void {
+  startChatStreamFn = startFn
+  abortChatStreamFn = abortFn
+}
+
+// ── MIME 类型 ──
+const MIME_TYPES: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.mjs': 'application/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.webp': 'image/webp',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.txt': 'text/plain; charset=utf-8',
+  '.map': 'application/json',
+}
+
+// ── 服务器状态 ──
+let server: http.Server | null = null
+let currentToken = ''
+let currentPort = 0
+
+export function getWebUIStatus(): { running: boolean; url?: string } {
+  if (!server) return { running: false }
+  return { running: true, url: `http://localhost:${currentPort}/?token=${currentToken}` }
+}
+
+export async function startWebUI(): Promise<{ port: number; token: string; url: string }> {
+  if (server) {
+    return { port: currentPort, token: currentToken, url: `http://localhost:${currentPort}/?token=${currentToken}` }
+  }
+
+  currentToken = crypto.randomBytes(32).toString('hex')
+
+  return new Promise((resolve, reject) => {
+    server = http.createServer(handleRequest)
+    server.listen(0, '0.0.0.0', () => {
+      const addr = server!.address()
+      if (addr && typeof addr === 'object') {
+        currentPort = addr.port
+        resolve({ port: currentPort, token: currentToken, url: `http://localhost:${currentPort}/?token=${currentToken}` })
+      } else {
+        server = null
+        reject(new Error('Failed to get server address'))
+      }
+    })
+    server.on('error', (err) => {
+      server = null
+      reject(err)
+    })
+  })
+}
+
+export function stopWebUI(): void {
+  if (server) {
+    server.close()
+    server = null
+    currentToken = ''
+    currentPort = 0
+  }
+}
+
+// ── 请求分发 ──
+function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
+  const url = new URL(req.url || '/', `http://localhost:${currentPort}`)
+
+  // API 路由需要 token 认证
+  if (url.pathname.startsWith('/api/')) {
+    const token = (req.headers['x-webui-token'] as string) || url.searchParams.get('token') || ''
+    if (token !== currentToken) {
+      sendJson(res, 401, { error: 'Unauthorized' })
+      return
+    }
+
+    if (url.pathname === '/api/invoke' && req.method === 'POST') {
+      void handleInvoke(req, res)
+      return
+    }
+    if (url.pathname === '/api/chat-stream' && req.method === 'POST') {
+      void handleChatStream(req, res)
+      return
+    }
+    if (url.pathname === '/api/platform') {
+      sendJson(res, 200, { result: process.platform })
+      return
+    }
+    if (url.pathname === '/api/homedir') {
+      sendJson(res, 200, { result: os.homedir() })
+      return
+    }
+
+    sendJson(res, 404, { error: 'Not found' })
+    return
+  }
+
+  // 静态文件 / Vite 代理
+  if (process.env.VITE_DEV_SERVER_URL) {
+    proxyToVite(req, res)
+  } else {
+    serveStatic(req, res, url.pathname)
+  }
+}
+
+// ── /api/invoke：调用 handlerRegistry 中的 handler ──
+async function handleInvoke(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  const body = await readBody(req, 10 * 1024 * 1024)
+  if (body === null) {
+    sendJson(res, 413, { error: 'Request body too large' })
+    return
+  }
+
+  try {
+    const { method, args } = JSON.parse(body) as { method: string; args: unknown[] }
+    if (typeof method !== 'string' || !Array.isArray(args)) {
+      sendJson(res, 400, { error: 'Invalid request format' })
+      return
+    }
+
+    // 对话框类 handler 在 WebUI 模式下无法弹出原生窗口，直接返回 null
+    const dialogHandlers = new Set([
+      'selectFolder', 'selectImageFile', 'selectAudioFile', 'selectMusicFolder', 'selectSkillFile',
+    ])
+    if (dialogHandlers.has(method)) {
+      sendJson(res, 200, { result: null })
+      return
+    }
+
+    // confirmDialog 在浏览器端由 window.confirm 处理，不走服务端
+    if (method === 'confirmDialog') {
+      sendJson(res, 200, { result: true })
+      return
+    }
+
+    // openExternal 在浏览器端由 window.open 处理，不走服务端
+    if (method === 'openExternal') {
+      sendJson(res, 200, { result: null })
+      return
+    }
+
+    const handler = handlerRegistry.get(method)
+    if (!handler) {
+      sendJson(res, 404, { error: `Unknown method: ${method}` })
+      return
+    }
+
+    // handler 签名是 (event, ...args)，WebUI 传 null 作为 event
+    const result = await handler(null, ...args)
+    sendJson(res, 200, { result: result === undefined ? null : result })
+  } catch (e) {
+    sendJson(res, 500, { error: e instanceof Error ? e.message : String(e) })
+  }
+}
+
+// ── /api/chat-stream：SSE 流式对话 ──
+async function handleChatStream(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  const body = await readBody(req, 10 * 1024 * 1024)
+  if (body === null) {
+    sendJson(res, 413, { error: 'Request body too large' })
+    return
+  }
+
+  try {
+    const { cfg, body: chatBody } = JSON.parse(body) as { cfg: unknown; body: unknown }
+
+    if (!startChatStreamFn) {
+      sendJson(res, 503, { error: 'Streaming not available' })
+      return
+    }
+
+    const requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+
+    // SSE 响应头，requestId 通过 header 传回前端
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'X-Request-Id': requestId,
+    })
+
+    // 启动流式对话，分片通过 SSE 推回；收到 done/error 终止信号后关闭连接
+    startChatStreamFn(cfg, chatBody, requestId, (payload) => {
+      if (!res.writableEnded) {
+        res.write(`data: ${JSON.stringify({ requestId, ...payload })}\n\n`)
+      }
+      if (payload.done === true || typeof payload.error === 'string') {
+        if (!res.writableEnded) res.end()
+      }
+    })
+
+    // 客户端断开时中止上游请求
+    req.on('close', () => {
+      abortChatStreamFn?.(requestId)
+    })
+  } catch (e) {
+    sendJson(res, 400, { error: e instanceof Error ? e.message : String(e) })
+  }
+}
+
+// ── 静态文件服务 ──
+function getDistDir(): string {
+  if (app.isPackaged) {
+    return path.join(app.getAppPath(), 'dist')
+  }
+  return path.join(process.cwd(), 'dist')
+}
+
+function serveStatic(req: http.IncomingMessage, res: http.ServerResponse, pathname: string): void {
+  const distDir = getDistDir()
+  // 解码 URL 编码的路径
+  let decodedPath: string
+  try {
+    decodedPath = decodeURIComponent(pathname)
+  } catch {
+    res.writeHead(400)
+    res.end()
+    return
+  }
+
+  let filePath = path.join(distDir, decodedPath === '/' ? 'index.html' : decodedPath)
+
+  // 防止路径遍历
+  const resolved = path.resolve(filePath)
+  if (!resolved.startsWith(path.resolve(distDir))) {
+    res.writeHead(403)
+    res.end()
+    return
+  }
+
+  // 文件不存在或是目录 → SPA fallback 到 index.html
+  if (!fs.existsSync(resolved) || fs.statSync(resolved).isDirectory()) {
+    filePath = path.join(distDir, 'index.html')
+  }
+
+  const ext = path.extname(filePath).toLowerCase()
+  const contentType = MIME_TYPES[ext] || 'application/octet-stream'
+
+  try {
+    const content = fs.readFileSync(filePath)
+    res.writeHead(200, { 'Content-Type': contentType })
+    res.end(content)
+  } catch {
+    res.writeHead(404)
+    res.end('Not found')
+  }
+}
+
+// ── 开发模式：代理到 Vite dev server ──
+function proxyToVite(req: http.IncomingMessage, res: http.ServerResponse): void {
+  const viteUrl = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5175'
+  const parsed = new URL(viteUrl)
+
+  const options: http.RequestOptions = {
+    hostname: parsed.hostname,
+    port: parsed.port || 80,
+    path: req.url,
+    method: req.method,
+    headers: { ...req.headers, host: parsed.host },
+  }
+
+  const proxyReq = http.request(options, (proxyRes) => {
+    res.writeHead(proxyRes.statusCode || 502, proxyRes.headers)
+    proxyRes.pipe(res)
+  })
+  proxyReq.on('error', () => {
+    res.writeHead(502, { 'Content-Type': 'text/plain' })
+    res.end('Vite dev server not available')
+  })
+  req.pipe(proxyReq)
+}
+
+// ── 工具函数 ──
+function sendJson(res: http.ServerResponse, status: number, data: unknown): void {
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' })
+  res.end(JSON.stringify(data))
+}
+
+function readBody(req: http.IncomingMessage, maxBytes: number): Promise<string | null> {
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = []
+    let received = 0
+    req.on('data', (chunk: Buffer) => {
+      received += chunk.length
+      if (received > maxBytes) {
+        req.destroy()
+        resolve(null)
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')))
+    req.on('error', () => resolve(null))
+  })
+}

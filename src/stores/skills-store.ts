@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { SkillDefinition, SkillsMPSkill, SkillsMPSearchResult } from '../types/skills'
 import { ipc } from '../lib/ipc-client'
+import { sharedStorage } from '../lib/shared-storage'
 
 // slug 级 mutex：同一技能的写盘/删除操作串行执行，防止"停用→快速激活"竞态
 // （removeSkillDir 在 writeSkillDir 之后完成导致刚写入的目录被删除）
@@ -497,6 +498,7 @@ export const useSkillsStore = create<SkillsState>()(
     }),
     {
       name: 'clerkbox-skills',
+      storage: sharedStorage,
       version: 2,
       migrate: (persisted: unknown, _version: number): Partial<SkillsState> => {
         const state = isRecord(persisted) ? persisted : {}

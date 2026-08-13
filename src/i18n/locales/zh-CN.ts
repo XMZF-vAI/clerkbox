@@ -199,6 +199,17 @@ export default {
     deleteSessionTitle: '删除会话',
     deleteSessionMsg: '确定要删除这个会话吗？此操作不可撤销，会话中的所有消息将永久丢失。',
     settings: '设置',
+    webui: '启动 WebUI',
+    webuiAria: '启动 WebUI 远程控制',
+    webuiStarting: '正在启动 WebUI...',
+    webuiTitle: 'WebUI 已启动',
+    webuiDesc: '在浏览器中打开以下地址即可远程操控 ClerkBox。数据与桌面端完全同步。',
+    webuiOpen: '在浏览器中打开',
+    webuiStop: '停止 WebUI',
+    webuiCopy: '复制地址',
+    webuiCopied: '已复制',
+    webuiSecurityNote: '地址包含访问令牌，请勿泄露给他人。',
+    webuiError: 'WebUI 启动失败',
   },
 
   titlebar: {

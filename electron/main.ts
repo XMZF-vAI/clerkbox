@@ -17,7 +17,8 @@ import * as dns from 'dns'
 import * as os from 'os'
 import * as cheerio from 'cheerio'
 import * as yaml from 'js-yaml'
-import { registerApiProxyHandlers, bindApiProxyCleanup } from './api-proxy'
+import { registerApiProxyHandlers, bindApiProxyCleanup, startChatStream, abortChatStream, type ApiConnConfig } from './api-proxy'
+import { handlerRegistry, setStreamHandlers, startWebUI, stopWebUI, getWebUIStatus } from './webui-server'
 
 const SKILL_REQUEST_TIMEOUT_MS = 15_000
 const MAX_SKILL_FILE_BYTES = 512 * 1024
@@ -510,6 +511,21 @@ function registerIpcHandlers() {
     mainWindow && !mainWindow.isDestroyed()
       ? dialog.showMessageBox(mainWindow, options)
       : dialog.showMessageBox(options)
+
+  // ── WebUI handler 注册表：monkey-patch ipcMain.handle，让所有 handler 自动同步到 WebUI ──
+  // 这样 46 个 handler 无需逐个手动注册，WebUI 的 /api/invoke 可直接调用同一份业务逻辑。
+  const originalHandle = ipcMain.handle.bind(ipcMain)
+  const patchedHandle = (channel: string, listener: (...args: unknown[]) => unknown) => {
+    handlerRegistry.set(channel, listener)
+    return originalHandle(channel, listener as (event: Electron.IpcMainInvokeEvent, ...args: unknown[]) => unknown)
+  }
+  ipcMain.handle = patchedHandle as typeof ipcMain.handle
+
+  // 流式对话桥接：WebUI 的 /api/chat-stream 走 SSE，复用 startChatStream / abortChatStream
+  setStreamHandlers(
+    (cfg, body, requestId, send) => startChatStream(cfg as ApiConnConfig, body, requestId, send),
+    abortChatStream
+  )
 
   // 模型 API 代理（拉模型列表 / 测连接 / 流式对话 / 中止）
   registerApiProxyHandlers()
@@ -1767,6 +1783,91 @@ function registerIpcHandlers() {
   ipcMain.handle('getPlatform', () => {
     return process.platform
   })
+
+  // ── 共享 KV 存储：Electron 与 WebUI 双模式读写同一份持久化数据 ──
+  // 渲染进程的 zustand persist（设置/技能/Vibe/token 统计）桥接到这里，
+  // 避免 WebUI（不同 origin）读不到 localStorage 导致"未配置模型"。
+  const kvPath = path.join(app.getPath('userData'), 'clerkbox-kv.json')
+  let kvWriteQueue: Promise<void> = Promise.resolve()
+
+  function readKvStore(): Record<string, string> {
+    try {
+      if (fs.existsSync(kvPath)) {
+        const parsed: unknown = JSON.parse(fs.readFileSync(kvPath, 'utf-8'))
+        if (parsed && typeof parsed === 'object') {
+          const out: Record<string, string> = {}
+          for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+            if (typeof v === 'string') out[k] = v
+          }
+          return out
+        }
+      }
+    } catch (err) {
+      console.error('[kv] read failed:', err)
+    }
+    return {}
+  }
+
+  function writeKvStore(data: Record<string, string>): void {
+    const tempPath = `${kvPath}.tmp-${process.pid}`
+    fs.writeFileSync(tempPath, JSON.stringify(data), 'utf-8')
+    try {
+      fs.renameSync(tempPath, kvPath)
+    } catch (err) {
+      try {
+        fs.copyFileSync(tempPath, kvPath)
+      } finally {
+        fs.rmSync(tempPath, { force: true })
+      }
+      if (!fs.existsSync(kvPath)) throw err
+    }
+  }
+
+  ipcMain.handle('kvGet', (_event, key: unknown): string | null => {
+    if (typeof key !== 'string') return null
+    const data = readKvStore()
+    return Object.prototype.hasOwnProperty.call(data, key) ? data[key] : null
+  })
+
+  ipcMain.handle('kvSet', (_event, key: unknown, value: unknown): Promise<void> => {
+    if (typeof key !== 'string' || typeof value !== 'string') return Promise.resolve()
+    const write = kvWriteQueue.then(() => {
+      const data = readKvStore()
+      data[key] = value
+      writeKvStore(data)
+    })
+    kvWriteQueue = write.catch((err) => console.error('[kv] write failed:', err))
+    return write
+  })
+
+  ipcMain.handle('kvRemove', (_event, key: unknown): Promise<void> => {
+    if (typeof key !== 'string') return Promise.resolve()
+    const write = kvWriteQueue.then(() => {
+      const data = readKvStore()
+      if (Object.prototype.hasOwnProperty.call(data, key)) {
+        delete data[key]
+        writeKvStore(data)
+      }
+    })
+    kvWriteQueue = write.catch((err) => console.error('[kv] remove failed:', err))
+    return write
+  })
+
+  // ── WebUI 控制 ──
+  ipcMain.handle('startWebUI', async () => {
+    try {
+      return await startWebUI()
+    } catch (e) {
+      return { error: e instanceof Error ? e.message : String(e) }
+    }
+  })
+  ipcMain.handle('stopWebUI', () => {
+    stopWebUI()
+    return { ok: true }
+  })
+  ipcMain.handle('getWebUIStatus', () => {
+    return getWebUIStatus()
+  })
 }
 
 /** Validate fetched SKILL.md structure and return human-readable warnings. */
@@ -2742,6 +2843,18 @@ if (process.platform === 'win32') {
 app.whenReady().then(() => {
   registerIpcHandlers()
   createWindow()
+
+  // 服务器部署场景：设置 CLERKBOX_WEBUI_AUTO=1 时自动启动 WebUI 并打印访问地址，
+  // 无需手动点击界面按钮即可远程访问。
+  if (process.env.CLERKBOX_WEBUI_AUTO === '1') {
+    startWebUI()
+      .then(({ url }) => {
+        console.log(`[WebUI] Auto-started: ${url}`)
+      })
+      .catch((e) => {
+        console.error('[WebUI] Auto-start failed:', e)
+      })
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

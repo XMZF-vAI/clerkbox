@@ -199,6 +199,17 @@ export default {
     deleteSessionTitle: 'Delete session',
     deleteSessionMsg: 'Delete this session? This action cannot be undone — all messages in this session will be permanently lost.',
     settings: 'Settings',
+    webui: 'Start WebUI',
+    webuiAria: 'Start WebUI remote control',
+    webuiStarting: 'Starting WebUI...',
+    webuiTitle: 'WebUI Started',
+    webuiDesc: 'Open the following address in your browser to remotely control ClerkBox. Data is fully synchronized with the desktop client.',
+    webuiOpen: 'Open in Browser',
+    webuiStop: 'Stop WebUI',
+    webuiCopy: 'Copy address',
+    webuiCopied: 'Copied',
+    webuiSecurityNote: 'The address contains an access token — do not share it with others.',
+    webuiError: 'WebUI failed to start',
   },
 
   titlebar: {
