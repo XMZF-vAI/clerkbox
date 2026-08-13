@@ -45,15 +45,41 @@ export interface SkillDefinition {
   skillMdPath?: string
 }
 
-// ── SkillsMP API types ──
+// ── CocoLoop Hub API types ──
+// 数据源：hub.cocoloop.cn（SSR 抓取 RSC initialItems 数组）
 
 export interface SkillsMPSkill {
+  /** CocoLoop 数字 ID（如 "1155"） */
   id: string
+  /** 显示标题（title） */
   name: string
+  /** 中文标题（titleCn），可能为空 */
+  titleCn?: string
+  /** 作者（creator） */
   author: string
+  /** 作者 slug（creatorSlug） */
+  creatorSlug?: string
+  /** 描述 */
   description: string
-  githubUrl: string
+  /** CocoLoop 详情页 URL：https://hub.cocoloop.cn/skills/{id} */
   skillUrl: string
+  /** 直链下载 URL：https://dl.cocoloop.cn/bss/skills/{author}-{name}-{version}.zip */
+  downloadUrl: string
+  /** emoji 图标 */
+  emoji?: string
+  /** BSS 安全等级：S+ / S / A / B / C / D */
+  bssLevel?: string
+  /** 下载量文本（如 "419.8k"） */
+  downloads?: string
+  /** 收藏量文本（如 "1922k"） */
+  favorites?: string
+  /** 安装量文本（如 "3.4k"） */
+  installs?: string
+  /** 推荐度文本（如 "0%推荐"） */
+  recommend?: string
+  /** 兼容旧字段：等于 downloadUrl */
+  githubUrl: string
+  /** 兼容旧字段：下载量数值（解析失败为 0） */
   stars: number
   updatedAt: string
 }

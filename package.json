@@ -4,8 +4,8 @@
   "description": "XMZF vAI - ClerkBox: Single AI Agent Desktop Workbench",
   "main": "dist-electron/electron/main.js",
   "scripts": {
-    "dev": "concurrently -k \"vite\" \"wait-on http://localhost:5175 && cross-env VITE_DEV_SERVER_URL=http://localhost:5175 electron .\"",
-    "dev:alt": "concurrently -k \"vite\" \"wait-on http://localhost:5176 && cross-env VITE_DEV_SERVER_URL=http://localhost:5176 electron .\"",
+    "dev": "concurrently \"npm run build:electron\" \"vite\" \"wait-on http://localhost:5175 && cross-env VITE_DEV_SERVER_URL=http://localhost:5175 electron .\"",
+    "dev:alt": "concurrently \"npm run build:electron\" \"vite\" \"wait-on http://localhost:5176 && cross-env VITE_DEV_SERVER_URL=http://localhost:5176 electron .\"",
     "build:electron": "tsc -p tsconfig.electron.json && node -e \"require('fs').writeFileSync('dist-electron/package.json','{\\\"type\\\":\\\"commonjs\\\"}\\n')\"",
     "electron": "npm run build:electron && cross-env VITE_DEV_SERVER_URL=http://localhost:5175 electron .",
     "build": "npm run build:electron && vite build && electron-builder --win",

@@ -289,19 +289,25 @@ export const useSkillsStore = create<SkillsState>()(
         try {
           const raw = await ipc.skillsSearch(query, page, 20)
           const result: SkillsMPSearchResult = JSON.parse(raw)
-          if (result.success && result.data) {
+          if (result.success && result.data && Array.isArray(result.data.skills)) {
+            // 防御：强制 id 为 string
+            const skills = result.data.skills.map((s) => ({ ...s, id: String(s.id) }))
+            // page > 1 时追加而非覆盖（支持"加载更多"语义）
+            const merged = page > 1 ? [...get().searchResults, ...skills] : skills
             set({
-              searchResults: result.data.skills,
+              searchResults: merged,
               searchPage: result.data.pagination.page,
               searchTotal: result.data.pagination.total,
               searchHasNext: result.data.pagination.hasNext,
               searchLoading: false,
             })
           } else {
-            set({ searchResults: [], searchLoading: false })
+            console.error('[skills-store] searchOnlineSkills failed:', result)
+            set({ searchResults: [], searchPage: 1, searchTotal: 0, searchHasNext: false, searchLoading: false })
           }
-        } catch {
-          set({ searchResults: [], searchLoading: false })
+        } catch (err) {
+          console.error('[skills-store] searchOnlineSkills error:', err)
+          set({ searchResults: [], searchPage: 1, searchTotal: 0, searchHasNext: false, searchLoading: false })
         }
       },
 
@@ -311,42 +317,27 @@ export const useSkillsStore = create<SkillsState>()(
         if (get().skills.some((skill) => skill.id === id)) return true
 
         try {
-          // 优先：整目录拉取（含 SKILL.md 与所有附属文件）
-          let files: Array<{ path: string; content: string }> = []
-          let warnings: string[] = []
-          let skillMdContent = ''
-
-          try {
-            const raw = await ipc.fetchSkillFromRepo(mpSkill.githubUrl)
-            const result = JSON.parse(raw)
-            if (result.success && Array.isArray(result.files) && result.files.length > 0) {
-              files = result.files
-              warnings = Array.isArray(result.warnings) ? result.warnings : []
-              const skillMdFile = files.find((f) => f.path === 'SKILL.md' || f.path.endsWith('/SKILL.md'))
-              skillMdContent = skillMdFile ? skillMdFile.content : ''
-            }
-          } catch {
-            // 整目录拉取异常，下面走回退
+          // 一次性下载 zip + 解压：fetchSkillFromRepo 已包含完整文件列表与 SKILL.md 内容，
+          // 不再回退到 fetchSkillMd 重复下载同一 zip 包。
+          const raw = await ipc.fetchSkillFromRepo(mpSkill.downloadUrl || mpSkill.githubUrl)
+          const result = JSON.parse(raw)
+          if (!result.success || !Array.isArray(result.files) || result.files.length === 0) {
+            return false
           }
-
-          // 回退：单文件模式（兼容旧逻辑）
-          if (!skillMdContent) {
-            const raw = await ipc.fetchSkillMd(mpSkill.githubUrl)
-            const result = JSON.parse(raw)
-            if (!result.success || !result.content) return false
-            skillMdContent = result.content as string
-            warnings = Array.isArray(result.warnings) ? (result.warnings as string[]) : []
-            files = [{ path: 'SKILL.md', content: skillMdContent }]
-          }
+          const files = result.files as Array<{ path: string; content: string }>
+          const warnings = Array.isArray(result.warnings) ? (result.warnings as string[]) : []
+          const skillMdFile = files.find((f) => f.path === 'SKILL.md' || f.path.endsWith('/SKILL.md'))
+          if (!skillMdFile) return false
+          const skillMdContent = skillMdFile.content
 
           set((state) => {
             if (state.skills.some((skill) => skill.id === id)) return state
             const newSkill: SkillDefinition = {
               id,
               slug: uniqueSkillSlug(generateSlug(mpSkill.name), state.skills),
-              name: mpSkill.name,
+              name: mpSkill.titleCn || mpSkill.name,
               description: (mpSkill.description || '').slice(0, 100),
-              icon: '⚡',
+              icon: '',
               category: 'online',
               source: 'online',
               skillMdContent,
@@ -416,7 +407,7 @@ export const useSkillsStore = create<SkillsState>()(
             slug: uniqueSkillSlug(generateSlug(name), state.skills),
             name,
             description: (result.description || '用户自定义技能').slice(0, 100),
-            icon: result.icon || '⚡',
+            icon: result.icon || '',
             category: (result.category as SkillDefinition['category']) || 'custom',
             source: 'custom',
             skillMdContent,
@@ -434,30 +425,22 @@ export const useSkillsStore = create<SkillsState>()(
       loadRecommended: async () => {
         set({ recommendedLoading: true })
         try {
-          // Search npm registry for popular agent-skills packages
-          const queries = ['office', 'design', 'work', 'code']
-          const allResults: SkillsMPSkill[] = []
-          for (const q of queries) {
-            try {
-              const raw = await ipc.skillsSearch(q, 1, 6)
-              const result: SkillsMPSearchResult = JSON.parse(raw)
-              if (result.success && result.data) {
-                allResults.push(...result.data.skills)
-              }
-            } catch { /* skip failed queries */ }
+          // CocoLoop Hub /search 路由返回 SSR HTML 含 initialItems（热门技能列表）
+          const raw = await ipc.skillsSearch('', 1, 12)
+          const result: SkillsMPSearchResult = JSON.parse(raw)
+          if (result.success && result.data && Array.isArray(result.data.skills)) {
+            // 防御：CocoLoop 后端 id 可能为 number，强制转 string 避免 UI 层 .replace 报错
+            const skills = result.data.skills.map((s) => ({ ...s, id: String(s.id) }))
+            // CocoLoop 已按热度返回，按下载量数值倒序兜底排序
+            const sorted = [...skills].sort((a, b) => b.stars - a.stars).slice(0, 12)
+            set({ recommendedSkills: sorted, recommendedLoading: false })
+          } else {
+            console.error('[skills-store] loadRecommended: API returned non-success or empty', result)
+            set({ recommendedSkills: [], recommendedLoading: false })
           }
-          // Deduplicate by id
-          const seen = new Set<string>()
-          const deduped = allResults.filter((s) => {
-            if (seen.has(s.id)) return false
-            seen.add(s.id)
-            return true
-          })
-          // Sort by stars and take top 12
-          const sorted = deduped.sort((a, b) => b.stars - a.stars).slice(0, 12)
-          set({ recommendedSkills: sorted, recommendedLoading: false })
-        } catch {
-          set({ recommendedLoading: false })
+        } catch (err) {
+          console.error('[skills-store] loadRecommended failed:', err)
+          set({ recommendedSkills: [], recommendedLoading: false })
         }
       },
 
@@ -530,7 +513,10 @@ export const useSkillsStore = create<SkillsState>()(
               }]
             })
           : []
-        return { ...state, skills } as Partial<SkillsState>
+        // 显式只保留需要持久化的字段，丢弃可能残留的 recommendedSkills/searchResults 等旧字段，
+        // 避免 useEffect 检测到非空 recommendedSkills 而不触发重新加载。
+        const sessionSkillIds = Array.isArray(state.sessionSkillIds) ? state.sessionSkillIds : []
+        return { skills, sessionSkillIds } as Partial<SkillsState>
       },
       partialize: (state) => ({
         // 仅持久化用户安装的 online/custom 技能 + 会话激活技能 id。

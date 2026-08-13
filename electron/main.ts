@@ -1,4 +1,4 @@
-import {
+﻿import {
   app,
   BrowserWindow,
   ipcMain,
@@ -167,11 +167,19 @@ function parseGitHubRepositoryUrl(input: string): GitHubRepositoryReference | nu
 function fetchHttpsText(
   url: string,
   headers: Record<string, string>,
-  maxBytes: number = MAX_SKILL_FILE_BYTES
+  maxBytes: number = MAX_SKILL_FILE_BYTES,
+  maxRedirects: number = 5
 ): Promise<{ statusCode: number; body: string }> {
   return new Promise((resolve, reject) => {
     const request = https.get(url, { headers }, (response) => {
       const statusCode = response.statusCode ?? 0
+      // 跟随 3xx 重定向（如 /skills → /）
+      if (statusCode >= 300 && statusCode < 400 && response.headers.location && maxRedirects > 0) {
+        response.resume()
+        const redirectUrl = new URL(response.headers.location, url).href
+        resolve(fetchHttpsText(redirectUrl, headers, maxBytes, maxRedirects - 1))
+        return
+      }
       if (statusCode !== 200) {
         response.resume()
         resolve({ statusCode, body: '' })
@@ -1669,7 +1677,7 @@ function registerIpcHandlers() {
     }
   })
 
-  // Skill marketplace: search via SkillHub API (https://skillhub.proclaw.cc)
+  // Skill marketplace: 抓取 hub.cocoloop.cn SSR (Next.js App Router RSC) 解析 initialItems
   ipcMain.handle('skillsSearch', async (_event, query: string, page: number = 1, limit: number = 20) => {
     const safeQuery = typeof query === 'string' ? query.trim().slice(0, 200) : ''
     const toInteger = (value: unknown, fallback: number, min: number, max: number) =>
@@ -1677,67 +1685,60 @@ function registerIpcHandlers() {
         ? Math.min(Math.max(Math.trunc(value), min), max)
         : fallback
     const safePage = toInteger(page, 1, 1, 1000)
-    const safeLimit = toInteger(limit, 20, 1, 50)
+    const safeLimit = toInteger(limit, 20, 1, 100)
 
     try {
-      const apiUrl = new URL('https://skillhub.proclaw.cc/api/search')
-      apiUrl.searchParams.set('q', safeQuery)
-      apiUrl.searchParams.set('page', String(safePage))
-      apiUrl.searchParams.set('pageSize', String(safeLimit))
-
+      // 1. 抓搜索页 SSR HTML（hub.cocoloop.cn 是 Next.js App Router，服务端渲染含 initialItems）
+      //    注意：主页 /skills 是纯静态 HTML 没有 initialItems，必须用 /search 路由才能拿到 RSC 数据
+      const requestUrl = `https://hub.cocoloop.cn/search${safeQuery ? `?q=${encodeURIComponent(safeQuery)}` : ''}`
       const response = await fetchHttpsText(
-        apiUrl.toString(),
-        { Accept: 'application/json', 'User-Agent': 'ClerkBox/1.5' }
+        requestUrl,
+        { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ClerkBox/1.7' },
+        2 * 1024 * 1024
       )
-      if (response.statusCode !== 200) throw new Error(`SkillHub returned HTTP ${response.statusCode}`)
+      if (response.statusCode !== 200) throw new Error(`CocoLoop returned HTTP ${response.statusCode}`)
 
-      const parsed: unknown = JSON.parse(response.body)
-      if (!isRecord(parsed)) throw new Error('SkillHub returned an invalid payload')
-      const skills = Array.isArray(parsed.skills) ? parsed.skills.filter(isRecord) : []
-      const asString = (value: unknown) => (typeof value === 'string' ? value : '')
-      const asNumber = (value: unknown, fallback: number) =>
-        typeof value === 'number' && Number.isFinite(value) ? value : fallback
-      const mapped = skills
-        .map((skill) => {
-          const id = asString(skill.id) || asString(skill.slug)
-          const repositoryUrl = asString(skill.repositoryUrl)
-          const author = isRecord(skill.author) ? asString(skill.author.name) : asString(skill.author)
-          return {
-            id,
-            name: asString(skill.name),
-            author: author || 'unknown',
-            description: asString(skill.description),
-            githubUrl: repositoryUrl,
-            skillUrl: repositoryUrl,
-            stars: asNumber(skill.starCount, 0),
-            updatedAt: '',
-          }
-        })
-        .filter((skill) => skill.id && skill.githubUrl)
-        .slice(0, safeLimit)
-      const total = Math.max(0, Math.trunc(asNumber(parsed.total, mapped.length)))
-      const totalPages = Math.max(1, Math.trunc(asNumber(parsed.totalPages, 1)))
-      const currentPage = toInteger(parsed.page, safePage, 1, totalPages)
-      const pageSize = toInteger(parsed.pageSize, safeLimit, 1, 50)
+      // 2. 解析 RSC 流中的 initialItems 数组
+      const allSkills = parseCocoloopSkills(response.body)
+
+      // 3. 关键词过滤：服务端不响应 ?q=，客户端做 name/titleCn/description/author 模糊匹配
+      const q = safeQuery.toLowerCase()
+      const filtered = q
+        ? allSkills.filter((s) =>
+            s.name.toLowerCase().includes(q) ||
+            (s.titleCn || '').toLowerCase().includes(q) ||
+            s.description.toLowerCase().includes(q) ||
+            (s.author || '').toLowerCase().includes(q) ||
+            (s.creatorSlug || '').toLowerCase().includes(q)
+          )
+        : allSkills
+
+      // 4. 分页
+      const total = filtered.length
+      const totalPages = Math.max(1, Math.ceil(total / safeLimit))
+      const start = (safePage - 1) * safeLimit
+      const paged = filtered.slice(start, start + safeLimit)
 
       return JSON.stringify({
         success: true,
         data: {
-          skills: mapped,
+          skills: paged,
           pagination: {
-            page: currentPage,
-            limit: pageSize,
+            page: safePage,
+            limit: safeLimit,
             total,
             totalPages,
-            hasNext: currentPage < totalPages,
-            hasPrev: currentPage > 1,
+            hasNext: safePage < totalPages,
+            hasPrev: safePage > 1,
           },
           filters: { search: safeQuery, sortBy: 'relevance' },
         },
       })
-    } catch {
+    } catch (err) {
+      // 返回 success: false + 错误信息，便于前端诊断，不再静默吞掉错误
       return JSON.stringify({
-        success: true,
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
         data: {
           skills: [],
           pagination: { page: safePage, limit: safeLimit, total: 0, totalPages: 0, hasNext: false, hasPrev: false },
@@ -1747,21 +1748,14 @@ function registerIpcHandlers() {
     }
   })
 
-  // Fetch SKILL.md from a skill's GitHub repository
-  // Tries multiple common locations and branches automatically
-  ipcMain.handle('fetchSkillMd', async (_event, githubUrl: string) => {
-    const repository = parseGitHubRepositoryUrl(githubUrl)
-    if (!repository) {
-      return JSON.stringify({ error: 'Invalid GitHub URL' })
-    }
-
-    // Use the robust multi-location fetcher
-    return await fetchSkillMdFromRepo(`${repository.owner}/${repository.repo}`)
+  // 下载 CocoLoop skill zip 解压后只取 SKILL.md 内容（兼容旧接口签名，参数为 downloadUrl）
+  ipcMain.handle('fetchSkillMd', async (_event, downloadUrl: string) => {
+    return await fetchCocoloopSkillMd(downloadUrl)
   })
 
-  // 整目录拉取技能：用 GitHub Trees API 列出文件后逐个抓取，返回完整文件列表
-  ipcMain.handle('fetchSkillFromRepo', async (_event, githubUrl: string) => {
-    return await fetchSkillDirFromRepo(githubUrl)
+  // 整目录拉取技能：下载 CocoLoop skill zip 并解压，返回完整文件列表
+  ipcMain.handle('fetchSkillFromRepo', async (_event, downloadUrl: string) => {
+    return await fetchCocoloopSkillDir(downloadUrl)
   })
 
   // 扫描 .claude/skills/ 标准路径，发现全局和项目级技能
@@ -1844,73 +1838,193 @@ function validateSkillMd(content: string): { valid: boolean; warnings: string[] 
   return { valid: name.length > 0 && description.length > 0, warnings }
 }
 
-/** Fetch SKILL.md from a GitHub repository (owner/repo format).
- *  Tries common locations and branches used by the agent-skills ecosystem. */
-async function fetchSkillMdFromRepo(ownerRepo: string): Promise<string> {
-  const [owner, repo] = ownerRepo.split('/')
-  const cleanRepo = (repo || '').replace(/\.git$/, '')
+/** 解析 CocoLoop SSR (Next.js App Router RSC) HTML 中的 initialItems 数组。
+ *  RSC 把 JSON 作为字符串嵌入 HTML，每个 " 被转义为 \"。
+ *  用栈匹配找到完整数组后 unescape 再 JSON.parse。
+ *
+ *  注意：搜索页 SSR HTML 把整个 RSC 流字符串化后嵌入外层流，
+ *  因此 marker 实际形式是 \"initialItems\":[（双层转义）。
+ *  统一查找 initialItems 字面量后回溯到第一个 [，兼容两种形式。 */
+function parseCocoloopSkills(html: string): Array<{
+  id: string
+  name: string
+  titleCn: string
+  author: string
+  creatorSlug: string
+  description: string
+  skillUrl: string
+  downloadUrl: string
+  githubUrl: string
+  emoji: string
+  bssLevel: string
+  downloads: string
+  favorites: string
+  installs: string
+  recommend: string
+  stars: number
+  updatedAt: string
+}> {
+  // 1. 找到 initialItems 字面量位置（兼容转义/非转义两种形式）
+  const markerIdx = html.indexOf('initialItems')
+  if (markerIdx < 0) return []
+  // 2. 从 marker 后回溯找到第一个 [（可能在转义引号之后）
+  let arrayStart = -1
+  for (let i = markerIdx; i < html.length; i++) {
+    if (html[i] === '[') { arrayStart = i; break }
+  }
+  if (arrayStart < 0) return []
 
-  // Common SKILL.md locations in the agent-skills ecosystem
-  const paths = [
-    'SKILL.md',
-    'skills/SKILL.md',
-    '.claude/skills/SKILL.md',
-    '.agents/skills/SKILL.md',
-    '.cursor/skills/SKILL.md',
-    'docs/SKILL.md',
-  ]
-
-  // Branches to try
-  const branches = ['main', 'master', 'HEAD']
-
-  const tryFetch = async (branch: string, filePath: string): Promise<string> => {
-    const encodedPath = filePath.split('/').map(encodeURIComponent).join('/')
-    const rawUrl = `https://raw.githubusercontent.com/${owner}/${cleanRepo}/${encodeURIComponent(branch)}/${encodedPath}`
-    try {
-      const response = await fetchHttpsText(rawUrl, { 'User-Agent': 'ClerkBox/1.5' })
-      return response.statusCode === 200 ? response.body : ''
-    } catch {
-      return ''
+  // 3. 用栈匹配找到对应的 ]，考虑转义引号
+  let depth = 0
+  let inString = false
+  let escape = false
+  let arrayEnd = -1
+  for (let i = arrayStart; i < html.length; i++) {
+    const ch = html[i]
+    if (escape) { escape = false; continue }
+    if (ch === '\\') { escape = true; continue }
+    if (ch === '"') { inString = !inString; continue }
+    if (inString) continue
+    if (ch === '[' || ch === '{') depth++
+    else if (ch === ']' || ch === '}') {
+      depth--
+      if (depth === 0 && ch === ']') { arrayEnd = i; break }
     }
   }
+  if (arrayEnd < 0) return []
 
-  // Try all branch × path combinations
-  for (const branch of branches) {
-    for (const filePath of paths) {
-      const content = await tryFetch(branch, filePath)
-      if (!content) continue
-      const { valid, warnings } = validateSkillMd(content)
-      if (valid) {
-        return JSON.stringify({ success: true, content, warnings })
-      }
-      // If we found a file but it's invalid, still keep it as a candidate with warnings
-      if (content.trim().length > 10) {
-        return JSON.stringify({ success: true, content, warnings })
-      }
-    }
+  // 3. 提取数组字符串，unescape 后 JSON.parse
+  //    RSC 字符串转义只转义两种字符：" → \"、\ → \\。
+  //    反向操作只需还原这两种，\n/\r/\t 是 JSON 层的转义，由 JSON.parse 处理。
+  const rawArray = html.slice(arrayStart, arrayEnd + 1)
+  let unescaped = rawArray
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, '\\')
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(unescaped)
+  } catch {
+    // 部分字段含未预期转义时回退：逐对象提取
+    return parseCocoloopSkillsFallback(html)
   }
+  if (!Array.isArray(parsed)) return []
 
-  return JSON.stringify({ error: 'SKILL.md not found in repository' })
+  const asString = (v: unknown) => (typeof v === 'string' ? v : '')
+  const result: Array<ReturnType<typeof parseCocoloopSkills> extends Array<infer T> ? T : never> = []
+  for (const item of parsed) {
+    if (!isRecord(item)) continue
+    const id = asString(item.id)
+    const downloadUrl = asString(item.downloadUrl)
+    if (!id || !downloadUrl) continue
+    // 解析 downloads 文本为数值（如 "419.8k" → 419800）
+    const parseCount = (text: string): number => {
+      const m = text.match(/([\d.]+)\s*([km]?)/i)
+      if (!m) return 0
+      const n = parseFloat(m[1]) || 0
+      const unit = m[2].toLowerCase()
+      return Math.round(n * (unit === 'k' ? 1000 : unit === 'm' ? 1_000_000 : 1))
+    }
+    result.push({
+      id,
+      name: asString(item.title) || asString(item.slug) || `skill-${id}`,
+      titleCn: asString(item.titleCn),
+      author: asString(item.creator) || 'unknown',
+      creatorSlug: asString(item.creatorSlug),
+      description: asString(item.description),
+      skillUrl: `https://hub.cocoloop.cn/skills/${id}`,
+      downloadUrl,
+      githubUrl: downloadUrl,
+      emoji: asString(item.emoji),
+      bssLevel: asString(item.bssLevel),
+      downloads: asString(item.downloads),
+      favorites: asString(item.favorites),
+      installs: asString(item.installs),
+      recommend: asString(item.recommend),
+      stars: parseCount(asString(item.downloads)),
+      updatedAt: '',
+    })
+  }
+  return result
 }
 
-/** 整目录拉取技能：解析 GitHub URL，用 Trees API 列出文件后逐个抓取，返回完整文件列表。
- *  失败时回退到 fetchSkillMdFromRepo 拉单个 SKILL.md，保证健壮性。 */
-async function fetchSkillDirFromRepo(githubUrl: string): Promise<string> {
-  const repository = parseGitHubRepositoryUrl(githubUrl)
-  if (!repository) {
-    return JSON.stringify({ error: 'Invalid GitHub URL' })
+/** Fallback：当整段 JSON.parse 失败时，用正则逐字段提取 skill 对象。 */
+function parseCocoloopSkillsFallback(html: string): Array<ReturnType<typeof parseCocoloopSkills> extends Array<infer T> ? T : never> {
+  const fieldRegex = (name: string) => new RegExp(`\\"${name}\\":\\"((?:[^"\\\\]|\\\\.)*)\\"`, 'g')
+  const ids = [...html.matchAll(fieldRegex('id'))].map(m => m[1])
+  const downloadUrls = [...html.matchAll(fieldRegex('downloadUrl'))].map(m => m[1])
+  const result: Array<ReturnType<typeof parseCocoloopSkills> extends Array<infer T> ? T : never> = []
+  const maxLen = Math.min(ids.length, downloadUrls.length)
+  for (let i = 0; i < maxLen; i++) {
+    const id = ids[i]
+    const downloadUrl = downloadUrls[i]
+    if (!/^\d+$/.test(id) || !downloadUrl.startsWith('https://')) continue
+    result.push({
+      id,
+      name: `skill-${id}`,
+      titleCn: '',
+      author: 'unknown',
+      creatorSlug: '',
+      description: '',
+      skillUrl: `https://hub.cocoloop.cn/skills/${id}`,
+      downloadUrl,
+      githubUrl: downloadUrl,
+      emoji: '',
+      bssLevel: '',
+      downloads: '',
+      favorites: '',
+      installs: '',
+      recommend: '',
+      stars: 0,
+      updatedAt: '',
+    })
   }
-  const { owner, repo } = repository
-  const branch = repository.branch || 'main'
-  // subPath：技能在仓库中的根路径（默认根目录）
-  let subPath = repository.subPath
-  // blob 单文件链接：取该文件所在目录作为 subPath，便于拉取同目录资源
-  if (repository.kind === 'blob' && subPath) {
-    const idx = subPath.lastIndexOf('/')
-    subPath = idx >= 0 ? subPath.slice(0, idx) : ''
-  }
+  return result
+}
 
-  // 跳过常见二进制扩展名（与 parseSkillFile 保持一致）
+/** 下载二进制 zip 到临时文件，返回路径。 */
+function fetchHttpsBuffer(url: string, headers: Record<string, string>, maxBytes: number): Promise<{ statusCode: number; filePath: string; size: number }> {
+  return new Promise((resolve, reject) => {
+    const tempPath = path.join(os.tmpdir(), `clerkbox-skill-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.zip`)
+    const request = https.get(url, { headers }, (response) => {
+      const statusCode = response.statusCode ?? 0
+      if (statusCode !== 200) {
+        response.resume()
+        resolve({ statusCode, filePath: '', size: 0 })
+        return
+      }
+      const writeStream = fs.createWriteStream(tempPath)
+      let receivedBytes = 0
+      response.on('data', (chunk: Buffer) => {
+        receivedBytes += chunk.length
+        if (receivedBytes > maxBytes) {
+          response.destroy(new Error(`Response exceeds ${maxBytes} byte limit`))
+          writeStream.destroy()
+          try { fs.unlinkSync(tempPath) } catch { /* ignore */ }
+          return
+        }
+        writeStream.write(chunk)
+      })
+      response.on('end', () => {
+        writeStream.end(() => resolve({ statusCode, filePath: tempPath, size: receivedBytes }))
+      })
+      response.on('error', (err) => {
+        writeStream.destroy()
+        try { fs.unlinkSync(tempPath) } catch { /* ignore */ }
+        reject(err)
+      })
+    })
+    request.setTimeout(SKILL_REQUEST_TIMEOUT_MS * 4, () => request.destroy(new Error('Request timed out')))
+    request.on('error', reject)
+  })
+}
+
+/** 解压 zip 到临时目录，复用 parseSkillFile 的解压逻辑。
+ *  返回 { files, skillMdContent, warnings }。 */
+async function extractSkillZip(zipPath: string): Promise<{
+  files: Array<{ path: string; content: string }>
+  skillMdContent: string
+  warnings: string[]
+}> {
   const binaryExt = new Set([
     '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico', '.tif', '.tiff',
     '.zip', '.gz', '.tar', '.rar', '.7z',
@@ -1918,106 +2032,133 @@ async function fetchSkillDirFromRepo(githubUrl: string): Promise<string> {
     '.pdf', '.exe', '.dll', '.so', '.dylib', '.class', '.jar',
     '.ttf', '.otf', '.woff', '.woff2', '.eot',
   ])
-
-  // 用 GitHub Trees API 列出文件
-  const treesApiUrl = `https://api.github.com/repos/${owner}/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`
-  let treeData = ''
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'clerkbox-cocoloop-'))
   try {
-    const response = await fetchHttpsText(
-      treesApiUrl,
-      { 'User-Agent': 'ClerkBox/1.5', Accept: 'application/vnd.github+json' },
-      MAX_SKILL_TREE_BYTES
+    assertSafeSkillArchive(zipPath)
+    const runExtractor = (command: string, args: string[]) => new Promise<void>((resolve, reject) => {
+      const child = spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })
+      let stderr = ''
+      child.stderr?.on('data', (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-8_192) })
+      child.on('error', reject)
+      child.on('close', (code) => {
+        if (code === 0) resolve()
+        else reject(new Error(stderr || `Archive extraction failed with exit code ${code ?? 'unknown'}`))
+      })
+    })
+    if (process.platform === 'win32') {
+      await runExtractor('powershell.exe', [
+        '-NoProfile', '-NonInteractive', '-Command',
+        'param($source, $destination) Expand-Archive -LiteralPath $source -DestinationPath $destination -Force',
+        zipPath, tempDir,
+      ])
+    } else {
+      await runExtractor('unzip', ['-o', zipPath, '-d', tempDir])
+    }
+
+    const skillMdPath = findSkillMd(tempDir)
+    if (!skillMdPath) {
+      const entries = listEntries(tempDir)
+      throw new Error(`ZIP 中未找到 SKILL.md 文件，解压后包含：${entries.slice(0, 10).join(', ')}${entries.length > 10 ? ' ...' : ''}`)
+    }
+    const skillMdStat = fs.statSync(skillMdPath)
+    if (skillMdStat.size > MAX_SKILL_FILE_BYTES) throw new Error('SKILL.md exceeds the allowed size')
+    const skillMdContent = fs.readFileSync(skillMdPath, 'utf-8')
+
+    // 遍历所有文件
+    const collected: Array<{ path: string; content: string }> = []
+    let totalBytes = 0
+    const walk = (dir: string, base: string = '') => {
+      if (collected.length >= MAX_SKILL_FILES || totalBytes >= MAX_SKILL_DIRECTORY_BYTES) return
+      let entries: fs.Dirent[]
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+      for (const e of entries) {
+        if (collected.length >= MAX_SKILL_FILES || totalBytes >= MAX_SKILL_DIRECTORY_BYTES) return
+        const rel = base ? `${base}/${e.name}` : e.name
+        if (e.isDirectory()) {
+          walk(path.join(dir, e.name), rel)
+        } else if (e.isFile()) {
+          const lower = path.extname(e.name).toLowerCase()
+          if (binaryExt.has(lower)) continue
+          const absPath = path.join(dir, e.name)
+          let stat: fs.Stats
+          try { stat = fs.statSync(absPath) } catch { continue }
+          if (stat.size > MAX_SKILL_FILE_BYTES || totalBytes + stat.size > MAX_SKILL_DIRECTORY_BYTES) continue
+          let content: string
+          try { content = fs.readFileSync(absPath, 'utf-8') } catch { continue }
+          if (content.indexOf('\u0000') !== -1) continue
+          totalBytes += stat.size
+          collected.push({ path: rel, content })
+        }
+      }
+    }
+    walk(tempDir)
+
+    // 若 SKILL.md 在子目录，提升到根级一份
+    if (!collected.find((f) => f.path === 'SKILL.md' || /^SKILL\.md$/i.test(f.path))) {
+      const skillMdRel = path.relative(tempDir, skillMdPath).replace(/\\/g, '/')
+      const item = collected.find((f) => f.path === skillMdRel)
+      if (item) collected.unshift({ path: 'SKILL.md', content: item.content })
+    }
+
+    const files = collected.length > 0 ? collected : [{ path: 'SKILL.md', content: skillMdContent }]
+    const { valid, warnings } = validateSkillMd(skillMdContent)
+    warnings.push('该 skill 来自 CocoLoop Hub（hub.cocoloop.cn），安装前请人工审阅 SKILL.md 内容后再激活')
+    if (!valid) warnings.unshift('SKILL.md 校验未通过：name/description 必需')
+    return { files, skillMdContent, warnings }
+  } finally {
+    try { fs.rmSync(tempDir, { recursive: true, force: true }) } catch { /* ignore */ }
+  }
+}
+
+/** 下载 CocoLoop skill zip 解压后只返回 SKILL.md 内容（兼容旧 fetchSkillMd 接口）。 */
+async function fetchCocoloopSkillMd(downloadUrl: string): Promise<string> {
+  if (!/^https?:\/\/dl\.cocoloop\.cn\//i.test(downloadUrl)) {
+    return JSON.stringify({ error: 'Invalid CocoLoop download URL' })
+  }
+  try {
+    const { statusCode, filePath } = await fetchHttpsBuffer(
+      downloadUrl,
+      { 'User-Agent': 'Mozilla/5.0 ClerkBox/1.7' },
+      MAX_SKILL_ARCHIVE_BYTES
     )
-    treeData = response.statusCode === 200 ? response.body : ''
-  } catch {
-    treeData = ''
-  }
-
-  // Trees API 失败：回退到旧逻辑拉单个 SKILL.md
-  if (!treeData) {
-    const fallback = await fetchSkillMdFromRepo(`${owner}/${repo}`)
+    if (statusCode !== 200 || !filePath) {
+      return JSON.stringify({ error: `Download failed: HTTP ${statusCode}` })
+    }
     try {
-      const parsed = JSON.parse(fallback)
-      if (parsed.success && parsed.content) {
-        return JSON.stringify({
-          success: true,
-          files: [{ path: 'SKILL.md', content: parsed.content }],
-          warnings: Array.isArray(parsed.warnings) ? parsed.warnings : [],
-        })
-      }
-    } catch { /* fall through to error */ }
-    return JSON.stringify({ error: 'SKILL.md not found' })
+      const { skillMdContent, warnings } = await extractSkillZip(filePath)
+      return JSON.stringify({ success: true, content: skillMdContent, warnings })
+    } finally {
+      try { fs.unlinkSync(filePath) } catch { /* ignore */ }
+    }
+  } catch (err) {
+    return JSON.stringify({ error: err instanceof Error ? err.message : String(err) })
   }
+}
 
-  // Parse the tree response defensively because it is external data.
-  let treeJson: unknown
+/** 下载 CocoLoop skill zip 并解压，返回完整文件列表（兼容旧 fetchSkillFromRepo 接口）。 */
+async function fetchCocoloopSkillDir(downloadUrl: string): Promise<string> {
+  if (!/^https?:\/\/dl\.cocoloop\.cn\//i.test(downloadUrl)) {
+    return JSON.stringify({ error: 'Invalid CocoLoop download URL' })
+  }
   try {
-    treeJson = JSON.parse(treeData)
-  } catch {
-    return JSON.stringify({ error: 'Failed to parse Trees API response' })
-  }
-  const tree = isRecord(treeJson) && Array.isArray(treeJson.tree) ? treeJson.tree : []
-
-  // Keep the manifest even if a repository has many auxiliary files.
-  const prefix = subPath ? subPath + '/' : ''
-  const supplementaryCandidates: Array<{ path: string }> = []
-  let skillCandidate: { path: string } | null = null
-  for (const item of tree) {
-    if (!isRecord(item) || item.type !== 'blob' || typeof item.path !== 'string') continue
-    let p = item.path
-    if (prefix) {
-      if (p.startsWith(prefix)) {
-        p = p.slice(prefix.length)
-      } else {
-        continue
-      }
+    const { statusCode, filePath } = await fetchHttpsBuffer(
+      downloadUrl,
+      { 'User-Agent': 'Mozilla/5.0 ClerkBox/1.7' },
+      MAX_SKILL_ARCHIVE_BYTES
+    )
+    if (statusCode !== 200 || !filePath) {
+      return JSON.stringify({ error: `Download failed: HTTP ${statusCode}` })
     }
-    if (!p) continue
-    if (p.split('/').some((segment) => !segment || segment === '.' || segment === '..' || /[\\\0]/.test(segment))) {
-      continue
-    }
-    const ext = path.extname(p).toLowerCase()
-    if (binaryExt.has(ext)) continue
-    if (typeof item.size === 'number' && (!Number.isFinite(item.size) || item.size > MAX_SKILL_FILE_BYTES)) continue
-    if (p === 'SKILL.md' || p.endsWith('/SKILL.md')) {
-      skillCandidate ??= { path: p }
-    } else if (supplementaryCandidates.length < 49) {
-      supplementaryCandidates.push({ path: p })
-    }
-  }
-  const candidates = skillCandidate ? [skillCandidate, ...supplementaryCandidates] : supplementaryCandidates
-
-  if (!skillCandidate) {
-    return JSON.stringify({ error: 'SKILL.md not found' })
-  }
-
-  // Fetch each text file with the same per-file size bound used for local imports.
-  const warnings: string[] = []
-  const files: Array<{ path: string; content: string }> = []
-  for (const cand of candidates) {
-    const fullPath = prefix ? `${prefix}${cand.path}` : cand.path
-    const encodedPath = fullPath.split('/').map(encodeURIComponent).join('/')
-    const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${encodeURIComponent(branch)}/${encodedPath}`
     try {
-      const response = await fetchHttpsText(rawUrl, { 'User-Agent': 'ClerkBox/1.5' })
-      if (response.statusCode !== 200 || !response.body) {
-        warnings.push(`拉取失败: ${cand.path}`)
-        continue
-      }
-      files.push({ path: cand.path, content: response.body })
-    } catch {
-      warnings.push(`拉取失败: ${cand.path}`)
+      const { files, skillMdContent, warnings } = await extractSkillZip(filePath)
+      if (!skillMdContent) return JSON.stringify({ error: 'SKILL.md not found in archive' })
+      return JSON.stringify({ success: true, files, warnings })
+    } finally {
+      try { fs.unlinkSync(filePath) } catch { /* ignore */ }
     }
+  } catch (err) {
+    return JSON.stringify({ error: err instanceof Error ? err.message : String(err) })
   }
-
-  // 确认 SKILL.md 内容已成功获取
-  const skillMdFile = files.find((f) => f.path === 'SKILL.md' || f.path.endsWith('/SKILL.md'))
-  if (!skillMdFile) {
-    return JSON.stringify({ error: 'SKILL.md not found' })
-  }
-
-  warnings.push('该 skill 来自外部仓库，安装前请人工审阅 SKILL.md 内容后再激活')
-  return JSON.stringify({ success: true, files, warnings })
 }
 
 /** 扫描技能目录，发现 ClerkBox 自有路径 + Anthropic 兼容路径的技能。
