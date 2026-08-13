@@ -260,6 +260,11 @@ function serveStatic(req: http.IncomingMessage, res: http.ServerResponse, pathna
 
   let filePath = path.join(distDir, decodedPath === '/' ? 'index.html' : decodedPath)
 
+  // 浏览器默认请求 /favicon.ico：复用应用图标（public/icon.png → dist/icon.png）
+  if (decodedPath === '/favicon.ico') {
+    filePath = path.join(distDir, 'icon.png')
+  }
+
   // 防止路径遍历
   const resolved = path.resolve(filePath)
   if (!resolved.startsWith(path.resolve(distDir))) {
