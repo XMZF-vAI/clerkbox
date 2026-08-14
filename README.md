@@ -4,15 +4,13 @@
 
 # ClerkBox
 
-**Single AI Agent Desktop Workbench — 把 AI 工程师装进你的桌面**
+**本地优先的 AI 桌面工作台：多供应商对话、工具调用、子 Agent、技能与 VIBE 沉浸模式**
 
-[![Version](https://img.shields.io/badge/version-1.7.0-7C5CFC?style=flat-square)](https://github.com/XMZF-Studio/ClerkBox)
+[![Version](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.github.com%2Frepos%2FXMZF-vAI%2Fclerkbox%2Freleases%2Flatest&query=%24.tag_name&label=version&style=flat-square&color=7C5CFC)](https://github.com/XMZF-vAI/clerkbox/releases)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-26A2C3?style=flat-square)](LICENSE)
 [![Electron](https://img.shields.io/badge/Electron-42-47848F?style=flat-square)](https://www.electronjs.org/)
 [![React](https://img.shields.io/badge/React-19-61DAFB?style=flat-square)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6-3178C6?style=flat-square)](https://www.typescriptlang.org/)
-[![Vite](https://img.shields.io/badge/Vite-5-646CFF?style=flat-square)](https://vitejs.dev/)
-[![Tailwind](https://img.shields.io/badge/Tailwind-3-38BDF8?style=flat-square)](https://tailwindcss.com/)
 [![Platform](https://img.shields.io/badge/platform-Windows-0078D4?style=flat-square)](#下载与安装)
 
 </div>
@@ -21,7 +19,7 @@
 
 ---
 
-> ClerkBox 是一个面向开发者与知识工作者的本地 AI 桌面工作台。它把**多模型对话**、**可调度的工具调用**、**子 Agent 编排**、**Skills 技能市场**、**长期记忆**与一套沉浸式的 **VIBE 氛围模式**整合进一个原生 Windows 应用，让你在同一个工作面板里完成搜索、写作、编码、自动化与思考。
+> ClerkBox 是一个本地优先的 AI 桌面工作台。它把多供应商对话、ReAct 工具循环、子 Agent 编排、Skills 技能、长期记忆与 VIBE 沉浸模式整合进一个 Windows 原生应用，让你在同一个面板里完成搜索、写作、编码与自动化。
 
 ---
 
@@ -52,34 +50,32 @@
 
 ## 亮点速览
 
-| 能力 | 描述 |
+| 能力 | 说明 |
 | --- | --- |
-| **多模型即插即用** | 内置 DeepSeek、OpenAI GPT-4o、Claude 3.5 Sonnet、通义千问 Max、智谱 GLM-4 等模型预设，支持自定义任意 OpenAI 兼容端点 |
-| **ReAct 工具循环** | Agent 自主推理 → 工具调用 → 观察结果 → 继续推理，最多 999 轮迭代，可在任意时点中止 |
-| **子 Agent 编排** | 内置"侦察兵"（只读）与"通用助手"（全工具），支持自定义子 Agent，独立上下文隔离执行 |
-| **Skills 技能市场** | 一键安装来自社区的可复用提示词模板，自动注入 system prompt |
-| **长期记忆系统** | 自动维护 user / feedback / project / reference 四类记忆条目，跨会话延续上下文 |
-| **Anthropic 缓存优化** | 自动对 Anthropic 请求启用 Prompt Caching，静态系统提示前缀命中缓存；每条消息显示缓存写入/读取 token 与命中率 |
-| **AGENTS.md 项目指令** | 自动读取工作目录根目录的 `AGENTS.md` 注入系统提示词，遵循跨工具标准（Codex / OpenCode / Qwen 原生支持），可回退 `CLAUDE.md` |
-| **VIBE 沉浸模式** | 全屏背景图 + 液态玻璃 UI + 内置音乐播放器，专注对话本身 |
-| **MD3 动态主题** | 基于 Material Design 3 色彩引擎，浅色 / 深色 / 跟随系统三种模式，支持自定义种子色 |
-| **原生圆角窗口** | 自绘标题栏 + 12px 圆角，最大化时自动恢复直角，细节考究 |
-| **WebUI 远程访问** | 一键启动内置 Web 服务，在任意浏览器中远程操控完整界面，桌面端与网页端数据实时同步，适合服务器部署 |
-| **本地优先** | 所有数据存储在本地 SQLite/JSON，零云端依赖，完全离线可用 |
-| **Apache 2.0 开源** | 自由使用、修改、分发，含专利授权条款，衍生作品可灵活选择许可证 |
+| **多供应商预设** | 内置 22 家供应商（Lunora / OpenAI / Anthropic / Gemini / DeepSeek / 通义千问 / 智谱 GLM / Ollama 等），每个供应商自动从 `/models` 拉取可用模型；支持自定义端点与 OpenAI / Anthropic 双协议 |
+| **ReAct 工具循环** | 推理 → 工具调用 → 观察 → 再推理，最多 999 轮，可任意时刻中止 |
+| **子 Agent 编排** | 内置只读侦察兵与全工具通用助手，支持 frontmatter 自定义 Agent，独立上下文隔离 |
+| **Skills 技能市场** | 一键安装 CocoLoop 社区的提示词模板，自动注入 system prompt |
+| **长期记忆** | user / feedback / project / reference 四类记忆条目，跨会话延续上下文 |
+| **思考控制** | 供应商级思考默认档位（low / medium / high），模型选择器按思考能力自动分组 |
+| **AGENTS.md 项目指令** | 自动读取工作目录根目录的 `AGENTS.md` 注入系统提示词；可回退 `CLAUDE.md` |
+| **VIBE 沉浸模式** | 全屏背景 + 液态玻璃 UI + 悬浮音乐播放器 |
+| **MD3 动态主题** | Material Design 3 色彩引擎，浅色 / 深色 / 跟随系统，可自定义种子色 |
+| **WebUI 远程访问** | 内置 Web 服务，把完整界面暴露给任意浏览器，桌面端与网页端数据实时同步 |
+| **本地优先** | 会话、记忆、技能、配置全部存在本地，零云端依赖 |
 
 ---
 
 ## 核心能力
 
-### 1. 多模型对话
+### 1. 多供应商对话
 
-ClerkBox 不绑定任何单一模型供应商。在 **设置 → 模型** 中：
+ClerkBox 在 `src/lib/provider-catalog.ts` 内置 **22 家供应商预设**，按 6 个分组排序：官方 / 国际 / 国内 / 聚合 / 本地 / 自定义。
 
-- 从内置预设选择模型（DeepSeek、OpenAI、Anthropic、阿里通义、智谱 GLM）
-- 添加任意 OpenAI 兼容的自定义端点（baseUrl + apiKey + model）
-- 一键切换当前会话使用的模型
-- 主 Agent 与子 Agent 可使用不同模型
+- 添加提供商时，预设仅作为 baseUrl 与协议（OpenAI / Anthropic）的填表默认值
+- 模型 ID 通过供应商的 `/models` 接口在线拉取，**目录永远不会过期**
+- 同一会话内可随时切换模型，主 Agent 与子 Agent 可使用不同模型
+- 思考模型自动识别（按模型 ID 关键词匹配），未命中的模型可在高级设置手动开启
 
 ### 2. ReAct 工具循环
 
@@ -98,7 +94,7 @@ LLM 推理（thinking）
 ```
 
 - 流式输出，思考过程实时显示
-- 任意时刻可点 **停止** 按钮中止
+- 任意时刻可点 **停止** 按钮中止（含子进程跟踪与强制终止）
 - 危险命令（`rm -rf`、`format`、`Stop-Computer` 等）自动拦截并要求确认
 - 文件写入前自动创建 `.clerkbox-bak` 备份
 
@@ -118,7 +114,7 @@ LLM 推理（thinking）
 
 Skills 是可复用的提示词模板（`SKILL.md` + frontmatter），存放在 `.clerkbox/skills/` 目录。
 
-- **技能市场**：内置推荐技能，一键安装
+- **技能市场**：数据源 [CocoLoop Hub](https://hub.cocoloop.cn)，一键安装
 - **自定义**：在 `.clerkbox/skills/<slug>/SKILL.md` 编写自己的技能
 - **自动注入**：激活后的技能会在会话开始时注入 system prompt
 - **热切换**：会话中可随时启用 / 禁用技能
@@ -136,58 +132,27 @@ Skills 是可复用的提示词模板（`SKILL.md` + frontmatter），存放在 
 
 Agent 通过 `save_memory` 工具主动写入，通过 frontmatter 索引快速检索。
 
-### 7. AGENTS.md 项目指令
+### 6. AGENTS.md 项目指令
 
 ClerkBox 遵循跨工具标准，在每个会话开始时自动读取工作目录根目录的 `AGENTS.md` 并注入到系统提示词，让 AI 立即了解项目技术栈、构建命令、编码规范等。
 
 - **跨工具标准**：`AGENTS.md` 是 [agentskills.io](https://agentskills.io) 与 [agents.md](https://agents.md) 倡导的通用规范，OpenAI Codex、OpenCode、Qwen Coder 等工具原生支持
 - **CLAUDE.md 兼容**：在 **设置 → 通用** 开启「兼容 CLAUDE.md」后，若工作目录没有 `AGENTS.md` 会回退读取 `CLAUDE.md`
 - **完全可选**：不需要时可关闭注入功能，Agent 行为不受影响
-- **示例 `AGENTS.md`**：
 
-```markdown
-# Project: ClerkBox
+### 7. VIBE 沉浸模式
 
-## Tech Stack
-- Electron 42 + React 19 + TypeScript 6
-- Vite 5 / Tailwind CSS 3
-- Zustand 5 (state) + Zod (validation)
-
-## Build & Test
-- `npm run dev` — Vite + Electron dev mode
-- `npm run build` — Production build (NSIS installer)
-
-## Conventions
-- 主进程 IPC handler 入口必须校验路径合法性
-- 优先 React.memo + useMemo 优化流式渲染
-- 中文界面文案放 src/i18n/locales/zh-CN.ts
-```
-
-### 8. VIBE 沉浸模式
-
-一键进入专注模式：
-
-- 全屏背景图（默认 Pexels，可自定义网络图或本地图片）
-- 液态玻璃风格消息气泡（`liquid-glass` 系列 class）
-- 右上角悬浮音乐播放器（支持单曲 / 音乐文件夹）
-- 左下角定制菜单（背景 / 音乐 / 文件夹）
-- 配置持久化，退出后普通界面状态保持
+一键进入专注模式，详见 [VIBE 沉浸模式](#vibe-沉浸模式) 章节。
 
 ---
 
 ## 下载与安装
 
-### 方式一：直接下载安装包（推荐）
+前往 [Releases](https://github.com/XMZF-vAI/clerkbox/releases) 下载最新的 `ClerkBox Setup x.x.x.exe`，双击安装即可。
 
-前往 [Releases](https://github.com/XMZF-Studio/ClerkBox/releases) 下载最新的 `ClerkBox-Setup-x.x.x.exe`，双击安装即可。
-
-- 安装包大小：约 90 MB
+- 安装包大小：约 120 MB
 - 支持 Windows 10 / 11 (x64)
 - NSIS 安装器，可选安装路径、创建桌面快捷方式
-
-### 方式二：便携版
-
-下载 `ClerkBox-portable-x.x.x.zip`，解压后直接运行 `ClerkBox.exe`，无需安装。
 
 ---
 
@@ -203,8 +168,8 @@ ClerkBox 遵循跨工具标准，在每个会话开始时自动读取工作目�
 
 ```bash
 # 1. 克隆仓库
-git clone https://github.com/XMZF-Studio/ClerkBox.git
-cd ClerkBox
+git clone https://github.com/XMZF-vAI/clerkbox.git
+cd clerkbox
 
 # 2. 安装依赖
 npm install
@@ -212,23 +177,24 @@ npm install
 # 3. 启动开发模式（Vite + Electron 同时启动）
 npm run dev
 
-# 4. 构建生产版本（编译 Electron + Vite 打包 + electron-builder 生成 NSIS 安装包）
+# 4. 构建生产版本（编译 Electron 主进程 + Vite 打包 + electron-builder 生成 NSIS 安装包）
 npm run build
 ```
 
-构建产物位于 `release-out/` 目录下，包含：
+构建产物位于 `release-out/` 目录下：
 
 - `ClerkBox Setup x.x.x.exe` — NSIS 安装包
+- `ClerkBox Setup x.x.x.exe.blockmap` — 增量更新块图
+- `latest.yml` — electron-updater 元数据
 - `win-unpacked/` — 解压版目录
 
 ### npm scripts
 
 | 命令 | 作用 |
 | --- | --- |
-| `npm run dev` | 启动开发服务器（端口 5175）与 Electron |
-| `npm run dev:alt` | 同上，但使用 5176 端口（5175 被占用时使用） |
+| `npm run dev` | 启动开发服务器（5175 端口）与 Electron |
+| `npm run dev:alt` | 同上，使用 5176 端口（5175 被占用时） |
 | `npm run build:electron` | 仅编译 Electron 主进程 TypeScript |
-| `npm run electron` | 编译并启动 Electron |
 | `npm run build` | 完整生产构建（生成安装包） |
 | `npm run preview` | Vite 预览构建后的前端 |
 
@@ -237,10 +203,10 @@ npm run build
 ## 快速开始
 
 1. **首次启动**：完成欢迎页引导，选择主题与颜色方案
-2. **配置模型**：进入 **设置 → API 配置 → 添加提供商**（内置 DeepSeek / OpenAI / Anthropic / 通义千问 / 智谱 GLM 等预设），填入你的 API Key
+2. **添加提供商**：进入 **设置 → API 配置 → 添加提供商**，从 22 家预设中选择并填入 API Key；模型 ID 会自动从供应商 `/models` 接口拉取
 3. **选择工作目录**：点击侧边栏底部按钮，选择一个项目文件夹作为 Agent 的工作目录
-4. **（可选）添加 AGENTS.md**：在工作目录根目录放置 `AGENTS.md` 描述项目技术栈与编码规范，ClerkBox 会自动注入到系统提示词
-5. **开始对话**：在输入框输入你的需求，例如：
+4. **（可选）添加 AGENTS.md**：在工作目录根目录放置 `AGENTS.md` 描述项目技术栈与编码规范
+5. **开始对话**：在输入框输入需求，例如：
    - "帮我重构 src/utils.ts 里的 parseDate 函数"
    - "分析这个项目的依赖结构"
    - "搜索所有 TODO 注释并列出来"
@@ -253,17 +219,6 @@ npm run build
 
 所有配置通过 **设置面板** 管理，持久化在本地。
 
-### 模型配置
-
-```typescript
-interface ModelConfig {
-  label: string         // 显示名称
-  model: string         // 模型 ID
-  baseUrl: string       // OpenAI 兼容端点
-  apiKey: string        // 密钥（加密存储）
-}
-```
-
 ### 应用配置
 
 - **主题**：`light` / `dark` / `system`
@@ -274,6 +229,7 @@ interface ModelConfig {
 - **语言**：中文（默认）/ English，运行时切换无需重启
 - **AGENTS.md 注入**：开启后自动读取工作目录根目录的 `AGENTS.md` 注入系统提示词；可选择兼容 `CLAUDE.md` 回退
 - **Token 用量统计**：累计 API 调用次数、输入/输出 token、缓存写入/命中与命中率（设置 → 通用）
+- **WebUI 远程访问**：见 [WebUI 远程访问](#webui-远程访问) 章节
 
 ### 数据目录结构
 
@@ -289,7 +245,6 @@ interface ModelConfig {
 │       └── SKILL.md
 ├── agents/              # 自定义 Agent
 │   └── <name>.md
-├── plan/                # Plan 模式产物
 └── *.clerkbox-bak       # 文件修改前备份
 ```
 
@@ -331,7 +286,6 @@ Agent 可调用以下工具完成实际任务：
 - **写入白名单**：Plan 模式仅允许写入 `.clerkbox/plan/` 目录
 - **路径校验**：所有文件操作路径必须在当前工作目录内
 - **URL scheme 校验**：`openExternal` 仅允许 `http://` / `https://`
-- **沙箱模式**：`sandbox: true` + `contextIsolation: true` + `nodeIntegration: false`
 
 ---
 
@@ -403,7 +357,6 @@ color: purple
 name: code-reviewer
 description: 代码审查专家
 version: 1.0.0
-author: XMZF
 ---
 
 你是一个资深代码审查专家。审查时请关注：
@@ -420,7 +373,7 @@ author: XMZF
 
 ### 安装技能
 
-- **从技能市场安装**：侧边栏点击 "Skills" → 浏览推荐 → 一键安装
+- **从技能市场安装**：侧边栏点击 "Skills" → 浏览推荐 → 一键安装（数据源 [CocoLoop Hub](https://hub.cocoloop.cn)）
 - **手动安装**：将技能目录放入 `.clerkbox/skills/<slug>/`
 - **从 URL 安装**：技能市场支持输入 GitHub raw URL 拉取远程 SKILL.md
 
@@ -458,7 +411,6 @@ mtime: 2026-07-20
 - 状态：Zustand
 - 样式：Tailwind CSS
 - 构建：Vite
-- 测试：Vitest
 ```
 
 Agent 通过 `save_memory` 工具自动写入，会话开始时扫描 frontmatter 索引快速加载相关条目。
@@ -497,7 +449,7 @@ ClerkBox 内置 Web 服务，可以把完整界面暴露给浏览器，实现远
 
 - **全屏背景**：默认全屏背景图，支持自定义网络图或本地图片
 - **液态玻璃 UI**：消息气泡、输入框、控件均采用 `liquid-glass` 毛玻璃效果
-- **音乐播放器**：右上角悬浮控制器，支持单曲 / 文件夹播放，白色进度条
+- **音乐播放器**：右上角悬浮控制器，支持单曲 / 文件夹播放
 - **定制菜单**：左下角玻璃菜单，配置背景与音乐
 - **持久化**：所有 VIBE 配置持久化，启动时自动恢复
 
@@ -506,10 +458,6 @@ ClerkBox 内置 Web 服务，可以把完整界面暴露给浏览器，实现远
 - 点击标题栏 **VIBE** 按钮进入
 - 点击右下角 **退出** 按钮退出
 - 普通界面状态在退出后完整保留
-
-### 默认音乐
-
-内置默认背景音乐 `https://download.xmzf.space/d/well.mp3`，背景图 `https://download.xmzf.space/d/all.jpg`，可在定制菜单中替换。
 
 ---
 
@@ -520,16 +468,12 @@ ClerkBox 采用 Material Design 3 色彩引擎，支持动态主题生成。
 ### 三种模式
 
 - **浅色**：明亮配色，适合白天
-- **深色**：默认模式，护眼
+- **深色**：默认模式
 - **跟随系统**：根据系统主题自动切换
 
 ### 颜色方案
 
-内置 MD3 色板预设：
-
-- Violet（默认紫色调）
-- Blue / Green / Orange / Pink / Teal / Indigo
-- **自定义种子色**：通过 `@material/material-color-utilities` 实时生成完整色板
+内置 MD3 色板预设：Violet（默认）/ Blue / Green / Orange / Pink / Teal / Indigo；支持通过 `@material/material-color-utilities` 实时生成自定义种子色色板。
 
 ### 视觉细节
 
@@ -552,15 +496,6 @@ ClerkBox/
 ├── src/                         # 渲染进程（React 应用）
 │   ├── components/
 │   │   ├── chat/                # 聊天相关组件
-│   │   │   ├── ChatPage.tsx
-│   │   │   ├── ChatInput.tsx
-│   │   │   ├── MessageList.tsx
-│   │   │   ├── MessageItem.tsx
-│   │   │   ├── SkillStore.tsx
-│   │   │   ├── SubAgentCard.tsx
-│   │   │   ├── SubAgentDetailPanel.tsx
-│   │   │   ├── ThemeWaves.tsx
-│   │   │   └── ThinkingShimmer.tsx
 │   │   ├── layout/              # 布局组件（Sidebar / TitleBar / FileTree）
 │   │   ├── onboarding/          # 欢迎页引导
 │   │   ├── settings/            # 设置面板
@@ -570,23 +505,19 @@ ClerkBox/
 │   │   └── use-agent.ts         # 核心 Agent Hook（ReAct 循环、流式、工具调度）
 │   ├── lib/                     # 核心库
 │   │   ├── agent-registry.ts    # Agent 注册表
+│   │   ├── api-adapters.ts      # 多协议适配器
+│   │   ├── api-transport.ts     # 流式传输层
 │   │   ├── tool-registry.ts     # 工具定义
 │   │   ├── permission-engine.ts # 权限引擎（危险命令检测）
+│   │   ├── provider-catalog.ts  # 供应商预设目录
 │   │   ├── theme-engine.ts      # MD3 主题引擎
 │   │   ├── compact.ts           # 长上下文压缩
 │   │   ├── token-estimate.ts    # Token 估算
 │   │   ├── token-tracker.ts     # Token 用量追踪
-│   │   ├── model-presets.ts     # 模型预设
 │   │   ├── memory.ts            # 记忆系统
 │   │   ├── ipc-client.ts        # IPC 客户端（Electron / WebUI 双模式）
-│   │   └── shared-storage.ts    # 跨模式共享持久化存储（主进程 KV 桥接）
+│   │   └── shared-storage.ts    # 跨模式共享持久化存储
 │   ├── stores/                  # Zustand 状态管理
-│   │   ├── chat-store.ts
-│   │   ├── settings-store.ts
-│   │   ├── skills-store.ts
-│   │   ├── agent-runs-store.ts
-│   │   ├── ui-store.ts
-│   │   └── vibe-store.ts
 │   ├── types/                   # TypeScript 类型定义
 │   ├── App.tsx                  # 应用根组件
 │   ├── main.tsx                 # 渲染进程入口
@@ -597,9 +528,10 @@ ClerkBox/
 ├── vite.config.ts
 ├── tailwind.config.ts
 ├── tsconfig.json
-├── tsconfig.electron.json
-└── electron-builder 配置见 package.json
+└── tsconfig.electron.json
 ```
+
+electron-builder 配置见 [package.json](package.json) 的 `build` 字段。
 
 ---
 
@@ -629,7 +561,7 @@ ClerkBox/
 ### 数据存储
 
 - 会话历史：本地 JSON（按会话 ID 分文件）
-- 应用配置：Zustand persist + localStorage
+- 应用配置：Zustand persist + localStorage（跨模式走主进程 KV 桥接）
 - 长期记忆：Markdown 文件 + frontmatter 索引
 - 技能与 Agent：Markdown 文件
 
@@ -637,47 +569,46 @@ ClerkBox/
 
 ## 路线图
 
-### 已完成（当前版本）
+### 已完成
 
-- [x] ReAct 工具循环 + 流式输出
-- [x] 子 Agent 编排（内置 + 自定义）
-- [x] Skills 技能市场
-- [x] 长期记忆系统
-- [x] VIBE 沉浸模式
-- [x] MD3 动态主题
-- [x] 圆角窗口 + 自绘标题栏
-- [x] 欢迎页引导
-- [x] 长上下文自动压缩（compact）
-- [x] Token 用量追踪（含设置页统计面板）
-- [x] Anthropic Prompt Caching（静态 system 前缀缓存 + 命中率展示）
-- [x] 危险命令拦截
-- [x] 文件修改自动备份
-- [x] 国际化（i18n，中 / 英）
-- [x] 通用设置栏（语言 / AGENTS.md / Token 用量统计）
-- [x] AGENTS.md 项目指令注入（跨工具标准，CLAUDE.md 兼容回退）
-- [x] 中断按钮强制停止工具执行（主进程子进程跟踪与终止）
-- [x] 模型选择器按提供商分组可折叠
-- [x] Apache 2.0 协议迁移（含专利授权条款）
-- [x] WebUI 远程访问（浏览器操控 + 双模式数据同步 + 服务器部署自动启动）
+- ReAct 工具循环 + 流式输出
+- 子 Agent 编排（内置 + 自定义）
+- Skills 技能市场（CocoLoop Hub）
+- 长期记忆系统
+- VIBE 沉浸模式
+- MD3 动态主题
+- 圆角窗口 + 自绘标题栏
+- 欢迎页引导
+- 长上下文自动压缩（compact）
+- Token 用量追踪与统计面板
+- Anthropic Prompt Caching（静态 system 前缀缓存 + 命中率展示）
+- 危险命令拦截
+- 文件修改自动备份
+- 国际化（i18n，中 / 英）
+- AGENTS.md 项目指令注入（跨工具标准，CLAUDE.md 兼容回退）
+- 中断按钮强制停止工具执行（主进程子进程跟踪与终止）
+- 多供应商预设与自动 `/models` 拉取
+- 思考控制（供应商默认档位 + 模型选择器按思考能力分组）
+- WebUI 远程访问（浏览器操控 + 双模式数据同步 + 服务器部署自动启动）
 
 ### 计划中 (v1.8+)
 
-- [ ] 会话分支（fork）：从某条消息分叉新会话
-- [ ] 消息编辑重发
-- [ ] 多模型并行对比
-- [ ] 工具调用回放（保存为可复用工作流）
-- [ ] 子 Agent 工作流可视化编排
-- [ ] 流式断点续传
-- [ ] 会话导出（Markdown / JSON / PDF）
-- [ ] 跨会话全文搜索（SQLite FTS5）
-- [ ] Prompt 模板与变量系统
-- [ ] 子 Agent 并行执行
-- [ ] Skills 评分与评论
-- [ ] Skills 本地签名校验
-- [ ] 命令面板（Ctrl+K）
-- [ ] 多窗口多会话
-- [ ] Token 用量按模型/会话维度分布
-- [ ] macOS / Linux 支持
+- 会话分支（fork）：从某条消息分叉新会话
+- 消息编辑重发
+- 多模型并行对比
+- 工具调用回放（保存为可复用工作流）
+- 子 Agent 工作流可视化编排
+- 流式断点续传
+- 会话导出（Markdown / JSON / PDF）
+- 跨会话全文搜索（SQLite FTS5）
+- Prompt 模板与变量系统
+- 子 Agent 并行执行
+- Skills 评分与评论
+- Skills 本地签名校验
+- 命令面板（Ctrl+K）
+- 多窗口多会话
+- Token 用量按模型/会话维度分布
+- macOS / Linux 支持
 
 ---
 
@@ -695,14 +626,7 @@ ClerkBox/
 
 ### 提交规范
 
-遵循 [Conventional Commits](https://www.conventionalcommits.org/)：
-
-- `feat:` 新功能
-- `fix:` Bug 修复
-- `refactor:` 重构
-- `perf:` 性能优化
-- `docs:` 文档
-- `chore:` 杂项
+遵循 [Conventional Commits](https://www.conventionalcommits.org/)：`feat:` / `fix:` / `refactor:` / `perf:` / `docs:` / `chore:` 等。
 
 ### 代码风格
 
@@ -745,15 +669,14 @@ limitations under the License.
 - [Vercel AI SDK](https://sdk.vercel.ai/) — 统一的 LLM 调用层
 - [Material Design 3](https://m3.material.io/) — 设计系统
 - [Tailwind CSS](https://tailwindcss.com/) — 样式工具
-- 所有模型供应商：DeepSeek、OpenAI、Anthropic、阿里通义、智谱 AI
-- 所有开源贡献者与社区反馈者
+- [CocoLoop Hub](https://hub.cocoloop.cn) — Skills 社区数据源
 
 ---
 
 <div align="center">
 
-**[报告 Bug](https://github.com/XMZF-Studio/ClerkBox/issues)** · **[功能建议](https://github.com/XMZF-Studio/ClerkBox/issues)** · **[Pull Request](https://github.com/XMZF-Studio/ClerkBox/pulls)**
+**[报告 Bug](https://github.com/XMZF-vAI/clerkbox/issues)** · **[功能建议](https://github.com/XMZF-vAI/clerkbox/issues)** · **[Pull Request](https://github.com/XMZF-vAI/clerkbox/pulls)**
 
-Made with care by **XMZF Studio** · Released under the Apache License 2.0
+Made by **XMZF Studio** · Apache License 2.0
 
 </div>

@@ -4,15 +4,13 @@
 
 # ClerkBox
 
-**Single AI Agent Desktop Workbench — put an AI engineer on your desktop**
+**A local-first AI desktop workbench: multi-provider chat, tool calling, sub-agents, skills, and VIBE immersive mode.**
 
-[![Version](https://img.shields.io/badge/version-1.7.0-7C5CFC?style=flat-square)](https://github.com/XMZF-Studio/ClerkBox)
+[![Version](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.github.com%2Frepos%2FXMZF-vAI%2Fclerkbox%2Freleases%2Flatest&query=%24.tag_name&label=version&style=flat-square&color=7C5CFC)](https://github.com/XMZF-vAI/clerkbox/releases)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-26A2C3?style=flat-square)](LICENSE)
 [![Electron](https://img.shields.io/badge/Electron-42-47848F?style=flat-square)](https://www.electronjs.org/)
 [![React](https://img.shields.io/badge/React-19-61DAFB?style=flat-square)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6-3178C6?style=flat-square)](https://www.typescriptlang.org/)
-[![Vite](https://img.shields.io/badge/Vite-5-646CFF?style=flat-square)](https://vitejs.dev/)
-[![Tailwind](https://img.shields.io/badge/Tailwind-3-38BDF8?style=flat-square)](https://tailwindcss.com/)
 [![Platform](https://img.shields.io/badge/platform-Windows-0078D4?style=flat-square)](#download-and-install)
 
 </div>
@@ -21,13 +19,7 @@
 
 ---
 
-> Hi there! I'm a 7th-grade student from XMZF Studio, and I built this project myself.
-> I'm still in middle school, so the code may not be perfect, but every line is written with care.
-> I hope you enjoy it — feedback and contributions are always welcome!
-
----
-
-> ClerkBox is a local AI desktop workbench for developers and knowledge workers. It brings **multi-model chat**, **schedulable tool calling**, **sub-agent orchestration**, **a Skills marketplace**, **long-term memory**, and an immersive **VIBE mode** together in a native Windows app, letting you search, write, code, automate, and think in one panel.
+> ClerkBox is a local-first AI desktop workbench. It brings multi-provider chat, a ReAct tool loop, sub-agent orchestration, reusable skills, long-term memory, and VIBE immersive mode together in a native Windows app, so you can search, write, code, and automate from a single panel.
 
 ---
 
@@ -44,6 +36,7 @@
 - [Skills System](#skills-system)
 - [Long-Term Memory](#long-term-memory)
 - [WebUI Remote Access](#webui-remote-access)
+- [AGENTS.md Project Instructions](#agentsmd-project-instructions)
 - [VIBE Immersive Mode](#vibe-immersive-mode)
 - [Theme & Appearance](#theme--appearance)
 - [Project Structure](#project-structure)
@@ -59,30 +52,30 @@
 
 | Capability | Description |
 | --- | --- |
-| **Plug-and-play models** | Built-in presets for DeepSeek, OpenAI GPT-4o, Claude 3.5 Sonnet, Qwen Max, Zhipu GLM-4, plus any custom OpenAI-compatible endpoint |
-| **ReAct tool loop** | Agent reasons → calls tools → observes results → keeps reasoning, up to 999 iterations, abortable at any time |
-| **Sub-agent orchestration** | Built-in "Scout" (read-only) and "General" (all tools) agents, plus custom sub-agents with isolated contexts |
-| **Skills marketplace** | One-click install of reusable prompt templates from the community, auto-injected into the system prompt |
-| **Long-term memory** | Maintains `user` / `feedback` / `project` / `reference` memory entries across sessions |
-| **VIBE immersive mode** | Fullscreen background + liquid-glass UI + built-in music player for focused conversations |
-| **MD3 dynamic theming** | Material Design 3 color engine, light / dark / system modes, customizable seed color |
-| **Native rounded window** | Custom title bar + 12px rounded corners, auto-resets to square when maximized |
-| **WebUI remote access** | One-click built-in web server to control the full UI from any browser, with real-time data sync between desktop and web — ideal for server deployment |
-| **Local-first** | All data stored locally in SQLite/JSON, zero cloud dependency, fully offline |
-| **Apache 2.0 open source** | Free to use, modify, and distribute; includes patent grant, derivative works may choose their own license |
+| **Multi-provider presets** | 22 built-in providers (Lunora / OpenAI / Anthropic / Gemini / DeepSeek / Qwen / Zhipu GLM / Ollama, etc.). Each provider pulls its model list from `/models` automatically. Custom endpoints with OpenAI or Anthropic protocol supported. |
+| **ReAct tool loop** | Reason → call tools → observe → reason again, up to 999 iterations, abortable at any time. |
+| **Sub-agent orchestration** | Built-in read-only Scout and full-tool General assistant, plus custom sub-agents via frontmatter with isolated contexts. |
+| **Skills marketplace** | One-click install of prompt templates from the CocoLoop community, auto-injected into the system prompt. |
+| **Long-term memory** | `user` / `feedback` / `project` / `reference` memory entries persist across sessions. |
+| **Thinking control** | Provider-level default thinking tiers (low / medium / high); model picker groups models by thinking capability. |
+| **AGENTS.md project instructions** | Auto-reads `AGENTS.md` from the working directory and injects it into the system prompt; falls back to `CLAUDE.md`. |
+| **VIBE immersive mode** | Fullscreen background, liquid-glass UI, and a floating music player. |
+| **MD3 dynamic theming** | Material Design 3 color engine with light / dark / system modes and custom seed color. |
+| **WebUI remote access** | Built-in web server exposes the full UI to any browser, with real-time data sync between desktop and web. |
+| **Local-first** | All sessions, memory, skills, and config live on disk — no cloud dependency. |
 
 ---
 
 ## Core Capabilities
 
-### 1. Multi-Model Chat
+### 1. Multi-Provider Chat
 
-ClerkBox is not tied to any single model provider. Under **Settings → Models**:
+`src/lib/provider-catalog.ts` ships **22 provider presets** sorted into 6 groups: official / international / china / aggregator / local / custom.
 
-- Pick a model from built-in presets (DeepSeek, OpenAI, Anthropic, Alibaba Qwen, Zhipu GLM)
-- Add any OpenAI-compatible custom endpoint (baseUrl + apiKey + model)
-- Switch the model used by the current session with one click
-- Main agent and sub-agents can use different models
+- Presets only fill in the baseUrl and protocol (OpenAI or Anthropic) when adding a provider
+- Model IDs are pulled live from each provider's `/models` endpoint, so the catalog never goes stale
+- Switch the current model at any time during a session; the main agent and sub-agents can use different models
+- Thinking-capable models are auto-detected by keyword match; unmatched models can be toggled manually in advanced settings
 
 ### 2. ReAct Tool Loop
 
@@ -101,7 +94,7 @@ Keep reasoning or return the final answer
 ```
 
 - Streaming output with real-time thinking display
-- Hit **Stop** at any time to abort
+- Hit **Stop** at any time to abort, including force-kill of child processes
 - Dangerous commands (`rm -rf`, `format`, `Stop-Computer`, etc.) are auto-blocked and require confirmation
 - A `.clerkbox-bak` backup is created before any file write
 
@@ -121,7 +114,7 @@ Sub-agents only return a **final summary** to the parent agent, so the main cont
 
 Skills are reusable prompt templates (`SKILL.md` + frontmatter) stored in `.clerkbox/skills/`.
 
-- **Marketplace**: built-in recommended skills, one-click install
+- **Marketplace**: one-click install from the [CocoLoop Hub](https://hub.cocoloop.cn)
 - **Custom**: write your own skills in `.clerkbox/skills/<slug>/SKILL.md`
 - **Auto-injection**: active skills are injected into the system prompt at session start
 - **Hot toggle**: enable / disable skills anytime during a session
@@ -137,33 +130,29 @@ Memory entries are organized by type under `.clerkbox/memory/`:
 | `project` | Project-level rules, conventions, decisions |
 | `reference` | Reference materials, links, notes |
 
-The agent writes entries via the `save_memory` tool and retrieves them quickly through a frontmatter index.
+The agent writes entries via the `save_memory` tool and retrieves them through a frontmatter index.
 
-### 6. VIBE Immersive Mode
+### 6. AGENTS.md Project Instructions
 
-Enter a distraction-free focus mode with one click:
+ClerkBox follows the cross-tool standard: at the start of every session, it auto-reads `AGENTS.md` from the working-directory root and injects it into the system prompt, so the AI immediately knows the project's stack, build commands, and coding conventions.
 
-- Fullscreen background (Pexels by default; custom web or local images supported)
-- Liquid-glass message bubbles (`liquid-glass` classes)
-- Floating music player in the top-right (single track / music folder)
-- Customize menu in the bottom-left (background / music / folder)
-- Config persists; normal UI state is preserved after exiting
+- **Cross-tool standard**: `AGENTS.md` is the common convention promoted by [agentskills.io](https://agentskills.io) and [agents.md](https://agents.md); natively supported by OpenAI Codex, OpenCode, Qwen Coder, etc.
+- **CLAUDE.md fallback**: under **Settings → General**, enable "CLAUDE.md compatibility" to fall back to `CLAUDE.md` when `AGENTS.md` is absent
+- **Fully optional**: turn injection off if you don't need it
+
+### 7. VIBE Immersive Mode
+
+One click to enter a focused conversation environment. See [VIBE Immersive Mode](#vibe-immersive-mode) for details.
 
 ---
 
 ## Download and Install
 
-### Option 1: Installer (recommended)
+Download the latest `ClerkBox Setup x.x.x.exe` from [Releases](https://github.com/XMZF-vAI/clerkbox/releases) and double-click to install.
 
-Download the latest `ClerkBox-Setup-x.x.x.exe` from [Releases](https://github.com/XMZF-Studio/ClerkBox/releases) and double-click to install.
-
-- Installer size: ~90 MB
+- Installer size: ~120 MB
 - Supports Windows 10 / 11 (x64)
 - NSIS installer with optional install path and desktop shortcut
-
-### Option 2: Portable
-
-Download `ClerkBox-portable-x.x.x.zip`, unzip it, and run `ClerkBox.exe` directly — no installation required.
 
 ---
 
@@ -179,8 +168,8 @@ Download `ClerkBox-portable-x.x.x.zip`, unzip it, and run `ClerkBox.exe` directl
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/XMZF-Studio/ClerkBox.git
-cd ClerkBox
+git clone https://github.com/XMZF-vAI/clerkbox.git
+cd clerkbox
 
 # 2. Install dependencies
 npm install
@@ -188,23 +177,24 @@ npm install
 # 3. Start dev mode (Vite + Electron together)
 npm run dev
 
-# 4. Build production (compile Electron + Vite bundle + electron-builder NSIS installer)
+# 4. Build production (compile Electron main + Vite bundle + electron-builder NSIS installer)
 npm run build
 ```
 
-Build artifacts are placed in `release/`:
+Build artifacts land in `release-out/`:
 
-- `ClerkBox-Setup-x.x.x.exe` — NSIS installer
-- `ClerkBox-x.x.x-win.zip` — portable version
+- `ClerkBox Setup x.x.x.exe` — NSIS installer
+- `ClerkBox Setup x.x.x.exe.blockmap` — incremental-update blockmap
+- `latest.yml` — electron-updater metadata
 - `win-unpacked/` — unpacked directory
 
 ### npm scripts
 
 | Command | Purpose |
 | --- | --- |
-| `npm run dev` | Start dev server and Electron |
+| `npm run dev` | Start dev server (port 5175) and Electron |
+| `npm run dev:alt` | Same, using port 5176 (when 5175 is busy) |
 | `npm run build:electron` | Compile Electron main-process TypeScript only |
-| `npm run electron` | Compile and launch Electron |
 | `npm run build` | Full production build (generates installer) |
 | `npm run preview` | Preview the built frontend with Vite |
 
@@ -213,31 +203,21 @@ Build artifacts are placed in `release/`:
 ## Quick Start
 
 1. **First launch**: complete the welcome tour, choose a theme and color scheme
-2. **Configure models**: go to **Settings → Models** and enter your API key
+2. **Add a provider**: go to **Settings → API Config → Add Provider**, pick one of the 22 presets, and enter your API key. Model IDs auto-populate from the provider's `/models` endpoint.
 3. **Pick a working directory**: click the button at the bottom of the sidebar to choose a project folder
-4. **Start chatting**: type your request, for example:
+4. **(Optional) Add AGENTS.md**: drop an `AGENTS.md` at the working-directory root to describe your project stack and conventions
+5. **Start chatting**: type your request, for example:
    - "Refactor the parseDate function in src/utils.ts"
    - "Analyze this project's dependency structure"
    - "Search for all TODO comments and list them"
-5. **Spawn sub-agents**: the agent decides automatically whether a sub-agent is needed for complex subtasks
-6. **Enter VIBE mode**: click the VIBE button in the title bar
+6. **Spawn sub-agents**: the agent decides automatically whether a sub-agent is needed for complex subtasks
+7. **Enter VIBE mode**: click the VIBE button in the title bar
 
 ---
 
 ## Configuration
 
 All configuration is managed through the **Settings panel** and persisted locally.
-
-### Model Configuration
-
-```typescript
-interface ModelConfig {
-  label: string         // display name
-  model: string         // model ID
-  baseUrl: string       // OpenAI-compatible endpoint
-  apiKey: string        // key (stored encrypted)
-}
-```
 
 ### App Configuration
 
@@ -246,6 +226,10 @@ interface ModelConfig {
 - **VIBE mode**: background image, music source
 - **Working directory**: project directory bound to the current session
 - **Data directory**: defaults to `%APPDATA%/ClerkBox`
+- **Language**: Chinese (default) / English, switchable at runtime
+- **AGENTS.md injection**: auto-read `AGENTS.md` from the working-directory root into the system prompt; optional `CLAUDE.md` fallback
+- **Token usage**: total API calls, input/output tokens, cache writes/hits and hit rate (Settings → General)
+- **WebUI remote access**: see [WebUI Remote Access](#webui-remote-access)
 
 ### Data Directory Layout
 
@@ -261,7 +245,6 @@ interface ModelConfig {
 │       └── SKILL.md
 ├── agents/              # custom agents
 │   └── <name>.md
-├── plan/                # Plan mode outputs
 └── *.clerkbox-bak       # backups before file modification
 ```
 
@@ -303,7 +286,6 @@ The agent can call the following tools to get work done:
 - **Write whitelist**: Plan mode only allows writes under `.clerkbox/plan/`
 - **Path validation**: all file operations must stay within the current working directory
 - **URL scheme validation**: `openExternal` only allows `http://` / `https://`
-- **Sandbox**: `sandbox: true` + `contextIsolation: true` + `nodeIntegration: false`
 
 ---
 
@@ -375,7 +357,6 @@ Each skill is a directory containing a `SKILL.md` file:
 name: code-reviewer
 description: Code review expert
 version: 1.0.0
-author: XMZF
 ---
 
 You are a senior code review expert. When reviewing, focus on:
@@ -392,7 +373,7 @@ Output format:
 
 ### Installing Skills
 
-- **From the marketplace**: click "Skills" in the sidebar → browse recommendations → one-click install
+- **From the marketplace**: click "Skills" in the sidebar → browse recommendations → one-click install (data source: [CocoLoop Hub](https://hub.cocoloop.cn))
 - **Manually**: put the skill directory into `.clerkbox/skills/<slug>/`
 - **From a URL**: the marketplace accepts a GitHub raw URL to pull a remote SKILL.md
 
@@ -430,7 +411,6 @@ User preferences:
 - State: Zustand
 - Styling: Tailwind CSS
 - Build: Vite
-- Testing: Vitest
 ```
 
 The agent writes entries via the `save_memory` tool, and scans the frontmatter index at session start to quickly load relevant entries.
@@ -467,9 +447,9 @@ Switch to a distraction-free focus environment with one click.
 
 ### Features
 
-- **Fullscreen background**: high-quality Pexels image by default; custom web or local images supported
+- **Fullscreen background**: default fullscreen image, custom web or local images supported
 - **Liquid-glass UI**: message bubbles, input, and controls use `liquid-glass` frosted-glass effects
-- **Music player**: floating controller in the top-right, single track / folder playback, white progress bar
+- **Music player**: floating controller in the top-right, single track / folder playback
 - **Customize menu**: glass menu in the bottom-left to configure background and music
 - **Persistence**: all VIBE config persists and auto-restores on launch
 
@@ -478,10 +458,6 @@ Switch to a distraction-free focus environment with one click.
 - Click the **VIBE** button in the title bar to enter
 - Click the **Exit** button in the bottom-right to exit
 - Normal UI state is fully preserved after exiting
-
-### Default Music
-
-Built-in default background track `https://xmzf.space/bj.mp3`, replaceable in the customize menu.
 
 ---
 
@@ -492,16 +468,12 @@ ClerkBox uses the Material Design 3 color engine with dynamic theme generation.
 ### Three Modes
 
 - **Light**: bright palette, for daytime
-- **Dark**: default mode, easy on the eyes
+- **Dark**: default mode
 - **System**: follows the system theme automatically
 
 ### Color Schemes
 
-Built-in MD3 palette presets:
-
-- Violet (default)
-- Blue / Green / Orange / Pink / Teal / Indigo
-- **Custom seed color**: generate a full palette in real time via `@material/material-color-utilities`
+Built-in MD3 palette presets: Violet (default), Blue, Green, Orange, Pink, Teal, Indigo. Custom seed colors generate a full palette in real time via `@material/material-color-utilities`.
 
 ### Visual Details
 
@@ -524,15 +496,6 @@ ClerkBox/
 ├── src/                         # renderer process (React app)
 │   ├── components/
 │   │   ├── chat/                # chat-related components
-│   │   │   ├── ChatPage.tsx
-│   │   │   ├── ChatInput.tsx
-│   │   │   ├── MessageList.tsx
-│   │   │   ├── MessageItem.tsx
-│   │   │   ├── SkillStore.tsx
-│   │   │   ├── SubAgentCard.tsx
-│   │   │   ├── SubAgentDetailPanel.tsx
-│   │   │   ├── ThemeWaves.tsx
-│   │   │   └── ThinkingShimmer.tsx
 │   │   ├── layout/              # layout components (Sidebar / TitleBar / FileTree)
 │   │   ├── onboarding/          # welcome tour
 │   │   ├── settings/            # settings panel
@@ -542,23 +505,19 @@ ClerkBox/
 │   │   └── use-agent.ts         # core agent hook (ReAct loop, streaming, tool dispatch)
 │   ├── lib/                     # core libraries
 │   │   ├── agent-registry.ts    # agent registry
+│   │   ├── api-adapters.ts      # multi-protocol adapters
+│   │   ├── api-transport.ts     # streaming transport layer
 │   │   ├── tool-registry.ts     # tool definitions
 │   │   ├── permission-engine.ts # permission engine (dangerous command detection)
+│   │   ├── provider-catalog.ts  # provider preset catalog
 │   │   ├── theme-engine.ts      # MD3 theme engine
 │   │   ├── compact.ts           # long-context compaction
 │   │   ├── token-estimate.ts    # token estimation
 │   │   ├── token-tracker.ts     # token usage tracking
-│   │   ├── model-presets.ts     # model presets
 │   │   ├── memory.ts            # memory system
 │   │   ├── ipc-client.ts        # IPC client (Electron / WebUI dual mode)
-│   │   └── shared-storage.ts    # cross-mode shared persistence (main-process KV bridge)
+│   │   └── shared-storage.ts    # cross-mode shared persistence
 │   ├── stores/                  # Zustand state
-│   │   ├── chat-store.ts
-│   │   ├── settings-store.ts
-│   │   ├── skills-store.ts
-│   │   ├── agent-runs-store.ts
-│   │   ├── ui-store.ts
-│   │   └── vibe-store.ts
 │   ├── types/                   # TypeScript type definitions
 │   ├── App.tsx                  # app root component
 │   ├── main.tsx                 # renderer entry
@@ -569,9 +528,10 @@ ClerkBox/
 ├── vite.config.ts
 ├── tailwind.config.ts
 ├── tsconfig.json
-├── tsconfig.electron.json
-└── electron-builder config in package.json
+└── tsconfig.electron.json
 ```
+
+electron-builder configuration lives in the `build` field of [package.json](package.json).
 
 ---
 
@@ -601,7 +561,7 @@ ClerkBox/
 ### Data Storage
 
 - Session history: local JSON (one file per session ID)
-- App config: Zustand persist + localStorage
+- App config: Zustand persist + localStorage (cross-mode via main-process KV bridge)
 - Long-term memory: Markdown files + frontmatter index
 - Skills & agents: Markdown files
 
@@ -609,42 +569,46 @@ ClerkBox/
 
 ## Roadmap
 
-### Done (current version)
+### Done
 
-- [x] ReAct tool loop + streaming
-- [x] Sub-agent orchestration (built-in + custom)
-- [x] Skills marketplace
-- [x] Long-term memory system
-- [x] VIBE immersive mode
-- [x] MD3 dynamic theming
-- [x] Rounded window + custom title bar
-- [x] Welcome tour
-- [x] Long-context auto-compaction (compact)
-- [x] Token usage tracking
-- [x] Anthropic Prompt Caching (static system-prefix caching + hit-rate display)
-- [x] Dangerous command blocking
-- [x] Automatic file write backup
-- [x] i18n (Chinese / English)
-- [x] WebUI remote access (browser control + dual-mode data sync + auto-start for server deployment)
+- ReAct tool loop + streaming
+- Sub-agent orchestration (built-in + custom)
+- Skills marketplace (CocoLoop Hub)
+- Long-term memory system
+- VIBE immersive mode
+- MD3 dynamic theming
+- Rounded window + custom title bar
+- Welcome tour
+- Long-context auto-compaction (compact)
+- Token usage tracking and stats panel
+- Anthropic Prompt Caching (static system-prefix caching + hit-rate display)
+- Dangerous command blocking
+- Automatic file write backup
+- i18n (Chinese / English)
+- AGENTS.md project instruction injection (cross-tool standard, CLAUDE.md fallback)
+- Hard-stop tool execution (main-process child-process tracking and termination)
+- Multi-provider presets with automatic `/models` fetching
+- Thinking control (provider default tiers + model picker grouped by thinking capability)
+- WebUI remote access (browser control + dual-mode data sync + server auto-start)
 
 ### Planned (v1.8+)
 
-- [ ] Session forking: branch a new session from a message
-- [ ] Message edit & resend
-- [ ] Parallel multi-model comparison
-- [ ] Tool-call replay (save as reusable workflow)
-- [ ] Visual sub-agent workflow orchestration
-- [ ] Streaming resumption
-- [ ] Session export (Markdown / JSON / PDF)
-- [ ] Cross-session full-text search (SQLite FTS5)
-- [ ] Prompt template & variable system
-- [ ] Parallel sub-agent execution
-- [ ] Skills rating & comments
-- [ ] Skills local signature verification
-- [ ] Command palette (Ctrl+K)
-- [ ] Multi-window multi-session
-- [ ] Token usage dashboard
-- [ ] macOS / Linux support
+- Session forking: branch a new session from a message
+- Message edit & resend
+- Parallel multi-model comparison
+- Tool-call replay (save as reusable workflow)
+- Visual sub-agent workflow orchestration
+- Streaming resumption
+- Session export (Markdown / JSON / PDF)
+- Cross-session full-text search (SQLite FTS5)
+- Prompt template & variable system
+- Parallel sub-agent execution
+- Skills rating & comments
+- Skills local signature verification
+- Command palette (Ctrl+K)
+- Multi-window multi-session
+- Token usage breakdown by model / session
+- macOS / Linux support
 
 ---
 
@@ -662,14 +626,7 @@ Issues and Pull Requests are welcome.
 
 ### Commit Convention
 
-Follow [Conventional Commits](https://www.conventionalcommits.org/):
-
-- `feat:` new feature
-- `fix:` bug fix
-- `refactor:` refactor
-- `perf:` performance
-- `docs:` documentation
-- `chore:` misc
+Follow [Conventional Commits](https://www.conventionalcommits.org/): `feat:` / `fix:` / `refactor:` / `perf:` / `docs:` / `chore:` and friends.
 
 ### Code Style
 
@@ -712,14 +669,13 @@ limitations under the License.
 - [Vercel AI SDK](https://sdk.vercel.ai/) — unified LLM layer
 - [Material Design 3](https://m3.material.io/) — design system
 - [Tailwind CSS](https://tailwindcss.com/) — styling utility
-- All model providers: DeepSeek, OpenAI, Anthropic, Alibaba Qwen, Zhipu AI
-- All open-source contributors and community feedback
+- [CocoLoop Hub](https://hub.cocoloop.cn) — Skills community data source
 
 ---
 
 <div align="center">
 
-**[Report a Bug](https://github.com/XMZF-Studio/ClerkBox/issues)** · **[Feature Request](https://github.com/XMZF-Studio/ClerkBox/issues)** · **[Pull Request](https://github.com/XMZF-Studio/ClerkBox/pulls)**
+**[Report a Bug](https://github.com/XMZF-vAI/clerkbox/issues)** · **[Feature Request](https://github.com/XMZF-vAI/clerkbox/issues)** · **[Pull Request](https://github.com/XMZF-vAI/clerkbox/pulls)**
 
 Made by **XMZF Studio** · Apache License 2.0
 
