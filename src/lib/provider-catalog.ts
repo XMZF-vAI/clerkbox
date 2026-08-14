@@ -379,23 +379,37 @@ export function guessApiCompat(baseUrl: string): ApiCompat {
 
 /**
  * 按提供商预设推断一个「新拉取模型」的思考默认值。
- * 命中预设 && 模型 id 含 effortKeywords → 视为思考模型，自动填充档位与风格；
- * 否则返回 undefined（由用户手动在高级设置里开启）。
+ *
+ * 策略：
+ * 1. 命中预设 && 模型 id 含 effortKeywords → 按预设风格（档位/effort 风格时附档位）
+ * 2. 命中预设但未命中关键词 → 用预设的默认 thinkingStyle（通常为 'enable' 开关）
+ * 3. 没有预设（custom/未声明 thinking）→ 一律走开关模式（enable）
+ *
+ * 函数始终返回值，不再返回 undefined —— 用户视角下"导入模型后默认支持思考（开关）"，
+ * 具体档位可到高级设置里再勾选。
  */
 export function inferThinkingDefaults(
   presetId: string | undefined,
   modelId: string
-): { supportsThinking: boolean; thinkingStyle: ThinkingStyle; reasoningEfforts: ReasoningEffort[] } | undefined {
+): { supportsThinking: boolean; thinkingStyle: ThinkingStyle; reasoningEfforts: ReasoningEffort[] } {
+  // 兜底：开关模式
+  const fallback = {
+    supportsThinking: true,
+    thinkingStyle: 'enable' as ThinkingStyle,
+    reasoningEfforts: [] as ReasoningEffort[],
+  }
   const preset = getPreset(presetId)
   const t = preset?.thinking
-  if (!t) return undefined
+  if (!t) return fallback
+
   const lower = modelId.toLowerCase()
   const hit = t.effortKeywords.some((k) => lower.includes(k))
-  if (!hit) return undefined
+  // 档位方案（effort 风格）才附带档位；其他风格（enable/glm/budget/auto）开关即可
+  const efforts = hit && t.thinkingStyle === 'effort' ? [...t.efforts] : []
   return {
     supportsThinking: true,
     thinkingStyle: t.thinkingStyle,
-    reasoningEfforts: [...t.efforts],
+    reasoningEfforts: efforts,
   }
 }
 

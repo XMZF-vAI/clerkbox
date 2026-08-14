@@ -205,12 +205,10 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
     patch({
       models: [...provider.models, {
         id,
-        ...(thinking ? {
-          supportsThinking: true,
-          thinkingStyle: thinking.thinkingStyle,
-          reasoningEfforts: thinking.reasoningEfforts,
-          reasoningEffort: thinking.reasoningEfforts[0],
-        } : {}),
+        supportsThinking: thinking.supportsThinking,
+        thinkingStyle: thinking.thinkingStyle,
+        reasoningEfforts: thinking.reasoningEfforts,
+        reasoningEffort: thinking.reasoningEfforts[0],
       }],
     })
     setManualId('')
@@ -494,7 +492,7 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
                             </div>
                           </div>
                         )}
-                        {(m.supportsThinking ?? false) && (
+                        {(m.supportsThinking ?? false) && (m.thinkingStyle ?? defaultStyleFor(m, provider)) === 'effort' && (m.reasoningEfforts?.length ?? 0) > 0 && (
                           <div>
                             <div className="text-[10px] text-dark-onSurfaceVariant mb-1">{t('settings.api.reasoningLevels')}</div>
                             <div className="flex flex-wrap gap-1">
@@ -771,12 +769,10 @@ function ModelPickerModal({ provider, onClose }: { provider: ModelProvider; onCl
         models.push({
           id,
           ...(f?.label ? { label: f.label } : {}),
-          ...(thinking ? {
-            supportsThinking: true,
-            thinkingStyle: thinking.thinkingStyle,
-            reasoningEfforts: thinking.reasoningEfforts,
-            reasoningEffort: thinking.reasoningEfforts[0],
-          } : {}),
+          supportsThinking: thinking.supportsThinking,
+          thinkingStyle: thinking.thinkingStyle,
+          reasoningEfforts: thinking.reasoningEfforts,
+          reasoningEffort: thinking.reasoningEfforts[0],
         })
       }
     }

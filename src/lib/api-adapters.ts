@@ -377,6 +377,10 @@ export interface ParserState {
   outputTokens: number
   cacheCreationInputTokens: number
   cacheReadInputTokens: number
+  /** openai 兼容：是否已经在 <think> 标签内（标签可能被切碎分片下发） */
+  insideThinkTag: boolean
+  /** openai 兼容：跨分片累积尚未匹配的 <think> 开标签（处理 "<thi" 跨片） */
+  pendingText: string
 }
 
 export const createParserState = (): ParserState => ({
@@ -387,6 +391,8 @@ export const createParserState = (): ParserState => ({
   outputTokens: 0,
   cacheCreationInputTokens: 0,
   cacheReadInputTokens: 0,
+  insideThinkTag: false,
+  pendingText: '',
 })
 
 /**
@@ -397,10 +403,64 @@ export const createParserState = (): ParserState => ({
  * @param state  跨 chunk 状态
  */
 export function parseEvent(compat: ApiCompat, json: unknown, state: ParserState): NormalizedEvent[] {
-  return compat === 'anthropic' ? parseAnthropicEvent(json, state) : parseOpenAIEvent(json)
+  return compat === 'anthropic' ? parseAnthropicEvent(json, state) : parseOpenAIEvent(json, state)
 }
 
-function parseOpenAIEvent(json: unknown): NormalizedEvent[] {
+/**
+ * 把 content 文本切成 [thinking, content, thinking, content, ...] 片段。
+ * 处理跨分片的 <think>/</think> 标签（标签可能被切碎分片下发）。
+ * 借助 state.insideThinkTag / state.pendingText 在分片间保持状态。
+ */
+function splitThinkTags(text: string, state: ParserState): { thinking: string; content: string }[] {
+  const out: { thinking: string; content: string }[] = []
+  let working = state.pendingText + text
+  state.pendingText = ''
+
+  while (working.length > 0) {
+    if (state.insideThinkTag) {
+      // 在 <think> 标签内，查找 </think>
+      const endIdx = working.indexOf('</think>')
+      if (endIdx === -1) {
+        // 没找到结束标签，全部当 thinking，保留最后 7 字符防止标签被切
+        const safeLen = Math.max(0, working.length - 7)
+        if (safeLen > 0) {
+          out.push({ thinking: working.slice(0, safeLen), content: '' })
+          working = working.slice(safeLen)
+        } else {
+          state.pendingText = working
+          working = ''
+        }
+      } else {
+        if (endIdx > 0) out.push({ thinking: working.slice(0, endIdx), content: '' })
+        out.push({ content: '', thinking: '' })
+        state.insideThinkTag = false
+        working = working.slice(endIdx + '</think>'.length)
+      }
+    } else {
+      // 在标签外，查找下一个 <think>
+      const startIdx = working.indexOf('<think>')
+      if (startIdx === -1) {
+        // 没找到开标签，全部当 content，保留最后 7 字符防止标签被切
+        const safeLen = Math.max(0, working.length - 7)
+        if (safeLen > 0) {
+          out.push({ thinking: '', content: working.slice(0, safeLen) })
+          working = working.slice(safeLen)
+        } else {
+          state.pendingText = working
+          working = ''
+        }
+      } else {
+        if (startIdx > 0) out.push({ thinking: '', content: working.slice(0, startIdx) })
+        state.insideThinkTag = true
+        working = working.slice(startIdx + '<think>'.length)
+      }
+    }
+  }
+
+  return out.filter((p) => p.thinking || p.content)
+}
+
+function parseOpenAIEvent(json: unknown, state: ParserState): NormalizedEvent[] {
   const events: NormalizedEvent[] = []
   const data = json as {
     usage?: TokenUsage
@@ -423,10 +483,18 @@ function parseOpenAIEvent(json: unknown): NormalizedEvent[] {
   const delta = choice.delta
 
   // 思考字段各家命名不同：DeepSeek/GLM 用 reasoning_content，部分 GLM 版本用 thinking_content
-  if (delta?.reasoning_content) events.push({ kind: 'thinking', text: delta.reasoning_content })
-  else if (delta?.thinking_content) events.push({ kind: 'thinking', text: delta.thinking_content })
-
-  if (delta?.content) events.push({ kind: 'content', text: delta.content })
+  if (delta?.reasoning_content) {
+    events.push({ kind: 'thinking', text: delta.reasoning_content })
+  } else if (delta?.thinking_content) {
+    events.push({ kind: 'thinking', text: delta.thinking_content })
+  } else if (delta?.content) {
+    // 部分模型（如 MiniMax M2.7）把思考内联在 content 里，用 <think>...</think> 包裹
+    // 跨分片解析标签，避免标签被切碎时漏判
+    for (const part of splitThinkTags(delta.content, state)) {
+      if (part.thinking) events.push({ kind: 'thinking', text: part.thinking })
+      if (part.content) events.push({ kind: 'content', text: part.content })
+    }
+  }
 
   if (delta?.tool_calls) {
     for (const tc of delta.tool_calls) {
