@@ -40,6 +40,11 @@
   --dark-surfaceContainerHighest-rgb: 224 224 224;
   --dark-onSurface-rgb: 26 26 26;
   --dark-onSurfaceVariant-rgb: 66 66 66;
+
+  /* 思考 shimmer：浅色主题用深灰系，保证在浅色背景上可见 */
+  --shimmer-base-rgb: 90 90 90;
+  --shimmer-mid-rgb: 130 130 130;
+  --shimmer-peak-rgb: 60 60 60;
 }
 
 /* Dark theme */
@@ -80,6 +85,11 @@
   --dark-surfaceContainerHighest-rgb: 44 44 44;
   --dark-onSurface-rgb: 255 255 255;
   --dark-onSurfaceVariant-rgb: 176 176 176;
+
+  /* 思考 shimmer：深色主题用银白系，保证在深色背景上可见 */
+  --shimmer-base-rgb: 192 192 192;
+  --shimmer-mid-rgb: 240 240 240;
+  --shimmer-peak-rgb: 255 255 255;
 }
 
 /* Markdown rendered content styles */
@@ -188,11 +198,11 @@
 .thinking-shimmer {
   background: linear-gradient(
     90deg,
-    rgba(192, 192, 192, 0.5) 0%,
-    rgba(240, 240, 240, 0.95) 45%,
-    rgba(255, 255, 255, 1) 50%,
-    rgba(240, 240, 240, 0.95) 55%,
-    rgba(192, 192, 192, 0.5) 100%
+    rgb(var(--shimmer-base-rgb) / 0.5) 0%,
+    rgb(var(--shimmer-mid-rgb) / 0.95) 45%,
+    rgb(var(--shimmer-peak-rgb) / 1) 50%,
+    rgb(var(--shimmer-mid-rgb) / 0.95) 55%,
+    rgb(var(--shimmer-base-rgb) / 0.5) 100%
   );
   background-size: 200% 100%;
   -webkit-background-clip: text;
@@ -213,6 +223,11 @@
     background-color: transparent;
     color: var(--dark-onSurface);
     overflow: hidden;
+  }
+
+  /* WebUI 模式（浏览器标签页）：不需要透明背景，直接用主题 surface 色 */
+  .webui-mode body {
+    background-color: rgb(var(--dark-surface-rgb));
   }
 
   /* DOM 全屏（VIBE 全屏模式）时取消窗口圆角 */

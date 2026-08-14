@@ -36,6 +36,16 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
     }
   }, [initialized, loadFromDb])
 
+  // 跨模式实时同步：定时从 DB 增量拉取，让桌面端与 WebUI 看到彼此的对话
+  const syncFromDb = useChatStore((s) => s.syncFromDb)
+  useEffect(() => {
+    if (!initialized) return
+    const timer = setInterval(() => {
+      void syncFromDb()
+    }, 3000)
+    return () => clearInterval(timer)
+  }, [initialized, syncFromDb])
+
   useEffect(() => {
     if (initialized && !activeSessionId) {
       createSession()

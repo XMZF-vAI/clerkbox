@@ -103,6 +103,7 @@ contextBridge.exposeInMainWorld('clerkbox', {
   dbDeleteSession: (id: string): Promise<void> => ipcRenderer.invoke('dbDeleteSession', id),
   dbGetAllSessions: (): Promise<SessionRow[]> => ipcRenderer.invoke('dbGetAllSessions'),
   dbGetRecents: (): Promise<string[]> => ipcRenderer.invoke('dbGetRecents'),
+  dbGetRevision: (): Promise<number> => ipcRenderer.invoke('dbGetRevision'),
   dbSetRecents: (recents: string[]): Promise<void> => ipcRenderer.invoke('dbSetRecents', recents),
   dbAddMessage: (row: MessageRow): Promise<void> => ipcRenderer.invoke('dbAddMessage', row),
   dbUpdateMessage: (

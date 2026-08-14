@@ -1424,6 +1424,8 @@ function registerIpcHandlers() {
     sessions: Record<string, unknown>[]
     messages: Record<string, Record<string, unknown>[]>
     recentsFolders?: string[]
+    /** 全局修订号：任何写入都会自增，供另一端检测数据变化 */
+    revision?: number
   }
 
   function readDb(): Database {
@@ -1445,6 +1447,7 @@ function registerIpcHandlers() {
             recentsFolders: Array.isArray(data.recentsFolders)
               ? data.recentsFolders.filter((folder): folder is string => typeof folder === 'string')
               : [],
+            revision: typeof data.revision === 'number' ? data.revision : 0,
           }
         }
         throw new Error('Database root must be an object')
@@ -1458,11 +1461,13 @@ function registerIpcHandlers() {
         }
       } catch { /* Preserve the original corruption error if backup creation also fails. */ }
     }
-    return { sessions: [], messages: {}, recentsFolders: [] }
+    return { sessions: [], messages: {}, recentsFolders: [], revision: 0 }
   }
 
   /** Write through a sibling temporary file to avoid corrupting the database on interruption. */
   function writeDb(db: Database) {
+    // 任何写入都自增全局修订号，供另一端的 syncFromDb 廉价检测变化
+    db.revision = (db.revision || 0) + 1
     const tempPath = `${dbPath}.tmp-${process.pid}`
     fs.writeFileSync(tempPath, JSON.stringify(db, null, 2), 'utf-8')
     try {
@@ -1475,6 +1480,12 @@ function registerIpcHandlers() {
       }
       if (!fs.existsSync(dbPath)) throw err
     }
+  }
+
+  /** 消息变更时同步刷新会话 updated_at，让另一端的 syncFromDb 能检测到变化 */
+  function touchSessionUpdatedAt(db: Database, sessionId: string, ts: number): void {
+    const session = db.sessions.find((s) => s.id === sessionId)
+    if (session) session.updated_at = ts
   }
 
   ipcMain.handle('dbCreateSession', async (_event, row: Record<string, unknown>) => {
@@ -1521,6 +1532,11 @@ function registerIpcHandlers() {
     return readDb().recentsFolders || []
   })
 
+  ipcMain.handle('dbGetRevision', async () => {
+    await dbWriteQueue
+    return readDb().revision || 0
+  })
+
   ipcMain.handle('dbSetRecents', async (_event, recents: string[]) => {
     await enqueueDbWrite(() => {
       const db = readDb()
@@ -1548,6 +1564,8 @@ function registerIpcHandlers() {
       } else {
         msgs.push(row)
       }
+      // 同步刷新会话 updated_at，让另一端的 syncFromDb 能检测到消息变化
+      touchSessionUpdatedAt(db, row.session_id, typeof row.timestamp === 'number' ? row.timestamp : Date.now())
       writeDb(db)
     })
   })
@@ -1566,7 +1584,7 @@ function registerIpcHandlers() {
       await enqueueDbWrite(() => {
         const db = readDb()
         let found = false
-        for (const msgs of Object.values(db.messages)) {
+        for (const [sessionId, msgs] of Object.entries(db.messages)) {
           const msg = msgs.find((m) => m.id === id)
           if (msg) {
             msg.content = content
@@ -1574,6 +1592,8 @@ function registerIpcHandlers() {
             if (toolResults !== undefined) msg.tool_results = toolResults
             if (thinkingContent !== undefined) msg.thinking_content = thinkingContent
             if (finishReason !== undefined) msg.finish_reason = finishReason
+            // 同步刷新会话 updated_at，让另一端的 syncFromDb 能检测到消息变化
+            touchSessionUpdatedAt(db, sessionId, Date.now())
             found = true
             break
           }

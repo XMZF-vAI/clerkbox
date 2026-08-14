@@ -216,6 +216,8 @@ export const ipc = {
     isElectron ? window.clerkbox.dbGetAllSessions() : webInvoke('dbGetAllSessions'),
   dbGetRecents: (): Promise<string[]> =>
     isElectron ? window.clerkbox.dbGetRecents() : webInvoke('dbGetRecents'),
+  dbGetRevision: (): Promise<number> =>
+    isElectron ? window.clerkbox.dbGetRevision() : webInvoke('dbGetRevision'),
   dbSetRecents: (recents: string[]): Promise<void> =>
     isElectron ? window.clerkbox.dbSetRecents(recents) : webInvoke('dbSetRecents', [recents]),
   dbAddMessage: (row: MessageRow): Promise<void> =>

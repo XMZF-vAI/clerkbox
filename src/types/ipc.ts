@@ -74,6 +74,7 @@ export interface ClerkBoxAPI {
   dbDeleteSession: (id: string) => Promise<void>
   dbGetAllSessions: () => Promise<SessionRow[]>
   dbGetRecents: () => Promise<string[]>
+  dbGetRevision: () => Promise<number>
   dbSetRecents: (recents: string[]) => Promise<void>
   dbAddMessage: (row: MessageRow) => Promise<void>
   dbUpdateMessage: (id: string, content: string, toolCalls?: string, toolResults?: string, thinkingContent?: string | null, finishReason?: string | null) => Promise<void>

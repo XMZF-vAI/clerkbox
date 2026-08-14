@@ -93,10 +93,30 @@ function parseToolResults(value: string | null | undefined): ToolResult[] | unde
   }
 }
 
+/** 把 DB 消息行映射为内存 Message 结构（loadFromDb / syncFromDb 共用） */
+function mapMessageRows(msgRows: import('../types/ipc').MessageRow[]): Message[] {
+  return msgRows.map((m) => ({
+    id: m.id,
+    role: ['user', 'assistant', 'system', 'tool'].includes(m.role) ? m.role as Message['role'] : 'assistant',
+    content: m.content || '',
+    thinkingContent: m.thinking_content || undefined,
+    timestamp: m.timestamp,
+    toolCalls: parseToolCalls(m.tool_calls),
+    toolResults: parseToolResults(m.tool_results),
+    finishReason: m.finish_reason || undefined,
+    isCompactSummary: m.is_compact === 1 ? true : undefined,
+    isSubAgentCard: m.is_sub_agent_card === 1 ? true : undefined,
+    subAgentId: m.sub_agent_id || undefined,
+  }))
+}
+
 /** 获取指定会话的 AbortController（可能为 undefined） */
 export function getSessionAbortController(sessionId: string): AbortController | undefined {
   return sessionAbortControllers.get(sessionId)
 }
+
+/** 上次同步时记录的 DB 全局修订号；revision 未变时 syncFromDb 直接跳过全量比对 */
+let lastSyncedRevision = -1
 
 /** 写入指定会话的 AbortController；若传入 null 则清除 */
 export function setSessionAbortController(sessionId: string, controller: AbortController | null): void {
@@ -129,6 +149,8 @@ interface ChatState {
   deleteSession: (id: string) => void
   compactSession: (sessionId: string, newMessages: Message[], deleteBeforeId: string) => void
   loadFromDb: () => Promise<void>
+  /** 增量同步：从 DB 拉取最新会话/消息，合并进内存状态（跳过正在流式的会话，避免覆盖本地流式内容） */
+  syncFromDb: () => Promise<void>
 }
 
 /** Format timestamp as YYYYMMDD-HHmmss */
@@ -186,23 +208,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const sessions: Session[] = []
       for (const row of rows) {
         const msgRows = await ipc.dbGetMessages(row.id)
-        const messages: Message[] = msgRows.map((m) => ({
-          id: m.id,
-          role: ['user', 'assistant', 'system', 'tool'].includes(m.role) ? m.role as Message['role'] : 'assistant',
-          content: m.content || '',
-          thinkingContent: m.thinking_content || undefined,
-          timestamp: m.timestamp,
-          toolCalls: parseToolCalls(m.tool_calls),
-          toolResults: parseToolResults(m.tool_results),
-          finishReason: m.finish_reason || undefined,
-          isCompactSummary: m.is_compact === 1 ? true : undefined,
-          isSubAgentCard: m.is_sub_agent_card === 1 ? true : undefined,
-          subAgentId: m.sub_agent_id || undefined,
-        }))
         sessions.push({
           id: row.id,
           title: row.title,
-          messages,
+          messages: mapMessageRows(msgRows),
           createdAt: row.created_at,
           updatedAt: row.updated_at,
         })
@@ -232,6 +241,66 @@ export const useChatStore = create<ChatState>((set, get) => ({
       })
     } catch {
       set({ initialized: true })
+    }
+  },
+
+  syncFromDb: async () => {
+    try {
+      // 廉价短路：DB 全局修订号未变 → 无任何写入，跳过全量比对
+      const revision = await ipc.dbGetRevision()
+      if (revision === lastSyncedRevision) return
+
+      const rows = await ipc.dbGetAllSessions()
+      const state = get()
+      // 正在流式的会话不能被 DB 覆盖（本地流式内容比 DB 更新）
+      const streaming = state.streamingSessionIds
+      const dbMap = new Map(rows.map((r) => [r.id, r]))
+      const localMap = new Map(state.sessions.map((s) => [s.id, s]))
+
+      const merged: Session[] = []
+      const seen = new Set<string>()
+
+      // 合并 DB 中的会话
+      for (const row of rows) {
+        seen.add(row.id)
+        const local = localMap.get(row.id)
+        if (streaming.has(row.id) && local) {
+          // 流式中：保留本地内存状态
+          merged.push(local)
+          continue
+        }
+        // DB 有更新（updatedAt 变化）或本地没有该会话 → 从 DB 拉取消息
+        if (!local || local.updatedAt !== row.updated_at) {
+          const msgRows = await ipc.dbGetMessages(row.id)
+          merged.push({
+            id: row.id,
+            title: row.title,
+            messages: mapMessageRows(msgRows),
+            createdAt: row.created_at,
+            updatedAt: row.updated_at,
+            workingDir: local?.workingDir,
+            defaultWorkDir: local?.defaultWorkDir,
+          })
+        } else {
+          merged.push(local)
+        }
+      }
+
+      // 保留本地有但 DB 没有的会话（可能是刚创建还没持久化完成的）
+      for (const s of state.sessions) {
+        if (!seen.has(s.id)) merged.push(s)
+      }
+
+      // 按 updatedAt 降序排序
+      merged.sort((a, b) => b.updatedAt - a.updatedAt)
+
+      // 同步 recentsFolders
+      const recentsFolders = await ipc.dbGetRecents().catch(() => state.recentsFolders)
+
+      set({ sessions: merged, recentsFolders })
+      lastSyncedRevision = revision
+    } catch (e) {
+      console.error('[chat-store] syncFromDb failed:', e)
     }
   },
 
