@@ -101,7 +101,8 @@ export default {
       thinkingMode: 'Thinking mode',
       thinkingModeToggle: 'Toggle',
       thinkingModeTier: 'Levels',
-      reasoningLevels: 'Thinking level',
+      reasoningLevels: 'Available thinking levels (multi-select)',
+      reasoningLevelsHint: 'Selected levels appear in the slider next to the chat input',
     },
     providers: {
       title: 'Providers',

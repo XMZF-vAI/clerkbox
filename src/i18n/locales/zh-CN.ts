@@ -101,7 +101,8 @@ export default {
       thinkingMode: '思考模式',
       thinkingModeToggle: '开关',
       thinkingModeTier: '档位',
-      reasoningLevels: '思考档位',
+      reasoningLevels: '可用思考档位（可多选）',
+      reasoningLevelsHint: '勾选后可在对话输入框旁的滑块中切换当前档位',
     },
     providers: {
       title: '提供商',

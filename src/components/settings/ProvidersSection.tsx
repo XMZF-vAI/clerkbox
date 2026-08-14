@@ -503,19 +503,36 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
                               <div>
                                 <div className="text-[10px] text-dark-onSurfaceVariant mb-1">{t('settings.api.reasoningLevels')}</div>
                                 <div className="flex flex-wrap gap-1">
-                                  {(m.reasoningEfforts ?? []).map((effort) => (
-                                    <button
-                                      key={effort}
-                                      type="button"
-                                      onClick={() => patchModel({ reasoningEffort: effort })}
-                                      className={`px-2 py-1 rounded-md3-xs text-[10px] capitalize transition-colors ${
-                                        m.reasoningEffort === effort
-                                          ? 'bg-md-primary/20 text-md-primary'
-                                          : 'bg-dark-surfaceContainer text-dark-onSurfaceVariant/60'
-                                      }`}
-                                    >{effort}</button>
-                                  ))}
+                                  {REASONING_EFFORTS.map((effort) => {
+                                    const selected = (m.reasoningEfforts ?? []).includes(effort)
+                                    return (
+                                      <button
+                                        key={effort}
+                                        type="button"
+                                        onClick={() => {
+                                          const next = selected
+                                            ? (m.reasoningEfforts ?? []).filter((x) => x !== effort)
+                                            : [...(m.reasoningEfforts ?? []), effort].sort(
+                                                (a, b) => REASONING_EFFORTS.indexOf(a) - REASONING_EFFORTS.indexOf(b)
+                                              )
+                                          if (next.length === 0) return // 至少保留一个档位
+                                          patchModel({
+                                            reasoningEfforts: next,
+                                            reasoningEffort: next.includes(m.reasoningEffort || 'medium')
+                                              ? (m.reasoningEffort ?? next[0])
+                                              : next[0],
+                                          })
+                                        }}
+                                        className={`px-2 py-1 rounded-md3-xs text-[10px] capitalize transition-colors ${
+                                          selected
+                                            ? 'bg-md-primary/20 text-md-primary'
+                                            : 'bg-dark-surfaceContainer text-dark-onSurfaceVariant/60'
+                                        }`}
+                                      >{effort}</button>
+                                    )
+                                  })}
                                 </div>
+                                <div className="text-[9px] text-dark-onSurfaceVariant/60 mt-1">{t('settings.api.reasoningLevelsHint')}</div>
                               </div>
                             )}
                           </>
