@@ -21,7 +21,7 @@
 
 > ClerkBox 是一个本地优先的 AI 桌面工作台。它把多供应商对话、ReAct 工具循环、子 Agent 编排、Skills 技能、长期记忆与 VIBE 沉浸模式整合进一个 Windows 原生应用，让你在同一个面板里完成搜索、写作、编码与自动化。
 
-> ClerkBox 由 [XMZF Studio](https://github.com/XMZF-vAI) 出品。这是一个学生小团队的项目，所以在功能选择和代码风格上可能比较随性——发现 bug 或者有想法，欢迎直接提 Issue。
+> ClerkBox 由 [XMZF Studio](https://github.com/XMZF-vAI) 出品，作者是一名初一学生。功能选择和代码风格可能比较随性——发现 bug 或者有想法，欢迎直接提 Issue。
 
 ---
 
