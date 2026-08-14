@@ -1,4 +1,4 @@
-﻿import {
+import {
   app,
   BrowserWindow,
   ipcMain,
@@ -1564,8 +1564,20 @@ function registerIpcHandlers() {
       } else {
         msgs.push(row)
       }
+      const ts = typeof row.timestamp === 'number' ? row.timestamp : Date.now()
+      // 会话行可能被另一端的空会话清理误删 → 消息成孤儿，另一端永远看不到。
+      // 这里自愈：行缺失时用首条消息内容派生标题重建。
+      if (!db.sessions.some((s) => s.id === row.session_id)) {
+        const text = typeof row.content === 'string' ? row.content.trim().replace(/\s+/g, ' ') : ''
+        db.sessions.push({
+          id: row.session_id,
+          title: text ? (text.length > 20 ? text.slice(0, 20) + '…' : text) : '新会话',
+          created_at: ts,
+          updated_at: ts,
+        })
+      }
       // 同步刷新会话 updated_at，让另一端的 syncFromDb 能检测到消息变化
-      touchSessionUpdatedAt(db, row.session_id, typeof row.timestamp === 'number' ? row.timestamp : Date.now())
+      touchSessionUpdatedAt(db, row.session_id, ts)
       writeDb(db)
     })
   })
@@ -2532,10 +2544,18 @@ function assertPublicWebUrl(value: string): URL {
 /** Resolve each host immediately before connecting and reject private DNS answers. */
 function lookupPublicHost(
   hostname: string,
-  options: number | dns.LookupOneOptions,
-  callback: (error: NodeJS.ErrnoException | null, address: string, family: number) => void
+  options: number | dns.LookupOneOptions | dns.LookupAllOptions,
+  callback: (
+    error: NodeJS.ErrnoException | null,
+    address: string | dns.LookupAddress[],
+    family: number
+  ) => void
 ): void {
   const lookupOptions = typeof options === 'number' ? { family: options } : options
+  // Node ≥ 22（autoSelectFamily 默认开启）会以 all:true 调用 lookup，
+  // 此时 callback 必须返回地址数组；返回单地址格式会导致
+  // "Invalid IP address: undefined"（socket 层拿不到地址）。
+  const wantAll = typeof options === 'object' && options !== null && (options as dns.LookupAllOptions).all === true
   dns.lookup(hostname, {
     family: lookupOptions.family,
     hints: lookupOptions.hints,
@@ -2551,8 +2571,11 @@ function lookupPublicHost(
       callback(new Error('Private network DNS result is not allowed') as NodeJS.ErrnoException, '', 0)
       return
     }
-    const record = records[0]
-    callback(null, record.address, record.family)
+    if (wantAll) {
+      callback(null, records, 0)
+    } else {
+      callback(null, records[0].address, records[0].family)
+    }
   })
 }
 
