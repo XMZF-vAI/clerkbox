@@ -721,6 +721,6 @@ limitations under the License.
 
 **[Report a Bug](https://github.com/XMZF-Studio/ClerkBox/issues)** · **[Feature Request](https://github.com/XMZF-Studio/ClerkBox/issues)** · **[Pull Request](https://github.com/XMZF-Studio/ClerkBox/pulls)**
 
-Made with care by **XMZF Studio** · Released under the Apache License 2.0
+Made by **XMZF Studio** · Apache License 2.0
 
 </div>
