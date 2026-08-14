@@ -10,22 +10,20 @@ import {
   type ProviderPreset, type ProviderGroup,
 } from '../../lib/provider-catalog'
 import { ipc } from '../../lib/ipc-client'
-import type { ApiCompat, ModelProvider, ProviderModel, ReasoningEffort, ThinkingStyle } from '../../types/agent'
-import { REASONING_EFFORTS, DEFAULT_THINKING_STYLE } from '../../types/agent'
+import type { ApiCompat, ModelProvider, ProviderModel, ReasoningEffort } from '../../types/agent'
+import { REASONING_EFFORTS } from '../../types/agent'
 import type { FetchedModel } from '../../types/ipc'
 
-/** 思考风格选项（thinkingStyle → 文案 key） */
-const THINKING_STYLE_OPTIONS: Array<[ThinkingStyle, string]> = [
-  ['effort', 'settings.api.styleEffort'],
-  ['budget', 'settings.api.styleBudget'],
-  ['enable', 'settings.api.styleEnable'],
-  ['glm', 'settings.api.styleGlm'],
-  ['auto', 'settings.api.styleAuto'],
-]
+/**
+ * 思考模式只有两种（用户可见）：
+ * - toggle 开关：开/关思考，不发强度参数
+ * - tier 档位：选定一个档位，按协议自动映射（reasoning_effort / thinking_budget / budget_tokens）
+ * payload 风格（thinkingStyle）是内部序列化细节，由供应商预设推断，不再暴露给用户。
+ */
+type ThinkingMode = 'toggle' | 'tier'
 
-/** 默认思考风格：模型未显式声明时按协议推断 */
-const defaultStyleFor = (model: ProviderModel, provider: ModelProvider): ThinkingStyle =>
-  model.thinkingStyle ?? DEFAULT_THINKING_STYLE[provider.apiCompat]
+const thinkingModeOf = (m: ProviderModel): ThinkingMode =>
+  (m.reasoningEfforts?.length ?? 0) > 0 ? 'tier' : 'toggle'
 
 const inputCls =
   'w-full px-3 py-2 bg-dark-surfaceContainerHighest rounded-md3-sm text-sm border border-dark-onSurfaceVariant/10 outline-none focus:border-md-primary/40 transition-colors'
@@ -400,9 +398,6 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
               {provider.models.map((m) => {
                 const active = isActiveProvider && settings.activeModelId === m.id
                 const advancedOpen = advancedModelId === m.id
-                const effortOptions: ReasoningEffort[] = [...REASONING_EFFORTS]
-                const sortEfforts = (efforts: ReasoningEffort[]) =>
-                  [...efforts].sort((a, b) => REASONING_EFFORTS.indexOf(a) - REASONING_EFFORTS.indexOf(b))
                 const patchModel = (partial: Partial<ProviderModel>) => {
                   const models = provider.models.map((x) => (x.id === m.id ? { ...x, ...partial } : x))
                   settings.setProviderModels(provider.id, models)
@@ -467,56 +462,63 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
                             checked={m.supportsThinking ?? false}
                             onChange={(e) => patchModel({
                               supportsThinking: e.target.checked,
-                              reasoningEfforts: e.target.checked ? m.reasoningEfforts : [],
-                              reasoningEffort: e.target.checked && m.reasoningEfforts?.length ? (m.reasoningEffort || m.reasoningEfforts[0]) : undefined,
+                              reasoningEfforts: [],
+                              reasoningEffort: undefined,
                             })}
                             className="accent-md-primary"
                           />
                         </label>
                         {(m.supportsThinking ?? false) && (
-                          <div>
-                            <div className="text-[10px] text-dark-onSurfaceVariant mb-1">{t('settings.api.thinkingStyle')}</div>
-                            <div className="flex flex-wrap gap-1">
-                              {THINKING_STYLE_OPTIONS.map(([style, labelKey]) => (
-                                <button
-                                  key={style}
-                                  type="button"
-                                  onClick={() => patchModel({ thinkingStyle: style })}
-                                  className={`px-2 py-1 rounded-md3-xs text-[10px] transition-colors ${
-                                    (m.thinkingStyle ?? defaultStyleFor(m, provider)) === style
-                                      ? 'bg-md-primary/20 text-md-primary'
-                                      : 'bg-dark-surfaceContainer text-dark-onSurfaceVariant/60'
-                                  }`}
-                                >{t(labelKey)}</button>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                        {(m.supportsThinking ?? false) && (m.thinkingStyle ?? defaultStyleFor(m, provider)) === 'effort' && (m.reasoningEfforts?.length ?? 0) > 0 && (
-                          <div>
-                            <div className="text-[10px] text-dark-onSurfaceVariant mb-1">{t('settings.api.reasoningLevels')}</div>
-                            <div className="flex flex-wrap gap-1">
-                              {effortOptions.map((effort) => {
-                                const selected = (m.reasoningEfforts ?? []).includes(effort)
-                                return (
+                          <>
+                            <div>
+                              <div className="text-[10px] text-dark-onSurfaceVariant mb-1">{t('settings.api.thinkingMode')}</div>
+                              <div className="flex gap-1">
+                                {(['toggle', 'tier'] as const).map((mode) => (
                                   <button
-                                    key={effort}
+                                    key={mode}
                                     type="button"
                                     onClick={() => {
-                                      const next = selected
-                                        ? (m.reasoningEfforts ?? []).filter((x) => x !== effort)
-                                        : sortEfforts([...(m.reasoningEfforts ?? []), effort])
-                                      patchModel({
-                                        reasoningEfforts: next.length ? next : ['medium'],
-                                        reasoningEffort: next.includes(m.reasoningEffort || 'medium') ? m.reasoningEffort : next[0],
-                                      })
+                                      if (mode === 'tier') {
+                                        // 档位模式：可用档位优先取供应商预设，否则放开全部标准档位
+                                        const inferred = inferThinkingDefaults(provider.presetId, m.id).reasoningEfforts
+                                        const levels: ReasoningEffort[] = inferred.length ? [...inferred] : [...REASONING_EFFORTS]
+                                        const keep = m.reasoningEffort && levels.includes(m.reasoningEffort)
+                                          ? m.reasoningEffort
+                                          : levels.includes('medium') ? 'medium' : levels[0]
+                                        patchModel({ reasoningEfforts: levels, reasoningEffort: keep })
+                                      } else {
+                                        patchModel({ reasoningEfforts: [], reasoningEffort: undefined })
+                                      }
                                     }}
-                                    className={`px-2 py-1 rounded-md3-xs text-[10px] transition-colors ${selected ? 'bg-md-primary/20 text-md-primary' : 'bg-dark-surfaceContainer text-dark-onSurfaceVariant/60'}`}
-                                  >{effort}</button>
-                                )
-                              })}
+                                    className={`px-2 py-1 rounded-md3-xs text-[10px] transition-colors ${
+                                      thinkingModeOf(m) === mode
+                                        ? 'bg-md-primary/20 text-md-primary'
+                                        : 'bg-dark-surfaceContainer text-dark-onSurfaceVariant/60'
+                                    }`}
+                                  >{t(mode === 'toggle' ? 'settings.api.thinkingModeToggle' : 'settings.api.thinkingModeTier')}</button>
+                                ))}
+                              </div>
                             </div>
-                          </div>
+                            {(m.reasoningEfforts?.length ?? 0) > 0 && (
+                              <div>
+                                <div className="text-[10px] text-dark-onSurfaceVariant mb-1">{t('settings.api.reasoningLevels')}</div>
+                                <div className="flex flex-wrap gap-1">
+                                  {(m.reasoningEfforts ?? []).map((effort) => (
+                                    <button
+                                      key={effort}
+                                      type="button"
+                                      onClick={() => patchModel({ reasoningEffort: effort })}
+                                      className={`px-2 py-1 rounded-md3-xs text-[10px] capitalize transition-colors ${
+                                        m.reasoningEffort === effort
+                                          ? 'bg-md-primary/20 text-md-primary'
+                                          : 'bg-dark-surfaceContainer text-dark-onSurfaceVariant/60'
+                                      }`}
+                                    >{effort}</button>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                          </>
                         )}
                         <div>
                           <label className="flex items-center gap-1 text-[10px] text-dark-onSurfaceVariant mb-1">

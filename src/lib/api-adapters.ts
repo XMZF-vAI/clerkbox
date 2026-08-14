@@ -147,7 +147,11 @@ function buildOpenAIBody(o: BuildBodyOptions): Record<string, unknown> {
       case 'enable':
       default:
         body.enable_thinking = true
-        if (o.thinkingBudget) body.thinking_budget = o.thinkingBudget
+        // 档位模式：enable 型端点用预算表达强度（Qwen 等支持 thinking_budget）
+        {
+          const budget = o.reasoningEffort ? EFFORT_BUDGET[o.reasoningEffort] : o.thinkingBudget
+          if (budget) body.thinking_budget = budget
+        }
     }
   }
 
