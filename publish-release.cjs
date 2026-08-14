@@ -24,9 +24,10 @@ function api(method, urlPath, body, contentType = 'application/json', isUpload =
       'User-Agent': 'clerkbox-release-script',
       'X-GitHub-Api-Version': '2022-11-28',
     }
-    if (payload && !isUpload) headers['Content-Type'] = contentType
-    if (isUpload) headers['Content-Type'] = contentType
-    if (payload && !isUpload) headers['Content-Length'] = payload.length
+    if (payload) {
+      headers['Content-Type'] = contentType
+      headers['Content-Length'] = payload.length
+    }
     const req = https.request({
       hostname: isUpload ? 'uploads.github.com' : 'api.github.com',
       path: urlPath,
@@ -53,10 +54,23 @@ function api(method, urlPath, body, contentType = 'application/json', isUpload =
 }
 
 async function uploadAsset(uploadUrl, filePath) {
+  // 注：Node 原生 https 上传大资产会被 GitHub 拒绝（400 Multipart form data required），
+  // 改用 curl（Windows 10+ 自带）走 --data-binary，稳定可靠。
+  const { execFile } = require('child_process')
   const name = encodeURIComponent(path.basename(filePath))
-  const urlPath = uploadUrl.replace('https://uploads.github.com', '') + `?name=${name}`
-  const data = fs.readFileSync(filePath)
-  return api('POST', urlPath, data, 'application/octet-stream', true)
+  const url = `${uploadUrl.split('{')[0]}?name=${name}`
+  return new Promise((resolve, reject) => {
+    execFile('curl.exe', [
+      '-s', '-X', 'POST',
+      '-H', `Authorization: Bearer ${TOKEN}`,
+      '-H', 'Content-Type: application/octet-stream',
+      '--data-binary', `@${filePath}`,
+      url,
+    ], { maxBuffer: 10 * 1024 * 1024 }, (error, stdout) => {
+      if (error) return reject(error)
+      try { resolve(JSON.parse(stdout)) } catch { reject(new Error(`unexpected response: ${stdout.slice(0, 300)}`)) }
+    }))
+  })
 }
 
 async function main() {
