@@ -222,10 +222,9 @@ npm run dev
 npm run build
 ```
 
-构建产物位于 `release/` 目录下，包含：
+构建产物位于 `release-out/` 目录下，包含：
 
-- `ClerkBox-Setup-x.x.x.exe` — NSIS 安装包
-- `ClerkBox-x.x.x-win.zip` — 便携版
+- `ClerkBox Setup x.x.x.exe` — NSIS 安装包
 - `win-unpacked/` — 解压版目录
 
 ### npm scripts
