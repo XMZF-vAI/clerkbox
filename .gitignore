@@ -8,6 +8,7 @@ dist-electron/
 # Release / packaged app artifacts
 release/
 release-out/
+release-out*/
 *.exe
 *.zip
 *.blockmap
@@ -49,3 +50,9 @@ Thumbs.db
 # 临时素材与校验脚本
 /logo-animation/
 /tmp-adapters-check.mts
+# 一次性文件修补/拷贝脚本（指向外部构建目录的 scratch 工具）
+/fix-inverse.cjs
+/copy_vibe.cjs
+/fix_vibe_import.cjs
+# 根目录遗留的组件草稿（正式实现在 src/ 下）
+/Vibe.tsx
