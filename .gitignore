@@ -56,3 +56,5 @@ Thumbs.db
 /fix_vibe_import.cjs
 # 根目录遗留的组件草稿（正式实现在 src/ 下）
 /Vibe.tsx
+# 发布说明草稿（每次发版重写）
+/.release-notes.md
