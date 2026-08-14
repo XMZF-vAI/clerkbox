@@ -21,6 +21,8 @@
 
 > ClerkBox is a local-first AI desktop workbench. It brings multi-provider chat, a ReAct tool loop, sub-agent orchestration, reusable skills, long-term memory, and VIBE immersive mode together in a native Windows app, so you can search, write, code, and automate from a single panel.
 
+> ClerkBox is built by [XMZF Studio](https://github.com/XMZF-vAI) — the author is a 7th-grade student. Feature picks and code style may be a bit rough around the edges — bug reports and ideas are very welcome via Issues.
+
 ---
 
 ## Table of Contents
