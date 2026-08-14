@@ -1737,17 +1737,34 @@ function registerIpcHandlers() {
 
     try {
       // 1. 抓搜索页 SSR HTML（hub.cocoloop.cn 是 Next.js App Router，服务端渲染含 initialItems）
-      //    注意：主页 /skills 是纯静态 HTML 没有 initialItems，必须用 /search 路由才能拿到 RSC 数据
-      const requestUrl = `https://hub.cocoloop.cn/search${safeQuery ? `?q=${encodeURIComponent(safeQuery)}` : ''}`
-      const response = await fetchHttpsText(
-        requestUrl,
-        { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ClerkBox/1.7' },
-        2 * 1024 * 1024
+      //    注意：主页 /skills 是纯静态 HTML 没有 initialItems，必须用 /search 路由才能拿到 RSC 数据。
+      //    另外：服务端 SSR 忽略 ?q=（返回固定热门列表），只有 ?page=N 分页是服务端生效的 ——
+      //    站点的搜索框是客户端行为。因此带关键词时并行拉多页聚合候选池，再做本地过滤，
+      //    否则只在一个 20 条的热门列表里找，搜什么都接近零结果。
+      const SEARCH_POOL_PAGES = 5
+      const pagesToFetch = safeQuery
+        ? Array.from({ length: SEARCH_POOL_PAGES }, (_, i) => i + 1)
+        : [safePage]
+      const responses = await Promise.all(
+        pagesToFetch.map((p) =>
+          fetchHttpsText(
+            `https://hub.cocoloop.cn/search?q=${encodeURIComponent(safeQuery)}&page=${p}`,
+            { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ClerkBox/1.7' },
+            2 * 1024 * 1024
+          )
+        )
       )
-      if (response.statusCode !== 200) throw new Error(`CocoLoop returned HTTP ${response.statusCode}`)
+      const okResponse = responses.find((r) => r.statusCode === 200)
+      if (!okResponse) throw new Error(`CocoLoop returned HTTP ${responses[0]?.statusCode ?? 0}`)
 
-      // 2. 解析 RSC 流中的 initialItems 数组
-      const allSkills = parseCocoloopSkills(response.body)
+      // 2. 解析 RSC 流中的 initialItems 数组，多页结果按 id 去重合并
+      const seenIds = new Set<string>()
+      const allSkills = responses.flatMap((r) => (r.statusCode === 200 ? parseCocoloopSkills(r.body) : []))
+        .filter((s) => {
+          if (seenIds.has(s.id)) return false
+          seenIds.add(s.id)
+          return true
+        })
 
       // 3. 关键词过滤：服务端不响应 ?q=，客户端做 name/titleCn/description/author 模糊匹配
       const q = safeQuery.toLowerCase()
