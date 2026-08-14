@@ -591,25 +591,6 @@ electron-builder configuration lives in the `build` field of [package.json](pack
 - Thinking control (provider default tiers + model picker grouped by thinking capability)
 - WebUI remote access (browser control + dual-mode data sync + server auto-start)
 
-### Planned (v1.8+)
-
-- Session forking: branch a new session from a message
-- Message edit & resend
-- Parallel multi-model comparison
-- Tool-call replay (save as reusable workflow)
-- Visual sub-agent workflow orchestration
-- Streaming resumption
-- Session export (Markdown / JSON / PDF)
-- Cross-session full-text search (SQLite FTS5)
-- Prompt template & variable system
-- Parallel sub-agent execution
-- Skills rating & comments
-- Skills local signature verification
-- Command palette (Ctrl+K)
-- Multi-window multi-session
-- Token usage breakdown by model / session
-- macOS / Linux support
-
 ---
 
 ## Contributing

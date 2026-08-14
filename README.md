@@ -21,6 +21,8 @@
 
 > ClerkBox 是一个本地优先的 AI 桌面工作台。它把多供应商对话、ReAct 工具循环、子 Agent 编排、Skills 技能、长期记忆与 VIBE 沉浸模式整合进一个 Windows 原生应用，让你在同一个面板里完成搜索、写作、编码与自动化。
 
+> ClerkBox 由 [XMZF Studio](https://github.com/XMZF-vAI) 出品。这是一个学生小团队的项目，所以在功能选择和代码风格上可能比较随性——发现 bug 或者有想法，欢迎直接提 Issue。
+
 ---
 
 ## 目录
@@ -590,25 +592,6 @@ electron-builder 配置见 [package.json](package.json) 的 `build` 字段。
 - 多供应商预设与自动 `/models` 拉取
 - 思考控制（供应商默认档位 + 模型选择器按思考能力分组）
 - WebUI 远程访问（浏览器操控 + 双模式数据同步 + 服务器部署自动启动）
-
-### 计划中 (v1.8+)
-
-- 会话分支（fork）：从某条消息分叉新会话
-- 消息编辑重发
-- 多模型并行对比
-- 工具调用回放（保存为可复用工作流）
-- 子 Agent 工作流可视化编排
-- 流式断点续传
-- 会话导出（Markdown / JSON / PDF）
-- 跨会话全文搜索（SQLite FTS5）
-- Prompt 模板与变量系统
-- 子 Agent 并行执行
-- Skills 评分与评论
-- Skills 本地签名校验
-- 命令面板（Ctrl+K）
-- 多窗口多会话
-- Token 用量按模型/会话维度分布
-- macOS / Linux 支持
 
 ---
 
