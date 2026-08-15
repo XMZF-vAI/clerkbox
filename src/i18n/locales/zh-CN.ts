@@ -117,7 +117,7 @@ export default {
       modelCount: '{{count}} 个模型',
       compat: 'API 协议兼容',
       compatHint: '选择该平台使用的接口协议。Anthropic 走 /v1/messages，OpenAI 走 /chat/completions。',
-      directFetch: '渲染进程直连（不走主进程代理，部分平台会被 CORS 拦截）',
+      directFetch: '直连模式（跳过应用内置转发；仅在连接异常时尝试，部分服务商不支持）',
       fetchModels: '获取模型列表',
       getKey: '获取 Key',
       showKey: '显示密钥',

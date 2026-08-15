@@ -117,7 +117,7 @@ export default {
       modelCount: '{{count}} model(s)',
       compat: 'API compatibility',
       compatHint: 'Pick the protocol this platform speaks. Anthropic uses /v1/messages, OpenAI uses /chat/completions.',
-      directFetch: 'Connect directly from the renderer (skips the main-process proxy; some platforms will be blocked by CORS)',
+      directFetch: 'Direct mode (bypass the built-in relay; try only if connections fail — unsupported by some providers)',
       fetchModels: 'Fetch model list',
       getKey: 'Get key',
       showKey: 'Show key',
