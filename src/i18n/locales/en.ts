@@ -77,6 +77,8 @@ export default {
       totalCompletion: 'Output tokens',
       totalTokens: 'Total tokens',
       cacheCreation: 'Cache writes',
+      cacheCreationNotReported: 'Not reported',
+      cacheCreationNotReportedHint: 'OpenAI-compatible endpoints (MiniMax/GLM etc.) report hits only; passive cache writes are free',
       cacheRead: 'Cache hits',
       cacheHitRate: 'Cache hit rate',
       noData: 'No usage data yet — start a conversation to begin tracking',

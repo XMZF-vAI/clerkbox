@@ -77,6 +77,8 @@ export default {
       totalCompletion: '输出 Tokens',
       totalTokens: '总计 Tokens',
       cacheCreation: '缓存写入',
+      cacheCreationNotReported: '未上报',
+      cacheCreationNotReportedHint: 'OpenAI 兼容端点（MiniMax/GLM 等）只报命中量不报写入量，且被动缓存写入不额外计费',
       cacheRead: '缓存命中',
       cacheHitRate: '缓存命中率',
       noData: '暂无用量数据，发起一次对话后即会开始统计',

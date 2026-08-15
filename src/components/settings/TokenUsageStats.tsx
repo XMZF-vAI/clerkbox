@@ -99,7 +99,10 @@ export default function TokenUsageStats() {
               icon={TrendingUp}
               label={t('settings.general.cacheHitRate')}
               value={cacheHitRate.toFixed(1) + '%'}
-              hint={`${formatTokens(stats.totalCacheReadTokens)} / ${formatTokens(cacheTotal)}`}
+              hint={`${formatTokens(stats.totalCacheReadTokens)} / ${formatTokens(
+                // 分母与计算口径一致：报了写入用 read/(read+creation)，否则用 read/prompt
+                stats.totalCacheCreationTokens > 0 ? cacheTotal : stats.totalPromptTokens,
+              )}`}
               accent="success"
             />
           </div>
@@ -123,7 +126,20 @@ export default function TokenUsageStats() {
             <StatCard
               icon={Database}
               label={t('settings.general.cacheCreation')}
-              value={formatTokens(stats.totalCacheCreationTokens)}
+              value={
+                // 有命中却无写入 → 供应商根本不上报写入量（MiniMax 等 OpenAI 兼容端点），
+                // 显示"未上报"而不是误导性的 0
+                stats.totalCacheCreationTokens > 0
+                  ? formatTokens(stats.totalCacheCreationTokens)
+                  : stats.totalCacheReadTokens > 0
+                    ? t('settings.general.cacheCreationNotReported')
+                    : formatTokens(0)
+              }
+              hint={
+                stats.totalCacheCreationTokens === 0 && stats.totalCacheReadTokens > 0
+                  ? t('settings.general.cacheCreationNotReportedHint')
+                  : undefined
+              }
               accent="info"
             />
             <StatCard
