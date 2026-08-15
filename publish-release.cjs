@@ -69,7 +69,7 @@ async function uploadAsset(uploadUrl, filePath) {
     ], { maxBuffer: 10 * 1024 * 1024 }, (error, stdout) => {
       if (error) return reject(error)
       try { resolve(JSON.parse(stdout)) } catch { reject(new Error(`unexpected response: ${stdout.slice(0, 300)}`)) }
-    }))
+    })
   })
 }
 
