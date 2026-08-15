@@ -478,6 +478,28 @@ export function flushParserState(compat: ApiCompat, state: ParserState): Normali
     : { kind: 'content', text: pending }]
 }
 
+/**
+ * OpenAI 兼容端点各家的缓存命中字段命名不一，统一归一到 Anthropic 风格：
+ * - OpenAI / GLM / Qwen：usage.prompt_tokens_details.cached_tokens
+ * - DashScope 兼容模式：usage.input_tokens_details.cached_tokens
+ * - DeepSeek：usage.prompt_cache_hit_tokens
+ * 归一后的 cache_read_input_tokens 供消息级展示与全局统计面板使用。
+ */
+function normalizeOpenAIUsage(u: TokenUsage): TokenUsage {
+  if (u.cache_read_input_tokens) return u
+  const raw = u as TokenUsage & {
+    prompt_tokens_details?: { cached_tokens?: number }
+    input_tokens_details?: { cached_tokens?: number }
+    prompt_cache_hit_tokens?: number
+  }
+  const cached =
+    raw.prompt_tokens_details?.cached_tokens ??
+    raw.input_tokens_details?.cached_tokens ??
+    raw.prompt_cache_hit_tokens
+  if (!cached) return u
+  return { ...u, cache_read_input_tokens: cached }
+}
+
 function parseOpenAIEvent(json: unknown, state: ParserState): NormalizedEvent[] {
   const events: NormalizedEvent[] = []
   const data = json as {
@@ -494,7 +516,7 @@ function parseOpenAIEvent(json: unknown, state: ParserState): NormalizedEvent[] 
   }
 
   // usage 通常在独立的最后一个 chunk 里
-  if (data.usage) events.push({ kind: 'usage', usage: data.usage })
+  if (data.usage) events.push({ kind: 'usage', usage: normalizeOpenAIUsage(data.usage) })
 
   const choice = data.choices?.[0]
   if (!choice) return events
