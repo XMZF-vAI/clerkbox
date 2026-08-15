@@ -51,9 +51,13 @@ export default function TokenUsageStats() {
 
   const hasData = stats.totalCalls > 0
   const cacheTotal = stats.totalCacheCreationTokens + stats.totalCacheReadTokens
-  const cacheHitRate = cacheTotal > 0
+  // OpenAI 兼容端点只报命中不报写入（creation=0），此时按 read/prompt 算真实命中率
+  // （两种协议的 prompt_tokens 均包含 cached 子集）
+  const cacheHitRate = stats.totalCacheCreationTokens > 0
     ? (stats.totalCacheReadTokens / cacheTotal) * 100
-    : 0
+    : stats.totalPromptTokens > 0
+      ? (stats.totalCacheReadTokens / stats.totalPromptTokens) * 100
+      : 0
 
   return (
     <div className="space-y-3 p-4 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10">

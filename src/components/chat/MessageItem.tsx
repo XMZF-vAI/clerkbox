@@ -669,7 +669,12 @@ function MessageItem({ message, vibe = false, sessionId }: MessageItemProps) {
   const cacheReadTokens = message.usage?.cache_read_input_tokens ?? 0
   const cacheCreatedTokens = message.usage?.cache_creation_input_tokens ?? 0
   const cacheEligibleTokens = cacheReadTokens + cacheCreatedTokens
-  const cacheHitRate = cacheEligibleTokens > 0 ? Math.round(cacheReadTokens / cacheEligibleTokens * 100) : 0
+  // OpenAI 兼容端点只报命中不报写入（creation=0），此时按 read/prompt 算真实命中率
+  const cacheHitRate = cacheCreatedTokens > 0
+    ? Math.round(cacheReadTokens / cacheEligibleTokens * 100)
+    : message.usage?.prompt_tokens
+      ? Math.round(cacheReadTokens / message.usage.prompt_tokens * 100)
+      : 0
 
   const handleCopy = async () => {
     try {
