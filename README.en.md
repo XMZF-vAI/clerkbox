@@ -59,7 +59,7 @@
 | **Sub-agent orchestration** | Built-in read-only Scout and full-tool General assistant, plus custom sub-agents via frontmatter with isolated contexts. |
 | **Skills marketplace** | One-click install of prompt templates from the CocoLoop community, auto-injected into the system prompt. |
 | **Long-term memory** | `user` / `feedback` / `project` / `reference` memory entries persist across sessions. |
-| **Thinking control** | Provider-level default thinking tiers (low / medium / high); model picker groups models by thinking capability. |
+| **Thinking & per-model tuning** | Per-model thinking toggle / tiers (low / medium / high), temperature and token limits; model picker groups models by thinking capability. |
 | **AGENTS.md project instructions** | Auto-reads `AGENTS.md` from the working directory and injects it into the system prompt; falls back to `CLAUDE.md`. |
 | **VIBE immersive mode** | Fullscreen background, liquid-glass UI, and a floating music player. |
 | **MD3 dynamic theming** | Material Design 3 color engine with light / dark / system modes and custom seed color. |
@@ -77,7 +77,8 @@
 - Presets only fill in the baseUrl and protocol (OpenAI or Anthropic) when adding a provider
 - Model IDs are pulled live from each provider's `/models` endpoint, so the catalog never goes stale
 - Switch the current model at any time during a session; the main agent and sub-agents can use different models
-- Thinking-capable models are auto-detected by keyword match; unmatched models can be toggled manually in advanced settings
+- Thinking-capable models are auto-detected by keyword match; unmatched models can be toggled manually in per-model settings
+- **Per-model advanced settings**: configure thinking toggle / tiers, temperature, context budget and output limits independently for each model
 
 ### 2. ReAct Tool Loop
 
@@ -231,6 +232,7 @@ All configuration is managed through the **Settings panel** and persisted locall
 - **Language**: Chinese (default) / English, switchable at runtime
 - **AGENTS.md injection**: auto-read `AGENTS.md` from the working-directory root into the system prompt; optional `CLAUDE.md` fallback
 - **Token usage**: total API calls, input/output tokens, cache writes/hits and hit rate (Settings → General)
+- **Per-model advanced settings**: configure thinking toggle / tiers, Temperature, context budget and output Max Tokens independently for each model
 - **WebUI remote access**: see [WebUI Remote Access](#webui-remote-access)
 
 ### Data Directory Layout
@@ -583,14 +585,15 @@ electron-builder configuration lives in the `build` field of [package.json](pack
 - Welcome tour
 - Long-context auto-compaction (compact)
 - Token usage tracking and stats panel
-- Anthropic Prompt Caching (static system-prefix caching + hit-rate display)
+- Prefix-cache optimization (static/dynamic system split + frozen memory snapshot + Anthropic dual breakpoints; 90%+ in-session hit rate)
 - Dangerous command blocking
 - Automatic file write backup
 - i18n (Chinese / English)
 - AGENTS.md project instruction injection (cross-tool standard, CLAUDE.md fallback)
 - Hard-stop tool execution (main-process child-process tracking and termination)
 - Multi-provider presets with automatic `/models` fetching
-- Thinking control (provider default tiers + model picker grouped by thinking capability)
+- Thinking control (toggle / tier modes + model picker grouped by thinking capability)
+- Per-model advanced settings (independent temperature / thinking tiers / token limits per model)
 - WebUI remote access (browser control + dual-mode data sync + server auto-start)
 
 ---
