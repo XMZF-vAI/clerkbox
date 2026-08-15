@@ -464,6 +464,20 @@ function splitThinkTags(text: string, state: ParserState): { thinking: string; c
   return out.filter((p) => p.thinking || p.content)
 }
 
+/**
+ * 流结束时冲刷 splitThinkTags 扣住的尾料（最多 7 字符）。
+ * 不冲刷的话每条回复结尾会被吞掉最多 7 个字符；若 </think> 落在尾料里，
+ * 还会把整段正文误判成思考。anthropic 协议不用 pendingText，恒返回空。
+ */
+export function flushParserState(compat: ApiCompat, state: ParserState): NormalizedEvent[] {
+  const pending = state.pendingText
+  state.pendingText = ''
+  if (compat === 'anthropic' || !pending) return []
+  return [state.insideThinkTag
+    ? { kind: 'thinking', text: pending }
+    : { kind: 'content', text: pending }]
+}
+
 function parseOpenAIEvent(json: unknown, state: ParserState): NormalizedEvent[] {
   const events: NormalizedEvent[] = []
   const data = json as {

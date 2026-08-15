@@ -21,6 +21,7 @@ import {
   canKeepThinking,
   createParserState,
   parseEvent,
+  flushParserState,
   type AnthropicThinkingBlock,
   type NeutralMessage,
 } from '../lib/api-adapters'
@@ -350,6 +351,13 @@ export function useAgent(sessionId: string) {
             throw new Error(ev.message)
         }
       }
+    }
+
+    // 流结束：冲刷 <think> 跨分片解析扣住的尾部（最多 7 字符），
+    // 否则每条回复的结尾都会被吞掉
+    for (const ev of flushParserState(stream.compat, state)) {
+      if (ev.kind === 'content') callbacks.onContent(ev.text)
+      else if (ev.kind === 'thinking') callbacks.onThinking(ev.text)
     }
 
     return toolCallBuffers
