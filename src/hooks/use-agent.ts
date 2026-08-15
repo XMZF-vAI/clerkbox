@@ -27,6 +27,16 @@ import {
 } from '../lib/api-adapters'
 import type { ApiCompat, Message, ToolCall, ToolResult, StreamingToolCall, TokenUsage } from '../types/agent'
 
+/** Vite 注入的 env（tsconfig 未含 vite/client 类型，安全取值） */
+const IS_DEV = (import.meta as unknown as { env?: { DEV?: boolean } }).env?.DEV ?? false
+
+/** 轻量字符串哈希（djb2）—— dev 下校验静态 system 段是否跨请求字节一致 */
+function hashString(s: string): string {
+  let h = 5381
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0
+  return (h >>> 0).toString(36)
+}
+
 /** Normalize separators and dot segments for path-comparison only. */
 function normalizePathForComparison(value: string): string {
   const slashNormalized = value.replace(/\\/g, '/').replace(/\/+/g, '/')
@@ -269,6 +279,12 @@ export function useAgent(sessionId: string) {
   const { addMessage, updateMessage, setStreaming, sessions, compactSession, setSessionStatus } = useChatStore()
   const tokenTrackerRef = useRef<TokenTracker>(new TokenTracker())
   const sessionReadFilesRef = useRef<Map<string, { content: string; timestamp: number }>>(new Map())
+  /** 会话级冻结的记忆快照：前缀缓存要求 system 段字节一致，
+   *  而 save_memory 会在会话中途改写记忆文件 → memoryPrompt 变化 → 动态段之后全部缓存作废。
+   *  故同一会话（含 workingDir/homeDir）内只构建一次，新记忆下个会话生效（快照语义）。 */
+  const sessionMemoryRef = useRef<{ key: string; prompt: string } | null>(null)
+  /** dev 校验用：静态 system 段最近一次的 (来源, 哈希) */
+  const staticSystemHashRef = useRef<{ origin: string; hash: string } | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   /** Get working directory for current session, with default fallback */
@@ -473,7 +489,6 @@ export function useAgent(sessionId: string) {
     let totalTokens = 0
     for (const m of msgs) {
       totalTokens += estimateTokens(m.content || '')
-      totalTokens += estimateTokens(m._systemSuffix || '')
       if (m.tool_calls) {
         totalTokens += estimateTokens(JSON.stringify(m.tool_calls))
       }
@@ -487,10 +502,12 @@ export function useAgent(sessionId: string) {
 
     // Need to truncate - find a safe cut point
     // We must NOT cut in the middle of a tool_calls → tool response sequence
-    const system = msgs[0]
-    const rest = msgs.slice(1)
+    // 前置的全部 system 消息（静态段+动态段）始终保留，只截对话历史
+    const systemCount = msgs.findIndex((m) => m.role !== 'system')
+    const system = msgs.slice(0, systemCount === -1 ? msgs.length : systemCount)
+    const rest = msgs.slice(system.length)
 
-    let runningTokens = estimateTokens(system.content || '')
+    let runningTokens = system.reduce((acc, m) => acc + estimateTokens(m.content || ''), 0)
 
     // Walk from most recent backwards, accumulating tokens
     // Find the earliest message we can keep without breaking sequence integrity
@@ -498,7 +515,7 @@ export function useAgent(sessionId: string) {
 
     for (let i = rest.length - 1; i >= 0; i--) {
       const m = rest[i]
-      const mTokens = estimateTokens(m.content || '') + estimateTokens(m._systemSuffix || '') + estimateTokens(m.tool_calls ? JSON.stringify(m.tool_calls) : '') + estimateTokens(m.reasoning_content || '')
+      const mTokens = estimateTokens(m.content || '') + estimateTokens(m.tool_calls ? JSON.stringify(m.tool_calls) : '') + estimateTokens(m.reasoning_content || '')
 
       if (runningTokens + mTokens > MAX_INPUT_TOKENS && (rest.length - i) >= 4) {
         // We've hit the budget, cut here — but check if this is a safe cut point
@@ -548,7 +565,7 @@ export function useAgent(sessionId: string) {
       break
     }
 
-    const kept = [system, ...rest.slice(cutIndex)]
+    const kept = [...system, ...rest.slice(cutIndex)]
     return kept
   }
 
@@ -606,12 +623,34 @@ export function useAgent(sessionId: string) {
       if (permissionMode === 'plan') dynamicSystemContent += PLAN_MODE_PROMPT
     }
 
+    // 静/动拆分成两条 system 消息：供应商前缀缓存按"首个不一致 token"作废其后全部。
+    // 静态段（SYSTEM_PROMPT / 子 agent prompt）单独在前，跨会话字节一致仍可命中缓存；
+    // 动态段（工作目录/记忆/技能索引/AGENTS.md）变化只作废动态段之后的部分。
+
+    // dev 校验：静态段在同来源下跨请求必须字节一致——若未来有人把易变内容
+    // （时间戳/记忆/技能索引等）塞回静态段，这里立刻暴露，避免缓存命中率悄悄归零。
+    if (IS_DEV) {
+      const origin = extraSystemPrompt ? 'sub' : 'main'
+      const hash = hashString(staticSystemContent)
+      const prev = staticSystemHashRef.current
+      if (prev && prev.origin === origin && prev.hash !== hash) {
+        console.warn(
+          `[cache] static system prompt ("${origin}") changed between requests — prefix cache will miss. ` +
+            `Ensure no volatile content (memory/skills/timestamps) leaks into the static segment.`,
+        )
+      }
+      staticSystemHashRef.current = { origin, hash }
+    }
+
     const result: NeutralMessage[] = [
       {
         role: 'system',
         content: staticSystemContent,
         _cacheControl: true,
-        _systemSuffix: dynamicSystemContent,
+      },
+      {
+        role: 'system',
+        content: dynamicSystemContent,
       },
     ]
 
@@ -815,15 +854,24 @@ export function useAgent(sessionId: string) {
   ) => {
     let conversationMessages = [...initialMessages]
 
-    // Pre-fetch memory prompt once per react loop
+    // Pre-fetch memory prompt —— 会话级冻结快照（见 sessionMemoryRef 注释）：
+    // 每轮 reactLoop 重新构建的话，本轮 save_memory 写入的记忆会让下一轮
+    // memoryPrompt 变化，动态 system 段之后的前缀缓存全部作废。
     const workingDir = getWorkingDir()
     const homeDir = ipc.homeDir()
     let memoryPrompt = ''
     if (homeDir) {
-      try {
-        memoryPrompt = await buildMemoryPrompt(workingDir, homeDir)
-      } catch {
-        memoryPrompt = ''
+      const snapKey = `${sessionId}|${homeDir}|${workingDir}`
+      const snap = sessionMemoryRef.current
+      if (snap && snap.key === snapKey) {
+        memoryPrompt = snap.prompt
+      } else {
+        try {
+          memoryPrompt = await buildMemoryPrompt(workingDir, homeDir)
+        } catch {
+          memoryPrompt = ''
+        }
+        sessionMemoryRef.current = { key: snapKey, prompt: memoryPrompt }
       }
     }
 

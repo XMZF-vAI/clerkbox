@@ -22,7 +22,6 @@ export interface NeutralMessage {
   /** 消息 id，用于在思考签名缓存里查回原始 thinking block（仅 anthropic 需要） */
   _msgId?: string
   _cacheControl?: boolean
-  _systemSuffix?: string
 }
 
 export interface NeutralTool {
@@ -55,6 +54,8 @@ export interface AnthropicThinkingBlock {
   type: 'thinking'
   thinking: string
   signature: string
+  /** 请求侧可加缓存断点标记；解析侧生成的 block 不带 */
+  cache_control?: { type: 'ephemeral' }
 }
 
 // ── 端点与请求头 ──
@@ -160,10 +161,7 @@ function buildOpenAIBody(o: BuildBodyOptions): Record<string, unknown> {
 
 /** 去掉只在前端流转的内部字段，别发给服务端 */
 function stripInternal(m: NeutralMessage) {
-  const { _msgId: _, _cacheControl: __, _systemSuffix, ...rest } = m
-  if (m.role === 'system' && _systemSuffix) {
-    return { ...rest, content: `${m.content}\n\n${_systemSuffix}` }
-  }
+  const { _msgId: _, _cacheControl: __, ...rest } = m
   return rest
 }
 
@@ -172,8 +170,8 @@ type AnthropicCacheControl = { type: 'ephemeral' }
 type AnthropicTextBlock = { type: 'text'; text: string; cache_control?: AnthropicCacheControl }
 type AnthropicBlock =
   | AnthropicTextBlock
-  | { type: 'tool_use'; id: string; name: string; input: unknown }
-  | { type: 'tool_result'; tool_use_id: string; content: string }
+  | { type: 'tool_use'; id: string; name: string; input: unknown; cache_control?: AnthropicCacheControl }
+  | { type: 'tool_result'; tool_use_id: string; content: string; cache_control?: AnthropicCacheControl }
   | AnthropicThinkingBlock
 
 interface AnthropicMessage {
@@ -268,13 +266,8 @@ export function toAnthropicMessages(
   for (const m of msgs) {
     if (m.role === 'system') {
       if (m.content) {
-        system.push({
-          type: 'text',
-          text: m.content,
-          ...(promptCaching && m._cacheControl ? { cache_control: { type: 'ephemeral' as const } } : {}),
-        })
+        system.push({ type: 'text', text: m.content })
       }
-      if (m._systemSuffix) system.push({ type: 'text', text: m._systemSuffix })
       continue
     }
 
@@ -331,6 +324,23 @@ export function toAnthropicMessages(
       out[0] = { role: 'user', content: texts }
     } else {
       out.shift()
+    }
+  }
+
+  // ── prompt caching 断点（最多 4 个，这里用 2 个）──
+  // Anthropic 只在断点处写入缓存、命中取最长前缀（tools → system → messages 顺序）：
+  //   断点1 = 最后一个 system block：缓存 tools + 全部 system（静态段+动态段）
+  //   断点2 = 最后一条消息的最后一个 block：缓存全部对话历史
+  // 每轮请求断点2前移，上一轮的断点即最长可命中前缀 → 稳态下每轮只有新增尾部按写入计费。
+  if (promptCaching) {
+    if (system.length > 0) {
+      system[system.length - 1].cache_control = { type: 'ephemeral' }
+    }
+    const lastMsg = out[out.length - 1]
+    if (lastMsg && lastMsg.content.length > 0) {
+      // 浅拷贝再标记：避免给 thinkingBlocks 缓存里回放的 thinking block 对象加字段
+      const lastBlock = lastMsg.content[lastMsg.content.length - 1]
+      lastMsg.content[lastMsg.content.length - 1] = { ...lastBlock, cache_control: { type: 'ephemeral' } }
     }
   }
 
