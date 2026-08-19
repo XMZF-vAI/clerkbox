@@ -3,7 +3,7 @@ import { ChevronDown, ChevronUp, Wrench } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { Message } from '../../types/agent'
 import MessageItem from './MessageItem'
-import ThinkingShimmer from './ThinkingShimmer'
+import AgentStatusIndicator from './AgentStatusIndicator'
 
 interface MessageListProps {
   messages: Message[]
@@ -149,11 +149,6 @@ const TurnPanel = memo(function TurnPanel({ turn, isLastTurn, isStreaming, vibe 
 
       {/* 最终回复（含 thinking + content） */}
       {finalMsg && <MessageItem message={finalMsg} vibe={vibe} />}
-
-      {/* Extra streaming indicator for when no assistant message exists yet */}
-      {isActiveTurn && !finalMsg && !turn.userMsg.isCompactSummary && (
-        <ThinkingShimmer />
-      )}
     </div>
   )
 })
@@ -199,6 +194,8 @@ export default function MessageList({ messages, isStreaming, vibe }: MessageList
           vibe={vibe}
         />
       ))}
+      {/* Agent 工作状态指示器：像素网格 + 阶段文案 + 耗时，固定在对话最底部 */}
+      {isStreaming && <AgentStatusIndicator messages={messages} vibe={vibe} />}
       <div ref={bottomRef} />
     </div>
   )

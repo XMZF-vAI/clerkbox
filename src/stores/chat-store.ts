@@ -119,15 +119,13 @@ export function getSessionAbortController(sessionId: string): AbortController | 
 let lastSyncedRevision = -1
 
 /**
- * 判断空"新会话"是否陈旧可删。
- * 双端（桌面/WebUI）各自启动时都会建一个空会话 —— 10 分钟内的空会话可能是
- * 另一端正活跃的，误删会让该端后续消息变孤儿；只有陈旧的空壳才值得清理。
+ * 判断是否为可清理的空会话。
+ * 空会话不再持久化（createSession 只建内存会话，首条消息落库时由
+ * dbAddMessage 自愈补建会话行），因此 DB 中出现的空会话均为遗留垃圾，
+ * 任何时点都可安全删除；内存中非 active 的空会话同样是垃圾。
  */
-const STALE_EMPTY_MS = 10 * 60 * 1000
-const isStaleEmptySession = (s: Session): boolean =>
-  s.messages.length === 0 &&
-  s.title === '新会话' &&
-  Date.now() - Math.max(s.updatedAt, s.createdAt) > STALE_EMPTY_MS
+const isEmptySession = (s: Session): boolean =>
+  s.messages.length === 0 && s.title === '新会话'
 
 /** 写入指定会话的 AbortController；若传入 null 则清除 */
 export function setSessionAbortController(sessionId: string, controller: AbortController | null): void {
@@ -219,6 +217,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const sessions: Session[] = []
       for (const row of rows) {
         const msgRows = await ipc.dbGetMessages(row.id)
+        // 空会话不再落库，DB 里的空壳全是遗留垃圾，启动时直接清掉
+        if (msgRows.length === 0 && row.title === '新会话') {
+          logPersistenceFailure('delete empty session', ipc.dbDeleteSession(row.id))
+          continue
+        }
         sessions.push({
           id: row.id,
           title: row.title,
@@ -230,20 +233,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // 按 updatedAt 降序排序，使最近更新的会话排在最前，与新建会话时的 prepend 行为一致
       sessions.sort((a, b) => b.updatedAt - a.updatedAt)
 
-      // 启动时默认创建一个新会话，只清理陈旧空会话（新空会话可能是另一端活跃的）
+      // 启动时默认创建一个新会话（纯内存，发首条消息时才落库）
       const newSession = createEmptySession()
-      const cleanedSessions = sessions.filter((s) => !isStaleEmptySession(s))
-      for (const s of sessions) {
-        if (isStaleEmptySession(s)) {
-          logPersistenceFailure('delete empty session', ipc.dbDeleteSession(s.id))
-        }
-      }
 
       // 加载用户曾选过的文件夹历史
       const recentsFolders = await ipc.dbGetRecents().catch(() => [])
 
       set({
-        sessions: [newSession, ...cleanedSessions],
+        sessions: [newSession, ...sessions],
         activeSessionId: newSession.id,
         recentsFolders,
         initialized: true,
@@ -276,6 +273,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (streaming.has(row.id) && local) {
           // 流式中：保留本地内存状态
           merged.push(local)
+          continue
+        }
+        // title 仍为'新会话'的 DB 会话：空会话不再落库，这些是遗留垃圾，
+        // 拉消息确认后直接删除（有消息的'新会话'正常保留）
+        if (row.title === '新会话') {
+          const msgRows = await ipc.dbGetMessages(row.id)
+          if (msgRows.length === 0) {
+            logPersistenceFailure('delete empty session', ipc.dbDeleteSession(row.id))
+            continue
+          }
+          merged.push({
+            id: row.id,
+            title: row.title,
+            messages: mapMessageRows(msgRows),
+            createdAt: row.created_at,
+            updatedAt: row.updated_at,
+            workingDir: local?.workingDir,
+            defaultWorkDir: local?.defaultWorkDir,
+          })
           continue
         }
         // DB 有更新（updatedAt 变化）或本地没有该会话 → 从 DB 拉取消息。
@@ -319,10 +335,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   createSession: () => {
     const session = createEmptySession()
     set((state) => {
-      // Auto-delete stale empty sessions (fresh empties may belong to the other client)
-      const cleanedSessions = state.sessions.filter((s) => !isStaleEmptySession(s))
+      // 空会话不落库：没发过消息的新会话刷新/关闭即消失，不再堆积在历史记录里。
+      // 首条消息落库时由 dbAddMessage 的自愈逻辑补建会话行。
+      // 顺带清掉内存里其他空会话（连点新建只保留最新一个），
+      // 若历史版本把它们写进过 DB 也一并删除。
+      const cleanedSessions = state.sessions.filter((s) => !isEmptySession(s))
       for (const s of state.sessions) {
-        if (isStaleEmptySession(s)) {
+        if (isEmptySession(s)) {
           logPersistenceFailure('delete empty session', ipc.dbDeleteSession(s.id))
         }
       }
@@ -331,20 +350,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         activeSessionId: session.id,
       }
     })
-    logPersistenceFailure('create session', ipc.dbCreateSession({
-      id: session.id,
-      title: session.title,
-      created_at: session.createdAt,
-      updated_at: session.updatedAt,
-    }))
     return session.id
   },
 
   setActiveSession: (id) => {
     set((state) => {
-      // Auto-delete stale empty sessions when switching away (fresh ones may be another client's)
+      // 切走时清掉非 active 的空会话（没说过话的会话不配留在历史记录里）
       const cleanedSessions = state.sessions.map((s) => {
-        if (s.id !== id && isStaleEmptySession(s)) {
+        if (s.id !== id && isEmptySession(s)) {
           logPersistenceFailure('delete empty session', ipc.dbDeleteSession(s.id))
           return null
         }

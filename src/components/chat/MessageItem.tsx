@@ -3,7 +3,6 @@ import { Copy, Check, Terminal, FileText, FolderOpen, AlertTriangle, ChevronDown
 import { useTranslation } from 'react-i18next'
 import type { Message, StreamingToolCall } from '../../types/agent'
 import { useChatStore } from '../../stores/chat-store'
-import ThinkingShimmer from './ThinkingShimmer'
 import { SubAgentCard } from './SubAgentCard'
 
 interface MessageItemProps {
@@ -838,11 +837,6 @@ function MessageItem({ message, vibe = false, sessionId }: MessageItemProps) {
             onToggle={() => setThinkingExpanded(!thinkingExpanded)}
             vibe={vibe}
           />
-        )}
-
-        {/* Thinking indicator when streaming but no visible output yet */}
-        {!isUser && message._isStreaming && !message.content && !message.thinkingContent && !message.streamingToolCalls?.length && (
-          <ThinkingShimmer />
         )}
 
         {/* Message content bubble */}

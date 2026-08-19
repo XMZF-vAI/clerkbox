@@ -211,6 +211,29 @@
   animation: shimmer 2.8s linear infinite;
 }
 
+/* ── Agent 工作状态指示器（像素网格 + shimmer 标签）── */
+@keyframes pixel-on {
+  0%, 100% { opacity: 0.15; }
+  18%, 72% { opacity: 1; }
+}
+
+.agent-status-label {
+  --asl-base: rgb(var(--shimmer-base-rgb));
+  --asl-peak: rgb(var(--shimmer-peak-rgb));
+  background-image: linear-gradient(90deg, var(--asl-base) 35%, var(--asl-peak) 50%, var(--asl-base) 65%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer 1.4s linear infinite;
+}
+
+/* VIBE 模式叠在 3D 场景上，统一用白色系保证可读 */
+.agent-status-label-vibe {
+  --asl-base: rgb(255 255 255 / 0.55);
+  --asl-peak: rgb(255 255 255);
+}
+
 @layer base {
   html {
     font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
