@@ -9,6 +9,7 @@ import VibeBackground from './components/vibe/VibeBackground'
 import VibeMusicPlayer from './components/vibe/VibeMusicPlayer'
 import VibeControls from './components/vibe/VibeControls'
 import { useSettingsStore, migrateProvidersIfNeeded, hydrateProviderApiKeys } from './stores/settings-store'
+import { useAccountStore } from './stores/account-store'
 import { useUIStore } from './stores/ui-store'
 import { useVibeStore } from './stores/vibe-store'
 import { applyColorScheme, resolveSeed } from './lib/theme-engine'
@@ -72,6 +73,7 @@ export default function App() {
     if (!hydrated) return
     migrateProvidersIfNeeded()
     void hydrateProviderApiKeys()
+    void useAccountStore.getState().init()
   }, [hydrated])
 
   // 圆角 + transform 创建包含块，使内部 fixed 元素（弹窗、VIBE 控件）也被圆角裁剪

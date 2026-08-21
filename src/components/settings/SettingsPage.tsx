@@ -1,7 +1,8 @@
 import { useState, useEffect, useId, useRef } from 'react'
-import { Cpu, Palette, RotateCcw, Check, AlertCircle, Info, X, Plus, Pencil, Trash2, Sparkles, Languages, FileText, Settings } from 'lucide-react'
+import { Cpu, Palette, RotateCcw, Check, AlertCircle, Info, X, Plus, Pencil, Trash2, Sparkles, Languages, FileText, Settings, User, LogOut, Upload, Download, Loader2, RefreshCw } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useSettingsStore } from '../../stores/settings-store'
+import { useAccountStore, avatarColorFor, initialOf } from '../../stores/account-store'
 import { useVibeStore } from '../../stores/vibe-store'
 import { MACARON_PRESETS, schemeSwatches } from '../../lib/theme-engine'
 import { SUPPORTED_LANGUAGES } from '../../i18n'
@@ -12,7 +13,7 @@ import ConfirmDialog from '../ui/ConfirmDialog'
 
 import APP_ICON from '../../assets/icon.png'
 
-type Tab = 'api' | 'general' | 'appearance' | 'about'
+type Tab = 'api' | 'general' | 'appearance' | 'account' | 'about'
 
 const THEME_LABEL_KEY: Record<string, string> = {
   light: 'settings.appearance.light',
@@ -22,15 +23,25 @@ const THEME_LABEL_KEY: Record<string, string> = {
 
 export default function SettingsPage({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation()
-  const [activeTab, setActiveTab] = useState<Tab>('api')
+  // 初始 tab 消费侧边栏账户入口留下的 transient 标记（useState 初始值只取一次）
+  const [activeTab, setActiveTab] = useState<Tab>(() => useSettingsStore.getState().pendingSettingsTab ?? 'api')
   const settings = useSettingsStore()
+  const account = useAccountStore()
   const isVibeMode = useVibeStore((s) => s.isVibeMode)
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle')
   const [testError, setTestError] = useState('')
   const [showResetConfirmation, setShowResetConfirmation] = useState(false)
+  const [confirmDownload, setConfirmDownload] = useState(false)
   const titleId = useId()
   const dialogRef = useRef<HTMLDivElement>(null)
   const closeButtonRef = useRef<HTMLButtonElement>(null)
+
+  // 消费后立即清空标记，下次打开设置页回到默认 tab
+  useEffect(() => {
+    if (useSettingsStore.getState().pendingSettingsTab) {
+      useSettingsStore.getState().updateSettings({ pendingSettingsTab: undefined })
+    }
+  }, [])
 
   const activeProvider = settings.providers.find((p) => p.id === settings.activeProviderId)
   const activeLabel =
@@ -104,6 +115,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
     { key: 'api', label: t('settings.tabs.api'), icon: Cpu },
     { key: 'general', label: t('settings.tabs.general'), icon: Settings },
     { key: 'appearance', label: t('settings.tabs.appearance'), icon: Palette },
+    { key: 'account', label: t('settings.tabs.account'), icon: User },
     { key: 'about', label: t('settings.tabs.about'), icon: Info },
   ]
 
@@ -387,6 +399,175 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
               </div>
             )}
 
+            {activeTab === 'account' && (
+              <div className="space-y-5">
+                {!account.loggedIn || !account.user ? (
+                  <>
+                    {/* 未登录：说明 + 登录入口 */}
+                    <div className="flex items-start gap-3 p-4 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10">
+                      <User size={16} className="text-md-primary flex-shrink-0 mt-0.5" />
+                      <p className="text-xs text-dark-onSurfaceVariant/70 leading-relaxed">
+                        {t('account.desc')}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void account.login()}
+                      disabled={account.loggingIn}
+                      className="flex items-center justify-center gap-1.5 px-4 py-2 rounded-md3-md bg-md-primary text-md-onPrimary hover:bg-md-primary/90 transition-colors text-sm font-medium disabled:opacity-60"
+                    >
+                      {account.loggingIn
+                        ? <Loader2 size={15} className="animate-spin" />
+                        : <User size={15} />}
+                      <span>{account.loggingIn ? t('account.loginPending') : t('account.login')}</span>
+                    </button>
+                    {account.lastError && (
+                      <p role="alert" className="flex items-center gap-1 text-sm text-md-error">
+                        <AlertCircle size={14} className="flex-shrink-0" />
+                        <span className="break-all">{account.lastError}</span>
+                      </p>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    {/* 用户信息卡 */}
+                    <div className="flex items-center gap-3 p-4 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10">
+                      <span
+                        className="w-10 h-10 rounded-full flex items-center justify-center text-white text-base font-semibold flex-shrink-0"
+                        style={{ backgroundColor: avatarColorFor(account.user.username) }}
+                        aria-hidden
+                      >
+                        {initialOf(account.user.username)}
+                      </span>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-medium text-dark-onSurface truncate">
+                            {account.user.username}
+                          </span>
+                          {account.user.isBetaUser && (
+                            <span className="px-1.5 py-0.5 rounded-md3-xs bg-md-tertiary/15 text-md-tertiary text-[10px] font-medium whitespace-nowrap flex-shrink-0">
+                              {t('account.beta')}
+                            </span>
+                          )}
+                        </div>
+                        {account.user.email && (
+                          <div className="text-xs text-dark-onSurfaceVariant truncate mt-0.5">
+                            {account.user.email}
+                          </div>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void account.logout()}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-md3-sm text-xs text-dark-onSurfaceVariant hover:bg-md-error/15 hover:text-md-error transition-colors flex-shrink-0"
+                      >
+                        <LogOut size={13} />
+                        <span>{t('account.logout')}</span>
+                      </button>
+                    </div>
+
+                    {/* 同步设置卡 */}
+                    <div className="space-y-3 p-4 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10">
+                      <div className="flex items-center gap-2">
+                        <RefreshCw size={14} className="text-md-primary flex-shrink-0" />
+                        <span className="text-sm font-medium text-dark-onSurface">
+                          {t('account.sync.title')}
+                        </span>
+                      </div>
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={account.syncMemory}
+                          onChange={(e) => account.setSyncMemory(e.target.checked)}
+                          className="accent-md-primary"
+                        />
+                        <span className="text-xs text-dark-onSurfaceVariant">{t('account.sync.memory')}</span>
+                      </label>
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={account.syncModels}
+                          onChange={(e) => account.setSyncModels(e.target.checked)}
+                          className="accent-md-primary"
+                        />
+                        <span className="text-xs text-dark-onSurfaceVariant">{t('account.sync.models')}</span>
+                      </label>
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={account.autoSync}
+                          onChange={(e) => account.setAutoSync(e.target.checked)}
+                          className="accent-md-primary"
+                        />
+                        <span className="text-xs text-dark-onSurfaceVariant">{t('account.sync.auto')}</span>
+                      </label>
+                      <p className="text-xs text-dark-onSurfaceVariant/60 leading-relaxed">
+                        {t('account.sync.autoDesc')}
+                      </p>
+                    </div>
+
+                    {/* 操作行：上传 / 下载 */}
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void account.upload()}
+                        disabled={account.syncing !== 'idle'}
+                        className="flex items-center gap-1.5 px-3 py-2 rounded-md3-sm bg-md-primary text-md-onPrimary hover:bg-md-primary/90 transition-colors text-xs font-medium disabled:opacity-50"
+                      >
+                        {account.syncing === 'uploading'
+                          ? <Loader2 size={14} className="animate-spin" />
+                          : <Upload size={14} />}
+                        <span>
+                          {account.syncing === 'uploading' ? t('account.sync.uploading') : t('account.sync.upload')}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmDownload(true)}
+                        disabled={account.syncing !== 'idle'}
+                        className="flex items-center gap-1.5 px-3 py-2 rounded-md3-sm bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer transition-colors text-xs font-medium text-dark-onSurfaceVariant disabled:opacity-50"
+                      >
+                        {account.syncing === 'downloading'
+                          ? <Loader2 size={14} className="animate-spin" />
+                          : <Download size={14} />}
+                        <span>
+                          {account.syncing === 'downloading' ? t('account.sync.downloading') : t('account.sync.download')}
+                        </span>
+                      </button>
+                    </div>
+
+                    {/* 上次同步时间 */}
+                    <div className="space-y-1.5 p-4 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10 text-xs">
+                      <div className="text-dark-onSurfaceVariant/60 mb-1">{t('account.sync.lastSyncAt')}</div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-dark-onSurfaceVariant">{t('account.sync.memory')}</span>
+                        <span className="text-dark-onSurfaceVariant/70">
+                          {account.lastSyncAt?.memory
+                            ? new Date(account.lastSyncAt.memory).toLocaleString()
+                            : t('account.sync.never')}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-dark-onSurfaceVariant">{t('account.sync.models')}</span>
+                        <span className="text-dark-onSurfaceVariant/70">
+                          {account.lastSyncAt?.models
+                            ? new Date(account.lastSyncAt.models).toLocaleString()
+                            : t('account.sync.never')}
+                        </span>
+                      </div>
+                    </div>
+
+                    {account.lastError && (
+                      <p role="alert" className="flex items-center gap-1 text-sm text-md-error">
+                        <AlertCircle size={14} className="flex-shrink-0" />
+                        <span className="break-all">{account.lastError}</span>
+                      </p>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+
             {activeTab === 'about' && (
               <div className="flex flex-col items-center justify-center py-8">
                 <img src={APP_ICON} alt="ClerkBox" className="w-16 h-16 rounded-xl mb-4" />
@@ -446,6 +627,20 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
             setShowResetConfirmation(false)
           }}
           onCancel={() => setShowResetConfirmation(false)}
+        />
+      )}
+      {/* 从云端下载：覆盖本地确认 */}
+      {confirmDownload && (
+        <ConfirmDialog
+          title={t('account.sync.confirmTitle')}
+          message={t('account.sync.confirmMsg')}
+          confirmText={t('account.sync.download')}
+          variant="danger"
+          onConfirm={() => {
+            setConfirmDownload(false)
+            void account.download(true)
+          }}
+          onCancel={() => setConfirmDownload(false)}
         />
       )}
     </div>

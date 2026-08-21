@@ -1,4 +1,8 @@
 import type {
+  AccountStatus,
+  AccountSyncDownloadResult,
+  AccountSyncKind,
+  AccountSyncResultItem,
   ApiChunkPayload,
   ApiConnConfig,
   FetchedModel,
@@ -280,6 +284,18 @@ export const ipc = {
     isElectron ? window.clerkbox.kvSet(key, value) : webInvoke('kvSet', [key, value]),
   kvRemove: (key: string): Promise<void> =>
     isElectron ? window.clerkbox.kvRemove(key) : webInvoke('kvRemove', [key]),
+
+  // 热土账号系统：登录 / 登出 / 状态 / 数据段云同步
+  accountLogin: (): Promise<{ ok: true; status: AccountStatus } | { error: string }> =>
+    isElectron ? window.clerkbox.accountLogin() : webInvoke('accountLogin'),
+  accountLogout: (): Promise<void> =>
+    isElectron ? window.clerkbox.accountLogout() : webInvoke('accountLogout'),
+  accountGetStatus: (): Promise<AccountStatus> =>
+    isElectron ? window.clerkbox.accountGetStatus() : webInvoke('accountGetStatus'),
+  accountSyncUpload: (kinds: AccountSyncKind[]): Promise<{ results: AccountSyncResultItem[] }> =>
+    isElectron ? window.clerkbox.accountSyncUpload(kinds) : webInvoke('accountSyncUpload', [kinds]),
+  accountSyncDownload: (kinds: AccountSyncKind[], force: boolean): Promise<AccountSyncDownloadResult> =>
+    isElectron ? window.clerkbox.accountSyncDownload(kinds, force) : webInvoke('accountSyncDownload', [kinds, force]),
 }
 
 // ── WebUI 模式下异步预取 platform / homeDir ──

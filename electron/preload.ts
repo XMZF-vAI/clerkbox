@@ -1,5 +1,9 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
+  AccountStatus,
+  AccountSyncDownloadResult,
+  AccountSyncKind,
+  AccountSyncResultItem,
   ApiChunkPayload,
   ApiConnConfig,
   FetchedModel,
@@ -153,4 +157,14 @@ contextBridge.exposeInMainWorld('clerkbox', {
   kvGet: (key: string): Promise<string | null> => ipcRenderer.invoke('kvGet', key),
   kvSet: (key: string, value: string): Promise<void> => ipcRenderer.invoke('kvSet', key, value),
   kvRemove: (key: string): Promise<void> => ipcRenderer.invoke('kvRemove', key),
+
+  // 热土账号系统（登录 / 登出 / 数据段云同步）
+  accountLogin: (): Promise<{ ok: true; status: AccountStatus } | { error: string }> =>
+    ipcRenderer.invoke('accountLogin'),
+  accountLogout: (): Promise<void> => ipcRenderer.invoke('accountLogout'),
+  accountGetStatus: (): Promise<AccountStatus> => ipcRenderer.invoke('accountGetStatus'),
+  accountSyncUpload: (kinds: AccountSyncKind[]): Promise<{ results: AccountSyncResultItem[] }> =>
+    ipcRenderer.invoke('accountSyncUpload', kinds),
+  accountSyncDownload: (kinds: AccountSyncKind[], force: boolean): Promise<AccountSyncDownloadResult> =>
+    ipcRenderer.invoke('accountSyncDownload', kinds, force),
 })

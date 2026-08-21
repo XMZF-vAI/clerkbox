@@ -15,6 +15,7 @@ import {
   Check,
   ExternalLink,
   X,
+  User,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useChatStore } from '../../stores/chat-store'
@@ -26,6 +27,7 @@ import { useShallow } from 'zustand/react/shallow'
 import { useSkillsStore } from '../../stores/skills-store'
 import { useSettingsStore } from '../../stores/settings-store'
 import { useUIStore } from '../../stores/ui-store'
+import { useAccountStore, avatarColorFor, initialOf } from '../../stores/account-store'
 
 interface SidebarProps {
   collapsed: boolean
@@ -43,6 +45,9 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
   )
   const toggleSessionSkill = useSkillsStore((s) => s.toggleSessionSkill)
   const { showSkillStore, setShowSkillStore } = useUIStore()
+  // 账户入口：登录态与用户信息（用于头像/文案切换）
+  const accountLoggedIn = useAccountStore((s) => s.loggedIn)
+  const accountUser = useAccountStore((s) => s.user)
   const [showSkillPicker, setShowSkillPicker] = useState(false)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
   const [hoveredSessionId, setHoveredSessionId] = useState<string | null>(null)
@@ -106,6 +111,11 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
     toggleSessionSkill(id, workingDir)
   }
 
+  // 账户入口点击：打开设置页并定位到"账户"标签（一次性 transient 标记）
+  const handleOpenAccountSettings = () => {
+    useSettingsStore.getState().updateSettings({ showSettings: true, pendingSettingsTab: 'account' })
+  }
+
   if (collapsed) {
     return (
       <div className="w-14 flex flex-col items-center py-3 bg-dark-surfaceDim border-r border-dark-onSurfaceVariant/10">
@@ -164,6 +174,29 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
           title={t('sidebar.settings')}
         >
           <Settings size={18} />
+        </button>
+        {/* 账户按钮：未登录=用户图标 / 已登录=首字母圆头像 */}
+        <button
+          type="button"
+          onClick={handleOpenAccountSettings}
+          className={`w-8 h-8 mt-1 flex items-center justify-center transition-colors ${
+            accountLoggedIn && accountUser
+              ? 'rounded-full text-white text-xs font-semibold'
+              : 'rounded-md3-sm hover:bg-dark-surfaceContainerHigh'
+          }`}
+          style={
+            accountLoggedIn && accountUser
+              ? { backgroundColor: avatarColorFor(accountUser.username) }
+              : undefined
+          }
+          aria-label={accountLoggedIn && accountUser ? accountUser.username : t('sidebar.notLoggedIn')}
+          title={accountLoggedIn && accountUser ? accountUser.username : t('sidebar.notLoggedIn')}
+        >
+          {accountLoggedIn && accountUser ? (
+            <span aria-hidden>{initialOf(accountUser.username)}</span>
+          ) : (
+            <User size={18} />
+          )}
         </button>
       </div>
     )
@@ -316,6 +349,28 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
         >
           <Settings size={16} />
           <span>{t('sidebar.settings')}</span>
+        </button>
+        {/* 账户按钮（最底）：未登录=用户图标+"未登录" / 已登录=首字母圆头像+用户名 */}
+        <button
+          onClick={handleOpenAccountSettings}
+          className="w-full flex items-center gap-2 px-3 py-2 rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-sm text-dark-onSurfaceVariant"
+          aria-label={accountLoggedIn && accountUser ? accountUser.username : t('sidebar.notLoggedIn')}
+          title={accountLoggedIn && accountUser ? accountUser.username : t('sidebar.account')}
+        >
+          {accountLoggedIn && accountUser ? (
+            <span
+              className="w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-semibold text-white flex-shrink-0"
+              style={{ backgroundColor: avatarColorFor(accountUser.username) }}
+              aria-hidden
+            >
+              {initialOf(accountUser.username)}
+            </span>
+          ) : (
+            <User size={16} className="flex-shrink-0" />
+          )}
+          <span className="truncate">
+            {accountLoggedIn && accountUser ? accountUser.username : t('sidebar.notLoggedIn')}
+          </span>
         </button>
       </div>
 

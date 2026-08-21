@@ -8,7 +8,9 @@ import { sharedStorage } from '../lib/shared-storage'
 
 interface SettingsState extends AppSettings {
   showSettings: boolean
-  updateSettings: (partial: Partial<AppSettings & { showSettings?: boolean }>) => void
+  /** 一次性 transient 标记：侧边栏账户入口点击后，SettingsPage 挂载时定位到指定 tab（不持久化，消费即清空） */
+  pendingSettingsTab?: 'account'
+  updateSettings: (partial: Partial<AppSettings & { showSettings?: boolean; pendingSettingsTab?: 'account' }>) => void
   resetSettings: () => void
   /** 添加/更新提供商 */
   upsertProvider: (provider: ModelProvider) => void
@@ -120,6 +122,7 @@ export const useSettingsStore = create<SettingsState>()(
     (set, get) => ({
       ...defaultSettings,
       showSettings: false,
+      pendingSettingsTab: undefined,
       updateSettings: (partial) => set((state) => ({ ...state, ...partial })),
       resetSettings: () => {
         credentialHydrationEpoch += 1
@@ -192,7 +195,7 @@ export const useSettingsStore = create<SettingsState>()(
       storage: sharedStorage,
       partialize: (state) => {
         // Keep credentials only in Electron's OS-backed safeStorage.
-        const { showSettings: _, apiKey: _apiKey, providers, customModels, ...rest } = state
+        const { showSettings: _, pendingSettingsTab: _pst, apiKey: _apiKey, providers, customModels, ...rest } = state
         const keepBrowserCredentials = !credentialStorageReady
         return {
           ...rest,

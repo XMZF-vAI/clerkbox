@@ -19,6 +19,8 @@ import * as cheerio from 'cheerio'
 import * as yaml from 'js-yaml'
 import { registerApiProxyHandlers, bindApiProxyCleanup, startChatStream, abortChatStream, type ApiConnConfig } from './api-proxy'
 import { handlerRegistry, setStreamHandlers, startWebUI, stopWebUI, getWebUIStatus } from './webui-server'
+import * as rtAccount from './rt-account'
+import type { AccountSyncKind } from '../src/types/ipc'
 
 const SKILL_REQUEST_TIMEOUT_MS = 15_000
 const MAX_SKILL_FILE_BYTES = 512 * 1024
@@ -1223,6 +1225,17 @@ function registerIpcHandlers() {
     return scanMemoryEntries(workingDir)
   })
 
+  /** 全局记忆落盘成功后通知账号系统（可能触发自动云同步）；仅当写入目标是用户主目录时生效 */
+  function notifyGlobalMemoryWritten(workingDir: string): void {
+    if (typeof workingDir !== 'string') return
+    try {
+      if (path.resolve(workingDir) !== path.resolve(os.homedir())) return
+    } catch {
+      return
+    }
+    rtAccount.rtNotifyMemoryWritten()
+  }
+
   // 扫描 .clerkbox/agents 目录下所有 .md 文件，返回自定义 agent 定义
   ipcMain.handle('scanAgents', async (_event, workingDir: string) => {
     try {
@@ -1330,6 +1343,8 @@ function registerIpcHandlers() {
         fs.mkdirSync(memDir, { recursive: true })
         const filePath = path.join(memDir, `${slug}.md`)
         fs.writeFileSync(filePath, fileContent, 'utf-8')
+        // 落盘成功后通知账号系统（仅全局范围时）
+        notifyGlobalMemoryWritten(workingDir)
       })
     }
   )
@@ -1373,6 +1388,8 @@ function registerIpcHandlers() {
         }
         fs.mkdirSync(path.dirname(indexPath), { recursive: true })
         fs.writeFileSync(indexPath, existing, 'utf-8')
+        // 落盘成功后通知账号系统（仅全局范围时）
+        notifyGlobalMemoryWritten(workingDir)
       })
     }
   )
@@ -1900,6 +1917,35 @@ function registerIpcHandlers() {
     })
     kvWriteQueue = write.catch((err) => console.error('[kv] remove failed:', err))
     return write
+  })
+
+  // ── 热土引擎（REngine）账号系统：登录 / 登出 / 状态 / 数据段云同步 ──
+
+  /** 校验同步 kinds 入参：必须是 'memory' | 'models' 数组 */
+  function parseSyncKinds(value: unknown): AccountSyncKind[] | null {
+    if (!Array.isArray(value)) return null
+    if (!value.every((item): item is AccountSyncKind => item === 'memory' || item === 'models')) return null
+    return [...new Set(value)]
+  }
+
+  ipcMain.handle('accountLogin', () => rtAccount.rtLogin())
+
+  ipcMain.handle('accountLogout', () => {
+    rtAccount.rtLogout()
+  })
+
+  ipcMain.handle('accountGetStatus', () => rtAccount.rtGetStatus())
+
+  ipcMain.handle('accountSyncUpload', (_event, kinds: unknown) => {
+    const parsed = parseSyncKinds(kinds)
+    if (!parsed) throw new Error('Invalid sync kinds')
+    return rtAccount.rtSyncUpload(parsed)
+  })
+
+  ipcMain.handle('accountSyncDownload', (_event, kinds: unknown, force: unknown) => {
+    const parsed = parseSyncKinds(kinds)
+    if (!parsed) throw new Error('Invalid sync kinds')
+    return rtAccount.rtSyncDownload(parsed, force === true)
   })
 
   // ── WebUI 控制 ──
@@ -2903,6 +2949,9 @@ if (process.platform === 'win32') {
 app.whenReady().then(() => {
   registerIpcHandlers()
   createWindow()
+
+  // 启动时校验热土账号 Token：失效则清理登录态（网络异常时保留，避免误登出）
+  void rtAccount.rtVerifyStartupToken()
 
   // 服务器部署场景：设置 CLERKBOX_WEBUI_AUTO=1 时自动启动 WebUI 并打印访问地址，
   // 无需手动点击界面按钮即可远程访问。

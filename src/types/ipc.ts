@@ -34,6 +34,49 @@ export interface WebSearchResult {
   url: string
 }
 
+// ── 热土引擎（REngine）账号系统 ──
+
+/** 热土用户信息 */
+export interface RtUser {
+  id: number
+  uuid?: string
+  username: string
+  email?: string
+  emailVerified?: boolean
+  isBetaUser?: boolean
+}
+
+/** 账号登录态 */
+export interface AccountStatus {
+  loggedIn: boolean
+  user?: RtUser
+  lastSyncAt: { memory?: number; models?: number }
+}
+
+/** 可同步的数据种类 */
+export type AccountSyncKind = 'memory' | 'models'
+
+/** 单项同步结果 */
+export interface AccountSyncResultItem {
+  kind: AccountSyncKind
+  ok: boolean
+  error?: string
+  skipped?: boolean
+}
+
+/** 从云端下载的模型配置（providers 含 apiKey） */
+export interface DownloadedModelConfig {
+  providers: import('./agent').ModelProvider[]
+  activeProviderId?: string
+  activeModelId?: string
+}
+
+/** 下载同步结果（models 仅当请求包含 'models' 且成功时返回） */
+export interface AccountSyncDownloadResult {
+  results: AccountSyncResultItem[]
+  models?: DownloadedModelConfig
+}
+
 export interface ClerkBoxAPI {
   selectFolder: () => Promise<string | null>
   selectImageFile: () => Promise<string | null>
@@ -99,6 +142,12 @@ export interface ClerkBoxAPI {
   kvGet: (key: string) => Promise<string | null>
   kvSet: (key: string, value: string) => Promise<void>
   kvRemove: (key: string) => Promise<void>
+  // 热土账号系统（登录 / 登出 / 数据段云同步）
+  accountLogin: () => Promise<{ ok: true; status: AccountStatus } | { error: string }>
+  accountLogout: () => Promise<void>
+  accountGetStatus: () => Promise<AccountStatus>
+  accountSyncUpload: (kinds: AccountSyncKind[]) => Promise<{ results: AccountSyncResultItem[] }>
+  accountSyncDownload: (kinds: AccountSyncKind[], force: boolean) => Promise<AccountSyncDownloadResult>
 }
 
 /** 模型 API 连接配置（主进程代理入参） */
