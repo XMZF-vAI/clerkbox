@@ -1,15 +1,74 @@
-import { useState, useRef, type KeyboardEvent as ReactKeyboardEvent, useEffect } from 'react'
-import { Send, Brain, FolderOpen, ChevronDown, Hammer, Eye, Square, ClipboardList, Zap, Check, X, Store, Plus, FolderPlus } from 'lucide-react'
+import { useState, useRef, type KeyboardEvent as ReactKeyboardEvent, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, useEffect } from 'react'
+import { Send, Brain, FolderOpen, ChevronDown, Hammer, Eye, Square, ClipboardList, Zap, Check, X, Store, Plus, FolderPlus, Paperclip, FileText } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useSettingsStore } from '../../stores/settings-store'
 import { useChatStore } from '../../stores/chat-store'
 import { useSkillsStore } from '../../stores/skills-store'
 import { useUIStore } from '../../stores/ui-store'
 import { ipc } from '../../lib/ipc-client'
+import type { MessageAttachment } from '../../types/agent'
 import ConfirmDialog from '../ui/ConfirmDialog'
 
 // 取路径的最后一节作为显示名（兼容 Windows/Unix 两种分隔符）
 const basename = (p: string) => p.split(/[/\\]/).filter(Boolean).pop() || p
+
+// ── 图片附件常量 ──
+const MAX_IMAGES = 10
+const MAX_TOTAL_IMAGE_BYTES = 8 * 1024 * 1024
+const MAX_IMAGE_DIM = 2048
+const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']
+
+const isImagePath = (p: string) => IMAGE_EXTENSIONS.some((ext) => p.toLowerCase().endsWith(ext))
+
+const genAttachmentId = () => `att-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+
+/** 客户端压缩图片：最长边 > MAX_IMAGE_DIM 时 canvas 等比重采样（PNG 输出 PNG，其余 JPEG 0.85；GIF 保持原样以免丢动画） */
+function compressImage(dataUrl: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => {
+      try {
+        const maxDim = Math.max(img.width, img.height)
+        if (maxDim <= MAX_IMAGE_DIM) {
+          resolve(dataUrl)
+          return
+        }
+        if (dataUrl.startsWith('data:image/gif')) {
+          resolve(dataUrl)
+          return
+        }
+        const scale = MAX_IMAGE_DIM / maxDim
+        const canvas = document.createElement('canvas')
+        canvas.width = Math.max(1, Math.round(img.width * scale))
+        canvas.height = Math.max(1, Math.round(img.height * scale))
+        const ctx = canvas.getContext('2d')
+        if (!ctx) {
+          resolve(dataUrl)
+          return
+        }
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+        const output = dataUrl.startsWith('data:image/png')
+          ? canvas.toDataURL('image/png')
+          : canvas.toDataURL('image/jpeg', 0.85)
+        resolve(output)
+      } catch (error) {
+        reject(error)
+      }
+    }
+    img.onerror = () => reject(new Error('Failed to load image'))
+    img.src = dataUrl
+  })
+}
+
+/** FileReader 读 File 为 data URL */
+function readFileAsDataURL(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result as string)
+    reader.onerror = () => reject(new Error('Failed to read file'))
+    reader.readAsDataURL(file)
+  })
+}
 
 function comparableFolderPath(value: string): string {
   const normalized = value.replace(/\\/g, '/').replace(/\/+$/, '') || '/'
@@ -19,7 +78,7 @@ function comparableFolderPath(value: string): string {
 }
 
 interface ChatInputProps {
-  onSend: (content: string) => void
+  onSend: (content: string, attachments?: MessageAttachment[]) => void
   onStop?: () => void
   isStreaming?: boolean
   variant?: 'default' | 'welcome'
@@ -30,6 +89,44 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
   const { t } = useTranslation()
   const [content, setContent] = useState('')
   const [folderSelecting, setFolderSelecting] = useState(false)
+  const [attachSelecting, setAttachSelecting] = useState(false)
+  const [dragging, setDragging] = useState(false)
+  // 附件列表（图片 base64 / 文件路径引用）。用 ref 镜像最新值，
+  // 保证多文件批量异步添加时上限校验读到的是同步最新列表（闭包里的 state 会过期）。
+  const [attachments, setAttachments] = useState<MessageAttachment[]>([])
+  const attachmentsRef = useRef<MessageAttachment[]>([])
+
+  const commitAttachments = (next: MessageAttachment[]) => {
+    attachmentsRef.current = next
+    setAttachments(next)
+  }
+
+  const addImageAttachment = (dataUrl: string, name: string, path?: string) => {
+    const prev = attachmentsRef.current
+    const images = prev.filter((a) => a.kind === 'image')
+    const totalBytes = images.reduce((sum, a) => sum + (a.dataUrl?.length ?? 0), 0) + dataUrl.length
+    if (images.length >= MAX_IMAGES || totalBytes > MAX_TOTAL_IMAGE_BYTES) {
+      alert(t('chat.attachLimit'))
+      return
+    }
+    commitAttachments([...prev, {
+      id: genAttachmentId(),
+      kind: 'image',
+      name,
+      mimeType: dataUrl.slice(5, dataUrl.indexOf(';')),
+      dataUrl,
+      path: path || undefined,
+      size: dataUrl.length,
+    }])
+  }
+
+  const addFileAttachment = (name: string, path: string) => {
+    commitAttachments([...attachmentsRef.current, { id: genAttachmentId(), kind: 'file', name, path }])
+  }
+
+  const removeAttachment = (id: string) => {
+    commitAttachments(attachmentsRef.current.filter((a) => a.id !== id))
+  }
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const settings = useSettingsStore()
   const { sessions, activeSessionId, updateSessionWorkingDir, recentsFolders, pushRecentFolder } = useChatStore()
@@ -74,16 +171,125 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
 
   const handleSend = () => {
     const trimmed = content.trim()
-    if (!trimmed || isStreaming) return
+    if (isStreaming) return
+    if (!trimmed && attachments.length === 0) return
     if (trimmed.length > 50000) {
       alert(t('chat.messageTooLong'))
       return
     }
-    onSend(trimmed)
+    // 非视觉模型：无磁盘路径的图片（如粘贴的截图）无法降级为路径引用，直接拦截
+    if (!imageSupported && attachments.some((a) => a.kind === 'image' && !a.path)) {
+      alert(t('chat.imageBlocked'))
+      return
+    }
+    onSend(trimmed, attachments.length ? attachments : undefined)
     setContent('')
+    commitAttachments([])
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
     }
+  }
+
+  // ── 附件入口 1：附件按钮（系统文件选择器，多选，图片与任意文件） ──
+  const openAttachPicker = async () => {
+    if (attachSelecting) return
+    setAttachSelecting(true)
+    try {
+      const paths = await ipc.selectChatFiles()
+      if (paths) {
+        for (const p of paths) {
+          if (isImagePath(p)) {
+            try {
+              const dataUrl = await ipc.readImageFileBase64(p)
+              const compressed = await compressImage(dataUrl)
+              addImageAttachment(compressed, basename(p), p)
+            } catch {
+              alert(t('chat.attachReadFailed'))
+            }
+          } else {
+            addFileAttachment(basename(p), p)
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Failed to select chat files:', error)
+    } finally {
+      setAttachSelecting(false)
+    }
+  }
+
+  // ── 附件入口 2：粘贴（剪贴板图片 → base64 图片附件；复制的磁盘文件 → 路径引用） ──
+  // 同步遍历 clipboardData.items 取 File（await 之后剪贴板数据可能失效），再异步读取。
+  // 只在真正消费了至少一个条目时 preventDefault，绝不拦截纯文本粘贴。
+  const handlePaste = (e: ReactClipboardEvent<HTMLTextAreaElement>) => {
+    const items = e.clipboardData?.items
+    if (!items) return
+    const imageFiles: File[] = []
+    const pathFiles: Array<{ name: string; path: string }> = []
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i]
+      if (item.kind !== 'file') continue
+      const file = item.getAsFile()
+      if (!file) continue
+      if (file.type.startsWith('image/')) {
+        imageFiles.push(file)
+      } else {
+        // file.type 可能为空（部分平台复制的磁盘文件），只要能取到真实路径就按文件引用入列
+        const p = ipc.getPathForFile(file)
+        if (p) pathFiles.push({ name: file.name, path: p })
+      }
+    }
+    if (imageFiles.length === 0 && pathFiles.length === 0) return
+    e.preventDefault()
+    void (async () => {
+      for (const file of imageFiles) {
+        try {
+          const dataUrl = await readFileAsDataURL(file)
+          const compressed = await compressImage(dataUrl)
+          addImageAttachment(compressed, file.name || 'image.png')
+        } catch {
+          alert(t('chat.attachReadFailed'))
+        }
+      }
+      for (const { name, path } of pathFiles) {
+        addFileAttachment(name, path)
+      }
+    })()
+  }
+
+  // ── 附件入口 3：拖拽（图片文件 → 图片附件（带路径）；其他文件 → 路径引用） ──
+  const handleDragOver = (e: ReactDragEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    setDragging(true)
+  }
+
+  const handleDragLeave = (e: ReactDragEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    setDragging(false)
+  }
+
+  const handleDrop = (e: ReactDragEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    setDragging(false)
+    // 同步取 FileList（事件结束后可能失效），路径解析与读取异步进行
+    const files = Array.from(e.dataTransfer.files)
+    if (files.length === 0) return
+    void (async () => {
+      for (const file of files) {
+        const p = ipc.getPathForFile(file)
+        if (file.type.startsWith('image/')) {
+          try {
+            const dataUrl = await readFileAsDataURL(file)
+            const compressed = await compressImage(dataUrl)
+            addImageAttachment(compressed, file.name, p || undefined)
+          } catch {
+            alert(t('chat.attachReadFailed'))
+          }
+        } else if (p) {
+          addFileAttachment(file.name, p)
+        }
+      }
+    })()
   }
 
   const handleKeyDown = (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
@@ -156,6 +362,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
   const activeProvider = settings.providers.find((p) => p.id === settings.activeProviderId)
   const activeModel = activeProvider?.models.find((m) => m.id === settings.activeModelId)
   const thinkingSupported = activeModel?.supportsThinking ?? false
+  const imageSupported = activeModel?.supportsImages ?? false
   const reasoningEfforts = activeModel?.reasoningEfforts ?? []
   const hasReasoningLevels = reasoningEfforts.length > 0
   const selectedReasoningEffort = activeModel?.reasoningEffort ?? settings.reasoningEffort ?? reasoningEfforts[0]
@@ -295,7 +502,12 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
         </div>
       )}
 
-      <div className={boxClass}>
+      <div
+        className={`${boxClass} ${dragging ? 'ring-2 ring-md-primary/50' : ''}`}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
         {/* Active skills pills - shown when any skill is loaded */}
         {activeSkills.length > 0 && (
           <div className="flex items-center gap-1 flex-wrap">
@@ -319,6 +531,61 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
           </div>
         )}
 
+        {/* Attachments preview - images as thumbnails, files as chips */}
+        {attachments.length > 0 && (
+          <div>
+            <div className="flex flex-wrap items-center gap-1.5">
+              {attachments.map((a) => a.kind === 'image' ? (
+                <div key={a.id} className="relative group">
+                  <img
+                    src={a.dataUrl}
+                    alt={a.name}
+                    title={a.path || a.name}
+                    className="w-14 h-14 object-cover rounded-md3-sm border border-dark-onSurfaceVariant/15"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removeAttachment(a.id)}
+                    aria-label={t('chat.attachRemove')}
+                    title={t('chat.attachRemove')}
+                    className={`absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full flex items-center justify-center transition-opacity ${
+                      vibe
+                        ? 'bg-white/70 text-dark-surface hover:bg-white'
+                        : 'bg-dark-surfaceContainerHighest border border-dark-onSurfaceVariant/20 text-dark-onSurfaceVariant hover:text-md-error'
+                    }`}
+                  >
+                    <X size={10} />
+                  </button>
+                </div>
+              ) : (
+                <div
+                  key={a.id}
+                  title={a.path}
+                  className={`flex items-center gap-1 px-2 py-1 rounded-md3-sm text-[11px] ${
+                    vibe ? 'bg-white/10 text-white/80' : 'bg-dark-surfaceContainerHighest text-dark-onSurfaceVariant'
+                  }`}
+                >
+                  <FileText size={11} className="flex-shrink-0" />
+                  <span className="truncate max-w-[140px]">{a.name}</span>
+                  <button
+                    type="button"
+                    onClick={() => removeAttachment(a.id)}
+                    aria-label={t('chat.attachRemove')}
+                    title={t('chat.attachRemove')}
+                    className="opacity-60 hover:opacity-100 flex-shrink-0"
+                  >
+                    <X size={10} />
+                  </button>
+                </div>
+              ))}
+            </div>
+            {/* 当前模型不支持图片输入时的降级提示 */}
+            {attachments.some((a) => a.kind === 'image') && !imageSupported && (
+              <div className="text-[10px] text-md-warning mt-1">{t('chat.imageUnsupportedHint')}</div>
+            )}
+          </div>
+        )}
+
         {/* Textarea - top area */}
         <textarea
           ref={textareaRef}
@@ -326,6 +593,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
           onChange={(e) => setContent(e.target.value)}
           onKeyDown={handleKeyDown}
           onInput={handleInput}
+          onPaste={handlePaste}
           disabled={isStreaming}
           aria-label={t('chat.messageInputAria')}
           placeholder={vibe ? t('chat.placeholderVibe') : (effectiveWorkDir ? t('chat.placeholderWorkDir', { name: effectiveWorkDir.split(/[/\\]/).pop() }) : t('chat.placeholderDefault'))}
@@ -339,6 +607,26 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
 
         {/* Bottom button row - inside the box */}
         <div className="flex items-center gap-1 flex-wrap">
+          {/* Attach (images / files) button */}
+          <button
+            type="button"
+            onClick={openAttachPicker}
+            disabled={attachSelecting}
+            className={`h-8 flex items-center gap-1 px-2 flex-shrink-0 rounded-md3-sm transition-colors disabled:opacity-40 ${
+              vibe
+                ? 'hover:bg-white/15 text-white/70'
+                : 'hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant'
+            }`}
+            title={t('chat.attachAria')}
+            aria-label={t('chat.attachAria')}
+          >
+            {attachSelecting ? (
+              <div className={`w-3.5 h-3.5 border-2 border-t-transparent rounded-full animate-spin ${vibe ? 'border-white/50' : 'border-dark-onSurfaceVariant/40'}`} />
+            ) : (
+              <Paperclip size={16} />
+            )}
+          </button>
+
           {/* Working folder button + popover */}
           <div className="relative" ref={folderPopoverRef}>
             <button
@@ -790,7 +1078,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
           <button
             type="button"
             onClick={isStreaming ? onStop : handleSend}
-            disabled={!isStreaming && !content.trim()}
+            disabled={!isStreaming && !content.trim() && attachments.length === 0}
             aria-label={isStreaming ? t('chat.stopResponseAria') : t('chat.sendMessageAria')}
             className={`h-9 w-9 flex-shrink-0 flex items-center justify-center rounded-full transition-colors disabled:opacity-30 disabled:cursor-not-allowed ${
               isStreaming

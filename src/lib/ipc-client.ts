@@ -141,6 +141,12 @@ export const ipc = {
     isElectron ? window.clerkbox.selectFolder() : Promise.resolve(null),
   selectImageFile: (): Promise<string | null> =>
     isElectron ? window.clerkbox.selectImageFile() : Promise.resolve(null),
+  // 对话附件多选：WebUI 模式无法弹出原生对话框，返回 null（UI 层降级为手动输入路径）
+  selectChatFiles: (): Promise<string[] | null> =>
+    isElectron ? window.clerkbox.selectChatFiles() : Promise.resolve(null),
+  // 按磁盘路径读图片为 base64 data URL（渲染进程无法直接读本地文件）
+  readImageFileBase64: (path: string): Promise<string> =>
+    isElectron ? window.clerkbox.readImageFileBase64(path) : webInvoke('readImageFileBase64', [path]),
   selectAudioFile: (): Promise<string | null> =>
     isElectron ? window.clerkbox.selectAudioFile() : Promise.resolve(null),
   selectMusicFolder: (): Promise<string | null> =>
@@ -152,6 +158,9 @@ export const ipc = {
     isElectron ? window.clerkbox.parseSkillFile(filePath) : webInvoke('parseSkillFile', [filePath]),
   fileExists: (path: string): Promise<boolean> =>
     isElectron ? window.clerkbox.fileExists(path) : webInvoke('fileExists', [path]),
+  // 取 File 的真实磁盘路径：仅 Electron 模式可用（浏览器拿不到本地路径，返回空串）
+  getPathForFile: (file: File): string =>
+    isElectron ? window.clerkbox.getPathForFile(file) : '',
   openExternal: (url: string): Promise<void> =>
     isElectron ? window.clerkbox.openExternal(url) : (window.open(url, '_blank'), Promise.resolve()),
   confirmDialog: (title: string, message: string): Promise<boolean> =>
@@ -178,6 +187,9 @@ export const ipc = {
     isElectron ? window.clerkbox.apiFetchModels(cfg) : webInvoke('apiFetchModels', [cfg]),
   apiTestConnection: (cfg: ApiConnConfig): Promise<{ ok: true; latencyMs: number } | { error: string }> =>
     isElectron ? window.clerkbox.apiTestConnection(cfg) : webInvoke('apiTestConnection', [cfg]),
+  // 探测模型图片输入支持（双模式均走主进程代理）
+  apiTestVision: (cfg: ApiConnConfig, modelId: string): Promise<{ ok: true } | { ok: false; status?: number; error: string }> =>
+    isElectron ? window.clerkbox.apiTestVision(cfg, modelId) : webInvoke('apiTestVision', [cfg, modelId]),
   apiChatStream: (cfg: ApiConnConfig, body: unknown): Promise<{ requestId: string }> =>
     isElectron ? window.clerkbox.apiChatStream(cfg, body) : webChatStream(cfg, body),
   apiAbort: (requestId: string): Promise<void> =>

@@ -32,6 +32,9 @@ export const POST_COMPACT_TOKEN_BUDGET = 50_000
 // 压缩请求 prompt-too-long 时的最大重试次数
 export const MAX_COMPACT_RETRIES = 2
 
+// 每张多模态图片附件的固定 token 粗估成本（与 use-agent 截断估算保持一致量级）
+const IMAGE_TOKEN_ESTIMATE = 1000
+
 /**
  * Build the system prompt for the compaction LLM call.
  * Instructs the model to produce a structured summary.
@@ -527,6 +530,10 @@ function estimateTokensForMessages(messages: Message[]): number {
       for (const tr of msg.toolResults) {
         total += estimateTokensForText(tr.content || '')
       }
+    }
+    // 图片附件按固定粗估计入（仅统计携带 dataUrl、会真正多模态发送的图片）
+    if (msg.attachments) {
+      total += msg.attachments.filter((a) => a.kind === 'image' && a.dataUrl).length * IMAGE_TOKEN_ESTIMATE
     }
     if (msg.compactMetadata) {
       total += estimateTokensForText(JSON.stringify(msg.compactMetadata))

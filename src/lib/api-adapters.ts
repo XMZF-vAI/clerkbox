@@ -19,6 +19,8 @@ export interface NeutralMessage {
   tool_calls?: unknown
   tool_call_id?: string
   reasoning_content?: string
+  /** 用户多模态图片；按协议翻译成 image_url / image block，内部字段本身不外发 */
+  images?: Array<{ dataUrl: string; mimeType: string }>
   /** 消息 id，用于在思考签名缓存里查回原始 thinking block（仅 anthropic 需要） */
   _msgId?: string
   _cacheControl?: boolean
@@ -111,7 +113,7 @@ export function buildRequestBody(compat: ApiCompat, o: BuildBodyOptions): Record
 function buildOpenAIBody(o: BuildBodyOptions): Record<string, unknown> {
   const body: Record<string, unknown> = {
     model: o.model,
-    messages: o.messages.map(stripInternal),
+    messages: o.messages.map(toOpenAIMessage),
     temperature: o.temperature,
     max_tokens: o.maxTokens,
   }
@@ -159,10 +161,20 @@ function buildOpenAIBody(o: BuildBodyOptions): Record<string, unknown> {
   return body
 }
 
-/** 去掉只在前端流转的内部字段，别发给服务端 */
-function stripInternal(m: NeutralMessage) {
-  const { _msgId: _, _cacheControl: __, ...rest } = m
-  return rest
+/**
+ * 中立消息 → OpenAI 请求体消息。
+ * 去掉只在前端流转的内部字段（_msgId / _cacheControl / images），别发给服务端；
+ * 带图片的消息 content 转为多模态数组：text part（正文非空时）+ 每张图一个 image_url part。
+ */
+function toOpenAIMessage(m: NeutralMessage): Record<string, unknown> {
+  const { _msgId: _, _cacheControl: __, images, ...rest } = m
+  if (!images || images.length === 0) return rest
+  const parts: Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }> = []
+  if (rest.content) parts.push({ type: 'text', text: rest.content })
+  for (const img of images) {
+    parts.push({ type: 'image_url', image_url: { url: img.dataUrl } })
+  }
+  return { ...rest, content: parts }
 }
 
 /** Anthropic content block（请求侧） */
@@ -172,6 +184,7 @@ type AnthropicBlock =
   | AnthropicTextBlock
   | { type: 'tool_use'; id: string; name: string; input: unknown; cache_control?: AnthropicCacheControl }
   | { type: 'tool_result'; tool_use_id: string; content: string; cache_control?: AnthropicCacheControl }
+  | { type: 'image'; source: { type: 'base64'; media_type: string; data: string }; cache_control?: AnthropicCacheControl }
   | AnthropicThinkingBlock
 
 interface AnthropicMessage {
@@ -311,7 +324,23 @@ export function toAnthropicMessages(
     }
 
     // user
-    if (m.content) push('user', [{ type: 'text', text: m.content }])
+    if (m.images && m.images.length > 0) {
+      // 多模态用户消息：text block（正文非空时）+ 每张图一个 base64 image block；
+      // dataUrl 解析不了的图片直接跳过，blocks 为空时 push 自行丢弃
+      const blocks: AnthropicBlock[] = []
+      if (m.content) blocks.push({ type: 'text', text: m.content })
+      for (const img of m.images) {
+        const match = /^data:([^;]+);base64,(.*)$/.exec(img.dataUrl)
+        if (!match) continue
+        blocks.push({
+          type: 'image',
+          source: { type: 'base64', media_type: img.mimeType || match[1], data: match[2] },
+        })
+      }
+      push('user', blocks)
+    } else if (m.content) {
+      push('user', [{ type: 'text', text: m.content }])
+    }
   }
 
   // 必须以 user 开头：开头若是 assistant 就处理掉。

@@ -25,10 +25,18 @@ import {
   type AnthropicThinkingBlock,
   type NeutralMessage,
 } from '../lib/api-adapters'
-import type { ApiCompat, Message, ToolCall, ToolResult, StreamingToolCall, TokenUsage } from '../types/agent'
+import type { ApiCompat, Message, MessageAttachment, ToolCall, ToolResult, StreamingToolCall, TokenUsage } from '../types/agent'
 
 /** Vite 注入的 env（tsconfig 未含 vite/client 类型，安全取值） */
 const IS_DEV = (import.meta as unknown as { env?: { DEV?: boolean } }).env?.DEV ?? false
+
+/** 每张多模态图片的固定 token 粗估成本（视觉输入按图片 token 计价，粗估 1000/张，用于截断/预算估算） */
+const IMAGE_TOKEN_ESTIMATE = 1000
+
+/** 从 data URL 前缀解析 MIME 类型（如 image/png）；非 data URL 形式返回 undefined */
+function mimeFromDataUrl(dataUrl: string): string | undefined {
+  return /^data:([^;,]+)/.exec(dataUrl)?.[1]
+}
 
 /** 轻量字符串哈希（djb2）—— dev 下校验静态 system 段是否跨请求字节一致 */
 function hashString(s: string): string {
@@ -489,6 +497,8 @@ export function useAgent(sessionId: string) {
     let totalTokens = 0
     for (const m of msgs) {
       totalTokens += estimateTokens(m.content || '')
+      // 多模态图片按固定粗估计入
+      totalTokens += (m.images?.length ?? 0) * IMAGE_TOKEN_ESTIMATE
       if (m.tool_calls) {
         totalTokens += estimateTokens(JSON.stringify(m.tool_calls))
       }
@@ -515,7 +525,7 @@ export function useAgent(sessionId: string) {
 
     for (let i = rest.length - 1; i >= 0; i--) {
       const m = rest[i]
-      const mTokens = estimateTokens(m.content || '') + estimateTokens(m.tool_calls ? JSON.stringify(m.tool_calls) : '') + estimateTokens(m.reasoning_content || '')
+      const mTokens = estimateTokens(m.content || '') + estimateTokens(m.tool_calls ? JSON.stringify(m.tool_calls) : '') + estimateTokens(m.reasoning_content || '') + (m.images?.length ?? 0) * IMAGE_TOKEN_ESTIMATE
 
       if (runningTokens + mTokens > MAX_INPUT_TOKENS && (rest.length - i) >= 4) {
         // We've hit the budget, cut here — but check if this is a safe cut point
@@ -598,6 +608,13 @@ export function useAgent(sessionId: string) {
       extraSystemPrompt,
       agentsMdContent = '',
     } = opts
+
+    // 当前生效模型是否支持图片输入；不支持时图片不进入 API 消息
+    // （ChatInput 已在 UI 层拦截无路径图片，这里对漏网的无路径图片兜底丢弃）
+    const supportsImages = settings.providers
+      .find((p) => p.id === settings.activeProviderId)
+      ?.models.find((m) => m.id === settings.activeModelId)
+      ?.supportsImages ?? false
 
     let staticSystemContent: string
     let dynamicSystemContent = `## Current Working Directory\n${workingDir || '(not set — treat all paths as relative)'}`
@@ -696,6 +713,24 @@ export function useAgent(sessionId: string) {
           msg.reasoning_content = m.thinkingContent
         }
         if (m.role === 'assistant') msg._msgId = m.id
+        // 用户消息附件：所有带磁盘路径的附件（文件 + 带路径图片）追加路径清单，
+        // 模型用 read_file 等工具按路径自行读取；文件内容本身不发给模型
+        if (m.role === 'user' && m.attachments?.length) {
+          const pathLines = m.attachments.filter((a) => a.path).map((a) => `- ${a.path}`)
+          if (pathLines.length > 0) {
+            msg.content = `${msg.content}\n\n[附件文件]\n${pathLines.join('\n')}`
+          }
+          // 支持图片的模型：携带 dataUrl 的图片附件转多模态 images（mimeType 取附件声明，缺失时从 dataUrl 前缀解析）
+          if (supportsImages) {
+            const images: Array<{ dataUrl: string; mimeType: string }> = []
+            for (const a of m.attachments) {
+              if (a.kind === 'image' && a.dataUrl) {
+                images.push({ dataUrl: a.dataUrl, mimeType: a.mimeType || mimeFromDataUrl(a.dataUrl) || 'image/png' })
+              }
+            }
+            if (images.length > 0) msg.images = images
+          }
+        }
         result.push(msg)
       }
     }
@@ -763,7 +798,7 @@ export function useAgent(sessionId: string) {
 
   /** Main send message function with full ReAct loop */
   const sendMessage = useCallback(
-    async (content: string) => {
+    async (content: string, attachments?: MessageAttachment[]) => {
       // Prevent concurrent sends on the same session（per-session 粒度，不阻塞其他会话并发）
       if (getSessionAbortController(sessionId)) {
         setError('当前正在处理中，请等待完成后再发送')
@@ -797,6 +832,8 @@ export function useAgent(sessionId: string) {
         role: 'user',
         content,
         timestamp: Date.now(),
+        // 附件随消息入内存 + 持久化（仅在非空时携带）
+        ...(attachments && attachments.length > 0 ? { attachments } : {}),
       }
       addMessage(sessionId, userMsg)
 

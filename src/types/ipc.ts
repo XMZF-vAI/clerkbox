@@ -22,6 +22,8 @@ export interface MessageRow {
   timestamp: number
   tool_calls?: string | null
   tool_results?: string | null
+  /** 附件（MessageAttachment[] 的 JSON 序列化） */
+  attachments?: string | null
   finish_reason?: string | null
   is_compact?: number  // 0 or 1 — marks compact boundary/summary messages
   is_sub_agent_card?: number  // 0 or 1 — marks sub-agent card placeholder messages
@@ -80,9 +82,14 @@ export interface AccountSyncDownloadResult {
 export interface ClerkBoxAPI {
   selectFolder: () => Promise<string | null>
   selectImageFile: () => Promise<string | null>
+  selectChatFiles: () => Promise<string[] | null>
+  /** 按磁盘路径读取图片文件，返回 base64 data URL */
+  readImageFileBase64: (path: string) => Promise<string>
   selectAudioFile: () => Promise<string | null>
   selectMusicFolder: () => Promise<string | null>
   fileExists: (path: string) => Promise<boolean>
+  /** 取 File 对应的磁盘绝对路径（Electron 42 起 File.path 已移除，须走 webUtils） */
+  getPathForFile: (file: File) => string
   openExternal: (url: string) => Promise<void>
   confirmDialog: (title: string, message: string) => Promise<boolean>
   windowAction: (action: 'minimize' | 'maximize' | 'close') => void
@@ -100,6 +107,8 @@ export interface ClerkBoxAPI {
   webFetch: (url: string, maxLength?: number) => Promise<{ content: string; url: string } | { error: string }>
   apiFetchModels: (cfg: ApiConnConfig) => Promise<{ models: FetchedModel[] } | { error: string }>
   apiTestConnection: (cfg: ApiConnConfig) => Promise<{ ok: true; latencyMs: number } | { error: string }>
+  /** 探测模型图片输入支持：发最小 1×1 PNG 非流式请求，只看 HTTP 通不通 */
+  apiTestVision: (cfg: ApiConnConfig, modelId: string) => Promise<{ ok: true } | { ok: false; status?: number; error: string }>
   apiChatStream: (cfg: ApiConnConfig, body: unknown) => Promise<{ requestId: string }>
   apiAbort: (requestId: string) => Promise<void>
   onApiChunk: (callback: (payload: ApiChunkPayload) => void) => () => void

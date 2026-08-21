@@ -28,6 +28,9 @@ const STREAM_IDLE_TIMEOUT_MS = 60_000
 const FLUSH_INTERVAL_MS = 16
 const FLUSH_BYTES = 8192
 const ERROR_BODY_LIMIT = 8 * 1024
+/** 图片输入探测用的最小 1×1 PNG（base64） */
+const VISION_PROBE_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
+const VISION_PROBE_PROMPT = 'Describe this image in one word.'
 const MODEL_LIST_LIMIT = 2 * 1024 * 1024
 const STREAM_RESPONSE_LIMIT = 20 * 1024 * 1024
 const REQUEST_BODY_LIMIT = 10 * 1024 * 1024
@@ -214,6 +217,48 @@ export function registerApiProxyHandlers() {
       return { ok: true as const, latencyMs: Date.now() - started }
     } catch (e) {
       return { error: redactApiKey(errMsg(e), apiKeyFromConfig(cfg)) }
+    }
+  })
+
+  /**
+   * 探测模型图片输入支持：向 chat 端点发一个 1×1 PNG 的最小非流式多模态请求，
+   * 只看 HTTP 通不通（2xx 即视为支持），不解析响应内容。
+   */
+  ipcMain.handle('apiTestVision', async (_e, cfg: ApiConnConfig, modelId: string) => {
+    try {
+      assertApiConfig(cfg)
+      if (typeof modelId !== 'string' || modelId.length === 0) throw new Error('Invalid model id')
+      const messages = cfg.apiCompat === 'anthropic'
+        ? [{
+            role: 'user',
+            content: [
+              { type: 'text', text: VISION_PROBE_PROMPT },
+              { type: 'image', source: { type: 'base64', media_type: 'image/png', data: VISION_PROBE_PNG } },
+            ],
+          }]
+        : [{
+            role: 'user',
+            content: [
+              { type: 'text', text: VISION_PROBE_PROMPT },
+              { type: 'image_url', image_url: { url: `data:image/png;base64,${VISION_PROBE_PNG}` } },
+            ],
+          }]
+      const res = await fetchWithTimeout(
+        endpointFor(cfg.apiCompat, cfg.baseUrl, 'chat'),
+        {
+          method: 'POST',
+          headers: headersFor(cfg),
+          body: JSON.stringify({ model: modelId, messages, max_tokens: 16, stream: false }),
+        },
+        20_000
+      )
+      if (!res.ok) {
+        const body = redactApiKey(await readResponseText(res, ERROR_BODY_LIMIT).catch(() => ''), apiKeyFromConfig(cfg))
+        return { ok: false as const, status: res.status, error: `HTTP ${res.status}${body ? `: ${body}` : ''}` }
+      }
+      return { ok: true as const }
+    } catch (e) {
+      return { ok: false as const, error: redactApiKey(errMsg(e), apiKeyFromConfig(cfg)) }
     }
   })
 

@@ -822,9 +822,50 @@ function MessageItem({ message, vibe = false, sessionId }: MessageItemProps) {
     )
   }
 
+  // 用户消息附件：图片缩略图 + 文件 chip（与正文气泡分开渲染，正文为空时也要显示）
+  const userImages = isUser ? (message.attachments || []).filter((a) => a.kind === 'image' && a.dataUrl) : []
+  const userFiles = isUser ? (message.attachments || []).filter((a) => a.kind === 'file') : []
+
   return (
     <div className={`animate-slide-up ${isUser ? 'flex justify-end' : 'flex justify-start'}`}>
       <div className={`flex flex-col ${isUser ? 'items-end max-w-[85%]' : 'items-start max-w-[90%]'}`}>
+
+        {/* User message attachments - above the content bubble */}
+        {(userImages.length > 0 || userFiles.length > 0) && (
+          <div className="flex flex-col items-end gap-1.5 mb-1.5">
+            {userImages.length > 0 && (
+              <div className="flex flex-wrap gap-1.5 justify-end">
+                {userImages.map((a) => (
+                  <img
+                    key={a.id}
+                    src={a.dataUrl}
+                    alt={a.name}
+                    title={a.path || a.name}
+                    className="max-h-40 max-w-[240px] rounded-md3-md object-cover border border-dark-onSurfaceVariant/15"
+                  />
+                ))}
+              </div>
+            )}
+            {userFiles.length > 0 && (
+              <div className="flex flex-wrap gap-1.5 justify-end">
+                {userFiles.map((a) => (
+                  <div
+                    key={a.id}
+                    title={a.path}
+                    className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md3-md text-xs ${
+                      vibe
+                        ? 'bg-white/10 border border-white/20 text-white/90'
+                        : 'bg-md-primaryContainer text-md-onPrimaryContainer'
+                    }`}
+                  >
+                    <FileText size={12} className="flex-shrink-0" />
+                    <span className="truncate max-w-[200px]">{a.name}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Thinking content - collapsible */}
         {hasThinking && !isUser && (

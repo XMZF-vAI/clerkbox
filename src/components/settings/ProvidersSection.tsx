@@ -2,6 +2,7 @@ import { useState, useEffect, useId, useRef } from 'react'
 import {
   Plus, Trash2, ChevronRight, RefreshCw, Check, AlertCircle,
   Search, ExternalLink, X, Pencil, Eye, EyeOff, Settings2, Thermometer, Hash, Brain,
+  Image as ImageIcon,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useSettingsStore } from '../../stores/settings-store'
@@ -182,18 +183,59 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
   const testConnection = async () => {
     setTestStatus('testing')
     setTestMsg('')
-    const res = await ipc.apiTestConnection({
+    const cfg = {
       baseUrl: provider.baseUrl,
       apiKey: provider.apiKey,
       apiCompat: provider.apiCompat,
-    })
+    }
+    const res = await ipc.apiTestConnection(cfg)
     if ('error' in res) {
       setTestMsg(res.error)
       setTestStatus('error')
-    } else {
+      return
+    }
+    // 连通性通过；无模型则直接出结果
+    if (provider.models.length === 0) {
       setTestMsg(`${res.latencyMs}ms`)
       setTestStatus('ok')
+      return
     }
+    // 对全部已启用模型并行探测图片输入支持
+    const visionErrorRe = /image|vision|multimodal|multi-modal|modality|视觉|图片|image_url/i
+    const results = await Promise.allSettled(
+      provider.models.map((m) => ipc.apiTestVision(cfg, m.id))
+    )
+    let unknown = 0
+    let changed = false
+    const updatedModels = provider.models.map((m, i) => {
+      const r = results[i]
+      if (r.status !== 'fulfilled') {
+        unknown += 1
+        return m
+      }
+      const v = r.value
+      if (v.ok) {
+        if (!m.supportsImages) changed = true
+        return { ...m, supportsImages: true }
+      }
+      const rejectedForImages =
+        typeof v.status === 'number' &&
+        v.status >= 400 && v.status < 500 &&
+        visionErrorRe.test(v.error)
+      if (rejectedForImages) {
+        if (m.supportsImages) changed = true
+        return { ...m, supportsImages: false }
+      }
+      // 网络错误/超时/鉴权/限流/5xx/与图片无关的 4xx：无法判定，保持现值
+      unknown += 1
+      return m
+    })
+    if (changed) settings.setProviderModels(provider.id, updatedModels)
+    const supported = updatedModels.filter((m) => m.supportsImages === true).length
+    let msg = `${res.latencyMs}ms · ${t('settings.api.visionSummary', { supported, total: provider.models.length })}`
+    if (unknown > 0) msg += ` · ${t('settings.api.visionUnknown', { count: unknown })}`
+    setTestMsg(msg)
+    setTestStatus('ok')
   }
 
   const addManualModel = () => {
@@ -465,6 +507,15 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
                               reasoningEfforts: [],
                               reasoningEffort: undefined,
                             })}
+                            className="accent-md-primary"
+                          />
+                        </label>
+                        <label className="flex items-center justify-between text-[10px] text-dark-onSurfaceVariant">
+                          <span className="flex items-center gap-1"><ImageIcon size={10} /> {t('settings.api.imageSupport')}</span>
+                          <input
+                            type="checkbox"
+                            checked={m.supportsImages ?? false}
+                            onChange={(e) => patchModel({ supportsImages: e.target.checked })}
                             className="accent-md-primary"
                           />
                         </label>

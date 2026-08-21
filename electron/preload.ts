@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type {
   AccountStatus,
   AccountSyncDownloadResult,
@@ -17,12 +17,18 @@ contextBridge.exposeInMainWorld('clerkbox', {
   // File system
   selectFolder: (): Promise<string | null> => ipcRenderer.invoke('selectFolder'),
   selectImageFile: (): Promise<string | null> => ipcRenderer.invoke('selectImageFile'),
+  selectChatFiles: (): Promise<string[] | null> => ipcRenderer.invoke('selectChatFiles'),
+  readImageFileBase64: (filePath: string): Promise<string> => ipcRenderer.invoke('readImageFileBase64', filePath),
   selectAudioFile: (): Promise<string | null> => ipcRenderer.invoke('selectAudioFile'),
   selectMusicFolder: (): Promise<string | null> => ipcRenderer.invoke('selectMusicFolder'),
   selectSkillFile: (): Promise<string | null> => ipcRenderer.invoke('selectSkillFile'),
   parseSkillFile: (filePath: string): Promise<{ success: boolean; name?: string; description?: string; icon?: string; category?: string; skillMdContent?: string; files?: Array<{ path: string; content: string }>; error?: string }> =>
     ipcRenderer.invoke('parseSkillFile', filePath),
   fileExists: (path: string): Promise<boolean> => ipcRenderer.invoke('fileExists', path),
+  /** Electron 42 起 File.path 已移除，取 File 真实磁盘路径须用 webUtils.getPathForFile */
+  getPathForFile: (file: File): string => {
+    try { return webUtils.getPathForFile(file) } catch { return '' }
+  },
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke('openExternal', url),
   confirmDialog: (title: string, message: string): Promise<boolean> =>
     ipcRenderer.invoke('confirmDialog', title, message),
@@ -70,6 +76,8 @@ contextBridge.exposeInMainWorld('clerkbox', {
     ipcRenderer.invoke('apiFetchModels', cfg),
   apiTestConnection: (cfg: ApiConnConfig): Promise<{ ok: true; latencyMs: number } | { error: string }> =>
     ipcRenderer.invoke('apiTestConnection', cfg),
+  apiTestVision: (cfg: ApiConnConfig, modelId: string): Promise<{ ok: true } | { ok: false; status?: number; error: string }> =>
+    ipcRenderer.invoke('apiTestVision', cfg, modelId),
   apiChatStream: (cfg: ApiConnConfig, body: unknown): Promise<{ requestId: string }> =>
     ipcRenderer.invoke('apiChatStream', cfg, body),
   apiAbort: (requestId: string): Promise<void> => ipcRenderer.invoke('apiAbort', requestId),

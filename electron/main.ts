@@ -593,6 +593,46 @@ function registerIpcHandlers() {
     return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
   })
 
+  // 对话附件多选：图片与任意类型文件均可，不加 filters
+  ipcMain.handle('selectChatFiles', async () => {
+    const result = await showOpenDialogSafe({
+      properties: ['openFile', 'multiSelections'],
+    })
+    return result.canceled || result.filePaths.length === 0 ? null : result.filePaths
+  })
+
+  // 按磁盘路径读取图片文件为 base64 data URL（渲染进程无法按路径读本地文件）
+  ipcMain.handle('readImageFileBase64', async (_e, filePath: string) => {
+    if (typeof filePath !== 'string' || !filePath) {
+      throw new Error('readImageFileBase64: file path must be a non-empty string')
+    }
+    let size = 0
+    try {
+      size = (await fs.promises.stat(filePath)).size
+    } catch {
+      throw new Error(`Cannot access image file: ${filePath}`)
+    }
+    if (size > 32 * 1024 * 1024) {
+      throw new Error('Image file too large (max 32MB)')
+    }
+    let buf: Buffer
+    try {
+      buf = await fs.promises.readFile(filePath)
+    } catch {
+      throw new Error(`Failed to read image file: ${filePath}`)
+    }
+    const ext = path.extname(filePath).toLowerCase()
+    const mime =
+      ext === '.png' ? 'image/png'
+        : ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg'
+          : ext === '.gif' ? 'image/gif'
+            : ext === '.webp' ? 'image/webp'
+              : ext === '.bmp' ? 'image/bmp'
+                : ext === '.svg' ? 'image/svg+xml'
+                  : 'image/png'
+    return `data:${mime};base64,${buf.toString('base64')}`
+  })
+
   ipcMain.handle('selectAudioFile', async () => {
     const result = await showOpenDialogSafe({
       properties: ['openFile'],

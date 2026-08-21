@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { ipc } from '../lib/ipc-client'
-import type { Message, Session, ToolCall, ToolResult } from '../types/agent'
+import type { Message, MessageAttachment, Session, ToolCall, ToolResult } from '../types/agent'
 
 export type SessionStatus = 'working' | 'error' | 'confirm-danger'
 
@@ -93,6 +93,32 @@ function parseToolResults(value: string | null | undefined): ToolResult[] | unde
   }
 }
 
+/** 解析 DB 行的 attachments JSON 列（MessageAttachment[] 序列化）；可选字段缺失时容忍 */
+function parseAttachments(value: string | null | undefined): MessageAttachment[] | undefined {
+  if (!value) return undefined
+  try {
+    const parsed: unknown = JSON.parse(value)
+    if (!Array.isArray(parsed)) return undefined
+    const attachments = parsed.flatMap((item) =>
+      isRecord(item) && typeof item.id === 'string' && typeof item.name === 'string'
+        && typeof item.kind === 'string' && (item.kind === 'image' || item.kind === 'file')
+        ? [{
+            id: item.id,
+            kind: item.kind as MessageAttachment['kind'],
+            name: item.name,
+            ...(typeof item.mimeType === 'string' ? { mimeType: item.mimeType } : {}),
+            ...(typeof item.dataUrl === 'string' ? { dataUrl: item.dataUrl } : {}),
+            ...(typeof item.path === 'string' ? { path: item.path } : {}),
+            ...(typeof item.size === 'number' ? { size: item.size } : {}),
+          }]
+        : []
+    )
+    return attachments.length > 0 ? attachments : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /** 把 DB 消息行映射为内存 Message 结构（loadFromDb / syncFromDb 共用） */
 function mapMessageRows(msgRows: import('../types/ipc').MessageRow[]): Message[] {
   return msgRows.map((m) => ({
@@ -103,6 +129,7 @@ function mapMessageRows(msgRows: import('../types/ipc').MessageRow[]): Message[]
     timestamp: m.timestamp,
     toolCalls: parseToolCalls(m.tool_calls),
     toolResults: parseToolResults(m.tool_results),
+    attachments: parseAttachments(m.attachments),
     finishReason: m.finish_reason || undefined,
     isCompactSummary: m.is_compact === 1 ? true : undefined,
     isSubAgentCard: m.is_sub_agent_card === 1 ? true : undefined,
@@ -390,6 +417,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       timestamp: message.timestamp,
       tool_calls: message.toolCalls ? JSON.stringify(message.toolCalls) : null,
       tool_results: message.toolResults ? JSON.stringify(message.toolResults) : null,
+      attachments: message.attachments ? JSON.stringify(message.attachments) : null,
       finish_reason: message.finishReason || null,
       is_compact: message.isCompactSummary ? 1 : 0,
       is_sub_agent_card: message.isSubAgentCard ? 1 : 0,
@@ -546,6 +574,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // Preserve subagent-card metadata when rewriting compacted history.
         is_sub_agent_card: msg.isSubAgentCard ? 1 : 0,
         sub_agent_id: msg.subAgentId || null,
+        // Preserve attachments when rewriting compacted history.
+        attachments: msg.attachments ? JSON.stringify(msg.attachments) : null,
       }))
     }
   },

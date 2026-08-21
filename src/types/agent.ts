@@ -1,9 +1,28 @@
+/** 消息附件：图片携带压缩后的 base64 data URL 真正发给模型；文件只携带绝对路径（内容由模型用工具自行读取） */
+export interface MessageAttachment {
+  id: string
+  /** 附件类型：image=图片（多模态发送），file=普通文件（仅路径引用） */
+  kind: 'image' | 'file'
+  /** 显示名（文件名） */
+  name: string
+  /** MIME 类型，如 image/png、application/pdf */
+  mimeType?: string
+  /** 图片内容：客户端压缩后的 base64 data URL（仅 image 附件携带） */
+  dataUrl?: string
+  /** 磁盘绝对路径（剪贴板截图等无路径附件省略） */
+  path?: string
+  /** 文件体积（字节） */
+  size?: number
+}
+
 export interface Message {
   id: string
   role: 'user' | 'assistant' | 'system' | 'tool'
   content: string
   thinkingContent?: string
   timestamp: number
+  /** 消息附件（图片/文件）；随消息持久化 */
+  attachments?: MessageAttachment[]
   toolCalls?: ToolCall[]
   toolResults?: ToolResult[]
   finishReason?: string
@@ -116,6 +135,8 @@ export interface ProviderModel {
   label?: string
   /** 是否支持思考；未设按全局开关兼容 */
   supportsThinking?: boolean
+  /** 是否支持图片输入 */
+  supportsImages?: boolean
   /** 思考在请求体里的表达方式（协议相关）；未设则按 apiCompat/预设推断 */
   thinkingStyle?: ThinkingStyle
   /** 该模型支持的思考档位，按顺序从弱到强 */
