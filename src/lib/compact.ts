@@ -137,8 +137,8 @@ export async function callCompactAPI(
   for (const msg of messages) {
     if (msg.role === 'system') continue // Skip system messages (we have our own)
     if (msg.role === 'tool') {
-      // Include tool results as user messages for the summarizer
-      const toolContent = msg.toolResults?.map(r => r.content).join('\n') || msg.content
+      // Include tool results as user messages for the summarizer（剥离 UI 专用 __EDIT_DIFF__ 元数据）
+      const toolContent = (msg.toolResults?.map(r => r.content).join('\n') || msg.content).replace(/\n__EDIT_DIFF__:.*$/s, '')
       apiMessages.push({ role: 'user', content: `[Tool Result] ${toolContent}` })
     } else if (msg.role === 'assistant' && msg.toolCalls && msg.toolCalls.length > 0) {
       const toolCallDesc = msg.toolCalls.map(tc => `[Tool Call: ${tc.name}(${JSON.stringify(tc.arguments)})]`).join('\n')

@@ -680,11 +680,11 @@ export function useAgent(sessionId: string) {
       if (m.role === 'assistant' && !m.toolCalls?.length && !m.content && !m.thinkingContent) continue
 
       if (m.role === 'tool') {
-        // Tool result message
+        // Tool result message（剥离 UI 专用 __EDIT_DIFF__ 元数据，不发给模型）
         const toolCallId = m.toolResults?.[0]?.toolCallId || ''
         result.push({
           role: 'tool',
-          content: m.content,
+          content: m.content.replace(/\n__EDIT_DIFF__:.*$/s, ''),
           tool_call_id: toolCallId,
         })
       } else if (m.role === 'assistant' && m.toolCalls && m.toolCalls.length > 0) {

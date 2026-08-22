@@ -63,6 +63,8 @@ const config: Config = {
         'fade-in': 'fadeIn 0.3s ease-out',
         'slide-up': 'slideUp 0.3s ease-out',
         'pulse-soft': 'pulseSoft 2s ease-in-out infinite',
+        'fade-up': 'fadeUp 0.3s cubic-bezier(0.23, 1, 0.32, 1) both',
+        'pop-in': 'popIn 0.25s cubic-bezier(0.23, 1, 0.32, 1) both',
       },
       keyframes: {
         fadeIn: {
@@ -76,6 +78,14 @@ const config: Config = {
         pulseSoft: {
           '0%, 100%': { opacity: '1' },
           '50%': { opacity: '0.6' },
+        },
+        fadeUp: {
+          '0%': { opacity: '0', transform: 'translateY(4px)' },
+          '100%': { opacity: '1', transform: 'translateY(0)' },
+        },
+        popIn: {
+          '0%': { opacity: '0', transform: 'scale(0.92)' },
+          '100%': { opacity: '1', transform: 'scale(1)' },
         },
       },
     },

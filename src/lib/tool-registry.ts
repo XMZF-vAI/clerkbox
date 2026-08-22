@@ -366,6 +366,53 @@ function escapePS(s: string): string {
   return s.replace(/`/g, '``').replace(/\$/g, '`$').replace(/"/g, '`"')
 }
 
+// ── 编辑差异元数据（UI 渲染 file-diff chips 与悬停预览用）──
+
+export interface EditDiffLine {
+  text: string
+  tone: 'add' | 'del' | 'ctx'
+}
+
+export interface EditDiffMeta {
+  path: string
+  added: number
+  removed: number
+  /** 供悬停预览的小样本行（上下文截断，超长折叠） */
+  lines: EditDiffLine[]
+}
+
+const DIFF_CTX = 2
+const DIFF_SIDE_CAP = 12
+
+/**
+ * 行级 diff：公共前缀/后缀压缩，中间整块替换。
+ * write_file 整文件重写与 search_replace 局部修改都适用；
+ * 只输出 UI 预览用的小样本（前后各 2 行 ctx，del/add 各至多 12 行），不追求补丁最小化。
+ */
+function computeEditDiff(path: string, oldText: string, newText: string): EditDiffMeta {
+  const a = oldText.length === 0 ? [] : oldText.split('\n')
+  const b = newText.length === 0 ? [] : newText.split('\n')
+  let pre = 0
+  while (pre < a.length && pre < b.length && a[pre] === b[pre]) pre++
+  let suf = 0
+  while (suf < a.length - pre && suf < b.length - pre && a[a.length - 1 - suf] === b[b.length - 1 - suf]) suf++
+  const removed = a.length - pre - suf
+  const added = b.length - pre - suf
+
+  const lines: EditDiffLine[] = []
+  for (let i = Math.max(0, pre - DIFF_CTX); i < pre; i++) lines.push({ text: a[i], tone: 'ctx' })
+  const delEnd = a.length - suf
+  const addEnd = b.length - suf
+  for (let i = pre; i < Math.min(delEnd, pre + DIFF_SIDE_CAP); i++) lines.push({ text: a[i], tone: 'del' })
+  if (delEnd - pre > DIFF_SIDE_CAP) lines.push({ text: `… 共 ${delEnd - pre} 行删除`, tone: 'ctx' })
+  for (let i = pre; i < Math.min(addEnd, pre + DIFF_SIDE_CAP); i++) lines.push({ text: b[i], tone: 'add' })
+  if (addEnd - pre > DIFF_SIDE_CAP) lines.push({ text: `… 共 ${addEnd - pre} 行新增`, tone: 'ctx' })
+  // 变更区之后紧邻的公共尾部 ctx（a 与 b 在该区间内容一致，取 a 即可）
+  for (let i = delEnd; i < Math.min(a.length - suf, delEnd + DIFF_CTX); i++) lines.push({ text: a[i], tone: 'ctx' })
+
+  return { path, added, removed, lines }
+}
+
 class ToolRegistry {
   private builtinDefinitions: ToolDefinition[]
 
@@ -407,13 +454,18 @@ class ToolRegistry {
         const path = String(args.path)
         const content = String(args.content)
         try {
+          // 读取旧内容供 diff 元数据（新文件则为空串）
+          let oldContent = ''
+          try { oldContent = await ipc.readFile(path) } catch { /* 新文件 */ }
           // Auto-backup before overwriting
           const bakPath = await backupFile(path)
           await ipc.writeFile(path, content)
+          const diffMeta = computeEditDiff(path, oldContent, content)
+          const diffTail = `\n__EDIT_DIFF__:${JSON.stringify(diffMeta)}`
           if (bakPath) {
-            return `✅ 文件已写入: ${path} (${content.length} 字符)\n📦 备份: ${bakPath}`
+            return `✅ 文件已写入: ${path} (${content.length} 字符)\n📦 备份: ${bakPath}${diffTail}`
           }
-          return `✅ 文件已创建: ${path} (${content.length} 字符)`
+          return `✅ 文件已创建: ${path} (${content.length} 字符)${diffTail}`
         } catch (e) {
           return `Error: 无法写入文件 ${path} - ${e instanceof Error ? e.message : String(e)}`
         }
@@ -538,9 +590,11 @@ class ToolRegistry {
 
           const diff = generateDiff(normalizedOriginal, result)
           const matchCount = replaceAll ? matches.length : 1
+          const diffMeta = computeEditDiff(path, normalizedOriginal, result)
           return `✅ 文件已编辑: ${path} ${diff}\n` +
             `📦 备份: ${bakPath}\n` +
-            `替换了 ${matchCount} 处匹配`
+            `替换了 ${matchCount} 处匹配` +
+            `\n__EDIT_DIFF__:${JSON.stringify(diffMeta)}`
         } catch (e) {
           return `Error: 搜索替换失败 ${path} - ${e instanceof Error ? e.message : String(e)}`
         }

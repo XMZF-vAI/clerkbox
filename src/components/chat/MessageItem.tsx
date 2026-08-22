@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo, memo } from 'react'
+import { createPortal } from 'react-dom'
 import { Copy, Check, Terminal, FileText, FolderOpen, AlertTriangle, ChevronDown, ChevronUp, Wrench, FilePen, Globe, Pencil, Archive, Loader2 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { Message, StreamingToolCall } from '../../types/agent'
@@ -49,295 +50,339 @@ function extractWriteFileData(argsSoFar: string): { path: string; content: strin
   return { path, content }
 }
 
-/** Streaming write_file preview card */
-function WriteFilePreviewCard({ streamingCall }: { streamingCall: StreamingToolCall }) {
-  const { t } = useTranslation()
-  const { path, content } = useMemo(() => extractWriteFileData(streamingCall.argsSoFar), [streamingCall.argsSoFar])
-  const scrollRef = useRef<HTMLPreElement>(null)
-  const [autoScroll, setAutoScroll] = useState(true)
+// ── 工具行渲染（紧凑行样式，参考 Tool Chips 设计）──
 
-  // Auto-scroll to bottom as content streams in (throttled)
-  useEffect(() => {
-    if (autoScroll && scrollRef.current) {
-      // Use requestAnimationFrame to avoid layout thrashing
-      requestAnimationFrame(() => {
-        if (scrollRef.current) {
-          scrollRef.current.scrollTop = scrollRef.current.scrollHeight
-        }
-      })
-    }
-  }, [content, autoScroll])
-
-  const lineCount = content.split('\n').length
-
-  return (
-    <div className="rounded-md3-md border border-md-info/[0.03] bg-md-info/5 overflow-hidden max-w-md">
-      {/* Header */}
-      <div className="flex items-center gap-2 px-3 py-1.5 bg-md-info/8 border-b border-md-info/[0.03]">
-        <FilePen size={12} className="text-md-info flex-shrink-0" />
-        <span className="text-[11px] font-medium text-md-info truncate">
-          {path || t('toolPreview.generatingPath')}
-        </span>
-        <span className="ml-auto text-[10px] px-1.5 py-0.5 rounded-md3-xs bg-md-info/15 text-md-info animate-pulse-soft flex-shrink-0">
-          {t('toolPreview.writing')}
-        </span>
-        <span className="text-[10px] text-dark-onSurfaceVariant/40 flex-shrink-0">
-          {lineCount} {t('common.lines')}
-        </span>
-      </div>
-      {/* Content preview - fixed height with scroll */}
-      <div
-        className="relative"
-        onMouseEnter={() => setAutoScroll(false)}
-        onMouseLeave={() => setAutoScroll(true)}
-      >
-        <pre
-          ref={scrollRef}
-          className="px-3 py-2 text-[11px] font-mono leading-relaxed text-dark-onSurface/80 overflow-y-auto max-h-[200px] whitespace-pre-wrap break-all"
-        >
-          {content || '...'}
-          <span className="inline-block w-1.5 h-3 bg-md-info animate-pulse-soft ml-0.5 align-text-bottom" />
-        </pre>
-      </div>
-    </div>
-  )
+/** 工具结果尾部的 __EDIT_DIFF__ 元数据（write_file / search_replace 附加，供 UI 展示差异） */
+interface EditDiffMetaView {
+  path: string
+  added: number
+  removed: number
+  lines: Array<{ text: string; tone: 'add' | 'del' | 'ctx' }>
 }
 
-/** Streaming search_replace preview card */
-function SearchReplacePreviewCard({ streamingCall }: { streamingCall: StreamingToolCall }) {
-  const { t } = useTranslation()
-  let path = ''
-  let oldPreview = ''
-  let newPreview = ''
+function parseEditDiff(content: string): EditDiffMetaView | null {
+  const idx = content.indexOf('\n__EDIT_DIFF__:')
+  if (idx === -1) return null
   try {
-    const parsed = JSON.parse(streamingCall.argsSoFar)
-    path = parsed.path || ''
-    oldPreview = (parsed.old_str || '').slice(0, 80).replace(/\n/g, '↵')
-    newPreview = (parsed.new_str || '').slice(0, 80).replace(/\n/g, '↵')
-  } catch {
-    const pathMatch = streamingCall.argsSoFar.match(/"path"\s*:\s*"((?:[^"\\]|\\.)*)"/)
-    if (pathMatch) path = pathMatch[1]
-  }
-
-  return (
-    <div className="rounded-md3-md border border-md-primary/[0.03] bg-md-primary/5 overflow-hidden max-w-md">
-      <div className="flex items-center gap-2 px-3 py-1.5 bg-md-primary/8 border-b border-md-primary/[0.03]">
-        <Pencil size={12} className="text-md-primary flex-shrink-0" />
-        <span className="text-[11px] font-medium text-md-primary truncate">
-          {path || t('toolPreview.parsing')}
-        </span>
-        <span className="ml-auto text-[10px] px-1.5 py-0.5 rounded-md3-xs bg-md-primary/15 text-md-primary animate-pulse-soft flex-shrink-0">
-          {t('toolPreview.searchReplacing')}
-        </span>
-      </div>
-      <div className="px-3 py-2 text-[11px] font-mono leading-relaxed space-y-1">
-        {oldPreview && (
-          <div className="flex gap-2">
-            <span className="text-md-error/60 flex-shrink-0">-</span>
-            <span className="text-md-error/80 whitespace-pre-wrap break-all">{oldPreview}{oldPreview.length >= 80 ? '...' : ''}</span>
-          </div>
-        )}
-        {newPreview && (
-          <div className="flex gap-2">
-            <span className="text-md-success/60 flex-shrink-0">+</span>
-            <span className="text-md-success/80 whitespace-pre-wrap break-all">{newPreview}{newPreview.length >= 80 ? '...' : ''}</span>
-          </div>
-        )}
-        {!oldPreview && !newPreview && (
-          <span className="text-dark-onSurfaceVariant/40">{t('toolPreview.receivingArgs')}</span>
-        )}
-      </div>
-    </div>
-  )
+    const raw = JSON.parse(content.slice(idx + '\n__EDIT_DIFF__:'.length)) as EditDiffMetaView
+    if (typeof raw.path !== 'string' || !Array.isArray(raw.lines)) return null
+    return { path: raw.path, added: raw.added || 0, removed: raw.removed || 0, lines: raw.lines.slice(0, 16) }
+  } catch { return null }
 }
 
-/** Streaming edit_file preview card */
-function EditFilePreviewCard({ streamingCall }: { streamingCall: StreamingToolCall }) {
-  const { t } = useTranslation()
-  const scrollRef = useRef<HTMLPreElement>(null)
-  const [autoScroll, setAutoScroll] = useState(true)
-
-  // Try to extract path and operations from partial JSON
-  let path = ''
-  let opsPreview = ''
-  try {
-    const parsed = JSON.parse(streamingCall.argsSoFar)
-    path = parsed.path || ''
-    if (Array.isArray(parsed.operations)) {
-      opsPreview = parsed.operations.map((op: { type?: string; line?: number; content?: string; count?: number }, i: number) => {
-        const type = op.type || '?'
-        const line = op.line || '?'
-        const lines = type === 'delete' ? (op.count || 1) : (op.content?.split('\n').length || 1)
-        if (type === 'replace') return t('toolPreview.replaceLines', { line, count: lines })
-        if (type === 'insert') return t('toolPreview.insertLines', { line, count: lines })
-        if (type === 'delete') return t('toolPreview.deleteLines', { line, count: lines })
-        return t('toolPreview.operationN', { n: i + 1 })
-      }).join('\n')
-    }
-  } catch {
-    // Partial JSON - try regex for path
-    const pathMatch = streamingCall.argsSoFar.match(/"path"\s*:\s*"((?:[^"\\]|\\.)*)"/)
-    if (pathMatch) path = pathMatch[1]
-    opsPreview = t('toolPreview.parsingOps')
-  }
-
-  useEffect(() => {
-    if (autoScroll && scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
-    }
-  }, [opsPreview, autoScroll])
-
-  return (
-    <div className="rounded-md3-md border border-md-success/[0.03] bg-md-success/5 overflow-hidden max-w-md">
-      {/* Header */}
-      <div className="flex items-center gap-2 px-3 py-1.5 bg-md-success/8 border-b border-md-success/[0.03]">
-        <Pencil size={12} className="text-md-success flex-shrink-0" />
-        <span className="text-[11px] font-medium text-md-success truncate">
-          {path || t('toolPreview.generatingPath')}
-        </span>
-        <span className="ml-auto text-[10px] px-1.5 py-0.5 rounded-md3-xs bg-md-success/15 text-md-success animate-pulse-soft flex-shrink-0">
-          {t('toolPreview.editing')}
-        </span>
-      </div>
-      {/* Operations preview */}
-      <div
-        className="relative"
-        onMouseEnter={() => setAutoScroll(false)}
-        onMouseLeave={() => setAutoScroll(true)}
-      >
-        <pre
-          ref={scrollRef}
-          className="px-3 py-2 text-[11px] font-mono leading-relaxed text-dark-onSurface/80 overflow-y-auto max-h-[120px] whitespace-pre-wrap"
-        >
-          {opsPreview || '...'}
-          <span className="inline-block w-1.5 h-3 bg-md-success animate-pulse-soft ml-0.5 align-text-bottom" />
-        </pre>
-      </div>
-    </div>
-  )
+function stripEditDiff(content: string): string {
+  const idx = content.indexOf('\n__EDIT_DIFF__:')
+  return idx === -1 ? content : content.slice(0, idx)
 }
 
-/** Compact tool call bar - horizontal strip style */
-function ToolCallBar({ toolCall, result, vibe }: { toolCall: NonNullable<Message['toolCalls']>[0]; result?: Message['toolResults']; vibe?: boolean }) {
-  // Hooks must run before the conditional return to preserve hook order.
+const fileBase = (p: string) => p.split(/[\\/]/).pop() || p
+
+/** 从流式部分 JSON 中抽第一个出现的字符串字段值 */
+function extractFirstStringField(argsSoFar: string, keys: string[]): string {
+  for (const k of keys) {
+    const m = argsSoFar.match(new RegExp(`"${k}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`))
+    if (m) {
+      try { return JSON.parse('"' + m[1] + '"') } catch { return m[1] }
+    }
+  }
+  return ''
+}
+
+function toolRowIcon(name: string) {
+  if (name === 'search_replace' || name === 'edit_file') return <Pencil size={13} />
+  if (name === 'write_file') return <FilePen size={13} />
+  if (name.includes('read') || name.includes('file')) return <FileText size={13} />
+  if (name.includes('dir') || name.includes('list')) return <FolderOpen size={13} />
+  if (name.includes('web') || (name.includes('search') && !name.includes('content'))) return <Globe size={13} />
+  return <Terminal size={13} />
+}
+
+/** 行 chip 文本：读写类显示文件名，命令/搜索显示参数片段 */
+function chipTextFor(name: string, args: Record<string, unknown>): string {
+  if (name === 'write_file' || name === 'search_replace' || name === 'edit_file' ||
+      name === 'read_file' || name === 'read_image' || name === 'list_dir') {
+    return fileBase(String(args.path || ''))
+  }
+  if (name === 'execute_command') return String(args.command || '').slice(0, 80)
+  if (name === 'search_files' || name === 'search_content') return String(args.pattern || '')
+  if (name === 'web_search') return String(args.query || '')
+  if (name === 'web_fetch') return String(args.url || '')
+  const json = JSON.stringify(args)
+  return json === '{}' ? '' : json.slice(0, 80)
+}
+
+/** 单个工具调用行：图标 + 动作标签 + 参数 chip；悬停露出 chevron，点击展开明细 */
+function ToolRow({ toolCall, result, vibe }: {
+  toolCall: NonNullable<Message['toolCalls']>[0]
+  result?: Message['toolResults']
+  vibe?: boolean
+}) {
   const { t } = useTranslation()
-  const [expanded, setExpanded] = useState(false)
-  // spawn_agent 由 SubAgentCard 单独展示，不显示原始工具调用条
-  if (toolCall.name === 'spawn_agent') return null
+  const [open, setOpen] = useState(false)
   const toolResult = result?.find((r) => r.toolCallId === toolCall.id)
   const isError = toolResult?.isError ?? false
+  const running = !toolResult
+  const meta = toolResult && !isError ? parseEditDiff(toolResult.content) : null
+  const detailLines = useMemo<Array<{ text: string; tone: 'add' | 'del' | 'ctx' }>>(() => {
+    if (!toolResult) return []
+    if (meta) return meta.lines
+    return stripEditDiff(toolResult.content).split('\n')
+      .filter((l) => l.trim()).slice(0, 5)
+      .map((text) => ({ text, tone: 'ctx' as const }))
+  }, [toolResult, meta])
 
-  const toolIcon = toolCall.name === 'edit_file' || toolCall.name === 'search_replace'
-    ? <Pencil size={12} />
-    : toolCall.name.includes('file') || toolCall.name.includes('read') || toolCall.name.includes('write')
-    ? <FileText size={12} />
-    : toolCall.name.includes('dir') || toolCall.name.includes('list')
-    ? <FolderOpen size={12} />
-    : toolCall.name.includes('web') || (toolCall.name.includes('search') && !toolCall.name.includes('content'))
-    ? <Globe size={12} />
-    : <Terminal size={12} />
-
-  const displayName = t(`tools.${toolCall.name}`, { defaultValue: toolCall.name })
-
-  const getArgsPreview = () => {
-    const args = toolCall.arguments
-    if (toolCall.name === 'read_file' || toolCall.name === 'read_image' || toolCall.name === 'list_dir') return String(args.path || '')
-    if (toolCall.name === 'write_file' || toolCall.name === 'edit_file' || toolCall.name === 'search_replace') return String(args.path || '')
-    if (toolCall.name === 'execute_command') return String(args.command || '').slice(0, 80)
-    if (toolCall.name === 'search_files') return `${args.pattern} in ${args.path}`
-    if (toolCall.name === 'search_content') return `/${args.pattern}/ in ${args.path}`
-    if (toolCall.name === 'web_search') return String(args.query || '')
-    if (toolCall.name === 'web_fetch') return String(args.url || '')
-    return JSON.stringify(args)
-  }
-
-  // Parse diff info from edit_file tool result
-  let editAddedLines = 0
-  let editRemovedLines = 0
-  if (toolCall.name === 'edit_file' && toolResult) {
-    const content = toolResult.content || ''
-    const diffMatch = content.match(/__EDIT_DIFF__:(.*)/s)
-    if (diffMatch) {
-      try {
-        const diffData = JSON.parse(diffMatch[1])
-        editAddedLines = diffData.addedLines || 0
-        editRemovedLines = diffData.removedLines || 0
-      } catch { /* Diff metadata is optional and should not hide the tool result. */ }
-    }
-  }
+  const label = toolCall.name === 'write_file'
+    ? t('chat.toolRowWrite', { count: String(toolCall.arguments.content || '').split('\n').length })
+    : t(`tools.${toolCall.name}`, { defaultValue: toolCall.name })
+  const chip = chipTextFor(toolCall.name, toolCall.arguments)
 
   return (
-    <div className={`rounded-md3-xs border overflow-hidden max-w-md ${
-      isError
-        ? vibe
-          ? 'border-md-error/30 bg-md-error/10'
-          : 'border-md-error/15 bg-md-error/5'
-        : vibe
-          ? 'liquid-glass-subtle border-white/[0.03]'
-          : 'border-dark-onSurfaceVariant/[0.03] bg-dark-surfaceContainer/40'
-    }`}>
+    <div className="animate-fade-up">
       <button
         type="button"
-        onClick={() => setExpanded(!expanded)}
-        aria-expanded={expanded}
-        aria-controls={`tc-detail-${toolCall.id}`}
-        aria-label={t('toolPreview.toolCallStatus', { name: displayName, status: toolResult ? (isError ? t('toolPreview.statusFailed') : t('toolPreview.statusComplete')) : t('toolPreview.statusExecuting') })}
-        className={`w-full flex items-center gap-2 px-3 py-1.5 text-[11px] transition-colors ${
+        aria-expanded={open}
+        onClick={() => setOpen(!open)}
+        className={`group/row flex h-7 w-full items-center gap-2 rounded-md3-xs px-1.5 text-left transition-colors duration-100 ${
           vibe ? 'hover:bg-white/10' : 'hover:bg-dark-surfaceContainerHigh/40'
         }`}
       >
-        {isError ? <AlertTriangle size={11} className="text-md-error flex-shrink-0" /> : <span className={vibe ? 'text-white/60 flex-shrink-0' : 'text-dark-onSurfaceVariant/50 flex-shrink-0'}>{toolIcon}</span>}
-        <span className={vibe ? 'font-medium text-white/80' : 'font-medium text-dark-onSurfaceVariant/80'}>{displayName}</span>
-        <span className={vibe ? 'text-white/40 truncate' : 'text-dark-onSurfaceVariant/30 truncate'}>{getArgsPreview()}</span>
-        {toolResult && (
-          <span className={`ml-auto text-[10px] px-1 py-0.5 rounded-md3-xs flex-shrink-0 ${isError ? 'bg-md-error/15 text-md-error' : 'bg-md-success/15 text-md-success'}`}>
-            {isError ? t('toolPreview.executionFailed') : t('toolPreview.executionComplete')}
+        <span className="relative flex size-4 shrink-0 items-center justify-center">
+          <span
+            className={`absolute inset-0 flex items-center justify-center transition-opacity duration-150 group-hover/row:opacity-0 ${open ? 'opacity-0' : 'opacity-100'} ${
+              isError ? 'text-md-error' : running ? 'text-md-info' : vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/50'
+            }`}
+          >
+            {isError ? <AlertTriangle size={13} /> : running ? <Loader2 size={13} className="animate-spin" /> : toolRowIcon(toolCall.name)}
           </span>
-        )}
-        {!isError && toolCall.name === 'edit_file' && editAddedLines > 0 && (
-          <span className="text-[10px] px-1 py-0.5 rounded-md3-xs bg-md-success/10 text-md-success flex-shrink-0">
-            +{editAddedLines}
-          </span>
-        )}
-        {!isError && toolCall.name === 'edit_file' && editRemovedLines > 0 && (
-          <span className="text-[10px] px-1 py-0.5 rounded-md3-xs bg-md-error/10 text-md-error flex-shrink-0">
-            -{editRemovedLines}
-          </span>
-        )}
-        {!toolResult && (
-          <span className="ml-auto text-[10px] px-1 py-0.5 rounded-md3-xs bg-md-info/15 text-md-info animate-pulse-soft flex-shrink-0">
-            {t('toolPreview.executing')}
-          </span>
-        )}
-        <span className={`flex-shrink-0 ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/30'}`}>
-          {expanded ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+          <ChevronDown
+            size={12}
+            className={`absolute transition-[opacity,transform] duration-150 group-hover/row:opacity-100 ${
+              open ? 'opacity-100' : 'opacity-0 -rotate-90'
+            } ${vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/50'}`}
+          />
         </span>
+        <span className={`shrink-0 text-[12px] font-medium ${vibe ? 'text-white/85' : 'text-dark-onSurface/85'}`}>{label}</span>
+        <span className={`inline-flex h-5 min-w-0 flex-1 items-center truncate rounded-md3-xs px-1.5 font-mono text-[11px] ${
+          vibe ? 'bg-white/[0.06] text-white/60' : 'bg-dark-surfaceContainer/60 text-dark-onSurfaceVariant/70'
+        }`}>
+          {chip || '…'}
+        </span>
+        {meta && meta.added > 0 && (
+          <span className="shrink-0 font-mono text-[10px] tabular-nums text-md-success">+{meta.added}</span>
+        )}
+        {meta && meta.removed > 0 && (
+          <span className="shrink-0 font-mono text-[10px] tabular-nums text-md-error">−{meta.removed}</span>
+        )}
+        {isError && <span className="shrink-0 text-[10px] text-md-error">{t('toolPreview.executionFailed')}</span>}
       </button>
-      {expanded && (
-        <div
-          id={`tc-detail-${toolCall.id}`}
-          className={`px-3 pb-2 space-y-2 text-[11px] border-t ${vibe ? 'border-white/[0.03]' : 'border-dark-onSurfaceVariant/[0.03]'}`}
-        >
-          <div className="pt-2">
-            <span className={vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/40'}>{t('chat.toolParams')}</span>
-            <pre className={`mt-1 p-2 rounded-md3-xs overflow-x-auto text-[10px] ${
-              vibe ? 'bg-black/30 text-white/90' : 'bg-dark-surfaceContainerHigh'
+      {/* 展开明细：grid-rows 折叠过渡 + 左边框缩进 */}
+      <div
+        className="grid transition-[grid-template-rows,opacity] duration-300"
+        style={{ gridTemplateRows: open ? '1fr' : '0fr', opacity: open ? 1 : 0, transitionTimingFunction: 'cubic-bezier(0.23, 1, 0.32, 1)' }}
+      >
+        <div className="min-h-0 overflow-hidden">
+          {detailLines.length > 0 && (
+            <div className={`mt-0.5 mb-1 ml-2 flex flex-col gap-0.5 border-l py-0.5 pl-3.5 ${
+              vibe ? 'border-white/15' : 'border-dark-onSurfaceVariant/10'
             }`}>
-              {JSON.stringify(toolCall.arguments, null, 2)}
-            </pre>
-          </div>
-          {toolResult && (
-            <div>
-              <span className={vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/40'}>{t('chat.toolResult')}</span>
-              <pre className={`mt-1 p-2 rounded-md3-xs overflow-x-auto max-h-48 text-[10px] whitespace-pre-wrap ${
-                isError ? 'bg-md-error/8 text-md-error' : vibe ? 'bg-black/30 text-white/90' : 'bg-dark-surfaceContainerHigh'
-              }`}>
-                {toolResult.content}
-              </pre>
+              {detailLines.map((line, i) => (
+                <span
+                  key={i}
+                  title={line.text}
+                  className={`truncate font-mono text-[11px] leading-[1.6] ${
+                    line.tone === 'add' ? 'text-md-success' : line.tone === 'del' ? 'text-md-error' : vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/60'
+                  }`}
+                >
+                  {line.text}
+                </span>
+              ))}
             </div>
           )}
         </div>
+      </div>
+    </div>
+  )
+}
+
+/** 流式生成中的工具调用行：与完成态同款行样式，参数从部分 JSON 容错抽取 */
+function StreamingToolRow({ call, vibe }: { call: StreamingToolCall; vibe?: boolean }) {
+  const { t } = useTranslation()
+  const raw = useMemo(() => {
+    if (call.name === 'write_file') return extractWriteFileData(call.argsSoFar).path
+    const v = extractFirstStringField(call.argsSoFar, ['path', 'command', 'query', 'url', 'pattern'])
+    return v.length > 80 ? v.slice(0, 80) : v
+  }, [call.name, call.argsSoFar])
+  const isPathTool = call.name === 'write_file' || call.name === 'search_replace' ||
+    call.name === 'read_file' || call.name === 'read_image' || call.name === 'list_dir'
+  const chip = isPathTool ? fileBase(raw) : raw
+
+  return (
+    <div className="flex h-7 w-full items-center gap-2 rounded-md3-xs px-1.5 animate-fade-up">
+      <span className={`flex size-4 shrink-0 items-center justify-center ${vibe ? 'text-white/60' : 'text-dark-onSurfaceVariant/60'}`}>
+        <Loader2 size={13} className="animate-spin" />
+      </span>
+      <span className={`shrink-0 text-[12px] font-medium ${vibe ? 'text-white/85' : 'text-dark-onSurface/85'}`}>
+        {t(`tools.${call.name}`, { defaultValue: call.name })}
+      </span>
+      <span className={`inline-flex h-5 min-w-0 flex-1 items-center truncate rounded-md3-xs px-1.5 font-mono text-[11px] ${
+        vibe ? 'bg-white/[0.06] text-white/60' : 'bg-dark-surfaceContainer/60 text-dark-onSurfaceVariant/70'
+      }`}>
+        {chip || t('toolPreview.parsing')}
+      </span>
+      <span className="ml-auto shrink-0 animate-pulse-soft text-[10px] text-md-info">{t('toolPreview.executing')}</span>
+    </div>
+  )
+}
+
+function StreamingToolRows({ calls, vibe }: { calls: StreamingToolCall[]; vibe?: boolean }) {
+  if (!calls.length) return null
+  return (
+    <div className="mt-1 flex w-full flex-col gap-0.5">
+      {calls.map((tc) => <StreamingToolRow key={tc.id} call={tc} vibe={vibe} />)}
+    </div>
+  )
+}
+
+/** 文件差异 chips：run 完成后聚合各文件增删行数，悬停弹出 diff 预览浮层。
+ *  浮层经 portal 渲染到 body —— 消息列表容器带 transform，会重定义 fixed 坐标系。 */
+function DiffChips({ metas, vibe }: { metas: EditDiffMetaView[]; vibe?: boolean }) {
+  const { t } = useTranslation()
+  const [preview, setPreview] = useState<{ meta: EditDiffMetaView; x: number; top?: number; bottom?: number } | null>(null)
+
+  const openPreview = (meta: EditDiffMetaView) => (e: React.SyntheticEvent) => {
+    const rect = (e.currentTarget as Element).getBoundingClientRect()
+    const height = 30 + Math.min(meta.lines.length, 16) * 20
+    const fitsBelow = rect.bottom + 6 + height <= window.innerHeight - 12
+    setPreview({
+      meta,
+      x: Math.max(12, Math.min(rect.left, window.innerWidth - 320)),
+      ...(fitsBelow ? { top: rect.bottom + 6 } : { bottom: window.innerHeight - rect.top + 6 }),
+    })
+  }
+  const closePreview = (path: string) => () =>
+    setPreview((cur) => (cur?.meta.path === path ? null : cur))
+
+  return (
+    <div className={`mt-2 flex max-w-full flex-wrap gap-1.5 border-t pt-2 ${vibe ? 'border-white/10' : 'border-dark-onSurfaceVariant/[0.06]'}`}>
+      {metas.map((m, i) => (
+        <span key={m.path} className="relative" onMouseEnter={openPreview(m)} onMouseLeave={closePreview(m.path)}>
+          <button
+            type="button"
+            aria-label={t('chat.diffPreviewLabel', { file: fileBase(m.path) })}
+            className={`inline-flex h-7 max-w-full items-center gap-1.5 rounded-md3-xs px-2 font-mono text-[11px] transition-colors duration-100 animate-pop-in ${
+              vibe
+                ? 'bg-white/[0.08] text-white/85 hover:bg-white/15'
+                : 'border border-dark-onSurfaceVariant/[0.06] bg-dark-surfaceContainer/60 text-dark-onSurface/85 hover:bg-dark-surfaceContainerHigh/60'
+            }`}
+            style={{ animationDelay: `${i * 60}ms` }}
+          >
+            <span className="min-w-0 truncate">{fileBase(m.path)}</span>
+            {m.added > 0 && <span className="shrink-0 tabular-nums text-md-success">+{m.added}</span>}
+            {m.removed > 0 && <span className="shrink-0 tabular-nums text-md-error">−{m.removed}</span>}
+          </button>
+        </span>
+      ))}
+      {preview && typeof document !== 'undefined' && createPortal(
+        <div
+          className={`fixed z-50 w-80 overflow-hidden rounded-md3-md border shadow-2xl ${
+            vibe ? 'border-white/10 bg-white/10 backdrop-blur-xl' : 'border-dark-onSurfaceVariant/10 bg-dark-surfaceContainerHighest'
+          }`}
+          style={{
+            left: preview.x,
+            top: preview.top,
+            bottom: preview.bottom,
+            animation: 'popIn 160ms cubic-bezier(0.23,1,0.32,1) both',
+            transformOrigin: preview.top === undefined ? 'bottom left' : 'top left',
+          }}
+        >
+          <div className={`flex items-center justify-between border-b px-2.5 py-1.5 font-mono text-[11px] ${vibe ? 'border-white/10' : 'border-dark-onSurfaceVariant/[0.06]'}`}>
+            <span className={`min-w-0 truncate ${vibe ? 'text-white/60' : 'text-dark-onSurfaceVariant/70'}`} title={preview.meta.path}>
+              {fileBase(preview.meta.path)}
+            </span>
+            <span className="shrink-0 tabular-nums">
+              {preview.meta.added > 0 && <span className="text-md-success"> +{preview.meta.added}</span>}
+              {preview.meta.removed > 0 && <span className="text-md-error"> −{preview.meta.removed}</span>}
+            </span>
+          </div>
+          <div className="py-1 font-mono text-[11px] leading-[1.8]">
+            {preview.meta.lines.map((line, i) => (
+              <div
+                key={i}
+                className={`flex gap-2 px-2.5 whitespace-pre ${
+                  line.tone === 'add' ? 'bg-md-success/8 text-md-success'
+                  : line.tone === 'del' ? 'bg-md-error/8 text-md-error'
+                  : vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/60'
+                }`}
+              >
+                <span className="w-3 shrink-0 select-none">{line.tone === 'add' ? '+' : line.tone === 'del' ? '−' : ' '}</span>
+                <span className="min-w-0 truncate" title={line.text}>{line.text}</span>
+              </div>
+            ))}
+          </div>
+        </div>,
+        document.body,
       )}
+    </div>
+  )
+}
+
+/** 工具运行组：折叠头部「N 个工具调用」+ 紧凑行列表 + 差异 chips */
+function ToolRunGroup({ toolCalls, toolResults, vibe, defaultOpen = false }: {
+  toolCalls: NonNullable<Message['toolCalls']>
+  toolResults?: Message['toolResults']
+  vibe?: boolean
+  defaultOpen?: boolean
+}) {
+  const { t } = useTranslation()
+  const [open, setOpen] = useState(defaultOpen)
+  const visible = toolCalls.filter((tc) => tc.name !== 'spawn_agent')
+  const running = visible.some((tc) => !toolResults?.some((r) => r.toolCallId === tc.id))
+  const diffMetas = useMemo(() => {
+    const byPath = new Map<string, EditDiffMetaView>()
+    for (const r of toolResults || []) {
+      const meta = parseEditDiff(r.content)
+      if (!meta || r.isError) continue
+      const cur = byPath.get(meta.path)
+      if (cur) {
+        cur.added += meta.added
+        cur.removed += meta.removed
+        cur.lines = meta.lines
+      } else {
+        byPath.set(meta.path, { ...meta })
+      }
+    }
+    return Array.from(byPath.values())
+  }, [toolResults])
+
+  if (visible.length === 0) return null
+
+  return (
+    <div className="w-full">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen(!open)}
+        className={`flex w-fit items-center gap-1.5 rounded-md3-xs px-1.5 py-1 text-[12px] transition-colors duration-100 ${
+          vibe ? 'text-white/60 hover:bg-white/10' : 'text-dark-onSurfaceVariant/60 hover:bg-dark-surfaceContainerHigh/40'
+        }`}
+      >
+        <ChevronDown size={12} className={`transition-transform duration-200 ${open ? '' : '-rotate-90'}`} />
+        <span className="tabular-nums">{t('chat.toolRunSummary', { count: visible.length })}</span>
+        {running && <span className="size-1.5 animate-pulse-soft rounded-full bg-md-info" />}
+      </button>
+      <div
+        className="grid transition-[grid-template-rows,opacity] duration-300"
+        style={{ gridTemplateRows: open ? '1fr' : '0fr', opacity: open ? 1 : 0, transitionTimingFunction: 'cubic-bezier(0.23, 1, 0.32, 1)' }}
+      >
+        <div className="min-h-0 overflow-hidden">
+          <div className="mt-1 flex flex-col gap-0.5">
+            {visible.map((tc) => (
+              <ToolRow key={tc.id} toolCall={tc} result={toolResults} vibe={vibe} />
+            ))}
+          </div>
+          {!running && diffMetas.length > 0 && <DiffChips metas={diffMetas} vibe={vibe} />}
+        </div>
+      </div>
     </div>
   )
 }
@@ -664,7 +709,6 @@ function MessageItem({ message, vibe = false, sessionId }: MessageItemProps) {
   const isToolResult = message.role === 'tool'
   const isTruncated = message.finishReason === 'length'
   const hasThinking = !!message.thinkingContent && message.thinkingContent.length > 0
-  const hasStreamingWriteFile = message.streamingToolCalls?.some(tc => tc.name === 'write_file')
   const cacheReadTokens = message.usage?.cache_read_input_tokens ?? 0
   const cacheCreatedTokens = message.usage?.cache_creation_input_tokens ?? 0
   const cacheEligibleTokens = cacheReadTokens + cacheCreatedTokens
@@ -800,20 +844,18 @@ function MessageItem({ message, vibe = false, sessionId }: MessageItemProps) {
             <span>{t('chat.collapsedSteps', { count: toolCallsCount })}</span>
           </button>
           {collapsedExpanded && (
-            <div className="mt-2">
-              <div className={`relative group px-4 py-2.5 rounded-md3-md text-sm leading-relaxed ${
-                vibe
-                  ? 'bg-white/10 border border-white/20 text-white/90'
-                  : 'bg-dark-surfaceContainerHigh text-dark-onSurface'
-              }`}>
-                <MarkdownContent content={message.content || ''} vibe={vibe} />
-              </div>
-              {message.toolCalls && message.toolCalls.some((tc) => tc.name !== 'spawn_agent') && (
-                <div className="mt-1.5 space-y-1">
-                  {message.toolCalls.filter((tc) => tc.name !== 'spawn_agent').map((tc) => (
-                    <ToolCallBar key={tc.id} toolCall={tc} result={message.toolResults} vibe={vibe} />
-                  ))}
+            <div className="mt-2 w-full">
+              {message.content && (
+                <div className={`relative group px-4 py-2.5 rounded-md3-md text-sm leading-relaxed ${
+                  vibe
+                    ? 'bg-white/10 border border-white/20 text-white/90'
+                    : 'bg-dark-surfaceContainerHigh text-dark-onSurface'
+                }`}>
+                  <MarkdownContent content={message.content} vibe={vibe} />
                 </div>
+              )}
+              {message.toolCalls && (
+                <ToolRunGroup toolCalls={message.toolCalls} toolResults={message.toolResults} vibe={vibe} />
               )}
             </div>
           )}
@@ -910,34 +952,19 @@ function MessageItem({ message, vibe = false, sessionId }: MessageItemProps) {
           </div>
         )}
 
-        {/* Streaming write_file / search_replace preview cards — 放在 content 下方，与已完成的 ToolCallBar 一致 */}
-        {!isUser && message.streamingToolCalls?.map((tc) => (
-          tc.name === 'write_file' ? (
-            <WriteFilePreviewCard key={tc.id} streamingCall={tc} />
-          ) : tc.name === 'edit_file' ? (
-            <EditFilePreviewCard key={tc.id} streamingCall={tc} />
-          ) : tc.name === 'search_replace' ? (
-            <SearchReplacePreviewCard key={tc.id} streamingCall={tc} />
-          ) : (
-            <div key={tc.id} className={`flex items-center gap-2 px-3 py-1.5 text-[11px] rounded-md3-xs mb-1 max-w-md ${
-              vibe
-                ? 'bg-white/10 border border-white/20 text-white/60'
-                : 'bg-dark-surfaceContainer/40 border border-dark-onSurfaceVariant/8 text-dark-onSurfaceVariant/50'
-            }`}>
-              {tc.name.includes('file') ? <FileText size={11} /> : <Terminal size={11} />}
-              <span>{t('chat.streamingToolCall', { name: tc.name })}</span>
-              <span className="ml-auto w-1.5 h-1.5 rounded-full bg-md-info animate-pulse-soft" />
-            </div>
-          )
-        ))}
+        {/* 流式生成中的工具调用行 — 与完成态同款紧凑行样式 */}
+        {!isUser && message.streamingToolCalls?.length ? (
+          <StreamingToolRows calls={message.streamingToolCalls} vibe={vibe} />
+        ) : null}
 
-        {/* Tool calls - compact horizontal bars (only for completed tool calls, not streaming) */}
-        {!message.streamingToolCalls?.length && message.toolCalls && message.toolCalls.some((tc) => tc.name !== 'spawn_agent') && (
-          <div className="w-full mt-1.5 space-y-1">
-            {message.toolCalls.filter((tc) => tc.name !== 'spawn_agent').map((tc) => (
-              <ToolCallBar key={tc.id} toolCall={tc} result={message.toolResults} vibe={vibe} />
-            ))}
-          </div>
+        {/* 工具运行组：折叠头部 + 紧凑行 + 文件差异 chips（含已完成与执行中的调用） */}
+        {!isUser && message.toolCalls && (
+          <ToolRunGroup
+            toolCalls={message.toolCalls}
+            toolResults={message.toolResults}
+            vibe={vibe}
+            defaultOpen={!!message.streamingToolCalls?.length || !message.finishReason}
+          />
         )}
 
         {/* Truncation warning */}
