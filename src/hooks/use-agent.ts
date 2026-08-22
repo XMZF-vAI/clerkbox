@@ -624,6 +624,9 @@ export function useAgent(sessionId: string) {
       staticSystemContent = SYSTEM_PROMPT
       if (workingDir) {
         dynamicSystemContent += `\n\nFile operations default to this directory. Do NOT write outside it unless the user explicitly provides an absolute path elsewhere.`
+        // 权威声明：会话中途切换目录后，历史消息/工具输出里仍是旧目录路径，
+        // 模型容易从上下文抄旧值回答"当前工作目录"。此声明强制以系统提示为准。
+        dynamicSystemContent += `\n\nThis section is authoritative: when asked about the current working directory, report the path above — NOT any directory path seen in earlier messages or tool outputs (those reflect a previous setting).`
         dynamicSystemContent += CLERKBOX_PROMPT
         if (agentsMdContent) dynamicSystemContent += agentsMdContent
         if (memoryPrompt) dynamicSystemContent += '\n\n' + memoryPrompt
