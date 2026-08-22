@@ -187,8 +187,8 @@ export const ipc = {
     isElectron ? window.clerkbox.apiFetchModels(cfg) : webInvoke('apiFetchModels', [cfg]),
   apiTestConnection: (cfg: ApiConnConfig): Promise<{ ok: true; latencyMs: number } | { error: string }> =>
     isElectron ? window.clerkbox.apiTestConnection(cfg) : webInvoke('apiTestConnection', [cfg]),
-  // 探测模型图片输入支持（双模式均走主进程代理）
-  apiTestVision: (cfg: ApiConnConfig, modelId: string): Promise<{ ok: true } | { ok: false; status?: number; error: string }> =>
+  // 探测模型图片输入支持（双模式均走主进程代理，靠回复内容判定而非仅 HTTP 状态）
+  apiTestVision: (cfg: ApiConnConfig, modelId: string): Promise<{ ok: true; supported: boolean | null; reply?: string } | { ok: false; status?: number; error: string }> =>
     isElectron ? window.clerkbox.apiTestVision(cfg, modelId) : webInvoke('apiTestVision', [cfg, modelId]),
   apiChatStream: (cfg: ApiConnConfig, body: unknown): Promise<{ requestId: string }> =>
     isElectron ? window.clerkbox.apiChatStream(cfg, body) : webChatStream(cfg, body),

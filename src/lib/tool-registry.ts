@@ -18,6 +18,20 @@ const fileTools: ToolDefinition[] = [
     },
   },
   {
+    name: 'read_image',
+    description:
+      '读取图片文件的结构化信息：格式、像素尺寸、文件大小、主色调（前 5 种颜色及占比）。' +
+      '用于了解图片的基本属性，而不是返回二进制乱码（read_file 读图片会得到乱码）。' +
+      '注意：本工具不提供图片的视觉语义内容（如文字、物体识别）；若你支持图片输入，用户在消息里附带的图片会直接可见，无需调用本工具。',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: '图片文件的绝对路径' },
+      },
+      required: ['path'],
+    },
+  },
+  {
     name: 'write_file',
     description:
       '将完整内容写入文件。如果文件不存在则创建，存在则覆盖。非常适合创建新文件或需要大幅重写的场景。写入前会自动创建 .clerkbox-bak 备份。',
@@ -251,6 +265,85 @@ function formatWithLineNumbers(content: string): string {
   return numbered
 }
 
+/** read_image 工具实现：读取图片元数据 + canvas 降采样统计主色调 */
+async function analyzeImageFile(path: string): Promise<string> {
+  const dataUrl = await ipc.readImageFileBase64(path)
+  const mime = /^data:([^;,]+)/.exec(dataUrl)?.[1] || 'unknown'
+  const formatNames: Record<string, string> = {
+    'image/png': 'PNG',
+    'image/jpeg': 'JPEG',
+    'image/gif': 'GIF',
+    'image/webp': 'WebP',
+    'image/bmp': 'BMP',
+    'image/svg+xml': 'SVG',
+  }
+  const format = formatNames[mime] || mime
+
+  // 文件大小从 base64 长度推算（避免 atob 整段解码大文件）
+  const b64 = dataUrl.slice(dataUrl.indexOf(',') + 1)
+  const padding = b64.endsWith('==') ? 2 : b64.endsWith('=') ? 1 : 0
+  const sizeBytes = Math.floor((b64.length * 3) / 4) - padding
+
+  // 解码拿像素尺寸
+  const img = new Image()
+  await new Promise<void>((resolve, reject) => {
+    img.onload = () => resolve()
+    img.onerror = () => reject(new Error('图片解码失败（格式不支持或文件损坏）'))
+    img.src = dataUrl
+  })
+  const w = img.naturalWidth
+  const h = img.naturalHeight
+  if (w === 0 || h === 0) throw new Error('无法确定图片尺寸（SVG 未声明宽高？）')
+
+  // 主色调：降采样到最多 64×64，逐像素按 32 级量化桶统计
+  const SAMPLE = 64
+  const scale = Math.min(1, SAMPLE / Math.max(w, h))
+  const cw = Math.max(1, Math.round(w * scale))
+  const ch = Math.max(1, Math.round(h * scale))
+  const canvas = document.createElement('canvas')
+  canvas.width = cw
+  canvas.height = ch
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) throw new Error('无法创建 canvas 上下文')
+  ctx.drawImage(img, 0, 0, cw, ch)
+  const data = ctx.getImageData(0, 0, cw, ch).data
+  const buckets = new Map<string, { count: number; r: number; g: number; b: number }>()
+  let opaque = 0
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i + 3] < 32) continue // 跳过近透明像素
+    opaque++
+    const r = data[i]
+    const g = data[i + 1]
+    const b = data[i + 2]
+    const key = `${r >> 5}-${g >> 5}-${b >> 5}`
+    const cur = buckets.get(key) || { count: 0, r: 0, g: 0, b: 0 }
+    cur.count++
+    cur.r += r
+    cur.g += g
+    cur.b += b
+    buckets.set(key, cur)
+  }
+  const top = Array.from(buckets.values())
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 5)
+    .map((v) => {
+      const r = Math.round(v.r / v.count)
+      const g = Math.round(v.g / v.count)
+      const b = Math.round(v.b / v.count)
+      const hex = '#' + [r, g, b].map((x) => x.toString(16).padStart(2, '0')).join('').toUpperCase()
+      return `${hex} ${((v.count / Math.max(1, opaque)) * 100).toFixed(0)}%`
+    })
+
+  const sizeStr = sizeBytes > 1024 * 1024
+    ? `${(sizeBytes / 1024 / 1024).toFixed(2)} MB`
+    : `${(sizeBytes / 1024).toFixed(1)} KB`
+  return [
+    `📷 图片: ${path}`,
+    `格式: ${format} · 尺寸: ${w}×${h}px · 大小: ${sizeStr}`,
+    `主色调: ${top.length > 0 ? top.join(', ') : '(全透明)'}`,
+  ].join('\n')
+}
+
 /**
  * Generate a unified diff between old and new content.
  * Returns a human-readable summary of the change.
@@ -300,6 +393,14 @@ class ToolRegistry {
           return content
         } catch (e) {
           return `Error: 无法读取文件 ${path} - ${e instanceof Error ? e.message : String(e)}`
+        }
+      }
+      case 'read_image': {
+        const path = String(args.path)
+        try {
+          return await analyzeImageFile(path)
+        } catch (e) {
+          return `Error: 无法读取图片 ${path} - ${e instanceof Error ? e.message : String(e)}`
         }
       }
       case 'write_file': {

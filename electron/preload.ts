@@ -76,7 +76,7 @@ contextBridge.exposeInMainWorld('clerkbox', {
     ipcRenderer.invoke('apiFetchModels', cfg),
   apiTestConnection: (cfg: ApiConnConfig): Promise<{ ok: true; latencyMs: number } | { error: string }> =>
     ipcRenderer.invoke('apiTestConnection', cfg),
-  apiTestVision: (cfg: ApiConnConfig, modelId: string): Promise<{ ok: true } | { ok: false; status?: number; error: string }> =>
+  apiTestVision: (cfg: ApiConnConfig, modelId: string): Promise<{ ok: true; supported: boolean | null; reply?: string } | { ok: false; status?: number; error: string }> =>
     ipcRenderer.invoke('apiTestVision', cfg, modelId),
   apiChatStream: (cfg: ApiConnConfig, body: unknown): Promise<{ requestId: string }> =>
     ipcRenderer.invoke('apiChatStream', cfg, body),

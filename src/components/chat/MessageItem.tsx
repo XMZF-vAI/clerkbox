@@ -241,7 +241,7 @@ function ToolCallBar({ toolCall, result, vibe }: { toolCall: NonNullable<Message
 
   const getArgsPreview = () => {
     const args = toolCall.arguments
-    if (toolCall.name === 'read_file' || toolCall.name === 'list_dir') return String(args.path || '')
+    if (toolCall.name === 'read_file' || toolCall.name === 'read_image' || toolCall.name === 'list_dir') return String(args.path || '')
     if (toolCall.name === 'write_file' || toolCall.name === 'edit_file' || toolCall.name === 'search_replace') return String(args.path || '')
     if (toolCall.name === 'execute_command') return String(args.command || '').slice(0, 80)
     if (toolCall.name === 'search_files') return `${args.pattern} in ${args.path}`

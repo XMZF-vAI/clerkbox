@@ -346,6 +346,7 @@ export default {
 
   tools: {
     read_file: 'Read file',
+    read_image: 'Read image',
     write_file: 'Write file',
     edit_file: 'Edit file',
     search_replace: 'Search & replace',

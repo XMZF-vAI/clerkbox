@@ -26,7 +26,7 @@ function ToolCallBar({ tc, result, vibe }: { tc: ToolCall; result?: ToolResult; 
   // 参数预览
   const argPreview = (() => {
     const a = tc.arguments
-    if (tc.name === 'read_file' || tc.name === 'write_file' || tc.name === 'search_replace') return String(a.path || '')
+    if (tc.name === 'read_file' || tc.name === 'read_image' || tc.name === 'write_file' || tc.name === 'search_replace') return String(a.path || '')
     if (tc.name === 'execute_command') return String(a.command || '').slice(0, 60)
     if (tc.name === 'search_files' || tc.name === 'search_content') return String(a.pattern || a.query || '')
     if (tc.name === 'list_dir') return String(a.path || '')

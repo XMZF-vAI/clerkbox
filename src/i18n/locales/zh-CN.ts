@@ -346,6 +346,7 @@ export default {
 
   tools: {
     read_file: '读取文件',
+    read_image: '读取图片',
     write_file: '写入文件',
     edit_file: '编辑文件',
     search_replace: '搜索替换',

@@ -107,8 +107,9 @@ export interface ClerkBoxAPI {
   webFetch: (url: string, maxLength?: number) => Promise<{ content: string; url: string } | { error: string }>
   apiFetchModels: (cfg: ApiConnConfig) => Promise<{ models: FetchedModel[] } | { error: string }>
   apiTestConnection: (cfg: ApiConnConfig) => Promise<{ ok: true; latencyMs: number } | { error: string }>
-  /** 探测模型图片输入支持：发最小 1×1 PNG 非流式请求，只看 HTTP 通不通 */
-  apiTestVision: (cfg: ApiConnConfig, modelId: string) => Promise<{ ok: true } | { ok: false; status?: number; error: string }>
+  /** 探测模型图片输入支持：发纯色 PNG 并验证回复内容（HTTP 200 不代表支持，需模型真的说出颜色）。
+   *  supported: true=确认支持 / false=确认不支持 / null=无法判定（保持现值） */
+  apiTestVision: (cfg: ApiConnConfig, modelId: string) => Promise<{ ok: true; supported: boolean | null; reply?: string } | { ok: false; status?: number; error: string }>
   apiChatStream: (cfg: ApiConnConfig, body: unknown) => Promise<{ requestId: string }>
   apiAbort: (requestId: string) => Promise<void>
   onApiChunk: (callback: (payload: ApiChunkPayload) => void) => () => void

@@ -1,4 +1,5 @@
 import { ipcMain, BrowserWindow } from 'electron'
+import { deflateSync } from 'node:zlib'
 
 /**
  * 主进程 API 代理。
@@ -28,9 +29,10 @@ const STREAM_IDLE_TIMEOUT_MS = 60_000
 const FLUSH_INTERVAL_MS = 16
 const FLUSH_BYTES = 8192
 const ERROR_BODY_LIMIT = 8 * 1024
-/** 图片输入探测用的最小 1×1 PNG（base64） */
-const VISION_PROBE_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
-const VISION_PROBE_PROMPT = 'Describe this image in one word.'
+/** 图片输入探测图：32×32 纯紫色（#800080）PNG。探测靠验证回复内容（见 classifyVisionReply），
+ *  颜色不能从提示词猜出来，所以只有真看到图的模型才答得出「紫色」。 */
+const VISION_PROBE_PNG = solidColorPng(32, 128, 0, 128).toString('base64')
+const VISION_PROBE_PROMPT = 'What is the dominant color of this image? Answer with one word.'
 const MODEL_LIST_LIMIT = 2 * 1024 * 1024
 const STREAM_RESPONSE_LIMIT = 20 * 1024 * 1024
 const REQUEST_BODY_LIMIT = 10 * 1024 * 1024
@@ -40,6 +42,101 @@ const MAX_BASE_URL_LENGTH = 4_096
 /** 在途请求：requestId → AbortController */
 const inflight = new Map<string, AbortController>()
 const userAborted = new Set<string>()
+
+// ── 视觉能力探测辅助 ──
+
+/** PNG CRC32（标准多项式 0xEDB88320） */
+function pngCrc32(buf: Buffer): number {
+  let c = 0xffffffff
+  for (let i = 0; i < buf.length; i++) {
+    c ^= buf[i]
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1
+  }
+  return (c ^ 0xffffffff) >>> 0
+}
+
+function pngChunk(type: string, data: Buffer): Buffer {
+  const out = Buffer.alloc(12 + data.length)
+  out.writeUInt32BE(data.length, 0)
+  out.write(type, 4, 'ascii')
+  data.copy(out, 8)
+  out.writeUInt32BE(pngCrc32(out.subarray(4, 8 + data.length)), 8 + data.length)
+  return out
+}
+
+/** 生成纯色 PNG（truecolor RGB）。运行时生成而非硬编码 base64，颜色可调且无抄错风险。 */
+function solidColorPng(size: number, r: number, g: number, b: number): Buffer {
+  const ihdr = Buffer.alloc(13)
+  ihdr.writeUInt32BE(size, 0)
+  ihdr.writeUInt32BE(size, 4)
+  ihdr[8] = 8 // bit depth
+  ihdr[9] = 2 // color type: truecolor
+  const row = Buffer.alloc(1 + size * 3)
+  for (let x = 0; x < size; x++) {
+    row[1 + x * 3] = r
+    row[2 + x * 3] = g
+    row[3 + x * 3] = b
+  }
+  const raw = Buffer.concat(Array.from({ length: size }, () => row))
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk('IHDR', ihdr),
+    pngChunk('IDAT', deflateSync(raw)),
+    pngChunk('IEND', Buffer.alloc(0)),
+  ])
+}
+
+/** 提取非流式回复文本（OpenAI choices / Anthropic content blocks 双协议） */
+function extractReplyText(body: string, compat: ApiCompat): string {
+  try {
+    const json: unknown = JSON.parse(body)
+    if (compat === 'anthropic') {
+      const content = (json as { content?: unknown })?.content
+      if (!Array.isArray(content)) return ''
+      return content
+        .filter(
+          (b): b is { text: string } =>
+            typeof b === 'object' && b !== null && (b as { type?: unknown }).type === 'text' &&
+            typeof (b as { text?: unknown }).text === 'string'
+        )
+        .map((b) => b.text)
+        .join(' ')
+    }
+    const content = (json as { choices?: Array<{ message?: { content?: unknown } }> })?.choices?.[0]?.message?.content
+    if (typeof content === 'string') return content
+    if (Array.isArray(content)) {
+      return content
+        .filter(
+          (p): p is { text: string } =>
+            typeof p === 'object' && p !== null && (p as { type?: unknown }).type === 'text' &&
+            typeof (p as { text?: unknown }).text === 'string'
+        )
+        .map((p) => p.text)
+        .join(' ')
+    }
+    return ''
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * 探测回复分类：true=确认支持 / false=确认不支持 / null=无法判定。
+ * 关键是防误报（把纯文本模型判成支持）：只有真说出图里的颜色才算支持。
+ * 纯文本模型的两种典型反应——明确说看不到图片（判 false）、瞎猜一个常见
+ * 颜色如红/蓝/绿（判 null 保持现值）——都不会被误标为支持。
+ */
+function classifyVisionReply(reply: string): boolean | null {
+  const t = reply.trim().toLowerCase()
+  if (t.length === 0) return null
+  if (/purple|violet|紫/.test(t)) return true
+  if (
+    /cannot see|can't see|can not see|unable to (see|view|access|process|analyze)|not able to|don't see|do not see|did not receive|didn't receive|haven't received|no image|no picture|without (the|any) image|text-only|text only|does not support|not support|无法|看不到|没有图|未提供|不支持|不能查看|无法查看|无法识别|无法分析/.test(t)
+  ) {
+    return false
+  }
+  return null
+}
 
 function assertApiConfig(value: unknown): asserts value is ApiConnConfig {
   if (!value || typeof value !== 'object') throw new Error('Invalid API configuration')
@@ -248,7 +345,7 @@ export function registerApiProxyHandlers() {
         {
           method: 'POST',
           headers: headersFor(cfg),
-          body: JSON.stringify({ model: modelId, messages, max_tokens: 16, stream: false }),
+          body: JSON.stringify({ model: modelId, messages, max_tokens: 64, stream: false }),
         },
         20_000
       )
@@ -256,7 +353,12 @@ export function registerApiProxyHandlers() {
         const body = redactApiKey(await readResponseText(res, ERROR_BODY_LIMIT).catch(() => ''), apiKeyFromConfig(cfg))
         return { ok: false as const, status: res.status, error: `HTTP ${res.status}${body ? `: ${body}` : ''}` }
       }
-      return { ok: true as const }
+      // HTTP 200 ≠ 支持图片：很多兼容服务对纯文本模型也照常 200（静默忽略图片）。
+      // 必须看回复内容：说出图里的颜色才算支持。
+      const raw = await readResponseText(res, ERROR_BODY_LIMIT)
+      const reply = extractReplyText(raw, cfg.apiCompat)
+      const supported = classifyVisionReply(reply)
+      return { ok: true as const, supported, reply: reply.slice(0, 200) }
     } catch (e) {
       return { ok: false as const, error: redactApiKey(errMsg(e), apiKeyFromConfig(cfg)) }
     }

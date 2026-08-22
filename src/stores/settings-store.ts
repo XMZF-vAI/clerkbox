@@ -136,9 +136,16 @@ export const useSettingsStore = create<SettingsState>()(
       upsertProvider: (provider) => {
         const previous = get().providers.find((item) => item.id === provider.id)
         if (previous?.apiKey !== provider.apiKey) {
-          apiKeyRevisions.set(provider.id, (apiKeyRevisions.get(provider.id) ?? 0) + 1)
-          void queueApiKeyWrite(provider.id, provider.apiKey)
-            .catch((error) => console.error('[settings-store] save API key failed:', error))
+          // 竞态防御：密钥注入（hydrateProviderApiKeys）完成前，内存里的 apiKey
+          // 可能为空——真密钥还在 safeStorage 加密存储里。此时若组件闭包里的
+          // stale provider（apiKey=''）触发写入，会把加密存储里的真密钥删掉。
+          // 注入完成（credentialStorageReady=true）后才放行空值写入。
+          const isBlankDuringHydration = provider.apiKey === '' && !credentialStorageReady
+          if (!isBlankDuringHydration) {
+            apiKeyRevisions.set(provider.id, (apiKeyRevisions.get(provider.id) ?? 0) + 1)
+            void queueApiKeyWrite(provider.id, provider.apiKey)
+              .catch((error) => console.error('[settings-store] save API key failed:', error))
+          }
         }
         set((state) => {
         const exists = state.providers.some((p) => p.id === provider.id)

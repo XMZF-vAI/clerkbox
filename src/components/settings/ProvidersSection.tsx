@@ -215,8 +215,13 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
       }
       const v = r.value
       if (v.ok) {
-        if (!m.supportsImages) changed = true
-        return { ...m, supportsImages: true }
+        // 内容判定：说出图里颜色→支持；明确说看不到→不支持；瞎猜颜色等歧义回复→无法判定保持现值
+        if (v.supported === null) {
+          unknown += 1
+          return m
+        }
+        if (m.supportsImages !== v.supported) changed = true
+        return { ...m, supportsImages: v.supported }
       }
       const rejectedForImages =
         typeof v.status === 'number' &&

@@ -1384,7 +1384,7 @@ export function useAgent(sessionId: string) {
 
     // Ask mode: only allow safe read operations + web tools + memory search
     if (mode === 'ask') {
-      if (['read_file', 'list_dir', 'search_files', 'search_content', 'web_search', 'web_fetch', 'search_memory'].includes(toolName)) {
+      if (['read_file', 'read_image', 'list_dir', 'search_files', 'search_content', 'web_search', 'web_fetch', 'search_memory'].includes(toolName)) {
         return { allowed: true }
       }
       return { allowed: false, reason: '当前处于 Ask 模式，仅允许读取和网络操作。如需执行写操作或命令，请切换到 Craft 模式。' }
@@ -1392,7 +1392,7 @@ export function useAgent(sessionId: string) {
 
     // Plan mode: allow read + write_file (for plan.md only) + list_dir + memory tools, but no execute_command
     if (mode === 'plan') {
-      if (['read_file', 'list_dir', 'search_files', 'search_content', 'web_search', 'web_fetch', 'search_memory'].includes(toolName)) {
+      if (['read_file', 'read_image', 'list_dir', 'search_files', 'search_content', 'web_search', 'web_fetch', 'search_memory'].includes(toolName)) {
         return { allowed: true }
       }
       if (toolName === 'save_memory') {
