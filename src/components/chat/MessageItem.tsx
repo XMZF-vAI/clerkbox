@@ -709,6 +709,7 @@ function MessageItem({ message, vibe = false, sessionId }: MessageItemProps) {
   const isToolResult = message.role === 'tool'
   const isTruncated = message.finishReason === 'length'
   const hasThinking = !!message.thinkingContent && message.thinkingContent.length > 0
+  const hasVisibleToolCalls = message.toolCalls?.some((tc) => tc.name !== 'spawn_agent') ?? false
   const cacheReadTokens = message.usage?.cache_read_input_tokens ?? 0
   const cacheCreatedTokens = message.usage?.cache_creation_input_tokens ?? 0
   const cacheEligibleTokens = cacheReadTokens + cacheCreatedTokens
@@ -862,6 +863,17 @@ function MessageItem({ message, vibe = false, sessionId }: MessageItemProps) {
         </div>
       </div>
     )
+  }
+
+  if (
+    message.role === 'assistant' &&
+    !message.isSubAgentCard &&
+    !message.content.trim() &&
+    !hasThinking &&
+    !message.streamingToolCalls?.length &&
+    !hasVisibleToolCalls
+  ) {
+    return null
   }
 
   // 用户消息附件：图片缩略图 + 文件 chip（与正文气泡分开渲染，正文为空时也要显示）
