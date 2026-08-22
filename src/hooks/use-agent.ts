@@ -1165,7 +1165,7 @@ export function useAgent(sessionId: string) {
       const assistantMessage: Message = {
         id: assistantId,
         role: 'assistant',
-        content: content || (toolCalls.length > 0 ? '正在使用工具...' : ''),
+        content: content || '',
         thinkingContent: thinkingContent || undefined,
         toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
         finishReason: finishReason || undefined,
@@ -1732,7 +1732,7 @@ export function useAgent(sessionId: string) {
         const assistantMessage: Message = {
           id: assistantId,
           role: 'assistant',
-          content: content || (toolCalls.length > 0 ? '正在使用工具...' : ''),
+          content: content || '',
           thinkingContent: thinkingContent || undefined,
           toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
           finishReason: finishReason || undefined,
