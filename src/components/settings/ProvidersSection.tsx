@@ -200,6 +200,9 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
       setTestStatus('ok')
       return
     }
+    // 连接成功先立即报一声，图片探测完成后再补结果（不憋到最后一起报）
+    setTestMsg(`${res.latencyMs}ms · ${t('settings.api.visionProbing')}`)
+    setTestStatus('ok')
     // 对全部已启用模型并行探测图片输入支持
     const visionErrorRe = /image|vision|multimodal|multi-modal|modality|视觉|图片|image_url/i
     const results = await Promise.allSettled(

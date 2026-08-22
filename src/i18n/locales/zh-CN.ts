@@ -109,6 +109,7 @@ export default {
       imageSupport: '支持图片',
       visionSummary: '图片 {{supported}}/{{total}}',
       visionUnknown: '{{count}} 个未判定',
+      visionProbing: '已连接，正在探测图片能力…',
     },
     providers: {
       title: '提供商',

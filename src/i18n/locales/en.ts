@@ -108,6 +108,7 @@ export default {
       reasoningLevelsHint: 'Selected levels appear in the slider next to the chat input',
       imageSupport: 'Image support',
       visionSummary: 'Images {{supported}}/{{total}}',
+      visionProbing: 'Connected, probing image support…',
       visionUnknown: '{{count}} undetermined',
     },
     providers: {
