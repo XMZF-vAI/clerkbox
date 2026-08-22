@@ -284,7 +284,8 @@ export async function runWithRetry<T>(
 
 export function useAgent(sessionId: string) {
   const settings = useSettingsStore()
-  const { addMessage, updateMessage, setStreaming, sessions, compactSession, setSessionStatus } = useChatStore()
+  const { addMessage, updateMessage, setStreaming, compactSession, setSessionStatus } = useChatStore()
+  const requestWorkingDirRef = useRef<string | null>(null)
   const tokenTrackerRef = useRef<TokenTracker>(new TokenTracker())
   const sessionReadFilesRef = useRef<Map<string, { content: string; timestamp: number }>>(new Map())
   /** 会话级冻结的记忆快照：前缀缓存要求 system 段字节一致，
@@ -297,9 +298,9 @@ export function useAgent(sessionId: string) {
 
   /** Get working directory for current session, with default fallback */
   const getWorkingDir = () => {
-    const session = sessions.find((s) => s.id === sessionId)
+    if (requestWorkingDirRef.current !== null) return requestWorkingDirRef.current
+    const session = useChatStore.getState().sessions.find((s) => s.id === sessionId)
     if (session?.workingDir) return session.workingDir
-    // Default: use the session's auto-generated working dir
     return session?.defaultWorkDir || ''
   }
 
@@ -826,6 +827,8 @@ export function useAgent(sessionId: string) {
 
       const controller = new AbortController()
       setSessionAbortController(sessionId, controller)
+      const currentSession = useChatStore.getState().sessions.find((s) => s.id === sessionId)
+      requestWorkingDirRef.current = currentSession?.workingDir || currentSession?.defaultWorkDir || ''
       // 记录是否是用户主动 abort，用于决定是否发"异常停下"通知
       let abortedByUser = false
 
@@ -864,6 +867,7 @@ export function useAgent(sessionId: string) {
         setSessionStatus(sessionId, 'error')
         notifyIfNotViewing(sessionId, 'error', msg.slice(0, 200))
       } finally {
+        requestWorkingDirRef.current = null
         // Do not clear a controller installed by a newer request for this session.
         if (getSessionAbortController(sessionId) === controller) {
           setSessionAbortController(sessionId, null)
