@@ -1,10 +1,11 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useMemo } from 'react'
 import {
   MessageSquare,
   Settings,
   Plus,
   Trash2,
   FolderClosed,
+  FolderOpen,
   Zap,
   Store,
   Loader2,
@@ -16,6 +17,9 @@ import {
   ExternalLink,
   X,
   User,
+  ChevronDown,
+  ChevronsDownUp,
+  ChevronsUpDown,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useChatStore } from '../../stores/chat-store'
@@ -52,6 +56,10 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
   const [hoveredSessionId, setHoveredSessionId] = useState<string | null>(null)
   const pickerRef = useRef<HTMLDivElement>(null)
+  // ── 任务列表分组：每个 workingDir 一组；null/空 workingDir 归到「默认」组 ──
+  // 单一布尔控制"全部折叠"：true 表示全部折叠，false 表示按单组状态（默认全展开）
+  // 单组状态：当 allCollapsed=false 时，每个组按 defaultExpanded=true 渲染
+  const [allCollapsed, setAllCollapsed] = useState(false)
 
   // ── WebUI 控制 ──
   const [webuiStarting, setWebuiStarting] = useState(false)
@@ -106,6 +114,31 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
   // Get current session's workingDir for skill sync (user-picked or default)
   const currentSession = sessions.find((s) => s.id === activeSessionId)
   const workingDir = currentSession?.workingDir || currentSession?.defaultWorkDir || ''
+
+  // 任务列表分组：从 sessions 派生
+  //   - key 为 'default' 表示 workingDir 为空/缺失的会话
+  //   - 其他 key 为工作目录绝对路径
+  //   - 组内按 updatedAt 降序；分组按组内最近活跃时间戳降序
+  // 排除空会话：未发过消息的不算"任务"（与历史行为一致）
+  const groups = useMemo(() => {
+    const visible = sessions.filter((s) => s.messages.length > 0)
+    const byKey = new Map<string, { key: string; label: string; sessions: typeof visible }>()
+    for (const s of visible) {
+      const dir = (s.workingDir || s.defaultWorkDir || '').trim()
+      const key = dir || 'default'
+      const label = dir ? dir.split(/[\\/]/).filter(Boolean).pop() || dir : t('sidebar.defaultGroup')
+      if (!byKey.has(key)) byKey.set(key, { key, label, sessions: [] })
+      byKey.get(key)!.sessions.push(s)
+    }
+    const arr = Array.from(byKey.values())
+    for (const g of arr) g.sessions.sort((a, b) => b.updatedAt - a.updatedAt)
+    arr.sort((a, b) => {
+      const aMax = a.sessions.reduce((m, s) => Math.max(m, s.updatedAt), 0)
+      const bMax = b.sessions.reduce((m, s) => Math.max(m, s.updatedAt), 0)
+      return bMax - aMax
+    })
+    return arr
+  }, [sessions, t])
 
   const handleToggleSkill = (id: string) => {
     toggleSessionSkill(id, workingDir)
@@ -239,6 +272,22 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
         </button>
       </div>
 
+      {/* 任务列表标题 + 全部折叠/展开 */}
+      <div className="px-3 pt-1 pb-1.5 flex items-center justify-between">
+        <span className="text-[11px] font-medium text-dark-onSurfaceVariant/50 uppercase tracking-wider">
+          {t('sidebar.taskList')}
+        </span>
+        <button
+          type="button"
+          onClick={() => setAllCollapsed((prev) => !prev)}
+          className="w-6 h-6 flex items-center justify-center rounded-md3-xs text-dark-onSurfaceVariant/40 hover:bg-dark-surfaceContainer hover:text-dark-onSurfaceVariant/70 transition-colors"
+          title={allCollapsed ? t('sidebar.expandAll') : t('sidebar.collapseAll')}
+          aria-label={allCollapsed ? t('sidebar.expandAll') : t('sidebar.collapseAll')}
+        >
+          {allCollapsed ? <ChevronsUpDown size={13} /> : <ChevronsDownUp size={13} />}
+        </button>
+      </div>
+
       {/* Active skills */}
       <div className="px-3 pb-2">
         {enabledSkills.length > 0 && (
@@ -258,77 +307,113 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
       </div>
 
       <div className="flex-1 overflow-y-auto px-2">
-        <div className="space-y-1">
-          {sessions.length === 0 && (
-            <p className="px-3 py-4 text-xs text-dark-onSurfaceVariant/50 text-center">
-              {t('sidebar.emptySessions')}
-            </p>
-          )}
-          {sessions.map((s) => (
-            <div
-              key={s.id}
-              onMouseEnter={() => setHoveredSessionId(s.id)}
-              onMouseLeave={() => setHoveredSessionId(null)}
-              className={`group flex items-center gap-2 px-3 py-2 rounded-full text-sm transition-colors ${
-                activeSessionId === s.id
-                  ? 'bg-md-secondaryContainer text-md-onSecondaryContainer'
-                  : 'text-dark-onSurfaceVariant hover:bg-dark-surfaceContainer'
-              }`}
-            >
+        {groups.length === 0 && (
+          <p className="px-3 py-4 text-xs text-dark-onSurfaceVariant/50 text-center">
+            {t('sidebar.emptySessions')}
+          </p>
+        )}
+        {groups.map((group) => {
+          const groupExpanded = !allCollapsed
+          const Icon = groupExpanded ? FolderOpen : FolderClosed
+          return (
+            <div key={group.key} className="mb-1">
+              {/* 分组行 */}
               <button
-                onClick={() => { setShowSkillStore(false); setActiveSession(s.id) }}
-                className="flex-1 flex items-center gap-2 text-left min-w-0"
-              >
-                <MessageSquare size={14} className="flex-shrink-0" />
-                <span className="truncate">{s.title}</span>
-              </button>
-              {s.workingDir && (
-                <span title={s.workingDir}>
-                  <FolderClosed size={11} className="flex-shrink-0 text-dark-onSurfaceVariant/40" />
-                </span>
-              )}
-              {/* per-session 工作状态指示器 */}
-              {(() => {
-                const status = sessionStatus[s.id]
-                if (status === 'working') {
-                  return (
-                    <span title={t('sidebar.statusWorking')} className="flex-shrink-0">
-                      <Loader2 size={13} className="animate-spin text-md-primary" />
-                    </span>
-                  )
-                }
-                if (status === 'error') {
-                  return (
-                    <span title={t('sidebar.statusError')} className="flex-shrink-0">
-                      <AlertTriangle size={13} className="text-md-error" />
-                    </span>
-                  )
-                }
-                if (status === 'confirm-danger') {
-                  return (
-                    <span title={t('sidebar.statusConfirmDanger')} className="flex-shrink-0">
-                      <ShieldAlert size={13} className="text-md-warning animate-pulse" />
-                    </span>
-                  )
-                }
-                return null
-              })()}
-              <button
-                onClick={(e) => {
-                  e.stopPropagation()
-                  setConfirmDeleteId(s.id)
-                }}
-                className={`w-6 h-6 flex items-center justify-center rounded-md3-xs hover:bg-md-error/20 hover:text-md-error transition-opacity flex-shrink-0 ${
-                  hoveredSessionId === s.id ? 'opacity-100' : 'opacity-0 group-focus-within:opacity-100'
+                type="button"
+                onClick={() => setAllCollapsed((prev) => !prev)}
+                className={`w-full flex items-center gap-1.5 px-2 py-1.5 rounded-md3-xs text-xs transition-colors ${
+                  groupExpanded
+                    ? 'text-dark-onSurfaceVariant/70 hover:bg-dark-surfaceContainer'
+                    : 'text-dark-onSurfaceVariant/60 hover:bg-dark-surfaceContainer'
                 }`}
-                aria-label={t('sidebar.deleteSessionAria')}
-                title={t('sidebar.deleteSessionAria')}
+                title={groupExpanded ? t('sidebar.collapseAll') : t('sidebar.expandAll')}
               >
-                <Trash2 size={13} />
+                <Icon size={13} className="flex-shrink-0" />
+                <span className="truncate flex-1 text-left">{group.label}</span>
+                <span className="text-[10px] text-dark-onSurfaceVariant/40 tabular-nums flex-shrink-0">
+                  {group.sessions.length}
+                </span>
+                <ChevronDown
+                  size={12}
+                  className={`flex-shrink-0 transition-transform duration-200 ${groupExpanded ? '' : '-rotate-90'}`}
+                />
               </button>
+              {/* 任务列表 */}
+              <div
+                className="grid transition-[grid-template-rows,opacity] duration-200"
+                style={{
+                  gridTemplateRows: groupExpanded ? '1fr' : '0fr',
+                  opacity: groupExpanded ? 1 : 0,
+                  transitionTimingFunction: 'cubic-bezier(0.23, 1, 0.32, 1)',
+                }}
+              >
+                <div className="min-h-0 overflow-hidden">
+                  <div className="flex flex-col gap-0.5 pl-2 pr-1">
+                    {group.sessions.map((s) => (
+                      <div
+                        key={s.id}
+                        onMouseEnter={() => setHoveredSessionId(s.id)}
+                        onMouseLeave={() => setHoveredSessionId(null)}
+                        className={`group flex items-center gap-2 px-2.5 py-1.5 rounded-md3-xs text-[13px] transition-colors ${
+                          activeSessionId === s.id
+                            ? 'bg-md-secondaryContainer text-md-onSecondaryContainer'
+                            : 'text-dark-onSurfaceVariant/85 hover:bg-dark-surfaceContainer'
+                        }`}
+                      >
+                        <button
+                          onClick={() => { setShowSkillStore(false); setActiveSession(s.id) }}
+                          className="flex-1 flex items-center gap-2 text-left min-w-0"
+                        >
+                          <MessageSquare size={13} className="flex-shrink-0 opacity-70" />
+                          <span className="truncate">{s.title}</span>
+                        </button>
+                        {/* per-session 工作状态指示器 */}
+                        {(() => {
+                          const status = sessionStatus[s.id]
+                          if (status === 'working') {
+                            return (
+                              <span title={t('sidebar.statusWorking')} className="flex-shrink-0">
+                                <Loader2 size={13} className="animate-spin text-md-primary" />
+                              </span>
+                            )
+                          }
+                          if (status === 'error') {
+                            return (
+                              <span title={t('sidebar.statusError')} className="flex-shrink-0">
+                                <AlertTriangle size={13} className="text-md-error" />
+                              </span>
+                            )
+                          }
+                          if (status === 'confirm-danger') {
+                            return (
+                              <span title={t('sidebar.statusConfirmDanger')} className="flex-shrink-0">
+                                <ShieldAlert size={13} className="text-md-warning animate-pulse" />
+                              </span>
+                            )
+                          }
+                          return null
+                        })()}
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setConfirmDeleteId(s.id)
+                          }}
+                          className={`w-6 h-6 flex items-center justify-center rounded-md3-xs hover:bg-md-error/20 hover:text-md-error transition-opacity flex-shrink-0 ${
+                            hoveredSessionId === s.id ? 'opacity-100' : 'opacity-0 group-focus-within:opacity-100'
+                          }`}
+                          aria-label={t('sidebar.deleteSessionAria')}
+                          title={t('sidebar.deleteSessionAria')}
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
             </div>
-          ))}
-        </div>
+          )
+        })}
       </div>
 
       <div className="border-t border-dark-onSurfaceVariant/10 px-3 py-2 flex flex-col gap-0.5">
