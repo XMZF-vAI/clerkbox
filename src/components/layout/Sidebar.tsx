@@ -116,15 +116,16 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
   const workingDir = currentSession?.workingDir || currentSession?.defaultWorkDir || ''
 
   // 任务列表分组：从 sessions 派生
-  //   - key 为 'default' 表示 workingDir 为空/缺失的会话
-  //   - 其他 key 为工作目录绝对路径
+  //   - 分组键只用 workingDir（用户主动选过的工作目录）
+  //   - defaultWorkDir（自动生成的时间戳目录）不作为分组键，全部归入「默认」组，
+  //     否则每个默认会话会各自成一个时间戳命名的垃圾分组
   //   - 组内按 updatedAt 降序；分组按组内最近活跃时间戳降序
   // 排除空会话：未发过消息的不算"任务"（与历史行为一致）
   const groups = useMemo(() => {
     const visible = sessions.filter((s) => s.messages.length > 0)
     const byKey = new Map<string, { key: string; label: string; sessions: typeof visible }>()
     for (const s of visible) {
-      const dir = (s.workingDir || s.defaultWorkDir || '').trim()
+      const dir = (s.workingDir || '').trim()
       const key = dir || 'default'
       const label = dir ? dir.split(/[\\/]/).filter(Boolean).pop() || dir : t('sidebar.defaultGroup')
       if (!byKey.has(key)) byKey.set(key, { key, label, sessions: [] })

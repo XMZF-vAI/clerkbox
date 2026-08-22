@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { ipc } from '../lib/ipc-client'
 import type { Message, MessageAttachment, Session, ToolCall, ToolResult } from '../types/agent'
+import type { SessionRow } from '../types/ipc'
 
 export type SessionStatus = 'working' | 'error' | 'confirm-danger'
 
@@ -217,6 +218,21 @@ function comparableFolderPath(value: string): string {
     : normalized
 }
 
+/**
+ * 从 DB 会话行恢复工作目录字段（loadFromDb / syncFromDb 共用）。
+ * 老数据行没有这两个字段：defaultWorkDir 按 created_at 确定性回填——
+ * createEmptySession 生成 defaultWorkDir 用的正是创建时间戳，同参重建结果一致。
+ */
+function restoreWorkDirs(row: SessionRow): { workingDir?: string; defaultWorkDir?: string } {
+  const workingDir = row.working_dir || undefined
+  let defaultWorkDir = row.default_work_dir || undefined
+  if (!defaultWorkDir) {
+    const { base, sep } = getDefaultWorkDirBase()
+    defaultWorkDir = `${base}${sep}${formatTimestamp(row.created_at)}`
+  }
+  return { workingDir, defaultWorkDir }
+}
+
 const createEmptySession = (): Session => {
   const now = Date.now()
   const { base, sep } = getDefaultWorkDirBase()
@@ -255,6 +271,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           messages: mapMessageRows(msgRows),
           createdAt: row.created_at,
           updatedAt: row.updated_at,
+          ...restoreWorkDirs(row),
         })
       }
       // 按 updatedAt 降序排序，使最近更新的会话排在最前，与新建会话时的 prepend 行为一致
@@ -310,14 +327,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
             logPersistenceFailure('delete empty session', ipc.dbDeleteSession(row.id))
             continue
           }
+          const restored = restoreWorkDirs(row)
           merged.push({
             id: row.id,
             title: row.title,
             messages: mapMessageRows(msgRows),
             createdAt: row.created_at,
             updatedAt: row.updated_at,
-            workingDir: local?.workingDir,
-            defaultWorkDir: local?.defaultWorkDir,
+            workingDir: restored.workingDir || local?.workingDir,
+            defaultWorkDir: restored.defaultWorkDir || local?.defaultWorkDir,
           })
           continue
         }
@@ -327,14 +345,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // 的旧数据覆盖本地新内容（思考内容闪回）。远端更新总会 bump 到更大的时间戳。
         if (!local || local.updatedAt < row.updated_at) {
           const msgRows = await ipc.dbGetMessages(row.id)
+          const restored = restoreWorkDirs(row)
           merged.push({
             id: row.id,
             title: row.title,
             messages: mapMessageRows(msgRows),
             createdAt: row.created_at,
             updatedAt: row.updated_at,
-            workingDir: local?.workingDir,
-            defaultWorkDir: local?.defaultWorkDir,
+            workingDir: restored.workingDir || local?.workingDir,
+            defaultWorkDir: restored.defaultWorkDir || local?.defaultWorkDir,
           })
         } else {
           merged.push(local)
@@ -401,13 +420,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   addMessage: (sessionId, message) => {
+    const now = Date.now()
     set((state) => ({
       sessions: state.sessions.map((s) =>
         s.id === sessionId
-          ? { ...s, messages: [...s.messages, message], updatedAt: Date.now() }
+          ? { ...s, messages: [...s.messages, message], updatedAt: now }
           : s
       ),
     }))
+    // 首条消息落库前先补建精确会话行（含 createdAt / 工作目录）。
+    // 否则只能靠 dbAddMessage 自愈补建，created_at 会退化成首条消息时间戳，
+    // defaultWorkDir 也无法恢复，重启后 AI 的默认工作目录会漂移。
+    const sessionBefore = get().sessions.find((s) => s.id === sessionId)
+    if (sessionBefore && sessionBefore.messages.length === 1) {
+      logPersistenceFailure('create session row', ipc.dbCreateSession({
+        id: sessionId,
+        title: sessionBefore.title,
+        created_at: sessionBefore.createdAt,
+        updated_at: now,
+        working_dir: sessionBefore.workingDir ?? null,
+        default_work_dir: sessionBefore.defaultWorkDir ?? null,
+      }))
+    }
     logPersistenceFailure('add message', ipc.dbAddMessage({
       id: message.id,
       session_id: sessionId,
@@ -488,11 +522,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   updateSessionWorkingDir: (sessionId, dir) => {
+    const now = Date.now()
     set((state) => ({
       sessions: state.sessions.map((s) =>
-        s.id === sessionId ? { ...s, workingDir: dir, updatedAt: Date.now() } : s
+        s.id === sessionId ? { ...s, workingDir: dir, updatedAt: now } : s
       ),
     }))
+    // 持久化：workingDir 必须落库，否则重启后 AI 的系统提示里工作目录丢失
+    // （dbCreateSession 为 upsert 语义，行不存在时会补建）
+    const session = get().sessions.find((s) => s.id === sessionId)
+    if (session) {
+      logPersistenceFailure('update session working dir', ipc.dbCreateSession({
+        id: sessionId,
+        title: session.title,
+        created_at: session.createdAt,
+        updated_at: now,
+        working_dir: dir,
+        default_work_dir: session.defaultWorkDir ?? null,
+      }))
+    }
   },
 
   pushRecentFolder: async (dir) => {

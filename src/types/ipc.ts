@@ -11,6 +11,10 @@ export interface SessionRow {
   title: string
   created_at: number
   updated_at: number
+  /** 用户为本会话选择的工作目录（未选择时缺省） */
+  working_dir?: string | null
+  /** 会话创建时自动生成的默认工作目录（回填用） */
+  default_work_dir?: string | null
 }
 
 export interface MessageRow {
