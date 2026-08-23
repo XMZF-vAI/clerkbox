@@ -6,6 +6,20 @@ export interface FileEntry {
   isFile: boolean
 }
 
+export interface WebUICapabilities {
+  isRemoteClient: boolean
+  canUpload: boolean
+  canBrowseHostFolders: boolean
+  maxUploadBytes: number
+}
+
+export interface WebUIUploadResult {
+  name: string
+  path: string
+  size: number
+  maxUploadBytes: number
+}
+
 export interface SessionRow {
   id: string
   title: string

@@ -57,6 +57,16 @@ const MIME_TYPES: Record<string, string> = {
   '.map': 'application/json',
 }
 
+// Remote WebUI uploads are deliberately capped to the same 10 MB scale as
+// the file tool read limit. The environment override is useful for a local
+// deployment, but is bounded so a bad value cannot disable the guardrail.
+const DEFAULT_WEBUI_UPLOAD_BYTES = 10 * 1024 * 1024
+const getWebUIUploadLimit = (): number => {
+  const raw = Number(process.env.CLERKBOX_WEBUI_MAX_UPLOAD_MB)
+  if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_WEBUI_UPLOAD_BYTES
+  return Math.min(Math.max(Math.floor(raw), 1), 100) * 1024 * 1024
+}
+
 // ── 服务器状态 ──
 let server: http.Server | null = null
 let currentToken = ''
@@ -143,6 +153,25 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
       void handleChatStream(req, res)
       return
     }
+    if (url.pathname === '/api/upload' && req.method === 'POST') {
+      void handleUpload(req, res, url).catch((error) => {
+        if (!res.writableEnded) {
+          sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) })
+        }
+      })
+      return
+    }
+    if (url.pathname === '/api/capabilities' && req.method === 'GET') {
+      sendJson(res, 200, {
+        result: {
+          isRemoteClient: !isLoopbackAddress(req.socket.remoteAddress),
+          canUpload: true,
+          canBrowseHostFolders: true,
+          maxUploadBytes: getWebUIUploadLimit(),
+        },
+      })
+      return
+    }
     if (url.pathname === '/api/platform') {
       sendJson(res, 200, { result: process.platform })
       return
@@ -162,6 +191,90 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
   } else {
     serveStatic(req, res, url.pathname)
   }
+}
+
+/** Stream one browser-selected file to the host without buffering it in memory. */
+async function handleUpload(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> {
+  const limit = getWebUIUploadLimit()
+  const declaredLength = Number(req.headers['content-length'] || 0)
+  if (declaredLength > limit) {
+    req.resume()
+    sendJson(res, 413, { error: `File too large. Maximum is ${formatBytes(limit)}.` })
+    return
+  }
+
+  const rawName = url.searchParams.get('name') || 'upload.bin'
+  const name = sanitizeUploadName(rawName)
+  const uploadDir = path.join(app.getPath('userData'), 'webui-uploads')
+  const uploadPath = path.join(uploadDir, `${crypto.randomBytes(16).toString('hex')}-${name}`)
+
+  await fs.promises.mkdir(uploadDir, { recursive: true })
+  const size = await streamRequestToFile(req, uploadPath, limit)
+  if (size === null) {
+    await fs.promises.rm(uploadPath, { force: true }).catch(() => {})
+    sendJson(res, 413, { error: `File too large. Maximum is ${formatBytes(limit)}.` })
+    return
+  }
+
+  sendJson(res, 200, {
+    result: { name, path: uploadPath, size, maxUploadBytes: limit },
+  })
+}
+
+function streamRequestToFile(req: http.IncomingMessage, filePath: string, limit: number): Promise<number | null> {
+  return new Promise((resolve) => {
+    const output = fs.createWriteStream(filePath, { flags: 'wx' })
+    let received = 0
+    let tooLarge = false
+    let settled = false
+
+    const finish = (result: number | null) => {
+      if (settled) return
+      settled = true
+      resolve(result)
+    }
+
+    output.on('error', () => {
+      req.resume()
+      finish(null)
+    })
+    output.on('finish', () => finish(tooLarge ? null : received))
+    req.on('data', (chunk: Buffer) => {
+      received += chunk.length
+      if (received > limit) {
+        tooLarge = true
+        return
+      }
+      output.write(chunk)
+    })
+    req.on('end', () => {
+      if (tooLarge) {
+        output.destroy()
+        finish(null)
+      } else {
+        output.end()
+      }
+    })
+    req.on('error', () => {
+      output.destroy()
+      finish(null)
+    })
+  })
+}
+
+function sanitizeUploadName(value: string): string {
+  const base = path.basename(value).replace(/[\x00-\x1f\\/:*?"<>|]/g, '_').trim()
+  const safe = base.replace(/^\.+$/, '') || 'upload.bin'
+  return safe.slice(0, 160)
+}
+
+function formatBytes(bytes: number): string {
+  return `${Math.round(bytes / (1024 * 1024))} MB`
+}
+
+function isLoopbackAddress(address: string | undefined): boolean {
+  const normalized = (address || '').replace(/^::ffff:/, '')
+  return normalized === '::1' || normalized === '127.0.0.1' || normalized.startsWith('127.')
 }
 
 // ── /api/invoke：调用 handlerRegistry 中的 handler ──

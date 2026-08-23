@@ -1,17 +1,22 @@
-import { useState, useRef, type KeyboardEvent as ReactKeyboardEvent, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, useEffect } from 'react'
+import { useState, useRef, type KeyboardEvent as ReactKeyboardEvent, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type ChangeEvent as ReactChangeEvent, useEffect } from 'react'
 import { Send, Brain, FolderOpen, ChevronDown, Hammer, Eye, Square, ClipboardList, Zap, Check, X, Store, Plus, FolderPlus, Paperclip, FileText } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useSettingsStore } from '../../stores/settings-store'
 import { useChatStore } from '../../stores/chat-store'
 import { useSkillsStore } from '../../stores/skills-store'
 import { useUIStore } from '../../stores/ui-store'
-import { ipc } from '../../lib/ipc-client'
+import { ipc, isWebUIMode } from '../../lib/ipc-client'
 import type { MessageAttachment } from '../../types/agent'
+import type { FileEntry, WebUICapabilities } from '../../types/ipc'
 import ConfirmDialog from '../ui/ConfirmDialog'
 import { useIsMobile } from '../../hooks/use-mobile'
 
 // 取路径的最后一节作为显示名（兼容 Windows/Unix 两种分隔符）
 const basename = (p: string) => p.split(/[/\\]/).filter(Boolean).pop() || p
+const appendFolderPath = (parent: string, name: string) => {
+  const separator = parent.includes('\\') ? '\\' : '/'
+  return parent.endsWith(separator) ? `${parent}${name}` : `${parent}${separator}${name}`
+}
 
 // ── 图片附件常量 ──
 const MAX_IMAGES = 10
@@ -22,6 +27,7 @@ const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.sv
 const isImagePath = (p: string) => IMAGE_EXTENSIONS.some((ext) => p.toLowerCase().endsWith(ext))
 
 const genAttachmentId = () => `att-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+const FALLBACK_WEBUI_UPLOAD_LIMIT = 10 * 1024 * 1024
 
 /** 客户端压缩图片：最长边 > MAX_IMAGE_DIM 时 canvas 等比重采样（PNG 输出 PNG，其余 JPEG 0.85；GIF 保持原样以免丢动画） */
 function compressImage(dataUrl: string): Promise<string> {
@@ -78,6 +84,18 @@ function comparableFolderPath(value: string): string {
     : normalized
 }
 
+function parentFolderPath(value: string): string | null {
+  const trimmed = value.replace(/[\\/]+$/, '') || value
+  const separatorIndex = Math.max(trimmed.lastIndexOf('\\'), trimmed.lastIndexOf('/'))
+  if (separatorIndex < 0) return null
+  // Keep filesystem roots navigable but never produce an empty path.
+  if (/^[A-Za-z]:$/.test(trimmed)) return `${trimmed}\\`
+  if (separatorIndex === 0) return trimmed.slice(0, 1)
+  if (separatorIndex === 2 && /^[A-Za-z]:/.test(trimmed)) return `${trimmed.slice(0, 3)}`
+  const parent = trimmed.slice(0, separatorIndex)
+  return parent || null
+}
+
 interface ChatInputProps {
   onSend: (content: string, attachments?: MessageAttachment[]) => void
   onStop?: () => void
@@ -96,6 +114,12 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
   // 保证多文件批量异步添加时上限校验读到的是同步最新列表（闭包里的 state 会过期）。
   const [attachments, setAttachments] = useState<MessageAttachment[]>([])
   const attachmentsRef = useRef<MessageAttachment[]>([])
+  const remoteFileInputRef = useRef<HTMLInputElement>(null)
+  const [webuiCapabilities, setWebuiCapabilities] = useState<WebUICapabilities | null>(null)
+  const [remoteFolderPickerOpen, setRemoteFolderPickerOpen] = useState(false)
+  const [remoteFolderPath, setRemoteFolderPath] = useState('')
+  const [remoteFolderEntries, setRemoteFolderEntries] = useState<FileEntry[]>([])
+  const [remoteFolderLoading, setRemoteFolderLoading] = useState(false)
 
   const commitAttachments = (next: MessageAttachment[]) => {
     attachmentsRef.current = next
@@ -128,12 +152,23 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
   const removeAttachment = (id: string) => {
     commitAttachments(attachmentsRef.current.filter((a) => a.id !== id))
   }
+
+  const webuiUploadEnabled = isWebUIMode
+  const hostFolderEnabled = isWebUIMode
+  const remoteUploadLimit = webuiCapabilities?.maxUploadBytes || FALLBACK_WEBUI_UPLOAD_LIMIT
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const settings = useSettingsStore()
   const { sessions, activeSessionId, updateSessionWorkingDir, recentsFolders, pushRecentFolder } = useChatStore()
   const currentSession = sessions.find((s) => s.id === activeSessionId)
   const defaultWorkDir = currentSession?.defaultWorkDir
   const effectiveWorkDir = currentSession?.workingDir || defaultWorkDir
+
+  useEffect(() => {
+    if (!isWebUIMode) return
+    void ipc.getWebUICapabilities()
+      .then(setWebuiCapabilities)
+      .catch((error) => console.error('Failed to load WebUI capabilities:', error))
+  }, [])
 
   // 移动端（WebUI 窄屏）适配：更大的触控目标、底部抽屉面板、虚拟键盘避让
   const isMobile = useIsMobile()
@@ -212,9 +247,49 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
     }
   }
 
+  const attachRemoteFile = async (file: File) => {
+    if (file.size > remoteUploadLimit) {
+      alert(t('chat.attachSizeLimit', { name: file.name, limit: Math.round(remoteUploadLimit / (1024 * 1024)) }))
+      return
+    }
+    try {
+      const uploaded = await ipc.uploadWebUIFile(file)
+      if (file.type.startsWith('image/') || isImagePath(file.name)) {
+        const dataUrl = await readFileAsDataURL(file)
+        const compressed = await compressImage(dataUrl)
+        addImageAttachment(compressed, file.name || uploaded.name, uploaded.path)
+      } else {
+        addFileAttachment(file.name || uploaded.name, uploaded.path)
+      }
+    } catch (error) {
+      console.error('Failed to upload WebUI file:', error)
+      alert(t('chat.attachUploadFailed', { name: file.name || 'file' }))
+    }
+  }
+
+  const handleRemoteFiles = async (files: File[]) => {
+    if (files.length === 0) return
+    setAttachSelecting(true)
+    try {
+      for (const file of files) await attachRemoteFile(file)
+    } finally {
+      setAttachSelecting(false)
+    }
+  }
+
+  const handleRemoteFileInputChange = (event: ReactChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files || [])
+    event.target.value = ''
+    void handleRemoteFiles(files)
+  }
+
   // ── 附件入口 1：附件按钮（系统文件选择器，多选，图片与任意文件） ──
   const openAttachPicker = async () => {
     if (attachSelecting) return
+    if (isWebUIMode) {
+      remoteFileInputRef.current?.click()
+      return
+    }
     setAttachSelecting(true)
     try {
       const paths = await ipc.selectChatFiles()
@@ -248,6 +323,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
     if (!items) return
     const imageFiles: File[] = []
     const pathFiles: Array<{ name: string; path: string }> = []
+    const remoteFiles: File[] = []
     for (let i = 0; i < items.length; i++) {
       const item = items[i]
       if (item.kind !== 'file') continue
@@ -259,16 +335,26 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
         // file.type 可能为空（部分平台复制的磁盘文件），只要能取到真实路径就按文件引用入列
         const p = ipc.getPathForFile(file)
         if (p) pathFiles.push({ name: file.name, path: p })
+        else if (webuiUploadEnabled) remoteFiles.push(file)
       }
     }
-    if (imageFiles.length === 0 && pathFiles.length === 0) return
+    if (imageFiles.length === 0 && pathFiles.length === 0 && remoteFiles.length === 0) return
     e.preventDefault()
     void (async () => {
       for (const file of imageFiles) {
         try {
+          if (webuiUploadEnabled && file.size > remoteUploadLimit) {
+            alert(t('chat.attachSizeLimit', { name: file.name, limit: Math.round(remoteUploadLimit / (1024 * 1024)) }))
+            continue
+          }
           const dataUrl = await readFileAsDataURL(file)
           const compressed = await compressImage(dataUrl)
-          addImageAttachment(compressed, file.name || 'image.png')
+          if (webuiUploadEnabled) {
+            const uploaded = await ipc.uploadWebUIFile(file)
+            addImageAttachment(compressed, file.name || 'image.png', uploaded.path)
+          } else {
+            addImageAttachment(compressed, file.name || 'image.png')
+          }
         } catch {
           alert(t('chat.attachReadFailed'))
         }
@@ -276,6 +362,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
       for (const { name, path } of pathFiles) {
         addFileAttachment(name, path)
       }
+      if (remoteFiles.length > 0) await handleRemoteFiles(remoteFiles)
     })()
   }
 
@@ -296,6 +383,10 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
     // 同步取 FileList（事件结束后可能失效），路径解析与读取异步进行
     const files = Array.from(e.dataTransfer.files)
     if (files.length === 0) return
+    if (webuiUploadEnabled) {
+      void handleRemoteFiles(files)
+      return
+    }
     void (async () => {
       for (const file of files) {
         const p = ipc.getPathForFile(file)
@@ -368,6 +459,24 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
   // popover 的「选择文件夹」按钮：先关 popover 再开系统选择器
   const openSystemFolderPicker = async () => {
     setShowFolderPopover(false)
+    if (isWebUIMode) {
+      const homeDir = await ipc.getHomeDir().catch(() => '')
+      const candidates = [effectiveWorkDir, ...recentsFolders, homeDir].filter((p): p is string => Boolean(p))
+      setRemoteFolderPath('')
+      setRemoteFolderEntries([])
+      setRemoteFolderPickerOpen(true)
+      for (const candidate of candidates) {
+        try {
+          await loadRemoteFolder(candidate)
+          return
+        } catch {
+          // Try the next known host directory.
+        }
+      }
+      setRemoteFolderLoading(false)
+      alert(t('chat.folderSelectionFailed'))
+      return
+    }
     if (folderSelecting) return
     setFolderSelecting(true)
     try {
@@ -379,6 +488,29 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
     } finally {
       setFolderSelecting(false)
     }
+  }
+
+  const loadRemoteFolder = async (dir: string) => {
+    if (!dir) return
+    setRemoteFolderLoading(true)
+    try {
+      const entries = await ipc.listDir(dir)
+      setRemoteFolderPath(dir)
+      setRemoteFolderEntries(entries.filter((entry) => entry.isDirectory).sort((a, b) => a.name.localeCompare(b.name)))
+    } finally {
+      setRemoteFolderLoading(false)
+    }
+  }
+
+  const selectRemoteFolder = () => {
+    if (!remoteFolderPath) return
+    setRemoteFolderPickerOpen(false)
+    requestSetFolder(remoteFolderPath)
+  }
+
+  const navigateRemoteParent = () => {
+    const parent = parentFolderPath(remoteFolderPath)
+    if (parent && parent !== remoteFolderPath) void loadRemoteFolder(parent).catch(() => {})
   }
 
   const activeProvider = settings.providers.find((p) => p.id === settings.activeProviderId)
@@ -532,6 +664,16 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
       >
+        {isWebUIMode && (
+          <input
+            ref={remoteFileInputRef}
+            type="file"
+            multiple
+            className="hidden"
+            onChange={handleRemoteFileInputChange}
+            aria-hidden="true"
+          />
+        )}
         {/* Active skills pills - shown when any skill is loaded */}
         {activeSkills.length > 0 && (
           <div className="flex items-center gap-1 flex-wrap">
@@ -754,7 +896,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
                       }`}
                     >
                       <FolderPlus size={12} className="opacity-70" />
-                      <span>{t('chat.folderSelect')}</span>
+                      <span>{hostFolderEnabled ? t('chat.folderBrowseHost') : t('chat.folderSelect')}</span>
                     </button>
                   </div>
                 </div>
@@ -1183,6 +1325,46 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
           </button>
         </div>
       </div>
+
+      {remoteFolderPickerOpen && (
+        <>
+          <div className="fixed inset-0 z-[70] bg-black/55 animate-fade-in" onClick={() => setRemoteFolderPickerOpen(false)} aria-hidden />
+          <div className={`fixed z-[71] inset-x-4 top-1/2 -translate-y-1/2 max-w-lg mx-auto rounded-md3-md border shadow-2xl overflow-hidden animate-fade-in ${
+            vibe ? 'bg-white/10 border-white/15 backdrop-blur-2xl text-white' : 'bg-dark-surfaceContainer border-dark-onSurfaceVariant/15 text-dark-onSurface'
+          }`} role="dialog" aria-modal="true" aria-label={t('chat.folderBrowseHost')}>
+            <div className="flex items-center gap-2 px-3 py-2 border-b border-dark-onSurfaceVariant/10">
+              <button type="button" onClick={navigateRemoteParent} disabled={!parentFolderPath(remoteFolderPath) || remoteFolderLoading} className="p-1.5 rounded-md3-sm hover:bg-dark-surfaceContainerHigh disabled:opacity-30" title={t('chat.folderParent')} aria-label={t('chat.folderParent')}>
+                <ChevronDown size={15} className="rotate-90" />
+              </button>
+              <span className="text-xs truncate flex-1" title={remoteFolderPath}>{remoteFolderPath || t('chat.folderNone')}</span>
+              <button type="button" onClick={() => setRemoteFolderPickerOpen(false)} className="p-1.5 max-md:p-3 rounded-md3-sm hover:bg-dark-surfaceContainerHigh" title={t('common.close')} aria-label={t('common.close')}>
+                <X size={15} />
+              </button>
+            </div>
+            <div className="max-h-64 overflow-y-auto p-1">
+              {remoteFolderLoading ? (
+                <div className="px-3 py-6 text-center text-xs opacity-60">{t('chat.folderLoading')}</div>
+              ) : remoteFolderEntries.length === 0 ? (
+                <div className="px-3 py-6 text-center text-xs opacity-60">{t('chat.folderNoSubfolders')}</div>
+              ) : (
+                remoteFolderEntries.map((entry) => {
+                  const childPath = appendFolderPath(remoteFolderPath, entry.name)
+                  return (
+                    <button key={childPath} type="button" onClick={() => void loadRemoteFolder(childPath).catch(() => {})} className="w-full flex items-center gap-2 px-3 py-2 rounded-md3-sm text-left text-xs hover:bg-dark-surfaceContainerHigh">
+                      <FolderOpen size={14} className="text-md-info flex-shrink-0" />
+                      <span className="truncate">{entry.name}</span>
+                    </button>
+                  )
+                })
+              )}
+            </div>
+            <div className="flex items-center justify-end gap-2 px-3 py-2 border-t border-dark-onSurfaceVariant/10">
+              <button type="button" onClick={() => setRemoteFolderPickerOpen(false)} className="px-3 py-1.5 text-xs rounded-md3-sm hover:bg-dark-surfaceContainerHigh">{t('common.cancel')}</button>
+              <button type="button" onClick={selectRemoteFolder} disabled={!remoteFolderPath || remoteFolderLoading} className="px-3 py-1.5 text-xs rounded-md3-sm bg-md-primary text-md-onPrimary hover:bg-md-primary/90 disabled:opacity-40">{t('chat.folderUseThis')}</button>
+            </div>
+          </div>
+        </>
+      )}
 
       {/* Disclaimer - only in default mode */}
       {!isWelcome && (

@@ -1,8 +1,9 @@
 import { useCallback, useRef, useState } from 'react'
 import { FolderOpen, Folder, File, ChevronRight, ChevronDown, HardDrive } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { ipc } from '../../lib/ipc-client'
+import { ipc, isWebUIMode } from '../../lib/ipc-client'
 import type { FileEntry } from '../../types/ipc'
+import HostFolderPicker from '../ui/HostFolderPicker'
 
 interface TreeNode {
   name: string
@@ -90,6 +91,7 @@ export default function FileTree() {
   const { t } = useTranslation()
   const [rootPath, setRootPath] = useState<string | null>(null)
   const [tree, setTree] = useState<TreeNode[]>([])
+  const [hostFolderPickerOpen, setHostFolderPickerOpen] = useState(false)
   const treeRef = useRef<TreeNode[]>([])
   const rootRequestRef = useRef(0)
   const pendingLoadsRef = useRef(new Set<string>())
@@ -123,8 +125,17 @@ export default function FileTree() {
   }, [])
 
   const handleSelectFolder = async () => {
+    if (isWebUIMode) {
+      setHostFolderPickerOpen(true)
+      return
+    }
     const selectedPath = await ipc.selectFolder()
     if (!selectedPath) return
+
+    await applyRootFolder(selectedPath)
+  }
+
+  const applyRootFolder = async (selectedPath: string) => {
 
     const requestId = ++rootRequestRef.current
     setRootPath(selectedPath)
@@ -164,7 +175,8 @@ export default function FileTree() {
 
   if (!rootPath) {
     return (
-      <div className="flex flex-col items-center justify-center h-48 gap-3 text-dark-onSurfaceVariant">
+      <>
+        <div className="flex flex-col items-center justify-center h-48 gap-3 text-dark-onSurfaceVariant">
         <HardDrive size={32} className="opacity-30" aria-hidden="true" />
         <p className="text-sm opacity-50">{t('fileTree.selectWorkspace')}</p>
         <button
@@ -174,12 +186,20 @@ export default function FileTree() {
         >
           {t('fileTree.selectFolder')}
         </button>
-      </div>
+        </div>
+        <HostFolderPicker
+          open={hostFolderPickerOpen}
+          onClose={() => setHostFolderPickerOpen(false)}
+          onSelect={(path) => void applyRootFolder(path)}
+          initialPath={ipc.homeDir()}
+        />
+      </>
     )
   }
 
   return (
-    <div className="py-1">
+    <>
+      <div className="py-1">
       <div className="flex items-center justify-between px-2 mb-2">
         <span title={rootPath} className="text-xs text-dark-onSurfaceVariant/50 truncate flex-1">{rootPath}</span>
         <button
@@ -195,6 +215,13 @@ export default function FileTree() {
           <FileTreeNode key={node.path} node={node} onToggle={handleToggle} />
         ))}
       </div>
-    </div>
+      </div>
+      <HostFolderPicker
+        open={hostFolderPickerOpen}
+        onClose={() => setHostFolderPickerOpen(false)}
+        onSelect={(path) => void applyRootFolder(path)}
+        initialPath={rootPath || ipc.homeDir()}
+      />
+    </>
   )
 }

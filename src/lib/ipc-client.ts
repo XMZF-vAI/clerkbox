@@ -10,6 +10,8 @@ import type {
   MessageRow,
   ParseSkillFileResult,
   SessionRow,
+  WebUICapabilities,
+  WebUIUploadResult,
 } from '../types/ipc'
 import type { MemoryEntry } from '../types/agent'
 
@@ -73,6 +75,91 @@ async function webGet<T>(path: string): Promise<T> {
   const json = await res.json()
   return json.result as T
 }
+
+async function webUploadFile(file: File): Promise<WebUIUploadResult> {
+  const query = `?name=${encodeURIComponent(file.name || 'upload.bin')}`
+  const res = await fetch(`/api/upload${query}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': file.type || 'application/octet-stream',
+      'X-WebUI-Token': webuiToken,
+    },
+    body: file,
+  })
+  const json = await res.json().catch(() => ({})) as { result?: WebUIUploadResult; error?: string }
+  if (!res.ok || json.error || !json.result) {
+    throw new Error(json.error || `WebUI upload failed (${res.status})`)
+  }
+  return json.result
+}
+
+const FALLBACK_WEBUI_UPLOAD_BYTES = 10 * 1024 * 1024
+
+async function browserFileWithinUploadLimit(file: File): Promise<boolean> {
+  const capabilities = await webGet<WebUICapabilities>('/api/capabilities').catch(() => null)
+  const limit = capabilities?.maxUploadBytes || FALLBACK_WEBUI_UPLOAD_BYTES
+  if (file.size <= limit) return true
+  window.alert(`File too large. Maximum is ${Math.round(limit / (1024 * 1024))} MB.`)
+  return false
+}
+
+/** Open a browser file picker synchronously from the user gesture. */
+function webPickFiles(options: { accept?: string; multiple?: boolean }): Promise<File[] | null> {
+  return new Promise((resolve) => {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.multiple = options.multiple === true
+    if (options.accept) input.accept = options.accept
+    input.style.position = 'fixed'
+    input.style.left = '-10000px'
+    input.style.opacity = '0'
+    const cleanup = () => {
+      input.remove()
+      input.onchange = null
+      input.oncancel = null
+    }
+    input.onchange = () => {
+      const files = Array.from(input.files || [])
+      cleanup()
+      resolve(files.length > 0 ? files : null)
+    }
+    input.oncancel = () => {
+      cleanup()
+      resolve(null)
+    }
+    document.body.appendChild(input)
+    input.click()
+  })
+}
+
+function readBrowserFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(new Error('Failed to read browser file'))
+    reader.readAsDataURL(file)
+  })
+}
+
+async function webPickDataUrl(accept: string): Promise<string | null> {
+  const files = await webPickFiles({ accept })
+  if (!files?.[0]) return null
+  if (!(await browserFileWithinUploadLimit(files[0]))) return null
+  return readBrowserFileAsDataUrl(files[0])
+}
+
+async function webPickUploadedFiles(options: { accept?: string; multiple?: boolean }): Promise<string[] | null> {
+  const files = await webPickFiles(options)
+  if (!files) return null
+  const paths: string[] = []
+  for (const file of files) {
+    if (!(await browserFileWithinUploadLimit(file))) continue
+    paths.push((await webUploadFile(file)).path)
+  }
+  return paths
+}
+
+let webuiCapabilitiesPromise: Promise<WebUICapabilities> | null = null
 
 // ── WebUI 流式对话：SSE 桥接到 onApiChunk 回调模式 ──
 // 与 Electron 的 apiChunk 事件语义对齐，api-transport.ts 无需改动。
@@ -143,23 +230,45 @@ function webAbort(requestId: string): void {
 // ── 统一 ipc 对象 ──
 // Electron 模式直接委托 window.clerkbox；WebUI 模式走 HTTP。
 export const ipc = {
+  getWebUICapabilities: (): Promise<WebUICapabilities> => {
+    if (isElectron) {
+      return Promise.resolve({
+        isRemoteClient: false,
+        canUpload: false,
+        canBrowseHostFolders: false,
+        maxUploadBytes: 10 * 1024 * 1024,
+      })
+    }
+    if (!webuiCapabilitiesPromise) {
+      webuiCapabilitiesPromise = webGet<WebUICapabilities>('/api/capabilities')
+    }
+    return webuiCapabilitiesPromise
+  },
+  uploadWebUIFile: (file: File): Promise<WebUIUploadResult> =>
+    isElectron ? Promise.reject(new Error('WebUI upload is only available in a browser')) : webUploadFile(file),
   // 文件对话框：WebUI 模式无法弹出原生对话框，返回 null（UI 层降级为手动输入路径）
   selectFolder: (): Promise<string | null> =>
     isElectron ? window.clerkbox.selectFolder() : Promise.resolve(null),
   selectImageFile: (): Promise<string | null> =>
-    isElectron ? window.clerkbox.selectImageFile() : Promise.resolve(null),
+    isElectron
+      ? window.clerkbox.selectImageFile()
+      : webPickDataUrl('image/*'),
   // 对话附件多选：WebUI 模式无法弹出原生对话框，返回 null（UI 层降级为手动输入路径）
   selectChatFiles: (): Promise<string[] | null> =>
-    isElectron ? window.clerkbox.selectChatFiles() : Promise.resolve(null),
+    isElectron ? window.clerkbox.selectChatFiles() : webPickUploadedFiles({ multiple: true }),
   // 按磁盘路径读图片为 base64 data URL（渲染进程无法直接读本地文件）
   readImageFileBase64: (path: string): Promise<string> =>
     isElectron ? window.clerkbox.readImageFileBase64(path) : webInvoke('readImageFileBase64', [path]),
   selectAudioFile: (): Promise<string | null> =>
-    isElectron ? window.clerkbox.selectAudioFile() : Promise.resolve(null),
+    isElectron
+      ? window.clerkbox.selectAudioFile()
+      : webPickDataUrl('audio/*'),
   selectMusicFolder: (): Promise<string | null> =>
     isElectron ? window.clerkbox.selectMusicFolder() : Promise.resolve(null),
   selectSkillFile: (): Promise<string | null> =>
-    isElectron ? window.clerkbox.selectSkillFile() : Promise.resolve(null),
+    isElectron
+      ? window.clerkbox.selectSkillFile()
+      : webPickUploadedFiles({ accept: '.skill,.zip,application/zip' }).then((paths) => paths?.[0] || null),
 
   parseSkillFile: (filePath: string): Promise<ParseSkillFileResult> =>
     isElectron ? window.clerkbox.parseSkillFile(filePath) : webInvoke('parseSkillFile', [filePath]),
@@ -287,6 +396,12 @@ export const ipc = {
   },
   homeDir: (): string => {
     if (isElectron) return window.clerkbox.homeDir
+    return cachedHomeDir
+  },
+  getHomeDir: async (): Promise<string> => {
+    if (isElectron) return window.clerkbox.homeDir
+    if (cachedHomeDir) return cachedHomeDir
+    cachedHomeDir = await webGet<string>('/api/homedir')
     return cachedHomeDir
   },
 

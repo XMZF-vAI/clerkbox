@@ -436,11 +436,12 @@ ClerkBox ships with a built-in web server that exposes the full UI to any browse
 - **Real-time data sync**: settings, skills, VIBE config, and token usage are synchronized between desktop and web via a shared main-process store; sessions and messages share the same local database
 - **Security**: a random token is generated on every start and required for all API requests; the static file server includes path-traversal protection
 - **Adaptive UI**: window control buttons (minimize / maximize / close) are automatically hidden in WebUI mode
+- **Browser files**: the local or third-device WebUI can upload one file at a time to the host (10MB per file by default) and choose a host working directory from a directory browser
 
 ### Notes
 
 - The WebUI listens on a random port on `0.0.0.0`, reachable within the LAN; for public deployment, use a reverse proxy with HTTPS
-- Native file-picker dialogs cannot be opened in the browser; those operations fall back to manual path input
+- Browser WebUI cannot open the host's native file-picker dialogs, so it uses browser uploads and a host-folder browser instead. Uploads default to 10MB per file and can be adjusted with `CLERKBOX_WEBUI_MAX_UPLOAD_MB` (1-100MB)
 - API keys are kept in OS-level encryption (safeStorage) and never enter the shared store in plaintext
 
 ---

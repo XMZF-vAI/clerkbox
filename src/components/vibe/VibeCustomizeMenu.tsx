@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { X, Image, Music, FolderOpen, File } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useVibeStore, DEFAULT_VIBE_BACKGROUND, DEFAULT_VIBE_MUSIC } from '../../stores/vibe-store'
-import { ipc } from '../../lib/ipc-client'
+import { ipc, isWebUIMode } from '../../lib/ipc-client'
+import HostFolderPicker from '../ui/HostFolderPicker'
 
 interface VibeCustomizeMenuProps {
   onClose: () => void
@@ -19,6 +20,7 @@ export default function VibeCustomizeMenu({ onClose }: VibeCustomizeMenuProps) {
 
   const [bgUrl, setBgUrl] = useState(background.type === 'url' ? background.value : '')
   const [musicUrl, setMusicUrl] = useState(music?.type === 'url' ? music.value : '')
+  const [hostFolderPickerOpen, setHostFolderPickerOpen] = useState(false)
 
   const dialogRef = useRef<HTMLDivElement>(null)
   const previousFocusRef = useRef<HTMLElement | null>(null)
@@ -63,7 +65,7 @@ export default function VibeCustomizeMenu({ onClose }: VibeCustomizeMenuProps) {
   const handleSelectLocalBackground = async () => {
     const path = await ipc.selectImageFile()
     if (path) {
-      setBackground({ type: 'local', value: path })
+      setBackground({ type: isWebUIMode ? 'url' : 'local', value: path })
     }
   }
 
@@ -81,7 +83,7 @@ export default function VibeCustomizeMenu({ onClose }: VibeCustomizeMenuProps) {
   const handleSelectLocalMusic = async () => {
     const path = await ipc.selectAudioFile()
     if (path) {
-      setMusic({ type: 'local', value: path })
+      setMusic({ type: isWebUIMode ? 'url' : 'local', value: path })
       setMusicUrl('')
     }
   }
@@ -98,6 +100,10 @@ export default function VibeCustomizeMenu({ onClose }: VibeCustomizeMenuProps) {
   }
 
   const handleSelectMusicFolder = async () => {
+    if (isWebUIMode) {
+      setHostFolderPickerOpen(true)
+      return
+    }
     const folder = await ipc.selectMusicFolder()
     if (folder) {
       setMusicFolder(folder)
@@ -269,6 +275,16 @@ export default function VibeCustomizeMenu({ onClose }: VibeCustomizeMenuProps) {
           )}
         </div>
       </div>
+      <HostFolderPicker
+        open={hostFolderPickerOpen}
+        onClose={() => setHostFolderPickerOpen(false)}
+        onSelect={(folder) => {
+          setMusicFolder(folder)
+          setMusicUrl('')
+        }}
+        initialPath={musicFolder || ipc.homeDir()}
+        variant="vibe"
+      />
     </div>
   )
 }
