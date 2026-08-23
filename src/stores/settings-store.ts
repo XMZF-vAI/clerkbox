@@ -49,6 +49,7 @@ const defaultSettings: AppSettings = {
   hasCompletedOnboarding: false,
   agentsMdEnabled: true,
   claudeMdCompat: true,
+  webuiLanAccess: false,
 }
 
 const apiKeyWriteQueues = new Map<string, Promise<void>>()

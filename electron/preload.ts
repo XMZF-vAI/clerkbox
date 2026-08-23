@@ -133,6 +133,8 @@ contextBridge.exposeInMainWorld('clerkbox', {
     ipcRenderer.invoke('dbDeleteMessagesBefore', sessionId, beforeId),
   dbClearMessages: (sessionId: string): Promise<void> =>
     ipcRenderer.invoke('dbClearMessages', sessionId),
+  dbCompactMessages: (sessionId: string, rows: MessageRow[]): Promise<void> =>
+    ipcRenderer.invoke('dbCompactMessages', sessionId, rows),
 
   // Skill operations
   initClerkbox: (projectDir: string): Promise<void> => ipcRenderer.invoke('initClerkbox', projectDir),
@@ -156,10 +158,11 @@ contextBridge.exposeInMainWorld('clerkbox', {
   homeDir: ipcRenderer.sendSync('getHomeDir'),
 
   // WebUI 控制
-  startWebUI: (): Promise<{ port: number; token: string; url: string } | { error: string }> =>
-    ipcRenderer.invoke('startWebUI'),
+  startWebUI: (lanAccess?: boolean): Promise<{ port: number; token: string; url: string } | { error: string }> =>
+    ipcRenderer.invoke('startWebUI', lanAccess === true),
   stopWebUI: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('stopWebUI'),
   getWebUIStatus: (): Promise<{ running: boolean; url?: string }> => ipcRenderer.invoke('getWebUIStatus'),
+  getLanAddresses: (): Promise<string[]> => ipcRenderer.invoke('getLanAddresses'),
 
   // 共享 KV 存储（Electron 与 WebUI 双模式同步持久化）
   kvGet: (key: string): Promise<string | null> => ipcRenderer.invoke('kvGet', key),

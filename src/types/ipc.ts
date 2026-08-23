@@ -138,6 +138,8 @@ export interface ClerkBoxAPI {
   dbGetMessages: (sessionId: string) => Promise<MessageRow[]>
   dbDeleteMessagesBefore: (sessionId: string, beforeId: string) => Promise<void>
   dbClearMessages: (sessionId: string) => Promise<void>
+  /** 原子压缩：单次写入内整体替换该会话的全部消息（compactSession 专用） */
+  dbCompactMessages: (sessionId: string, rows: MessageRow[]) => Promise<void>
   initClerkbox: (projectDir: string) => Promise<void>
   writeSkillMd: (projectDir: string, slug: string, content: string) => Promise<void>
   writeSkillDir: (projectDir: string, slug: string, files: Array<{ path: string; content: string }>) => Promise<void>
@@ -149,9 +151,10 @@ export interface ClerkBoxAPI {
   platform: string
   homeDir: string
   // WebUI 控制
-  startWebUI: () => Promise<{ port: number; token: string; url: string } | { error: string }>
+  startWebUI: (lanAccess?: boolean) => Promise<{ port: number; token: string; url: string } | { error: string }>
   stopWebUI: () => Promise<{ ok: boolean }>
   getWebUIStatus: () => Promise<{ running: boolean; url?: string }>
+  getLanAddresses: () => Promise<string[]>
   // 共享 KV 存储（Electron 与 WebUI 双模式同步持久化）
   kvGet: (key: string) => Promise<string | null>
   kvSet: (key: string, value: string) => Promise<void>

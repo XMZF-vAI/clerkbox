@@ -18,7 +18,7 @@ import * as os from 'os'
 import * as cheerio from 'cheerio'
 import * as yaml from 'js-yaml'
 import { registerApiProxyHandlers, bindApiProxyCleanup, startChatStream, abortChatStream, type ApiConnConfig } from './api-proxy'
-import { handlerRegistry, setStreamHandlers, startWebUI, stopWebUI, getWebUIStatus } from './webui-server'
+import { handlerRegistry, setStreamHandlers, startWebUI, stopWebUI, getWebUIStatus, getLanAddresses } from './webui-server'
 import * as rtAccount from './rt-account'
 import type { AccountSyncKind } from '../src/types/ipc'
 
@@ -1705,6 +1705,39 @@ function registerIpcHandlers() {
     })
   })
 
+  // 原子压缩：单次写入内整体替换该 session 的消息列表。
+  // 旧「清空再逐条重写」两步间崩溃会丢失全会话历史；这里借助 writeDb 的
+  // tmp+rename 原子性一次落盘完成替换，不存在清空后未写回的中间态。
+  // 最坏情况（写入失败）旧数据完好，仅压缩未生效。
+  ipcMain.handle('dbCompactMessages', async (_event, sessionId: string, rows: Record<string, unknown>[]) => {
+    await enqueueDbWrite(() => {
+      if (typeof sessionId !== 'string' || !sessionId || !Array.isArray(rows)) {
+        throw new Error('Invalid compact payload')
+      }
+      for (const row of rows) {
+        if (!isRecord(row) || typeof row.id !== 'string' || !row.id) {
+          throw new Error('Invalid message row in compact payload')
+        }
+      }
+      const db = readDb()
+      db.messages[sessionId] = [...rows]
+      // 会话行可能缺失（如被另一端清理）→ 与 dbAddMessage 同策略自愈重建
+      if (rows.length > 0 && !db.sessions.some((s) => s.id === sessionId)) {
+        const last = rows[rows.length - 1]
+        const ts = typeof last.timestamp === 'number' ? last.timestamp : Date.now()
+        const text = typeof last.content === 'string' ? last.content.trim().replace(/\s+/g, ' ') : ''
+        db.sessions.push({
+          id: sessionId,
+          title: text ? (text.length > 20 ? text.slice(0, 20) + '…' : text) : '新会话',
+          created_at: ts,
+          updated_at: ts,
+        })
+      }
+      touchSessionUpdatedAt(db, sessionId, Date.now())
+      writeDb(db)
+    })
+  })
+
   // A restricted slug prevents skill-directory traversal.
   function assertSafeSlug(slug: string): string {
     if (typeof slug !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(slug)) {
@@ -1989,9 +2022,9 @@ function registerIpcHandlers() {
   })
 
   // ── WebUI 控制 ──
-  ipcMain.handle('startWebUI', async () => {
+  ipcMain.handle('startWebUI', async (_event, lanAccess?: boolean) => {
     try {
-      return await startWebUI()
+      return await startWebUI({ lanAccess: lanAccess === true })
     } catch (e) {
       return { error: e instanceof Error ? e.message : String(e) }
     }
@@ -2002,6 +2035,10 @@ function registerIpcHandlers() {
   })
   ipcMain.handle('getWebUIStatus', () => {
     return getWebUIStatus()
+  })
+  // 局域网 IPv4 列表：WebUI 弹窗用于拼手机可访问的 URL 并生成二维码
+  ipcMain.handle('getLanAddresses', () => {
+    return getLanAddresses()
   })
 }
 

@@ -2,7 +2,8 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <!-- CSP 由 vite.config.ts 的 inject-csp-meta 插件在构建时注入（dev 模式除外） -->
     <base href="./" />
     <title>ClerkBox - XMZF vAI</title>
     <link rel="icon" type="image/png" href="./icon.png" />
@@ -15,27 +16,7 @@
         overflow: hidden;
       }
     </style>
-    <script>
-      // Prevent FOUC: apply theme before React renders
-      try {
-        var raw = localStorage.getItem('clerkbox-settings');
-        if (raw) {
-          var parsed = JSON.parse(raw);
-          var theme = parsed.state && parsed.state.theme;
-          var prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-          var isDark = theme === 'dark' || (theme === 'system' && prefersDark);
-          if (!isDark && theme) {
-            document.documentElement.classList.remove('dark');
-          } else {
-            document.documentElement.classList.add('dark');
-          }
-        } else {
-          document.documentElement.classList.add('dark');
-        }
-      } catch(e) {
-        document.documentElement.classList.add('dark');
-      }
-    </script>
+    <script src="./theme-init.js"></script>
   </head>
   <body>
     <div id="root"></div>

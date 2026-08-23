@@ -67,16 +67,37 @@ export function getWebUIStatus(): { running: boolean; url?: string } {
   return { running: true, url: `http://localhost:${currentPort}/?token=${currentToken}` }
 }
 
-export async function startWebUI(): Promise<{ port: number; token: string; url: string }> {
+/** 枚举本机非内部 IPv4 地址（供移动端扫码/拼局域网 URL 用），按可用性排序 */
+export function getLanAddresses(): string[] {
+  const out: string[] = []
+  const interfaces = os.networkInterfaces()
+  for (const addrs of Object.values(interfaces)) {
+    for (const addr of addrs ?? []) {
+      if (addr.family !== 'IPv4' || addr.internal) continue
+      // 排除链路本地与基准测试保留段（VPN TUN 常占用 198.18.0.0/15，手机无法访问）
+      if (/^169\.254\./.test(addr.address) || /^198\.(18|19)\./.test(addr.address)) continue
+      out.push(addr.address)
+    }
+  }
+  // 真实局域网网段优先（RFC1918），其余排在后面兜底
+  const isPrivate = (ip: string) =>
+    /^192\.168\./.test(ip) || /^10\./.test(ip) || /^172\.(1[6-9]|2\d|3[01])\./.test(ip)
+  return out.sort((a, b) => Number(isPrivate(b)) - Number(isPrivate(a)))
+}
+
+export async function startWebUI(options: { lanAccess?: boolean } = {}): Promise<{ port: number; token: string; url: string }> {
   if (server) {
     return { port: currentPort, token: currentToken, url: `http://localhost:${currentPort}/?token=${currentToken}` }
   }
 
   currentToken = crypto.randomBytes(32).toString('hex')
+  // 默认仅绑定本机回环地址；显式开启局域网访问后才绑定所有网卡。
+  // 绑定 0.0.0.0 意味着同一网络内任何设备都可尝试访问，依赖随机 token 认证。
+  const host = options.lanAccess ? '0.0.0.0' : '127.0.0.1'
 
   return new Promise((resolve, reject) => {
     server = http.createServer(handleRequest)
-    server.listen(0, '0.0.0.0', () => {
+    server.listen(0, host, () => {
       const addr = server!.address()
       if (addr && typeof addr === 'object') {
         currentPort = addr.port

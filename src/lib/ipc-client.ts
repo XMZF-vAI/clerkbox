@@ -34,6 +34,13 @@ if (!isElectron && typeof window !== 'undefined') {
   // 存入 sessionStorage，刷新页面后仍可复用（SPA 路由切换不丢）
   if (webuiToken) sessionStorage.setItem('clerkbox-webui-token', webuiToken)
   else webuiToken = sessionStorage.getItem('clerkbox-webui-token') || ''
+  // 从地址栏抹掉 token（sessionStorage 已留存）：减少链接被复制、
+  // 浏览器历史/服务器日志记录 token 的泄漏面。仅首次携带时执行一次。
+  if (params.get('token')) {
+    params.delete('token')
+    const qs = params.toString()
+    window.history.replaceState(null, '', window.location.pathname + (qs ? `?${qs}` : '') + window.location.hash)
+  }
 }
 
 /** WebUI 模式下判断当前是否为 WebUI 环境（供 UI 层隐藏窗口控制按钮等） */
@@ -246,6 +253,8 @@ export const ipc = {
     isElectron ? window.clerkbox.dbDeleteMessagesBefore(sessionId, beforeId) : webInvoke('dbDeleteMessagesBefore', [sessionId, beforeId]),
   dbClearMessages: (sessionId: string): Promise<void> =>
     isElectron ? window.clerkbox.dbClearMessages(sessionId) : webInvoke('dbClearMessages', [sessionId]),
+  dbCompactMessages: (sessionId: string, rows: MessageRow[]): Promise<void> =>
+    isElectron ? window.clerkbox.dbCompactMessages(sessionId, rows) : webInvoke('dbCompactMessages', [sessionId, rows]),
 
   // .clerkbox operations
   initClerkbox: (projectDir: string): Promise<void> =>
@@ -282,12 +291,14 @@ export const ipc = {
   },
 
   // WebUI 控制（仅 Electron 模式可用）
-  startWebUI: (): Promise<{ port: number; token: string; url: string } | { error: string }> =>
-    isElectron ? window.clerkbox.startWebUI() : Promise.resolve({ error: 'Already in WebUI mode' }),
+  startWebUI: (lanAccess?: boolean): Promise<{ port: number; token: string; url: string } | { error: string }> =>
+    isElectron ? window.clerkbox.startWebUI(lanAccess === true) : Promise.resolve({ error: 'Already in WebUI mode' }),
   stopWebUI: (): Promise<{ ok: boolean }> =>
     isElectron ? window.clerkbox.stopWebUI() : Promise.resolve({ ok: false }),
   getWebUIStatus: (): Promise<{ running: boolean; url?: string }> =>
     isElectron ? window.clerkbox.getWebUIStatus() : Promise.resolve({ running: true, url: window.location.href }),
+  getLanAddresses: (): Promise<string[]> =>
+    isElectron ? window.clerkbox.getLanAddresses() : Promise.resolve([]),
 
   // 共享 KV 存储：双模式读写主进程同一份文件，实现设置/技能等跨模式同步
   kvGet: (key: string): Promise<string | null> =>

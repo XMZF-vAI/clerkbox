@@ -603,12 +603,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     //    但 deleteBeforeId 是新创建的 boundaryMessage.id（不在 DB 中），导致 findIndex 返回 -1 直接 return 什么也不删；
     //    而 dbAddMessage 是纯 push 无 UPSERT，keptMessages 会被重复写入，重启后历史翻倍。
     //    改为「清空再重写」是最稳妥的方案。
+    // 2. 原子压缩：主进程在单次写入内整体替换该 session 的消息列表
+    //    （tmp+rename 原子落盘）。旧「清空再逐条重写」两步间崩溃会丢全会话历史，
+    //    现在最坏情况只是压缩未生效，数据不会丢失。
     cancelPendingMessageWrites(sessionId)
-    logPersistenceFailure('clear compacted messages', ipc.dbClearMessages(sessionId))
-
-    // 3. 写入压缩后的完整消息列表（boundary + summary + keptMessages + fileAttachments）
-    for (const msg of newMessages) {
-      logPersistenceFailure('write compacted message', ipc.dbAddMessage({
+    logPersistenceFailure('compact messages', ipc.dbCompactMessages(
+      sessionId,
+      newMessages.map((msg) => ({
         id: msg.id,
         session_id: sessionId,
         role: msg.role,
@@ -625,6 +626,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // Preserve attachments when rewriting compacted history.
         attachments: msg.attachments ? JSON.stringify(msg.attachments) : null,
       }))
-    }
+    ))
   },
 }))
