@@ -211,6 +211,8 @@ export interface AppSettings {
   agentsMdEnabled: boolean
   /** 是否兼容读取 CLAUDE.md（AGENTS.md 不存在时回退） */
   claudeMdCompat: boolean
+  /** WebUI 是否绑定 0.0.0.0 允许局域网访问（默认 false 仅本机 127.0.0.1） */
+  webuiLanAccess: boolean
 }
 
 /** OpenAI-compatible stream chunk delta */

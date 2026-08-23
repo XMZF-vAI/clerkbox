@@ -927,8 +927,9 @@ export function useAgent(sessionId: string) {
         const candidates = settings.claudeMdCompat
           ? ['AGENTS.md', 'CLAUDE.md']
           : ['AGENTS.md']
+        const sep = workingDir.includes('\\') ? '\\' : '/'
         for (const name of candidates) {
-          const fullPath = workingDir + '\\' + name
+          const fullPath = `${workingDir}${sep}${name}`
           const text = await ipc.readFile(fullPath)
           if (text && text.trim()) {
             agentsMdContent = `\n\n### 📋 Project Instructions (${name})\n${text.trim()}`
@@ -1253,7 +1254,7 @@ export function useAgent(sessionId: string) {
           if (tc.name === 'execute_command') {
             argsWithCwd.cwd = resolveToolPath(workingDir, argsWithCwd.cwd || workingDir)
           }
-          if (tc.name === 'read_file' || tc.name === 'write_file' || tc.name === 'search_replace') {
+          if (tc.name === 'read_file' || tc.name === 'write_file' || tc.name === 'search_replace' || tc.name === 'read_image') {
             argsWithCwd.path = resolveToolPath(workingDir, argsWithCwd.path)
           }
           if (tc.name === 'list_dir' || tc.name === 'search_files' || tc.name === 'search_content') {
@@ -1773,7 +1774,7 @@ export function useAgent(sessionId: string) {
           const argsWithCwd = { ...tc.arguments }
           if (workingDir) {
             if (tc.name === 'execute_command') argsWithCwd.cwd = resolveToolPath(workingDir, argsWithCwd.cwd || workingDir)
-            if (tc.name === 'read_file' || tc.name === 'write_file' || tc.name === 'search_replace') {
+            if (tc.name === 'read_file' || tc.name === 'write_file' || tc.name === 'search_replace' || tc.name === 'read_image') {
               argsWithCwd.path = resolveToolPath(workingDir, argsWithCwd.path)
             }
             if (tc.name === 'list_dir' || tc.name === 'search_files' || tc.name === 'search_content') {
