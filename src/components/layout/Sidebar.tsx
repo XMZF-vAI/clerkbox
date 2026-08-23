@@ -24,6 +24,7 @@ import {
 import { useTranslation } from 'react-i18next'
 import { useChatStore } from '../../stores/chat-store'
 import ConfirmDialog from '../ui/ConfirmDialog'
+import QrCode from '../ui/QrCode'
 import { ipc, isWebUIMode } from '../../lib/ipc-client'
 
 import APP_ICON from '../../assets/icon.png'
@@ -36,9 +37,11 @@ import { useAccountStore, avatarColorFor, initialOf } from '../../stores/account
 interface SidebarProps {
   collapsed: boolean
   onToggle: () => void
+  /** 导航类操作后回调（新建会话/切换会话/技能商店/设置），移动端抽屉用于自动关闭 */
+  onNavigate?: () => void
 }
 
-export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
+export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProps) {
   const { t } = useTranslation()
   const { sessions, activeSessionId, createSession, setActiveSession, deleteSession } = useChatStore()
   // 订阅 sessionStatus 变化以触发 loading 圈重渲染
@@ -57,24 +60,39 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
   const [hoveredSessionId, setHoveredSessionId] = useState<string | null>(null)
   const pickerRef = useRef<HTMLDivElement>(null)
   // ── 任务列表分组：每个 workingDir 一组；null/空 workingDir 归到「默认」组 ──
-  // 单一布尔控制"全部折叠"：true 表示全部折叠，false 表示按单组状态（默认全展开）
-  // 单组状态：当 allCollapsed=false 时，每个组按 defaultExpanded=true 渲染
-  const [allCollapsed, setAllCollapsed] = useState(false)
+  // 每组独立折叠状态：Set 里存的是"已折叠"的分组 key，不在 Set 内 = 展开（默认）
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
 
   // ── WebUI 控制 ──
   const [webuiStarting, setWebuiStarting] = useState(false)
   const [webuiInfo, setWebuiInfo] = useState<{ url: string } | null>(null)
   const [webuiCopied, setWebuiCopied] = useState(false)
+  const [webuiRestarting, setWebuiRestarting] = useState(false)
+  // 二维码内容：仅在「允许局域网访问」且检测到局域网 IP 时才生成（绝不指向 localhost）
+  const [webuiQrUrl, setWebuiQrUrl] = useState<string | null>(null)
+  // 开启了局域网访问但没探测到可用网卡地址
+  const [webuiLanMissing, setWebuiLanMissing] = useState(false)
+  const webuiLanAccess = useSettingsStore((s) => s.webuiLanAccess)
+  const updateSettings = useSettingsStore((s) => s.updateSettings)
+
+  /** 解析二维码 URL：lanAllowed 时取第一个非内部 IPv4 拼 URL，否则不生成二维码 */
+  const resolveQrUrl = async (result: { port: number; token: string; url: string }, lanAllowed: boolean) => {
+    const ips = await ipc.getLanAddresses().catch(() => [] as string[])
+    const ip = lanAllowed ? ips[0] : undefined
+    setWebuiQrUrl(ip ? `http://${ip}:${result.port}/?token=${result.token}` : null)
+    setWebuiLanMissing(lanAllowed && !ip)
+  }
 
   const handleStartWebUI = async () => {
     if (webuiStarting) return
     setWebuiStarting(true)
     try {
-      const result = await ipc.startWebUI()
+      const result = await ipc.startWebUI(webuiLanAccess)
       if ('error' in result && result.error) {
         alert(t('sidebar.webuiError'))
       } else if ('url' in result) {
         setWebuiInfo({ url: result.url })
+        void resolveQrUrl(result, webuiLanAccess)
       }
     } catch {
       alert(t('sidebar.webuiError'))
@@ -83,9 +101,32 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
     }
   }
 
+  // 切换局域网访问：写设置后重启 WebUI 以应用新的绑定范围（127.0.0.1 ↔ 0.0.0.0）
+  const handleToggleLanAccess = async () => {
+    if (webuiRestarting) return
+    setWebuiRestarting(true)
+    const next = !webuiLanAccess
+    updateSettings({ webuiLanAccess: next })
+    try {
+      await ipc.stopWebUI()
+      const result = await ipc.startWebUI(next)
+      if ('url' in result) {
+        setWebuiInfo({ url: result.url })
+        // 用新设置重算二维码（开启局域网后指向 LAN IP，关闭则不显示）
+        void resolveQrUrl(result, next)
+      }
+    } catch {
+      /* 重启失败时保留原弹窗状态，用户可手动重试 */
+    } finally {
+      setWebuiRestarting(false)
+    }
+  }
+
   const handleStopWebUI = async () => {
     await ipc.stopWebUI()
     setWebuiInfo(null)
+    setWebuiQrUrl(null)
+    setWebuiLanMissing(false)
   }
 
   const handleCopyWebUIUrl = async () => {
@@ -140,6 +181,25 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
     })
     return arr
   }, [sessions, t])
+
+  // 激活任务所在分组自动展开（切换任务时，即使该分组被手动折叠也展开，保证当前任务可见）
+  useEffect(() => {
+    if (!activeSessionId) return
+    const active = sessions.find((s) => s.id === activeSessionId)
+    if (!active) return
+    const key = (active.workingDir || '').trim() || 'default'
+    setCollapsedGroups((prev) => (prev.has(key) ? new Set([...prev].filter((k) => k !== key)) : prev))
+  }, [activeSessionId, sessions])
+
+  /** 折叠/展开单个分组 */
+  const toggleGroup = (key: string) => {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
 
   const handleToggleSkill = (id: string) => {
     toggleSessionSkill(id, workingDir)
@@ -255,14 +315,14 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
       {/* New Chat + Skill Store buttons - vertical stack for better breathing room */}
       <div className="px-3 pb-2 flex flex-col gap-1.5">
         <button
-          onClick={() => { setShowSkillStore(false); createSession() }}
-          className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-md3-md bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer transition-colors text-sm"
+          onClick={() => { setShowSkillStore(false); createSession(); onNavigate?.() }}
+          className="w-full flex items-center justify-center gap-1.5 px-3 py-2 max-md:py-3 rounded-md3-md bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer transition-colors text-sm max-md:text-base"
         >
           <span>{t('sidebar.newChat')}</span>
         </button>
         <button
-          onClick={() => setShowSkillStore(!showSkillStore)}
-          className={`w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-md3-md transition-colors text-sm ${
+          onClick={() => { setShowSkillStore(!showSkillStore); onNavigate?.() }}
+          className={`w-full flex items-center justify-center gap-1.5 px-3 py-2 max-md:py-3 rounded-md3-md transition-colors text-sm max-md:text-base ${
             showSkillStore
               ? 'bg-md-primary/15 text-md-primary hover:bg-md-primary/25'
               : 'bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant'
@@ -280,12 +340,16 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
         </span>
         <button
           type="button"
-          onClick={() => setAllCollapsed((prev) => !prev)}
+          onClick={() => {
+            // 有任一分组展开 → 全部折叠；全已折叠 → 全部展开
+            const anyExpanded = groups.some((g) => !collapsedGroups.has(g.key))
+            setCollapsedGroups(anyExpanded ? new Set(groups.map((g) => g.key)) : new Set())
+          }}
           className="w-6 h-6 flex items-center justify-center rounded-md3-xs text-dark-onSurfaceVariant/40 hover:bg-dark-surfaceContainer hover:text-dark-onSurfaceVariant/70 transition-colors"
-          title={allCollapsed ? t('sidebar.expandAll') : t('sidebar.collapseAll')}
-          aria-label={allCollapsed ? t('sidebar.expandAll') : t('sidebar.collapseAll')}
+          title={groups.some((g) => !collapsedGroups.has(g.key)) ? t('sidebar.collapseAll') : t('sidebar.expandAll')}
+          aria-label={groups.some((g) => !collapsedGroups.has(g.key)) ? t('sidebar.collapseAll') : t('sidebar.expandAll')}
         >
-          {allCollapsed ? <ChevronsUpDown size={13} /> : <ChevronsDownUp size={13} />}
+          {groups.some((g) => !collapsedGroups.has(g.key)) ? <ChevronsDownUp size={13} /> : <ChevronsUpDown size={13} />}
         </button>
       </div>
 
@@ -314,20 +378,21 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
           </p>
         )}
         {groups.map((group) => {
-          const groupExpanded = !allCollapsed
+          const groupExpanded = !collapsedGroups.has(group.key)
           const Icon = groupExpanded ? FolderOpen : FolderClosed
           return (
             <div key={group.key} className="mb-1">
               {/* 分组行 */}
               <button
                 type="button"
-                onClick={() => setAllCollapsed((prev) => !prev)}
+                onClick={() => toggleGroup(group.key)}
                 className={`w-full flex items-center gap-1.5 px-2 py-1.5 rounded-md3-xs text-xs transition-colors ${
                   groupExpanded
                     ? 'text-dark-onSurfaceVariant/70 hover:bg-dark-surfaceContainer'
                     : 'text-dark-onSurfaceVariant/60 hover:bg-dark-surfaceContainer'
                 }`}
-                title={groupExpanded ? t('sidebar.collapseAll') : t('sidebar.expandAll')}
+                aria-expanded={groupExpanded}
+                title={group.label}
               >
                 <Icon size={13} className="flex-shrink-0" />
                 <span className="truncate flex-1 text-left">{group.label}</span>
@@ -355,14 +420,14 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
                         key={s.id}
                         onMouseEnter={() => setHoveredSessionId(s.id)}
                         onMouseLeave={() => setHoveredSessionId(null)}
-                        className={`group flex items-center gap-2 px-2.5 py-1.5 rounded-md3-xs text-[13px] transition-colors ${
+                        className={`group flex items-center gap-2 px-2.5 py-1.5 max-md:py-2.5 rounded-md3-xs text-[13px] max-md:text-sm transition-colors ${
                           activeSessionId === s.id
                             ? 'bg-md-secondaryContainer text-md-onSecondaryContainer'
                             : 'text-dark-onSurfaceVariant/85 hover:bg-dark-surfaceContainer'
                         }`}
                       >
                         <button
-                          onClick={() => { setShowSkillStore(false); setActiveSession(s.id) }}
+                          onClick={() => { setShowSkillStore(false); setActiveSession(s.id); onNavigate?.() }}
                           className="flex-1 flex items-center gap-2 text-left min-w-0"
                         >
                           <MessageSquare size={13} className="flex-shrink-0 opacity-70" />
@@ -399,8 +464,10 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
                             e.stopPropagation()
                             setConfirmDeleteId(s.id)
                           }}
-                          className={`w-6 h-6 flex items-center justify-center rounded-md3-xs hover:bg-md-error/20 hover:text-md-error transition-opacity flex-shrink-0 ${
-                            hoveredSessionId === s.id ? 'opacity-100' : 'opacity-0 group-focus-within:opacity-100'
+                          className={`w-6 h-6 max-md:w-9 max-md:h-9 flex items-center justify-center rounded-md3-xs hover:bg-md-error/20 hover:text-md-error transition-opacity flex-shrink-0 ${
+                            hoveredSessionId === s.id || activeSessionId === s.id
+                              ? 'opacity-100'
+                              : 'opacity-0 group-focus-within:opacity-100 max-md:opacity-60'
                           }`}
                           aria-label={t('sidebar.deleteSessionAria')}
                           title={t('sidebar.deleteSessionAria')}
@@ -430,15 +497,15 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
           </button>
         )}
         <button
-          onClick={() => useSettingsStore.getState().updateSettings({ showSettings: true })}
-          className="w-full flex items-center gap-2 px-3 py-2 rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-sm text-dark-onSurfaceVariant"
+          onClick={() => { useSettingsStore.getState().updateSettings({ showSettings: true }); onNavigate?.() }}
+          className="w-full flex items-center gap-2 px-3 py-2 max-md:py-3 rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-sm max-md:text-base text-dark-onSurfaceVariant"
         >
           <Settings size={16} />
           <span>{t('sidebar.settings')}</span>
         </button>
         {/* 账户按钮（最底）：未登录=用户图标+"未登录" / 已登录=首字母圆头像+用户名 */}
         <button
-          onClick={handleOpenAccountSettings}
+          onClick={() => { handleOpenAccountSettings(); onNavigate?.() }}
           className="w-full flex items-center gap-2 px-3 py-2 rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-sm text-dark-onSurfaceVariant"
           aria-label={accountLoggedIn && accountUser ? accountUser.username : t('sidebar.notLoggedIn')}
           title={accountLoggedIn && accountUser ? accountUser.username : t('sidebar.account')}
@@ -519,9 +586,45 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
             {webuiCopied && (
               <p className="text-xs text-md-primary mb-1">{t('sidebar.webuiCopied')}</p>
             )}
-            <p className="text-xs text-dark-onSurfaceVariant/60 mb-4">
+
+            {/* 扫码直达：仅在允许局域网访问且探测到网卡地址时展示 */}
+            {webuiLanAccess && webuiQrUrl && (
+              <div className="flex flex-col items-center gap-1.5 py-3">
+                <QrCode text={webuiQrUrl} size={168} />
+                <p className="text-xs text-dark-onSurfaceVariant/60 text-center">
+                  {t('sidebar.webuiScanHint')}
+                </p>
+                <code className="text-[10px] break-all text-center text-dark-onSurfaceVariant/50 px-4 select-all">
+                  {webuiQrUrl}
+                </code>
+              </div>
+            )}
+            {webuiLanAccess && webuiLanMissing && (
+              <p className="text-xs text-md-warning text-center py-2">
+                {t('sidebar.webuiNoLanIp')}
+              </p>
+            )}
+
+            <p className="text-xs text-dark-onSurfaceVariant/60 mb-3">
               {t('sidebar.webuiSecurityNote')}
             </p>
+
+            {/* 局域网访问开关：默认仅本机 127.0.0.1；开启后绑定 0.0.0.0 并重启服务 */}
+            <div className="mb-4 p-2.5 rounded-md3-md bg-dark-surfaceContainerHigh">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={webuiLanAccess}
+                  onChange={handleToggleLanAccess}
+                  disabled={webuiRestarting}
+                  className="accent-md-primary"
+                />
+                <span className="text-xs text-dark-onSurface">{t('sidebar.webuiLanAccess')}</span>
+              </label>
+              <p className="text-xs text-dark-onSurfaceVariant/60 leading-relaxed mt-1">
+                {t('sidebar.webuiLanHint')}
+              </p>
+            </div>
 
             <div className="flex gap-2">
               <button
