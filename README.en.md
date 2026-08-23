@@ -63,7 +63,7 @@
 | **AGENTS.md project instructions** | Auto-reads `AGENTS.md` from the working directory and injects it into the system prompt; falls back to `CLAUDE.md`. |
 | **VIBE immersive mode** | Fullscreen background, liquid-glass UI, and a floating music player. |
 | **MD3 dynamic theming** | Material Design 3 color engine with light / dark / system modes and custom seed color. |
-| **WebUI remote access** | Built-in web server exposes the full UI to any browser, with real-time data sync between desktop and web. |
+| **WebUI remote access** | Built-in web server exposes the full UI to any browser; binds to localhost by default, with a one-click LAN toggle and scan-to-connect QR code, real-time data sync between desktop and web, and an auto-switching mobile layout on narrow screens. |
 | **Local-first** | All sessions, memory, skills, and config live on disk — no cloud dependency. |
 
 ---
@@ -428,7 +428,8 @@ ClerkBox ships with a built-in web server that exposes the full UI to any browse
 ### How to Start
 
 - **Manual start from desktop**: click the 🌐 icon above the settings button in the sidebar. A dialog shows the tokenized access URL — copy it with one click or open it directly in your default browser. The service can be stopped from the same dialog at any time.
-- **Auto start for servers**: set the environment variable `CLERKBOX_WEBUI_AUTO=1` before launching the app; the WebUI starts automatically and prints the access URL to the console.
+- **LAN access & QR scan**: ticking "Allow LAN access" in the dialog binds the server to all network interfaces and generates a QR code when a LAN IP is detected — scan it with your phone to connect instantly (shown only when LAN access is on and a network adapter address is found; never points to localhost).
+- **Auto start for servers**: set the environment variable `CLERKBOX_WEBUI_AUTO=1` before launching the app; the WebUI starts automatically and prints the access URL to the console (auto-start binds to localhost by default — enable LAN access in the desktop app first for remote use).
 
 ### Features
 
@@ -436,11 +437,12 @@ ClerkBox ships with a built-in web server that exposes the full UI to any browse
 - **Real-time data sync**: settings, skills, VIBE config, and token usage are synchronized between desktop and web via a shared main-process store; sessions and messages share the same local database
 - **Security**: a random token is generated on every start and required for all API requests; the static file server includes path-traversal protection
 - **Adaptive UI**: window control buttons (minimize / maximize / close) are automatically hidden in WebUI mode
+- **Mobile layout on narrow screens**: the web page switches to a mobile UI (large touch targets, bottom-sheet menus, virtual-keyboard avoidance) for convenient use on phones
 - **Browser files**: the local or third-device WebUI can upload one file at a time to the host (10MB per file by default) and choose a host working directory from a directory browser
 
 ### Notes
 
-- The WebUI listens on a random port on `0.0.0.0`, reachable within the LAN; for public deployment, use a reverse proxy with HTTPS
+- The WebUI binds to `127.0.0.1` with a random port by default, so it is only reachable from this machine; after ticking "Allow LAN access" it binds to `0.0.0.0` and any device on the same LAN can reach it. For public deployment, use a reverse proxy with HTTPS
 - Browser WebUI cannot open the host's native file-picker dialogs, so it uses browser uploads and a host-folder browser instead. Uploads default to 10MB per file and can be adjusted with `CLERKBOX_WEBUI_MAX_UPLOAD_MB` (1-100MB)
 - API keys are kept in OS-level encryption (safeStorage) and never enter the shared store in plaintext
 

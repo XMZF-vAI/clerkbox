@@ -160,7 +160,7 @@ export default {
       customSeedAriaLabel: '自定义种子色',
     },
     about: {
-      version: 'v1.7.0',
+      version: 'v1.7.5',
       tagline: 'Single AI Agent Desktop Workbench',
       developer: '开发者',
       framework: '框架',
