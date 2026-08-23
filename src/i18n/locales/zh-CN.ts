@@ -246,7 +246,11 @@ export default {
     webuiStop: '停止 WebUI',
     webuiCopy: '复制地址',
     webuiCopied: '已复制',
+    webuiScanHint: '手机扫码直达（需同一局域网）',
+    webuiNoLanIp: '未检测到局域网地址，请检查网络连接后重启 WebUI',
     webuiSecurityNote: '地址包含访问令牌，请勿泄露给他人。',
+    webuiLanAccess: '允许局域网访问（手机 / 平板）',
+    webuiLanHint: '开启后服务绑定所有网卡，同一局域网内的设备可凭令牌访问；关闭后仅本机可访问。修改后需重启 WebUI 生效。',
     webuiError: 'WebUI 启动失败',
   },
 

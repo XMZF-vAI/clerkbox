@@ -62,6 +62,7 @@ const config: Config = {
       animation: {
         'fade-in': 'fadeIn 0.3s ease-out',
         'slide-up': 'slideUp 0.3s ease-out',
+        'slide-in-left': 'slideInLeft 0.25s cubic-bezier(0.23, 1, 0.32, 1) both',
         'pulse-soft': 'pulseSoft 2s ease-in-out infinite',
         'fade-up': 'fadeUp 0.3s cubic-bezier(0.23, 1, 0.32, 1) both',
         'pop-in': 'popIn 0.25s cubic-bezier(0.23, 1, 0.32, 1) both',
@@ -74,6 +75,10 @@ const config: Config = {
         slideUp: {
           '0%': { opacity: '0', transform: 'translateY(12px)' },
           '100%': { opacity: '1', transform: 'translateY(0)' },
+        },
+        slideInLeft: {
+          '0%': { transform: 'translateX(-100%)' },
+          '100%': { transform: 'translateX(0)' },
         },
         pulseSoft: {
           '0%, 100%': { opacity: '1' },

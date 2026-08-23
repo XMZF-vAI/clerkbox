@@ -246,7 +246,11 @@ export default {
     webuiStop: 'Stop WebUI',
     webuiCopy: 'Copy address',
     webuiCopied: 'Copied',
+    webuiScanHint: 'Scan to open on your phone (same LAN required)',
+    webuiNoLanIp: 'No LAN address detected — check your network and restart WebUI',
     webuiSecurityNote: 'The address contains an access token — do not share it with others.',
+    webuiLanAccess: 'Allow LAN access (phone / tablet)',
+    webuiLanHint: 'When enabled, the server binds to all network interfaces and any device on the same LAN can connect with the token; when disabled, only this machine can access. Restart WebUI to apply changes.',
     webuiError: 'WebUI failed to start',
   },
 

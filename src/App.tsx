@@ -15,6 +15,7 @@ import { useVibeStore } from './stores/vibe-store'
 import { applyColorScheme, resolveSeed } from './lib/theme-engine'
 import { I18nProvider } from './components/I18nProvider'
 import { isWebUIMode } from './lib/ipc-client'
+import { useIsMobile } from './hooks/use-mobile'
 
 function ThemeProvider({ children }: { children: React.ReactNode }) {
   const theme = useSettingsStore((s) => s.theme)
@@ -64,6 +65,9 @@ export default function App() {
   const [hydrated, setHydrated] = useState(() => useSettingsStore.persist.hasHydrated())
   // 圆角窗口：最大化时取消圆角
   const [isMaximized, setIsMaximized] = useState(() => window.clerkbox?.isWindowMaximized ?? false)
+  // 移动端（WebUI 窄屏）：侧边栏变为覆盖式抽屉
+  const isMobile = useIsMobile()
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
 
   useEffect(() => window.clerkbox?.onWindowStateChange(setIsMaximized), [])
   useEffect(() => useSettingsStore.persist.onFinishHydration(() => setHydrated(true)), [])
@@ -78,6 +82,7 @@ export default function App() {
 
   // 圆角 + transform 创建包含块，使内部 fixed 元素（弹窗、VIBE 控件）也被圆角裁剪
   // WebUI 模式运行在浏览器标签页中，不需要窗口圆角和细边框
+  //保佑别崩溃
   const windowShape = isWebUIMode || isMaximized ? '' : 'rounded-xl [transform:translateZ(0)]'
 
   if (!hydrated) return null
@@ -87,13 +92,13 @@ export default function App() {
   let content: React.ReactNode
   if (!hasCompletedOnboarding) {
     content = (
-      <div className={`app-window relative h-screen w-screen overflow-hidden bg-dark-surface text-dark-onSurface ${windowShape} ${isWebUIMode || isMaximized ? '' : 'border border-dark-onSurfaceVariant/20'}`}>
+      <div className={`app-window relative h-screen max-md:h-dvh w-screen overflow-hidden bg-dark-surface text-dark-onSurface ${windowShape} ${isWebUIMode || isMaximized ? '' : 'border border-dark-onSurfaceVariant/20'}`}>
         <OnboardingFlow />
       </div>
     )
   } else if (isVibeMode) {
     content = (
-      <div className={`app-window relative h-screen w-screen overflow-hidden text-white ${windowShape} ${isWebUIMode || isMaximized ? '' : 'border border-white/15'}`}>
+      <div className={`app-window relative h-screen max-md:h-dvh w-screen overflow-hidden text-white ${windowShape} ${isWebUIMode || isMaximized ? '' : 'border border-white/15'}`}>
         <VibeBackground />
         <VibeMusicPlayer />
         <main className="relative z-10 h-full w-full">
@@ -105,13 +110,35 @@ export default function App() {
     )
   } else {
     content = (
-      <div className={`app-window flex h-screen w-screen bg-dark-surface text-dark-onSurface overflow-hidden ${windowShape} ${isWebUIMode || isMaximized ? '' : 'border border-dark-onSurfaceVariant/20'}`}>
-        <Sidebar
-          collapsed={sidebarCollapsed}
-          onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
-        />
+      <div className={`app-window flex h-screen max-md:h-dvh w-screen bg-dark-surface text-dark-onSurface overflow-hidden ${windowShape} ${isWebUIMode || isMaximized ? '' : 'border border-dark-onSurfaceVariant/20'}`}>
+        {isMobile ? (
+          <>
+            {/* 移动端：覆盖式抽屉 + 遮罩 */}
+            {mobileSidebarOpen && (
+              <div className="fixed inset-0 z-40 md:hidden">
+                <div
+                  className="absolute inset-0 bg-black/55 animate-fade-in"
+                  onClick={() => setMobileSidebarOpen(false)}
+                  aria-hidden
+                />
+                <div className="absolute inset-y-0 left-0 w-[85vw] max-w-xs shadow-2xl animate-slide-in-left">
+                  <Sidebar
+                    collapsed={false}
+                    onToggle={() => setMobileSidebarOpen(false)}
+                    onNavigate={() => setMobileSidebarOpen(false)}
+                  />
+                </div>
+              </div>
+            )}
+          </>
+        ) : (
+          <Sidebar
+            collapsed={sidebarCollapsed}
+            onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
+          />
+        )}
         <div className="flex flex-col flex-1 min-w-0">
-          <TitleBar onToggleSidebar={() => setSidebarCollapsed(!sidebarCollapsed)} />
+          <TitleBar onToggleSidebar={isMobile ? () => setMobileSidebarOpen(true) : () => setSidebarCollapsed(!sidebarCollapsed)} />
           <main className="flex-1 min-h-0 overflow-hidden">
             {showSkillStore ? <SkillStore /> : <ChatPage />}
           </main>
@@ -123,3 +150,4 @@ export default function App() {
 
   return <ThemeProvider><I18nProvider>{content}</I18nProvider></ThemeProvider>
 }
+//别蹦别蹦别蹦

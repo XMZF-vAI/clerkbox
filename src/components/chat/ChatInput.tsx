@@ -8,6 +8,7 @@ import { useUIStore } from '../../stores/ui-store'
 import { ipc } from '../../lib/ipc-client'
 import type { MessageAttachment } from '../../types/agent'
 import ConfirmDialog from '../ui/ConfirmDialog'
+import { useIsMobile } from '../../hooks/use-mobile'
 
 // 取路径的最后一节作为显示名（兼容 Windows/Unix 两种分隔符）
 const basename = (p: string) => p.split(/[/\\]/).filter(Boolean).pop() || p
@@ -133,6 +134,27 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
   const currentSession = sessions.find((s) => s.id === activeSessionId)
   const defaultWorkDir = currentSession?.defaultWorkDir
   const effectiveWorkDir = currentSession?.workingDir || defaultWorkDir
+
+  // 移动端（WebUI 窄屏）适配：更大的触控目标、底部抽屉面板、虚拟键盘避让
+  const isMobile = useIsMobile()
+  // 虚拟键盘遮挡高度（visualViewport 与布局视口的高度差），>0 时抬高输入区
+  const [kbOffset, setKbOffset] = useState(0)
+
+  useEffect(() => {
+    const vv = window.visualViewport
+    if (!vv || !isMobile) { setKbOffset(0); return }
+    const update = () => {
+      const overlap = Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop))
+      setKbOffset(overlap)
+    }
+    vv.addEventListener('resize', update)
+    vv.addEventListener('scroll', update)
+    update()
+    return () => {
+      vv.removeEventListener('resize', update)
+      vv.removeEventListener('scroll', update)
+    }
+  }, [isMobile])
 
   // Model dropdown state
   const [showModelMenu, setShowModelMenu] = useState(false)
@@ -480,7 +502,9 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
     ? 'px-4 py-2'
     : vibe
       ? 'px-4 py-3 bg-transparent'
-      : 'px-4 py-3 bg-dark-surfaceDim border-t border-dark-onSurfaceVariant/10'
+      : 'px-4 py-3 max-md:pb-[calc(0.75rem+env(safe-area-inset-bottom))] bg-dark-surfaceDim border-t border-dark-onSurfaceVariant/10'
+  // 虚拟键盘弹出时抬高输入区（压缩消息列表），避免输入框被遮挡
+  const outerStyle = !isWelcome && isMobile && kbOffset > 0 ? { paddingBottom: kbOffset } : undefined
 
   // Input box: wider and more rounded
   const boxMaxWidth = isWelcome ? 'max-w-3xl' : 'max-w-5xl'
@@ -491,7 +515,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
     : `flex flex-col ${boxMaxWidth} mx-auto bg-dark-surfaceContainerHigh rounded-[28px] px-5 py-3.5 gap-2 border border-dark-onSurfaceVariant/8 focus-within:border-md-primary/30 transition-colors`
 
   return (
-    <div className={outerClass}>
+    <div className={outerClass} style={outerStyle}>
       {/* Working directory indicator - only in default mode */}
       {!isWelcome && effectiveWorkDir && (
         <div className={`flex items-center gap-1.5 mb-2 px-1 max-w-5xl mx-auto ${vibe ? 'text-white/50' : ''}`}>
@@ -598,7 +622,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
           aria-label={t('chat.messageInputAria')}
           placeholder={vibe ? t('chat.placeholderVibe') : (effectiveWorkDir ? t('chat.placeholderWorkDir', { name: effectiveWorkDir.split(/[/\\]/).pop() }) : t('chat.placeholderDefault'))}
           rows={1}
-          className={`w-full bg-transparent text-sm resize-none outline-none min-h-[20px] max-h-[200px] py-1 ${
+          className={`w-full bg-transparent text-sm max-md:text-base resize-none outline-none min-h-[20px] max-md:min-h-6 max-h-[200px] py-1 ${
             vibe
               ? 'text-white/90 placeholder-white/50'
               : 'text-dark-onSurface placeholder-dark-onSurfaceVariant/40'
@@ -612,7 +636,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
             type="button"
             onClick={openAttachPicker}
             disabled={attachSelecting}
-            className={`h-8 flex items-center gap-1 px-2 flex-shrink-0 rounded-md3-sm transition-colors disabled:opacity-40 ${
+            className={`h-8 max-md:h-11 max-md:px-3 flex items-center gap-1 px-2 flex-shrink-0 rounded-md3-sm transition-colors disabled:opacity-40 ${
               vibe
                 ? 'hover:bg-white/15 text-white/70'
                 : 'hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant'
@@ -634,7 +658,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
               type="button"
               onClick={() => setShowFolderPopover((v) => !v)}
               disabled={folderSelecting}
-              className={`h-8 flex items-center gap-1 px-2 flex-shrink-0 rounded-md3-sm transition-colors disabled:opacity-40 ${
+              className={`h-8 max-md:h-11 max-md:px-3 flex items-center gap-1 px-2 flex-shrink-0 rounded-md3-sm transition-colors disabled:opacity-40 ${
                 vibe
                   ? 'hover:bg-white/15 text-white/70'
                   : 'hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant'
@@ -652,76 +676,89 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
             </button>
 
             {showFolderPopover && (
-              <div id="chat-folder-menu" className={`absolute bottom-full left-0 mb-1 w-72 rounded-md3-md border shadow-2xl z-40 overflow-hidden animate-fade-in ${
-                vibe
-                  ? 'bg-white/10 border-white/15 backdrop-blur-2xl text-white'
-                  : 'bg-dark-surfaceContainer border-dark-onSurfaceVariant/15 text-dark-onSurface'
-              }`}>
-                {/* Current working dir (with check) */}
-                <div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wider opacity-50">
-                  {t('chat.folderCurrent')}
-                </div>
-                {effectiveWorkDir ? (
-                  <div className={`px-3 py-1.5 mx-1 rounded-md3-sm flex items-center gap-2 text-xs ${vibe ? 'bg-white/10' : 'bg-dark-surfaceContainerHigh'}`}>
-                    <FolderOpen size={12} className="opacity-60 flex-shrink-0" />
-                    <div className="flex-1 min-w-0">
-                      <div className="truncate font-medium">{basename(effectiveWorkDir)}</div>
-                      <div className="truncate opacity-50 text-[10px]">{effectiveWorkDir}</div>
+              <>
+                <div
+                  className="max-md:block hidden fixed inset-0 z-[64] bg-black/55 animate-fade-in"
+                  onClick={() => setShowFolderPopover(false)}
+                  aria-hidden
+                />
+                <div id="chat-folder-menu" className={`absolute bottom-full left-0 mb-1 w-72 rounded-md3-md border shadow-2xl z-40 overflow-hidden animate-fade-in
+                  max-md:fixed max-md:inset-x-0 max-md:bottom-0 max-md:left-auto max-md:mb-0 max-md:w-full max-md:max-h-[72dvh] max-md:overflow-y-auto max-md:overscroll-contain
+                  max-md:rounded-t-2xl max-md:rounded-b-none max-md:z-[66]
+                  max-md:pb-[calc(env(safe-area-inset-bottom)+8px)] ${
+                  vibe
+                    ? 'bg-white/10 border-white/15 backdrop-blur-2xl text-white'
+                    : 'bg-dark-surfaceContainer border-dark-onSurfaceVariant/15 text-dark-onSurface'
+                }`}>
+                  <div className="hidden max-md:flex justify-center pt-2 pb-1 flex-shrink-0" aria-hidden>
+                    <div className={`w-10 h-1 rounded-full ${vibe ? 'bg-white/25' : 'bg-dark-onSurfaceVariant/25'}`} />
+                  </div>
+                  {/* Current working dir (with check) */}
+                  <div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wider opacity-50">
+                    {t('chat.folderCurrent')}
+                  </div>
+                  {effectiveWorkDir ? (
+                    <div className={`px-3 py-1.5 mx-1 rounded-md3-sm flex items-center gap-2 text-xs ${vibe ? 'bg-white/10' : 'bg-dark-surfaceContainerHigh'}`}>
+                      <FolderOpen size={12} className="opacity-60 flex-shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <div className="truncate font-medium">{basename(effectiveWorkDir)}</div>
+                        <div className="truncate opacity-50 text-[10px]">{effectiveWorkDir}</div>
+                      </div>
+                      <Check size={12} className="text-md-primary flex-shrink-0" />
                     </div>
-                    <Check size={12} className="text-md-primary flex-shrink-0" />
-                  </div>
-                ) : (
-                  <div className="px-3 py-1.5 text-xs opacity-50">{t('chat.folderNone')}</div>
-                )}
+                  ) : (
+                    <div className="px-3 py-1.5 text-xs opacity-50">{t('chat.folderNone')}</div>
+                  )}
 
-                {/* Recents list */}
-                <div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wider opacity-50">
-                  {t('chat.folderRecents')}
-                </div>
-                {recentsFolders.length === 0 ? (
-                  <div className="px-3 py-2 text-xs opacity-50">{t('chat.folderNoRecents')}</div>
-                ) : (
-                  <div className="max-h-56 overflow-y-auto pb-1">
-                    {recentsFolders.map((p) => {
-                      const isCurrent = effectiveWorkDir && comparableFolderPath(p) === comparableFolderPath(effectiveWorkDir)
-                      return (
-                        <button
-                          type="button"
-                          key={p}
-                          onClick={() => requestSetFolder(p)}
-                          className={`w-full px-3 py-1.5 mx-1 rounded-md3-sm flex items-center gap-2 text-xs text-left transition-colors ${
-                            isCurrent
-                              ? (vibe ? 'bg-white/10' : 'bg-dark-surfaceContainerHigh')
-                              : (vibe ? 'hover:bg-white/10' : 'hover:bg-dark-surfaceContainerHigh')
-                          }`}
-                          style={{ width: 'calc(100% - 8px)' }}
-                        >
-                          <FolderOpen size={12} className="opacity-60 flex-shrink-0" />
-                          <div className="flex-1 min-w-0">
-                            <div className="truncate font-medium">{basename(p)}</div>
-                            <div className="truncate opacity-50 text-[10px]">{p}</div>
-                          </div>
-                          {isCurrent && <Check size={12} className="text-md-primary flex-shrink-0" />}
-                        </button>
-                      )
-                    })}
+                  {/* Recents list */}
+                  <div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wider opacity-50">
+                    {t('chat.folderRecents')}
                   </div>
-                )}
+                  {recentsFolders.length === 0 ? (
+                    <div className="px-3 py-2 text-xs opacity-50">{t('chat.folderNoRecents')}</div>
+                  ) : (
+                    <div className="max-h-56 overflow-y-auto overscroll-contain pb-1">
+                      {recentsFolders.map((p) => {
+                        const isCurrent = effectiveWorkDir && comparableFolderPath(p) === comparableFolderPath(effectiveWorkDir)
+                        return (
+                          <button
+                            type="button"
+                            key={p}
+                            onClick={() => requestSetFolder(p)}
+                            className={`w-full px-3 py-1.5 max-md:py-3 mx-1 rounded-md3-sm flex items-center gap-2 text-xs max-md:text-sm text-left transition-colors ${
+                              isCurrent
+                                ? (vibe ? 'bg-white/10' : 'bg-dark-surfaceContainerHigh')
+                                : (vibe ? 'hover:bg-white/10' : 'hover:bg-dark-surfaceContainerHigh')
+                            }`}
+                            style={{ width: 'calc(100% - 8px)' }}
+                          >
+                            <FolderOpen size={12} className="opacity-60 flex-shrink-0" />
+                            <div className="flex-1 min-w-0">
+                              <div className="truncate font-medium">{basename(p)}</div>
+                              <div className="truncate opacity-50 text-[10px]">{p}</div>
+                            </div>
+                            {isCurrent && <Check size={12} className="text-md-primary flex-shrink-0" />}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  )}
 
-                {/* Pick new folder */}
-                <div className="border-t border-dark-onSurfaceVariant/10 p-1">
-                  <button
-                    type="button"
-                    onClick={openSystemFolderPicker}
-                    className={`w-full px-3 py-1.5 rounded-md3-sm flex items-center gap-2 text-xs transition-colors ${
-                      vibe ? 'hover:bg-white/10' : 'hover:bg-dark-surfaceContainerHigh'
-                    }`}
-                  >
-                    <FolderPlus size={12} className="opacity-70" />
-                    <span>{t('chat.folderSelect')}</span>
-                  </button>
+                  {/* Pick new folder */}
+                  <div className="border-t border-dark-onSurfaceVariant/10 p-1">
+                    <button
+                      type="button"
+                      onClick={openSystemFolderPicker}
+                      className={`w-full px-3 py-1.5 max-md:py-3 rounded-md3-sm flex items-center gap-2 text-xs max-md:text-sm transition-colors ${
+                        vibe ? 'hover:bg-white/10' : 'hover:bg-dark-surfaceContainerHigh'
+                      }`}
+                    >
+                      <FolderPlus size={12} className="opacity-70" />
+                      <span>{t('chat.folderSelect')}</span>
+                    </button>
+                  </div>
                 </div>
-              </div>
+              </>
             )}
           </div>
 
@@ -731,7 +768,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
               ref={modeTriggerRef}
               type="button"
               onClick={() => setShowModeMenu(!showModeMenu)}
-              className={`h-8 flex items-center gap-1 px-2 flex-shrink-0 rounded-md3-sm transition-colors ${
+              className={`h-8 max-md:h-11 max-md:px-3 flex items-center gap-1 px-2 flex-shrink-0 rounded-md3-sm transition-colors ${
                 vibe
                   ? 'bg-white/10 text-white/80 hover:bg-white/15'
                   : mode === 'craft'
@@ -749,57 +786,70 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
               <ChevronDown size={12} />
             </button>
             {showModeMenu && (
-              <div id="chat-permission-mode-menu" className={`absolute bottom-full mb-1 left-0 w-48 rounded-md3-md overflow-hidden z-50 ${
-                vibe
-                  ? 'liquid-glass-strong'
-                  : 'bg-dark-surfaceContainerHighest border border-dark-onSurfaceVariant/10 shadow-lg'
-              }`}>
-                <button
-                  type="button"
-                  onClick={() => { settings.updateSettings({ permissionMode: 'craft' }); setShowModeMenu(false) }}
-                  className={`w-full flex items-center gap-2.5 px-3 py-2.5 text-sm transition-colors ${
-                    mode === 'craft'
-                      ? vibe ? 'bg-md-warning/20 text-md-warning' : 'bg-md-warning/10 text-md-warning'
-                      : vibe ? 'text-white/90 hover:bg-white/10' : 'text-dark-onSurface hover:bg-dark-surfaceContainerHigh'
-                  }`}
-                >
-                  <Hammer size={16} />
-                  <div className="text-left">
-                    <div className="font-medium">{t('chat.modeCraftTitle')}</div>
-                    <div className="text-[10px] opacity-60">{t('chat.modeCraftDesc')}</div>
+              <>
+                <div
+                  className="max-md:block hidden fixed inset-0 z-[65] bg-black/55 animate-fade-in"
+                  onClick={() => setShowModeMenu(false)}
+                  aria-hidden
+                />
+                <div id="chat-permission-mode-menu" className={`absolute bottom-full mb-1 left-0 w-48 rounded-md3-md overflow-hidden z-50
+                  max-md:fixed max-md:inset-x-0 max-md:bottom-0 max-md:left-auto max-md:mb-0 max-md:w-full
+                  max-md:rounded-t-2xl max-md:rounded-b-none max-md:border-t max-md:border-dark-onSurfaceVariant/15
+                  max-md:z-[66] max-md:pb-[calc(env(safe-area-inset-bottom)+8px)] ${
+                  vibe
+                    ? 'liquid-glass-strong'
+                    : 'bg-dark-surfaceContainerHighest border border-dark-onSurfaceVariant/10 shadow-lg'
+                }`}>
+                  <div className="hidden max-md:flex justify-center pt-2 pb-1 flex-shrink-0" aria-hidden>
+                    <div className={`w-10 h-1 rounded-full ${vibe ? 'bg-white/25' : 'bg-dark-onSurfaceVariant/25'}`} />
                   </div>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => { settings.updateSettings({ permissionMode: 'ask' }); setShowModeMenu(false) }}
-                  className={`w-full flex items-center gap-2.5 px-3 py-2.5 text-sm transition-colors ${
-                    mode === 'ask'
-                      ? vibe ? 'bg-md-success/20 text-md-success' : 'bg-md-success/10 text-md-success'
-                      : vibe ? 'text-white/90 hover:bg-white/10' : 'text-dark-onSurface hover:bg-dark-surfaceContainerHigh'
-                  }`}
-                >
-                  <Eye size={16} />
-                  <div className="text-left">
-                    <div className="font-medium">{t('chat.modeAskTitle')}</div>
-                    <div className="text-[10px] opacity-60">{t('chat.modeAskDesc')}</div>
-                  </div>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => { settings.updateSettings({ permissionMode: 'plan' }); setShowModeMenu(false) }}
-                  className={`w-full flex items-center gap-2.5 px-3 py-2.5 text-sm transition-colors ${
-                    mode === 'plan'
-                      ? vibe ? 'bg-md-info/20 text-md-info' : 'bg-md-info/10 text-md-info'
-                      : vibe ? 'text-white/90 hover:bg-white/10' : 'text-dark-onSurface hover:bg-dark-surfaceContainerHigh'
-                  }`}
-                >
-                  <ClipboardList size={16} />
-                  <div className="text-left">
-                    <div className="font-medium">{t('chat.modePlanTitle')}</div>
-                    <div className="text-[10px] opacity-60">{t('chat.modePlanDesc')}</div>
-                  </div>
-                </button>
-              </div>
+                  <button
+                    type="button"
+                    onClick={() => { settings.updateSettings({ permissionMode: 'craft' }); setShowModeMenu(false) }}
+                    className={`w-full flex items-center gap-2.5 px-3 py-2.5 max-md:py-4 text-sm transition-colors ${
+                      mode === 'craft'
+                        ? vibe ? 'bg-md-warning/20 text-md-warning' : 'bg-md-warning/10 text-md-warning'
+                        : vibe ? 'text-white/90 hover:bg-white/10' : 'text-dark-onSurface hover:bg-dark-surfaceContainerHigh'
+                    }`}
+                  >
+                    <Hammer size={16} />
+                    <div className="text-left">
+                      <div className="font-medium">{t('chat.modeCraftTitle')}</div>
+                      <div className="text-[10px] opacity-60">{t('chat.modeCraftDesc')}</div>
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { settings.updateSettings({ permissionMode: 'ask' }); setShowModeMenu(false) }}
+                    className={`w-full flex items-center gap-2.5 px-3 py-2.5 max-md:py-4 text-sm transition-colors ${
+                      mode === 'ask'
+                        ? vibe ? 'bg-md-success/20 text-md-success' : 'bg-md-success/10 text-md-success'
+                        : vibe ? 'text-white/90 hover:bg-white/10' : 'text-dark-onSurface hover:bg-dark-surfaceContainerHigh'
+                    }`}
+                  >
+                    <Eye size={16} />
+                    <div className="text-left">
+                      <div className="font-medium">{t('chat.modeAskTitle')}</div>
+                      <div className="text-[10px] opacity-60">{t('chat.modeAskDesc')}</div>
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { settings.updateSettings({ permissionMode: 'plan' }); setShowModeMenu(false) }}
+                    className={`w-full flex items-center gap-2.5 px-3 py-2.5 max-md:py-4 text-sm transition-colors ${
+                      mode === 'plan'
+                        ? vibe ? 'bg-md-info/20 text-md-info' : 'bg-md-info/10 text-md-info'
+                        : vibe ? 'text-white/90 hover:bg-white/10' : 'text-dark-onSurface hover:bg-dark-surfaceContainerHigh'
+                    }`}
+                  >
+                    <ClipboardList size={16} />
+                    <div className="text-left">
+                      <div className="font-medium">{t('chat.modePlanTitle')}</div>
+                      <div className="text-[10px] opacity-60">{t('chat.modePlanDesc')}</div>
+                    </div>
+                  </button>
+                </div>
+              </>
             )}
           </div>
 
@@ -809,7 +859,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
               type="button"
               onClick={toggleThinking}
               disabled={!thinkingSupported}
-              className={`h-8 flex items-center gap-1 px-2 flex-shrink-0 rounded-l-md3-sm transition-colors ${
+              className={`h-8 max-md:h-11 flex items-center gap-1 px-2 flex-shrink-0 rounded-l-md3-sm transition-colors ${
                 settings.enableThinking && thinkingSupported
                   ? vibe
                     ? 'bg-md-tertiary/30 text-md-tertiary'
@@ -830,7 +880,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
                 type="button"
                 onClick={() => setShowThinkingMenu((v) => !v)}
                 disabled={!thinkingSupported}
-                className={`h-8 flex items-center gap-1 px-1.5 flex-shrink-0 rounded-r-md3-sm transition-colors ${
+                className={`h-8 max-md:h-11 flex items-center gap-1 px-1.5 flex-shrink-0 rounded-r-md3-sm transition-colors ${
                   settings.enableThinking && thinkingSupported
                     ? vibe
                       ? 'bg-md-tertiary/30 text-md-tertiary'
@@ -848,33 +898,46 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
               </button>
             )}
             {showThinkingMenu && thinkingSupported && hasReasoningLevels && (
-              <div id="chat-reasoning-menu" className={`absolute bottom-full mb-1 left-0 w-64 p-3 rounded-md3-md z-50 ${
-                vibe ? 'liquid-glass-strong' : 'bg-dark-surfaceContainerHighest border border-dark-onSurfaceVariant/10 shadow-lg'
-              }`}>
-                <div className="flex items-center justify-between mb-2 text-xs">
-                  <span>{t('chat.thinkingLevel')}</span>
-                  <button
-                    type="button"
-                    onClick={toggleThinking}
-                    className={`px-2 py-0.5 rounded-full text-[10px] ${settings.enableThinking ? 'bg-md-tertiary/20 text-md-tertiary' : 'bg-dark-surfaceContainer text-dark-onSurfaceVariant'}`}
-                  >
-                    {settings.enableThinking ? t('chat.thinkingOn') : t('chat.thinkingOff')}
-                  </button>
-                </div>
-                <input
-                  type="range"
-                  min={0}
-                  max={Math.max(0, reasoningEfforts.length - 1)}
-                  step={1}
-                  value={currentEffortIndex}
-                  onChange={(e) => setReasoningEffort(Number(e.target.value))}
-                  aria-label={t('chat.thinkingLevel')}
-                  className="w-full accent-md-tertiary"
+              <>
+                <div
+                  className="max-md:block hidden fixed inset-0 z-[65] bg-black/55 animate-fade-in"
+                  onClick={() => setShowThinkingMenu(false)}
+                  aria-hidden
                 />
-                <div className="mt-1 flex justify-between text-[9px] text-dark-onSurfaceVariant/70">
-                  {reasoningEfforts.map((effort) => <span key={effort} className="capitalize">{effort}</span>)}
+                <div id="chat-reasoning-menu" className={`absolute bottom-full mb-1 left-0 w-64 p-3 rounded-md3-md z-50
+                  max-md:fixed max-md:inset-x-0 max-md:bottom-0 max-md:left-auto max-md:mb-0 max-md:w-full max-md:p-4
+                  max-md:rounded-t-2xl max-md:rounded-b-none max-md:border-t max-md:border-dark-onSurfaceVariant/15
+                  max-md:z-[66] max-md:pb-[calc(env(safe-area-inset-bottom)+16px)] ${
+                  vibe ? 'liquid-glass-strong' : 'bg-dark-surfaceContainerHighest border border-dark-onSurfaceVariant/10 shadow-lg'
+                }`}>
+                  <div className="hidden max-md:flex justify-center pt-0 pb-3 -mt-1 flex-shrink-0" aria-hidden>
+                    <div className={`w-10 h-1 rounded-full ${vibe ? 'bg-white/25' : 'bg-dark-onSurfaceVariant/25'}`} />
+                  </div>
+                  <div className="flex items-center justify-between mb-2 text-xs max-md:text-sm">
+                    <span>{t('chat.thinkingLevel')}</span>
+                    <button
+                      type="button"
+                      onClick={toggleThinking}
+                      className={`px-2 py-0.5 max-md:py-1.5 max-md:px-3 rounded-full text-[10px] max-md:text-xs ${settings.enableThinking ? 'bg-md-tertiary/20 text-md-tertiary' : 'bg-dark-surfaceContainer text-dark-onSurfaceVariant'}`}
+                    >
+                      {settings.enableThinking ? t('chat.thinkingOn') : t('chat.thinkingOff')}
+                    </button>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={Math.max(0, reasoningEfforts.length - 1)}
+                    step={1}
+                    value={currentEffortIndex}
+                    onChange={(e) => setReasoningEffort(Number(e.target.value))}
+                    aria-label={t('chat.thinkingLevel')}
+                    className="w-full accent-md-tertiary max-md:h-2"
+                  />
+                  <div className="mt-1 flex justify-between text-[9px] max-md:text-xs text-dark-onSurfaceVariant/70">
+                    {reasoningEfforts.map((effort) => <span key={effort} className="capitalize">{effort}</span>)}
+                  </div>
                 </div>
-              </div>
+              </>
             )}
           </div>
 
@@ -884,7 +947,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
               ref={skillTriggerRef}
               type="button"
               onClick={() => setShowSkillMenu(!showSkillMenu)}
-              className={`h-8 flex items-center gap-1 px-2 flex-shrink-0 rounded-md3-sm transition-colors ${
+              className={`h-8 max-md:h-11 max-md:px-3 flex items-center gap-1 px-2 flex-shrink-0 rounded-md3-sm transition-colors ${
                 activeSkills.length > 0
                   ? vibe
                     ? 'bg-md-primary/25 text-md-primary hover:bg-md-primary/35'
@@ -910,67 +973,80 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
               <ChevronDown size={12} className={`transition-transform ${showSkillMenu ? 'rotate-180' : ''}`} />
             </button>
             {showSkillMenu && (
-              <div id="chat-skill-menu" className={`absolute bottom-full mb-1 left-0 w-64 rounded-md3-md overflow-hidden z-50 ${
-                vibe
-                  ? 'liquid-glass-strong'
-                  : 'bg-dark-surfaceContainerHighest border border-dark-onSurfaceVariant/10 shadow-lg'
-              }`}>
-                <div className={`px-3 py-2 text-[10px] uppercase tracking-wide ${
-                  vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/40'
+              <>
+                <div
+                  className="max-md:block hidden fixed inset-0 z-[65] bg-black/55 animate-fade-in"
+                  onClick={() => setShowSkillMenu(false)}
+                  aria-hidden
+                />
+                <div id="chat-skill-menu" className={`absolute bottom-full mb-1 left-0 w-64 rounded-md3-md overflow-hidden z-50
+                  max-md:fixed max-md:inset-x-0 max-md:bottom-0 max-md:left-auto max-md:mb-0 max-md:w-full max-md:max-h-[72dvh]
+                  max-md:rounded-t-2xl max-md:rounded-b-none max-md:border-t max-md:border-dark-onSurfaceVariant/15
+                  max-md:z-[66] max-md:pb-[calc(env(safe-area-inset-bottom)+8px)] ${
+                  vibe
+                    ? 'liquid-glass-strong'
+                    : 'bg-dark-surfaceContainerHighest border border-dark-onSurfaceVariant/10 shadow-lg'
                 }`}>
-                  {t('chat.installedSkills')}
-                </div>
-                {skills.length === 0 ? (
-                  <div className={`px-3 py-3 text-xs text-center ${vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/50'}`}>
-                    {t('chat.noSkills')}
+                  <div className="hidden max-md:flex justify-center pt-2 pb-1 flex-shrink-0" aria-hidden>
+                    <div className={`w-10 h-1 rounded-full ${vibe ? 'bg-white/25' : 'bg-dark-onSurfaceVariant/25'}`} />
                   </div>
-                ) : (
-                  <div className="max-h-56 overflow-y-auto">
-                    {skills.map((skill) => {
-                      const isActive = sessionSkillIds.includes(skill.id)
-                      return (
-                        <button
-                          type="button"
-                          key={skill.id}
-                          onClick={() => toggleSessionSkill(skill.id, effectiveWorkDir || undefined)}
-                          className={`w-full flex items-center gap-2 px-3 py-2 text-sm transition-colors ${
-                            isActive
-                              ? vibe
-                                ? 'bg-md-primary/20 text-md-primary'
-                                : 'bg-md-primary/10 text-md-primary'
-                              : vibe
-                                ? 'text-white/90 hover:bg-white/10'
-                                : 'text-dark-onSurface hover:bg-dark-surfaceContainerHigh'
-                          }`}
-                        >
-                          <span className="flex-shrink-0">{skill.icon}</span>
-                          <div className="flex-1 text-left min-w-0">
-                            <div className="truncate font-medium">{skill.name}</div>
-                            {skill.description && (
-                              <div className={`text-[10px] truncate ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/40'}`}>
-                                {skill.description}
-                              </div>
-                            )}
-                          </div>
-                          {isActive && <Check size={14} className="flex-shrink-0 text-md-primary" />}
-                        </button>
-                      )
-                    })}
+                  <div className={`px-3 py-2 text-[10px] uppercase tracking-wide ${
+                    vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/40'
+                  }`}>
+                    {t('chat.installedSkills')}
                   </div>
-                )}
-                <div className={`border-t ${vibe ? 'border-white/15' : 'border-dark-onSurfaceVariant/10'}`}>
-                  <button
-                    type="button"
-                    onClick={() => { setShowSkillMenu(false); setShowSkillStore(true) }}
-                    className={`w-full flex items-center gap-2 px-3 py-2.5 text-sm transition-colors ${
-                      vibe ? 'text-white/90 hover:bg-white/10' : 'text-dark-onSurface hover:bg-dark-surfaceContainerHigh'
-                    }`}
-                  >
-                    <Store size={14} />
-                    <span>{t('chat.getSkills')}</span>
-                  </button>
+                  {skills.length === 0 ? (
+                    <div className={`px-3 py-3 text-xs text-center ${vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/50'}`}>
+                      {t('chat.noSkills')}
+                    </div>
+                  ) : (
+                    <div className="max-h-56 max-md:max-h-none overflow-y-auto overscroll-contain">
+                      {skills.map((skill) => {
+                        const isActive = sessionSkillIds.includes(skill.id)
+                        return (
+                          <button
+                            type="button"
+                            key={skill.id}
+                            onClick={() => toggleSessionSkill(skill.id, effectiveWorkDir || undefined)}
+                            className={`w-full flex items-center gap-2 px-3 py-2 max-md:py-3 text-sm transition-colors ${
+                              isActive
+                                ? vibe
+                                  ? 'bg-md-primary/20 text-md-primary'
+                                  : 'bg-md-primary/10 text-md-primary'
+                                : vibe
+                                  ? 'text-white/90 hover:bg-white/10'
+                                  : 'text-dark-onSurface hover:bg-dark-surfaceContainerHigh'
+                            }`}
+                          >
+                            <span className="flex-shrink-0">{skill.icon}</span>
+                            <div className="flex-1 text-left min-w-0">
+                              <div className="truncate font-medium">{skill.name}</div>
+                              {skill.description && (
+                                <div className={`text-[10px] max-md:text-xs truncate ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/40'}`}>
+                                  {skill.description}
+                                </div>
+                              )}
+                            </div>
+                            {isActive && <Check size={14} className="flex-shrink-0 text-md-primary" />}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  )}
+                  <div className={`border-t ${vibe ? 'border-white/15' : 'border-dark-onSurfaceVariant/10'}`}>
+                    <button
+                      type="button"
+                      onClick={() => { setShowSkillMenu(false); setShowSkillStore(true) }}
+                      className={`w-full flex items-center gap-2 px-3 py-2 max-md:py-3.5 text-sm transition-colors ${
+                        vibe ? 'text-white/90 hover:bg-white/10' : 'text-dark-onSurface hover:bg-dark-surfaceContainerHigh'
+                      }`}
+                    >
+                      <Store size={14} />
+                      <span>{t('chat.getSkills')}</span>
+                    </button>
+                  </div>
                 </div>
-              </div>
+              </>
             )}
           </div>
 
@@ -980,7 +1056,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
               ref={modelTriggerRef}
               type="button"
               onClick={() => setShowModelMenu(!showModelMenu)}
-              className={`h-8 flex items-center gap-1 px-2 flex-shrink-0 rounded-md3-sm transition-colors ${
+              className={`h-8 max-md:h-11 max-md:px-3 flex items-center gap-1 px-2 flex-shrink-0 rounded-md3-sm transition-colors ${
                 vibe ? 'hover:bg-white/15 text-white/70' : 'hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant'
               }`}
               aria-label={t('chat.modelSelectAria')}
@@ -991,12 +1067,26 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
               <ChevronDown size={12} className={`transition-transform ${showModelMenu ? 'rotate-180' : ''}`} />
             </button>
             {showModelMenu && (
-              <div id="chat-model-menu" className={`absolute bottom-full mb-1 left-0 w-56 rounded-md3-md overflow-hidden z-50 py-1 max-h-64 overflow-y-auto ${
-                vibe
-                  ? 'liquid-glass-strong'
-                  : 'bg-dark-surfaceContainerHighest border border-dark-onSurfaceVariant/10 shadow-lg'
-              }`}>
-                {providersWithModels.length === 0 ? (
+              <>
+                {/* 移动端遮罩：点击关闭 */}
+                <div
+                  className="max-md:block hidden fixed inset-0 z-[65] bg-black/55 animate-fade-in"
+                  onClick={() => setShowModelMenu(false)}
+                  aria-hidden
+                />
+                <div id="chat-model-menu" className={`absolute bottom-full mb-1 left-0 w-56 rounded-md3-md overflow-hidden z-50 py-1 max-h-64 overflow-y-auto
+                  max-md:fixed max-md:inset-x-0 max-md:bottom-0 max-md:left-auto max-md:mb-0 max-md:w-full max-md:max-h-[72dvh]
+                  max-md:rounded-t-2xl max-md:rounded-b-none max-md:border-t max-md:border-dark-onSurfaceVariant/15
+                  max-md:z-[66] max-md:pb-[calc(env(safe-area-inset-bottom)+8px)] ${
+                  vibe
+                    ? 'liquid-glass-strong'
+                    : 'bg-dark-surfaceContainerHighest border border-dark-onSurfaceVariant/10 shadow-lg'
+                }`}>
+                  {/* 移动端拖动指示条 */}
+                  <div className="hidden max-md:flex justify-center pt-2 pb-1 flex-shrink-0" aria-hidden>
+                    <div className={`w-10 h-1 rounded-full ${vibe ? 'bg-white/25' : 'bg-dark-onSurfaceVariant/25'}`} />
+                  </div>
+                  {providersWithModels.length === 0 ? (
                   <div className={`px-3 py-3 text-xs ${vibe ? 'text-white/60' : 'text-dark-onSurfaceVariant'}`}>
                     {t('chat.noModels')}
                   </div>
@@ -1012,7 +1102,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
                         <button
                           type="button"
                           onClick={() => toggleProviderCollapse(p.id)}
-                          className={`sticky top-0 z-10 w-full flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide backdrop-blur-sm transition-colors ${
+                          className={`sticky top-0 z-10 w-full flex items-center gap-1.5 px-3 py-1.5 max-md:py-3 text-[10px] max-md:text-xs font-semibold uppercase tracking-wide backdrop-blur-sm transition-colors ${
                             vibe
                               ? 'text-white/60 bg-black/25 hover:bg-black/35'
                               : 'text-dark-onSurfaceVariant/70 bg-dark-surfaceContainerHighest/95 hover:bg-dark-surfaceContainerHighest'
@@ -1038,15 +1128,15 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
                               type="button"
                               key={m.id}
                               onClick={() => handleSelectModel(p.id, m.id)}
-                              className={`w-full text-left pl-7 pr-3 py-2 transition-colors ${
+                              className={`w-full text-left pl-7 pr-3 py-2 max-md:py-3.5 max-md:pl-5 transition-colors ${
                                 active
                                   ? vibe ? 'text-md-primary bg-md-primary/10' : 'text-md-primary bg-md-primary/5'
                                   : vibe ? 'text-white/90 hover:bg-white/10' : 'text-dark-onSurface hover:bg-dark-surfaceContainer'
                               }`}
                             >
-                              <div className="text-xs font-medium truncate">{m.label || m.id}</div>
+                              <div className="text-xs max-md:text-[15px] font-medium truncate">{m.label || m.id}</div>
                               {m.label && (
-                                <div className={`text-[10px] truncate mt-0.5 ${active ? 'text-md-primary/70' : vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/70'}`}>
+                                <div className={`text-[10px] max-md:text-xs truncate mt-0.5 ${active ? 'text-md-primary/70' : vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/70'}`}>
                                   {m.id}
                                 </div>
                               )}
@@ -1061,13 +1151,14 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
                 <button
                   type="button"
                   onClick={handleAddCustomModel}
-                  className={`w-full flex items-center gap-2 px-3 py-2 text-xs transition-colors ${
+                  className={`w-full flex items-center gap-2 px-3 py-2 max-md:py-3.5 text-xs max-md:text-sm transition-colors ${
                     vibe ? 'text-md-primary hover:bg-white/10' : 'text-md-primary hover:bg-md-primary/10'
                   }`}
                 >
                   <Plus size={13} /> {t('chat.customModel')}
                 </button>
-              </div>
+                </div>
+              </>
             )}
           </div>
 
@@ -1080,7 +1171,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
             onClick={isStreaming ? onStop : handleSend}
             disabled={!isStreaming && !content.trim() && attachments.length === 0}
             aria-label={isStreaming ? t('chat.stopResponseAria') : t('chat.sendMessageAria')}
-            className={`h-9 w-9 flex-shrink-0 flex items-center justify-center rounded-full transition-colors disabled:opacity-30 disabled:cursor-not-allowed ${
+            className={`h-9 w-9 max-md:h-12 max-md:w-12 flex-shrink-0 flex items-center justify-center rounded-full transition-colors disabled:opacity-30 disabled:cursor-not-allowed ${
               isStreaming
                 ? 'bg-md-error text-md-onError hover:bg-md-error/90'
                 : vibe
@@ -1088,7 +1179,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
                   : 'bg-md-primary text-md-onPrimary hover:bg-md-primary/90'
             }`}
           >
-            {isStreaming ? <Square size={14} /> : <Send size={16} />}
+            {isStreaming ? <Square size={isMobile ? 18 : 14} /> : <Send size={isMobile ? 20 : 16} />}
           </button>
         </div>
       </div>

@@ -139,14 +139,15 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <div className={`fixed ${isVibeMode ? 'inset-0' : 'inset-x-0 bottom-0 top-11'} z-50 flex items-center justify-center ${isVibeMode ? 'bg-black/50 backdrop-blur-sm' : 'bg-black/60'}`}>
+    <div className={`fixed ${isVibeMode ? 'inset-0' : 'inset-x-0 bottom-0 top-11 max-md:top-14'} z-50 flex items-center justify-center ${isVibeMode ? 'bg-black/50 backdrop-blur-sm' : 'bg-black/60'}`}>
       <div
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
         tabIndex={-1}
-        className="w-[720px] max-w-[92vw] h-[560px] max-h-[82vh] bg-dark-surfaceDim rounded-md3-xl border border-dark-onSurfaceVariant/10 flex flex-col shadow-2xl"
+        className="w-[720px] max-w-[92vw] h-[560px] max-h-[82vh] bg-dark-surfaceDim rounded-md3-xl border border-dark-onSurfaceVariant/10 flex flex-col shadow-2xl
+          max-md:w-screen max-md:h-full max-md:max-w-none max-md:max-h-none max-md:rounded-none max-md:border-0"
       >
         <div className="flex items-center justify-between px-6 py-4 border-b border-dark-onSurfaceVariant/10">
           <h2 id={titleId} className="text-lg font-semibold">{t('settings.title')}</h2>
@@ -156,14 +157,15 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
             onClick={onClose}
             aria-label={t('common.close')}
             title={t('common.close')}
-            className="w-8 h-8 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-dark-onSurfaceVariant"
+            className="w-8 h-8 max-md:w-11 max-md:h-11 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-dark-onSurfaceVariant"
           >
             <X size={16} />
           </button>
         </div>
 
-        <div className="flex flex-1 min-h-0">
-          <div role="tablist" aria-orientation="vertical" className="w-44 flex flex-col gap-1 p-3 border-r border-dark-onSurfaceVariant/10">
+        <div className="flex flex-1 min-h-0 max-md:flex-col">
+          <div role="tablist" aria-orientation="vertical" className="w-44 flex flex-col gap-1 p-3 border-r border-dark-onSurfaceVariant/10
+            max-md:w-full max-md:flex-row max-md:items-center max-md:overflow-x-auto max-md:overscroll-contain max-md:gap-1 max-md:p-2 max-md:border-r-0 max-md:border-b">
             {tabs.map((tab) => (
               <button
                 key={tab.key}
@@ -174,7 +176,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                 aria-controls="settings-tabpanel"
                 onClick={() => setActiveTab(tab.key)}
                 onKeyDown={(event) => handleTabKeyDown(event, tab.key)}
-                className={`flex items-center gap-2.5 px-3 py-2.5 rounded-md3-sm text-sm transition-colors text-left ${
+                className={`flex items-center gap-2.5 px-3 py-2.5 max-md:py-3 max-md:px-4 max-md:flex-shrink-0 rounded-md3-sm text-sm transition-colors text-left ${
                   activeTab === tab.key
                     ? 'bg-dark-surfaceContainerHigh text-dark-onSurface'
                     : 'text-dark-onSurfaceVariant hover:bg-dark-surfaceContainer'
@@ -190,7 +192,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
             id="settings-tabpanel"
             role="tabpanel"
             aria-labelledby={`settings-tab-${activeTab}`}
-            className="flex-1 overflow-y-auto p-6"
+            className="flex-1 overflow-y-auto overscroll-contain p-6 max-md:p-4"
           >
             {activeTab === 'api' && (
               <div className="space-y-5">

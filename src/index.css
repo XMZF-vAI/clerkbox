@@ -369,3 +369,17 @@
       0 4px 16px rgb(0 0 0 / 0.28);
   }
 }
+
+/* ── 移动端（WebUI 窄屏）全局适配 ──
+   桌面 Electron 最小窗宽 800px 不受影响；仅浏览器窄屏生效。 */
+@media (max-width: 768px) {
+  /* 去掉移动端点击高亮闪烁 */
+  * {
+    -webkit-tap-highlight-color: transparent;
+  }
+  /* 阻止下拉刷新 / 橡皮筋滚动带乱应用布局 */
+  html,
+  body {
+    overscroll-behavior: none;
+  }
+}

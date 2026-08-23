@@ -27,7 +27,7 @@ export default function TitleBar({ onToggleSidebar }: TitleBarProps) {
 
   return (
     <div
-      className="h-11 flex items-center justify-between px-4 bg-dark-surface/80 backdrop-blur-md border-b border-dark-onSurfaceVariant/10 select-none"
+      className="h-11 max-md:h-14 flex items-center justify-between px-4 max-md:px-3 bg-dark-surface/80 backdrop-blur-md border-b border-dark-onSurfaceVariant/10 select-none"
       style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
     >
       <div className="flex items-center gap-3" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
@@ -36,11 +36,11 @@ export default function TitleBar({ onToggleSidebar }: TitleBarProps) {
           onClick={onToggleSidebar}
           aria-label={t('titlebar.toggleSidebar')}
           title={t('titlebar.toggleSidebar')}
-          className="w-8 h-8 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors"
+          className="w-8 h-8 max-md:w-11 max-md:h-11 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors"
         >
           <Menu size={18} />
         </button>
-        <span className="text-xs px-1.5 py-0.5 rounded-md3-xs bg-dark-surfaceContainerHigh text-dark-onSurfaceVariant">
+        <span className="text-xs px-1.5 py-0.5 rounded-md3-xs bg-dark-surfaceContainerHigh text-dark-onSurfaceVariant max-md:hidden">
           v{pkg.version}
         </span>
       </div>
@@ -50,7 +50,7 @@ export default function TitleBar({ onToggleSidebar }: TitleBarProps) {
         <button
           type="button"
           onClick={() => toggleVibeMode()}
-          className="h-7 flex items-center gap-1 px-2 mr-2 rounded-md3-sm bg-md-tertiary/15 text-md-tertiary hover:bg-md-tertiary/25 transition-colors"
+          className="h-7 max-md:h-10 max-md:px-3 flex items-center gap-1 px-2 mr-2 rounded-md3-sm bg-md-tertiary/15 text-md-tertiary hover:bg-md-tertiary/25 transition-colors"
           title={t('titlebar.vibeEnter')}
           aria-label={t('titlebar.vibeToggleAria')}
           aria-pressed={vibeMode}
@@ -66,7 +66,7 @@ export default function TitleBar({ onToggleSidebar }: TitleBarProps) {
           <div className={`w-2 h-2 rounded-full ${
             hasStreaming ? 'bg-md-info animate-pulse-soft' : 'bg-md-success'
           }`} />
-          <span className="text-xs text-dark-onSurfaceVariant">
+          <span className="text-xs text-dark-onSurfaceVariant max-md:hidden">
             {hasStreaming ? t('titlebar.statusExecuting') : t('titlebar.statusReady')}
           </span>
         </div>
