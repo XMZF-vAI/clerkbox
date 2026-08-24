@@ -1,15 +1,22 @@
 import { useState, useRef, type KeyboardEvent as ReactKeyboardEvent, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type ChangeEvent as ReactChangeEvent, useEffect } from 'react'
-import { Send, Brain, FolderOpen, ChevronDown, Hammer, Eye, Square, ClipboardList, Zap, Check, X, Store, Plus, FolderPlus, Paperclip, FileText } from 'lucide-react'
+import { Send, Brain, FolderOpen, ChevronDown, Square, Zap, Check, X, Store, Plus, FolderPlus, Paperclip, FileText, ShieldCheck, Hand, TriangleAlert, Slash, BookOpen, GitBranch, Target, type LucideIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useSettingsStore } from '../../stores/settings-store'
 import { useChatStore } from '../../stores/chat-store'
 import { useSkillsStore } from '../../stores/skills-store'
 import { useUIStore } from '../../stores/ui-store'
 import { ipc, isWebUIMode } from '../../lib/ipc-client'
-import type { MessageAttachment } from '../../types/agent'
+import type { MessageAttachment, TaskMode } from '../../types/agent'
 import type { FileEntry, WebUICapabilities } from '../../types/ipc'
 import ConfirmDialog from '../ui/ConfirmDialog'
 import { useIsMobile } from '../../hooks/use-mobile'
+
+// ── "/" 命令菜单里的任务工作流命令（对齐 TRAE：Spec / Plan / Goal；Browser 模式不做） ──
+const TASK_COMMANDS: Array<{ id: TaskMode; name: string; icon: LucideIcon; descKey: string }> = [
+  { id: 'spec', name: 'Spec', icon: BookOpen, descKey: 'chat.cmdSpecDesc' },
+  { id: 'plan', name: 'Plan', icon: GitBranch, descKey: 'chat.cmdPlanDesc' },
+  { id: 'goal', name: 'Goal', icon: Target, descKey: 'chat.cmdGoalDesc' },
+]
 
 // 取路径的最后一节作为显示名（兼容 Windows/Unix 两种分隔符）
 const basename = (p: string) => p.split(/[/\\]/).filter(Boolean).pop() || p
@@ -97,7 +104,7 @@ function parentFolderPath(value: string): string | null {
 }
 
 interface ChatInputProps {
-  onSend: (content: string, attachments?: MessageAttachment[]) => void
+  onSend: (content: string, attachments?: MessageAttachment[], taskMode?: TaskMode) => void
   onStop?: () => void
   isStreaming?: boolean
   variant?: 'default' | 'welcome'
@@ -107,6 +114,8 @@ interface ChatInputProps {
 export default function ChatInput({ onSend, onStop, isStreaming, variant = 'default', vibe = false }: ChatInputProps) {
   const { t } = useTranslation()
   const [content, setContent] = useState('')
+  // 任务工作流芯片（/ 命令菜单选择的 Spec/Plan/Goal，随下一条消息一次性生效）
+  const [taskMode, setTaskMode] = useState<TaskMode | null>(null)
   const [folderSelecting, setFolderSelecting] = useState(false)
   const [attachSelecting, setAttachSelecting] = useState(false)
   const [dragging, setDragging] = useState(false)
@@ -207,10 +216,16 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
   // 豁免：recents 列表里的目录（已经授权过）+ 会话默认目录（用户从未改过，不算授权过）
   const [pendingFolder, setPendingFolder] = useState<string | null>(null)
 
-  // Mode dropdown state
-  const [showModeMenu, setShowModeMenu] = useState(false)
-  const modeMenuRef = useRef<HTMLDivElement>(null)
-  const modeTriggerRef = useRef<HTMLButtonElement>(null)
+  // Approval dropdown state（Agent 操作审批：手动 / 自动 / 完全访问）
+  const [showApprovalMenu, setShowApprovalMenu] = useState(false)
+  const approvalMenuRef = useRef<HTMLDivElement>(null)
+  const approvalTriggerRef = useRef<HTMLButtonElement>(null)
+
+  // "/" 命令菜单状态（任务工作流 + 技能；输入框即过滤框，"/" 后文本为过滤词）
+  const [showCommandMenu, setShowCommandMenu] = useState(false)
+  const commandMenuRef = useRef<HTMLDivElement>(null)
+  const inputBoxRef = useRef<HTMLDivElement>(null)
+  const [commandHighlight, setCommandHighlight] = useState(0)
 
   // Skill dropdown state
   const [showSkillMenu, setShowSkillMenu] = useState(false)
@@ -226,6 +241,46 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
   const { setShowSkillStore } = useUIStore()
   const activeSkills = skills.filter((s) => sessionSkillIds.includes(s.id))
 
+  // ── "/" 命令菜单：过滤 + 键盘导航 + 选择 ──
+  // 过滤词 = 输入框中 "/" 之后的文本（菜单打开时输入框即搜索框，对齐 TRAE 交互）
+  const commandQuery = showCommandMenu && content.startsWith('/') ? content.slice(1).trim().toLowerCase() : ''
+  const filteredCommands = TASK_COMMANDS.filter((c) =>
+    !commandQuery || c.name.toLowerCase().includes(commandQuery) || t(c.descKey).toLowerCase().includes(commandQuery)
+  )
+  const filteredSkills = skills.filter((s) =>
+    !commandQuery || s.name.toLowerCase().includes(commandQuery) || (s.description || '').toLowerCase().includes(commandQuery)
+  )
+  const commandFlatCount = filteredCommands.length + filteredSkills.length
+  const commandSafeHighlight = commandFlatCount > 0 ? Math.min(commandHighlight, commandFlatCount - 1) : 0
+
+  /** 关闭命令菜单；若输入框只剩触发用的 "/" 则一并清掉 */
+  const closeCommandMenu = () => {
+    setShowCommandMenu(false)
+    setContent((v) => (v.trim() === '/' ? '' : v))
+  }
+
+  /** 点击 "/" 按钮打开命令菜单：空输入时补一个 "/" 作为过滤前缀并聚焦输入框 */
+  const openCommandMenu = () => {
+    if (isStreaming) return
+    setShowCommandMenu(true)
+    setCommandHighlight(0)
+    setContent((v) => (v.trim() === '' ? '/' : v))
+    requestAnimationFrame(() => textareaRef.current?.focus())
+  }
+
+  /** 选中命令菜单某项：命令 → 设置任务芯片并关闭；技能 → 切换激活态并保持菜单（可连续多选） */
+  const selectCommandItem = (kind: 'command' | 'skill', id: string) => {
+    if (kind === 'command') {
+      setTaskMode(id as TaskMode)
+      // 只清掉以 "/" 开头的过滤前缀（菜单触发态），保留用户已输入的正文，避免临时切换模式时丢字
+      setContent((v) => (v.startsWith('/') ? '' : v))
+      setShowCommandMenu(false)
+      requestAnimationFrame(() => textareaRef.current?.focus())
+      return
+    }
+    toggleSessionSkill(id, effectiveWorkDir || undefined)
+  }
+
   const handleSend = () => {
     const trimmed = content.trim()
     if (isStreaming) return
@@ -239,8 +294,9 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
       alert(t('chat.imageBlocked'))
       return
     }
-    onSend(trimmed, attachments.length ? attachments : undefined)
+    onSend(trimmed, attachments.length ? attachments : undefined, taskMode ?? undefined)
     setContent('')
+    setTaskMode(null)
     commitAttachments([])
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
@@ -405,10 +461,57 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
     })()
   }
 
+  /** 输入框 onChange：空输入框输入 "/" 打开命令菜单；菜单打开时 "/" 后文本即过滤词；
+   *  删掉 "/" 或改为普通文本则关闭菜单 */
+  const handleTextareaChange = (e: ReactChangeEvent<HTMLTextAreaElement>) => {
+    const v = e.target.value
+    setContent(v)
+    if (v.startsWith('/')) {
+      if (!showCommandMenu) {
+        setShowCommandMenu(true)
+        setCommandHighlight(0)
+      }
+    } else if (showCommandMenu) {
+      closeCommandMenu()
+    }
+  }
+
   const handleKeyDown = (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    // 命令菜单打开时：↑↓ 导航、Enter 选中、Esc 关闭（优先于发送逻辑）
+    if (showCommandMenu && commandFlatCount > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setCommandHighlight((commandSafeHighlight + 1) % commandFlatCount)
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setCommandHighlight((commandSafeHighlight - 1 + commandFlatCount) % commandFlatCount)
+        return
+      }
+      if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+        e.preventDefault()
+        if (commandSafeHighlight < filteredCommands.length) {
+          selectCommandItem('command', filteredCommands[commandSafeHighlight].id)
+        } else {
+          selectCommandItem('skill', filteredSkills[commandSafeHighlight - filteredCommands.length].id)
+        }
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        closeCommandMenu()
+        return
+      }
+    }
     if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault()
       handleSend()
+    }
+    // 空输入框按 Backspace：先移除任务工作流芯片
+    if (e.key === 'Backspace' && !content && taskMode) {
+      e.preventDefault()
+      setTaskMode(null)
     }
   }
 
@@ -562,8 +665,15 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
       if (modelMenuRef.current && !modelMenuRef.current.contains(e.target as Node)) {
         setShowModelMenu(false)
       }
-      if (modeMenuRef.current && !modeMenuRef.current.contains(e.target as Node)) {
-        setShowModeMenu(false)
+      if (approvalMenuRef.current && !approvalMenuRef.current.contains(e.target as Node)) {
+        setShowApprovalMenu(false)
+      }
+      // 命令菜单锚定在整个输入框上：框内点击（输入过滤词等）不关闭，框外点击关闭
+      if (inputBoxRef.current && !inputBoxRef.current.contains(e.target as Node)) {
+        if (showCommandMenu) {
+          setShowCommandMenu(false)
+          setContent((v) => (v.trim() === '/' ? '' : v))
+        }
       }
       if (skillMenuRef.current && !skillMenuRef.current.contains(e.target as Node)) {
         setShowSkillMenu(false)
@@ -575,43 +685,57 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
         setShowFolderPopover(false)
       }
     }
-    if (showModelMenu || showModeMenu || showSkillMenu || showThinkingMenu || showFolderPopover) {
+    if (showModelMenu || showApprovalMenu || showCommandMenu || showSkillMenu || showThinkingMenu || showFolderPopover) {
       document.addEventListener('mousedown', handleClickOutside)
       return () => document.removeEventListener('mousedown', handleClickOutside)
     }
-  }, [showModelMenu, showModeMenu, showSkillMenu, showThinkingMenu, showFolderPopover])
+  }, [showModelMenu, showApprovalMenu, showCommandMenu, showSkillMenu, showThinkingMenu, showFolderPopover])
 
   useEffect(() => {
-    if (!showModelMenu && !showModeMenu && !showSkillMenu && !showThinkingMenu && !showFolderPopover) return
+    if (!showModelMenu && !showApprovalMenu && !showCommandMenu && !showSkillMenu && !showThinkingMenu && !showFolderPopover) return
 
     const handleEscape = (event: globalThis.KeyboardEvent) => {
       if (event.key !== 'Escape') return
       const trigger = showModelMenu
         ? modelTriggerRef.current
-        : showModeMenu
-          ? modeTriggerRef.current
-          : showSkillMenu
-            ? skillTriggerRef.current
-            : showThinkingMenu
-              ? thinkingTriggerRef.current
-              : folderTriggerRef.current
+        : showApprovalMenu
+          ? approvalTriggerRef.current
+          : showCommandMenu
+            ? textareaRef.current
+            : showSkillMenu
+              ? skillTriggerRef.current
+              : showThinkingMenu
+                ? thinkingTriggerRef.current
+                : folderTriggerRef.current
       event.stopPropagation()
       setShowModelMenu(false)
-      setShowModeMenu(false)
+      setShowApprovalMenu(false)
+      setShowCommandMenu(false)
       setShowSkillMenu(false)
       setShowThinkingMenu(false)
       setShowFolderPopover(false)
+      if (showCommandMenu) setContent((v) => (v.trim() === '/' ? '' : v))
       requestAnimationFrame(() => trigger?.focus())
     }
 
     document.addEventListener('keydown', handleEscape)
     return () => document.removeEventListener('keydown', handleEscape)
-  }, [showModelMenu, showModeMenu, showSkillMenu, showThinkingMenu, showFolderPopover])
+  }, [showModelMenu, showApprovalMenu, showCommandMenu, showSkillMenu, showThinkingMenu, showFolderPopover])
 
-  const mode = settings.permissionMode
-  const modeIcon = mode === 'craft' ? Hammer : mode === 'plan' ? ClipboardList : Eye
-  const modeLabel = mode === 'craft' ? t('sidebar.mode.craftLabel') : mode === 'plan' ? t('sidebar.mode.planLabel') : t('sidebar.mode.askLabel')
-  const ModeIcon = modeIcon
+  // 审批档位元数据（图标 + 标签；完全访问用警告色，对齐 TRAE）
+  const approvalMode = settings.approvalMode
+  const approvalMeta = {
+    manual: { icon: Hand, label: t('chat.approvalManualTitle') },
+    auto: { icon: ShieldCheck, label: t('chat.approvalAutoTitle') },
+    full: { icon: TriangleAlert, label: t('chat.approvalFullTitle') },
+  }[approvalMode]
+  const ApprovalIcon = approvalMeta.icon
+  // 任务工作流芯片配色（spec=info / plan=primary / goal=tertiary）
+  const taskChipClass = taskMode === 'spec'
+    ? (vibe ? 'bg-md-info/25 text-md-info' : 'bg-md-info/15 text-md-info')
+    : taskMode === 'plan'
+      ? (vibe ? 'bg-md-primary/25 text-md-primary' : 'bg-md-primary/15 text-md-primary')
+      : (vibe ? 'bg-md-tertiary/25 text-md-tertiary' : 'bg-md-tertiary/15 text-md-tertiary')
 
   // 当前模型显示名：优先取所属提供商里登记的 label，回落到 model id；都没有则提示未配置
   const currentModelLabel = (() => {
@@ -641,10 +765,10 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
   // Input box: wider and more rounded
   const boxMaxWidth = isWelcome ? 'max-w-3xl' : 'max-w-5xl'
 
-  // Box class: vibe uses liquid glass
+  // Box class: vibe uses liquid glass（relative 供 "/" 命令菜单 absolute 锚定）
   const boxClass = vibe
-    ? `flex flex-col ${boxMaxWidth} mx-auto liquid-glass rounded-[28px] px-5 py-3.5 gap-2 focus-within:border-white/40 transition-colors`
-    : `flex flex-col ${boxMaxWidth} mx-auto bg-dark-surfaceContainerHigh rounded-[28px] px-5 py-3.5 gap-2 border border-dark-onSurfaceVariant/8 focus-within:border-md-primary/30 transition-colors`
+    ? `relative flex flex-col ${boxMaxWidth} mx-auto liquid-glass rounded-[28px] px-5 py-3.5 gap-2 focus-within:border-white/40 transition-colors`
+    : `relative flex flex-col ${boxMaxWidth} mx-auto bg-dark-surfaceContainerHigh rounded-[28px] px-5 py-3.5 gap-2 border border-dark-onSurfaceVariant/8 focus-within:border-md-primary/30 transition-colors`
 
   return (
     <div className={outerClass} style={outerStyle}>
@@ -659,6 +783,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
       )}
 
       <div
+        ref={inputBoxRef}
         className={`${boxClass} ${dragging ? 'ring-2 ring-md-primary/50' : ''}`}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
@@ -752,24 +877,148 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
           </div>
         )}
 
-        {/* Textarea - top area */}
-        <textarea
-          ref={textareaRef}
-          value={content}
-          onChange={(e) => setContent(e.target.value)}
-          onKeyDown={handleKeyDown}
-          onInput={handleInput}
-          onPaste={handlePaste}
-          disabled={isStreaming}
-          aria-label={t('chat.messageInputAria')}
-          placeholder={vibe ? t('chat.placeholderVibe') : (effectiveWorkDir ? t('chat.placeholderWorkDir', { name: effectiveWorkDir.split(/[/\\]/).pop() }) : t('chat.placeholderDefault'))}
-          rows={1}
-          className={`w-full bg-transparent text-sm max-md:text-base resize-none outline-none min-h-[20px] max-md:min-h-6 max-h-[200px] py-1 ${
-            vibe
-              ? 'text-white/90 placeholder-white/50'
-              : 'text-dark-onSurface placeholder-dark-onSurfaceVariant/40'
-          }`}
-        />
+        {/* Textarea - top area（左侧可带任务工作流芯片，如 Goal，点击芯片可移除） */}
+        <div className="flex items-start gap-2">
+          {taskMode && (() => {
+            const chipMeta = TASK_COMMANDS.find((c) => c.id === taskMode)
+            if (!chipMeta) return null
+            const ChipIcon = chipMeta.icon
+            return (
+              <button
+                type="button"
+                onClick={() => setTaskMode(null)}
+                title={t('chat.taskChipRemove')}
+                className={`flex items-center gap-1.5 mt-1 px-2 py-0.5 rounded-md3-sm text-sm font-medium flex-shrink-0 transition-colors ${taskChipClass}`}
+              >
+                <ChipIcon size={14} />
+                <span>{chipMeta.name}</span>
+                <X size={11} className="opacity-50" />
+              </button>
+            )
+          })()}
+          <textarea
+            ref={textareaRef}
+            value={content}
+            onChange={handleTextareaChange}
+            onKeyDown={handleKeyDown}
+            onInput={handleInput}
+            onPaste={handlePaste}
+            disabled={isStreaming}
+            aria-label={t('chat.messageInputAria')}
+            placeholder={taskMode
+              ? t('chat.taskPlaceholder')
+              : vibe
+                ? t('chat.placeholderVibe')
+                : (effectiveWorkDir ? t('chat.placeholderWorkDir', { name: effectiveWorkDir.split(/[/\\]/).pop() }) : t('chat.placeholderDefault'))}
+            rows={1}
+            className={`w-full bg-transparent text-sm max-md:text-base resize-none outline-none min-h-[20px] max-md:min-h-6 max-h-[200px] py-1 ${
+              vibe
+                ? 'text-white/90 placeholder-white/50'
+                : 'text-dark-onSurface placeholder-dark-onSurfaceVariant/40'
+            }`}
+          />
+        </div>
+
+        {/* "/" 命令菜单：任务工作流（Spec/Plan/Goal）+ 已安装技能，锚定输入框上方 */}
+        {showCommandMenu && (
+          <>
+            <div
+              className="max-md:block hidden fixed inset-0 z-[64] bg-black/55 animate-fade-in"
+              onClick={closeCommandMenu}
+              aria-hidden
+            />
+            <div
+              ref={commandMenuRef}
+              className={`absolute bottom-full left-0 right-0 mb-1 rounded-md3-md border shadow-2xl z-50 overflow-y-auto overscroll-contain max-h-[min(50dvh,300px)]
+                max-md:fixed max-md:inset-x-0 max-md:bottom-0 max-md:left-auto max-md:right-auto max-md:mb-0 max-md:w-full max-md:max-h-[60dvh]
+                max-md:rounded-t-2xl max-md:rounded-b-none max-md:z-[66]
+                max-md:pb-[calc(env(safe-area-inset-bottom)+8px)] ${
+                vibe
+                  ? 'bg-black/60 border-white/15 backdrop-blur-2xl text-white'
+                  : 'bg-dark-surfaceContainerHighest border-dark-onSurfaceVariant/15 text-dark-onSurface'
+              }`}
+            >
+              <div className="hidden max-md:flex justify-center pt-2 pb-1 flex-shrink-0 sticky top-0" aria-hidden>
+                <div className={`w-10 h-1 rounded-full ${vibe ? 'bg-white/25' : 'bg-dark-onSurfaceVariant/25'}`} />
+              </div>
+              {/* 命令 section */}
+              {filteredCommands.length > 0 && (
+                <>
+                  <div className={`px-3 pt-2 pb-1 text-[10px] uppercase tracking-wider ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/40'}`}>
+                    {t('chat.cmdSection')}
+                  </div>
+                  {filteredCommands.map((c, i) => {
+                    const highlighted = i === commandSafeHighlight
+                    const CmdIcon = c.icon
+                    return (
+                      <button
+                        type="button"
+                        key={c.id}
+                        onMouseEnter={() => setCommandHighlight(i)}
+                        onClick={() => selectCommandItem('command', c.id)}
+                        className={`w-full flex items-center gap-2.5 px-3 py-2 max-md:py-3 text-left transition-colors ${
+                          highlighted ? (vibe ? 'bg-white/10' : 'bg-dark-surfaceContainerHigh') : ''
+                        }`}
+                      >
+                        <CmdIcon size={16} className="flex-shrink-0 text-md-primary" />
+                        <span className={`text-sm font-medium flex-shrink-0 ${vibe ? 'text-white/90' : 'text-dark-onSurface'}`}>{c.name}</span>
+                        <span className={`text-xs truncate flex-1 ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/60'}`}>{t(c.descKey)}</span>
+                        {highlighted && <span className={`text-xs flex-shrink-0 ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/40'}`}>↵</span>}
+                      </button>
+                    )
+                  })}
+                </>
+              )}
+              {/* 技能 section（对齐 TRAE 的「插件」区：列出已安装技能，点击切换激活态） */}
+              <div className={`px-3 pt-2 pb-1 text-[10px] uppercase tracking-wider ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/40'}`}>
+                {t('chat.skillsSection')}
+              </div>
+              {filteredSkills.length === 0 ? (
+                <div className={`px-3 py-3 text-xs text-center ${vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/50'}`}>
+                  {skills.length === 0 ? t('chat.noSkills') : t('chat.cmdNoMatch')}
+                </div>
+              ) : (
+                filteredSkills.map((skill, j) => {
+                  const flatIndex = filteredCommands.length + j
+                  const highlighted = flatIndex === commandSafeHighlight
+                  const isActive = sessionSkillIds.includes(skill.id)
+                  return (
+                    <button
+                      type="button"
+                      key={skill.id}
+                      onMouseEnter={() => setCommandHighlight(flatIndex)}
+                      onClick={() => selectCommandItem('skill', skill.id)}
+                      className={`w-full flex items-center gap-2.5 px-3 py-2 max-md:py-3 text-left transition-colors ${
+                        highlighted ? (vibe ? 'bg-white/10' : 'bg-dark-surfaceContainerHigh') : ''
+                      }`}
+                    >
+                      <span className="flex-shrink-0 text-base leading-none">{skill.icon}</span>
+                      <span className="flex-1 min-w-0">
+                        <span className={`block text-sm font-medium truncate ${isActive ? 'text-md-primary' : vibe ? 'text-white/90' : 'text-dark-onSurface'}`}>{skill.name}</span>
+                        {skill.description && (
+                          <span className={`block text-xs truncate ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/60'}`}>{skill.description}</span>
+                        )}
+                      </span>
+                      {isActive && <Check size={14} className="flex-shrink-0 text-md-primary" />}
+                    </button>
+                  )
+                })
+              )}
+              <div className={`border-t mt-1 ${vibe ? 'border-white/15' : 'border-dark-onSurfaceVariant/10'}`}>
+                <button
+                  type="button"
+                  onClick={() => { setShowCommandMenu(false); setContent((v) => (v.trim() === '/' ? '' : v)); setShowSkillStore(true) }}
+                  className={`w-full flex items-center gap-2 px-3 py-2 max-md:py-3.5 text-sm transition-colors ${
+                    vibe ? 'text-white/90 hover:bg-white/10' : 'text-dark-onSurface hover:bg-dark-surfaceContainerHigh'
+                  }`}
+                >
+                  <Store size={14} />
+                  <span>{t('chat.getSkills')}</span>
+                </button>
+              </div>
+            </div>
+          </>
+        )}
 
         {/* Bottom button row - inside the box */}
         <div className="flex items-center gap-1 flex-wrap">
@@ -791,6 +1040,27 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
             ) : (
               <Paperclip size={16} />
             )}
+          </button>
+
+          {/* "/" 命令菜单按钮：打开工作流命令 + 技能选择列表（也可在空输入框直接输入 / 触发） */}
+          <button
+            type="button"
+            onClick={openCommandMenu}
+            disabled={isStreaming}
+            className={`h-8 max-md:h-11 max-md:px-3 flex items-center px-2 flex-shrink-0 rounded-md3-sm transition-colors disabled:opacity-40 ${
+              showCommandMenu
+                ? vibe
+                  ? 'bg-white/15 text-white/90'
+                  : 'bg-dark-surfaceContainer text-md-primary'
+                : vibe
+                  ? 'hover:bg-white/15 text-white/70'
+                  : 'hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant'
+            }`}
+            title={t('chat.commandMenuAria')}
+            aria-label={t('chat.commandMenuAria')}
+            aria-expanded={showCommandMenu}
+          >
+            <Slash size={15} />
           </button>
 
           {/* Working folder button + popover */}
@@ -904,92 +1174,93 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
             )}
           </div>
 
-          {/* Permission mode dropdown */}
-          <div className="relative" ref={modeMenuRef}>
+          {/* Approval mode dropdown（Agent 操作审批：手动 / 自动 / 完全访问，对齐 TRAE） */}
+          <div className="relative" ref={approvalMenuRef}>
             <button
-              ref={modeTriggerRef}
+              ref={approvalTriggerRef}
               type="button"
-              onClick={() => setShowModeMenu(!showModeMenu)}
-              className={`h-8 max-md:h-11 max-md:px-3 flex items-center gap-1 px-2 flex-shrink-0 rounded-md3-sm transition-colors ${
-                vibe
-                  ? 'bg-white/10 text-white/80 hover:bg-white/15'
-                  : mode === 'craft'
-                    ? 'bg-md-warning/15 text-md-warning'
-                    : mode === 'plan'
-                      ? 'bg-md-info/15 text-md-info'
-                      : 'bg-md-success/15 text-md-success'
-                }`}
-              aria-label={t('chat.permissionModeAria')}
-              aria-controls="chat-permission-mode-menu"
-              aria-expanded={showModeMenu}
+              onClick={() => setShowApprovalMenu((v) => !v)}
+              className={`h-8 max-md:h-11 max-md:px-3 flex items-center gap-1.5 px-2.5 flex-shrink-0 rounded-md3-sm transition-colors ${
+                approvalMode === 'full'
+                  ? vibe
+                    ? 'bg-md-warning/25 text-md-warning hover:bg-md-warning/35'
+                    : 'bg-md-warning/15 text-md-warning hover:bg-md-warning/25'
+                  : vibe
+                    ? 'bg-white/10 text-white/80 hover:bg-white/15'
+                    : 'bg-dark-surfaceContainerHighest/70 text-dark-onSurface hover:bg-dark-surfaceContainerHighest'
+              }`}
+              aria-label={t('chat.approvalAria')}
+              aria-controls="chat-approval-menu"
+              aria-expanded={showApprovalMenu}
             >
-              <ModeIcon size={14} />
-              <span className="text-xs font-medium">{modeLabel}</span>
-              <ChevronDown size={12} />
+              <ApprovalIcon size={14} />
+              <span className="text-xs font-medium">{approvalMeta.label}</span>
+              <ChevronDown size={12} className={`transition-transform ${showApprovalMenu ? 'rotate-180' : ''}`} />
             </button>
-            {showModeMenu && (
+            {showApprovalMenu && (
               <>
                 <div
                   className="max-md:block hidden fixed inset-0 z-[65] bg-black/55 animate-fade-in"
-                  onClick={() => setShowModeMenu(false)}
+                  onClick={() => setShowApprovalMenu(false)}
                   aria-hidden
                 />
-                <div id="chat-permission-mode-menu" className={`absolute bottom-full mb-1 left-0 w-48 rounded-md3-md overflow-hidden z-50
-                  max-md:fixed max-md:inset-x-0 max-md:bottom-0 max-md:left-auto max-md:mb-0 max-md:w-full
+                <div id="chat-approval-menu" className={`absolute bottom-full mb-1 left-0 w-80 max-md:w-full rounded-md3-md overflow-hidden z-50 py-1
+                  max-md:fixed max-md:inset-x-0 max-md:bottom-0 max-md:left-auto max-md:mb-0
                   max-md:rounded-t-2xl max-md:rounded-b-none max-md:border-t max-md:border-dark-onSurfaceVariant/15
                   max-md:z-[66] max-md:pb-[calc(env(safe-area-inset-bottom)+8px)] ${
                   vibe
-                    ? 'liquid-glass-strong'
+                    ? 'bg-black/60 border-white/15 backdrop-blur-2xl text-white'
                     : 'bg-dark-surfaceContainerHighest border border-dark-onSurfaceVariant/10 shadow-lg'
                 }`}>
                   <div className="hidden max-md:flex justify-center pt-2 pb-1 flex-shrink-0" aria-hidden>
                     <div className={`w-10 h-1 rounded-full ${vibe ? 'bg-white/25' : 'bg-dark-onSurfaceVariant/25'}`} />
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => { settings.updateSettings({ permissionMode: 'craft' }); setShowModeMenu(false) }}
-                    className={`w-full flex items-center gap-2.5 px-3 py-2.5 max-md:py-4 text-sm transition-colors ${
-                      mode === 'craft'
-                        ? vibe ? 'bg-md-warning/20 text-md-warning' : 'bg-md-warning/10 text-md-warning'
-                        : vibe ? 'text-white/90 hover:bg-white/10' : 'text-dark-onSurface hover:bg-dark-surfaceContainerHigh'
-                    }`}
-                  >
-                    <Hammer size={16} />
-                    <div className="text-left">
-                      <div className="font-medium">{t('chat.modeCraftTitle')}</div>
-                      <div className="text-[10px] opacity-60">{t('chat.modeCraftDesc')}</div>
-                    </div>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => { settings.updateSettings({ permissionMode: 'ask' }); setShowModeMenu(false) }}
-                    className={`w-full flex items-center gap-2.5 px-3 py-2.5 max-md:py-4 text-sm transition-colors ${
-                      mode === 'ask'
-                        ? vibe ? 'bg-md-success/20 text-md-success' : 'bg-md-success/10 text-md-success'
-                        : vibe ? 'text-white/90 hover:bg-white/10' : 'text-dark-onSurface hover:bg-dark-surfaceContainerHigh'
-                    }`}
-                  >
-                    <Eye size={16} />
-                    <div className="text-left">
-                      <div className="font-medium">{t('chat.modeAskTitle')}</div>
-                      <div className="text-[10px] opacity-60">{t('chat.modeAskDesc')}</div>
-                    </div>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => { settings.updateSettings({ permissionMode: 'plan' }); setShowModeMenu(false) }}
-                    className={`w-full flex items-center gap-2.5 px-3 py-2.5 max-md:py-4 text-sm transition-colors ${
-                      mode === 'plan'
-                        ? vibe ? 'bg-md-info/20 text-md-info' : 'bg-md-info/10 text-md-info'
-                        : vibe ? 'text-white/90 hover:bg-white/10' : 'text-dark-onSurface hover:bg-dark-surfaceContainerHigh'
-                    }`}
-                  >
-                    <ClipboardList size={16} />
-                    <div className="text-left">
-                      <div className="font-medium">{t('chat.modePlanTitle')}</div>
-                      <div className="text-[10px] opacity-60">{t('chat.modePlanDesc')}</div>
-                    </div>
-                  </button>
+                  {/* 弹层标题 + 了解更多 */}
+                  <div className="flex items-center justify-between px-3 pt-2 pb-1.5">
+                    <span className={`text-xs ${vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/70'}`}>{t('chat.approvalHeader')}</span>
+                    <a
+                      href="https://github.com/XMZF-vAI/clerkbox#readme"
+                      target="_blank"
+                      rel="noreferrer"
+                      className={`text-xs underline underline-offset-2 transition-opacity hover:opacity-100 ${
+                        vibe ? 'text-white/60 opacity-80' : 'text-dark-onSurfaceVariant/80 opacity-90'
+                      }`}
+                    >
+                      {t('chat.approvalLearnMore')}
+                    </a>
+                  </div>
+                  {([
+                    { id: 'manual' as const, icon: Hand, title: t('chat.approvalManualTitle'), desc: t('chat.approvalManualDesc') },
+                    { id: 'auto' as const, icon: ShieldCheck, title: t('chat.approvalAutoTitle'), desc: t('chat.approvalAutoDesc') },
+                    { id: 'full' as const, icon: TriangleAlert, title: t('chat.approvalFullTitle'), desc: t('chat.approvalFullDesc') },
+                  ]).map((item) => {
+                    const active = approvalMode === item.id
+                    const isFull = item.id === 'full'
+                    const ItemIcon = item.icon
+                    return (
+                      <button
+                        type="button"
+                        key={item.id}
+                        onClick={() => { settings.updateSettings({ approvalMode: item.id }); setShowApprovalMenu(false) }}
+                        className={`w-full flex items-start gap-2.5 px-3 py-2.5 max-md:py-3.5 text-left transition-colors ${
+                          active
+                            ? vibe ? 'bg-white/10' : 'bg-dark-surfaceContainerHigh'
+                            : vibe ? 'hover:bg-white/10' : 'hover:bg-dark-surfaceContainerHigh'
+                        }`}
+                      >
+                        <ItemIcon size={16} className={`mt-0.5 flex-shrink-0 ${isFull ? 'text-md-warning' : vibe ? 'text-white/80' : 'text-dark-onSurfaceVariant'}`} />
+                        <span className="flex-1 min-w-0">
+                          <span className={`block text-sm font-medium ${isFull ? 'text-md-warning' : vibe ? 'text-white/90' : 'text-dark-onSurface'}`}>
+                            {item.title}
+                          </span>
+                          <span className={`block text-xs mt-0.5 ${isFull ? 'text-md-warning/80' : vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/50'}`}>
+                            {item.desc}
+                          </span>
+                        </span>
+                        {active && <Check size={14} className="mt-1 flex-shrink-0 text-md-primary" />}
+                      </button>
+                    )
+                  })}
                 </div>
               </>
             )}

@@ -35,7 +35,7 @@ const defaultSettings: AppSettings = {
   colorScheme: 'classic',
   customSeedColor: '#F4A7B9',
   language: 'zh-CN',
-  permissionMode: 'craft',
+  approvalMode: 'auto',
   enableThinking: false,
   thinkingBudget: undefined,
   providers: [],
@@ -220,13 +220,17 @@ export const useSettingsStore = create<SettingsState>()(
       },
       // 旧版本没有 maxInputTokens 时补默认，避免 undefined 贯穿运行时
       merge: (persisted, current) => {
-        const p = (persisted ?? {}) as Partial<AppSettings>
+        const { permissionMode: _legacyMode, ...pRaw } = (persisted ?? {}) as Partial<AppSettings> & { permissionMode?: string }
+        const p = pRaw as Partial<AppSettings>
         return {
           ...current,
           ...p,
           maxInputTokens: p.maxInputTokens ?? defaultSettings.maxInputTokens,
           maxTokens: p.maxTokens ?? defaultSettings.maxTokens,
           temperature: p.temperature ?? defaultSettings.temperature,
+          // 迁移：旧版 permissionMode（craft/ask/plan）没有对应新审批档位时，
+          // 一律回落到 manual（与旧 craft「危险操作需确认」行为最接近，不惊扰老用户）
+          approvalMode: p.approvalMode ?? (_legacyMode ? 'manual' : current.approvalMode),
         }
       },
     }

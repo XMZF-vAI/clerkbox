@@ -5,7 +5,7 @@ import { useAgent } from '../../hooks/use-agent'
 import { useSkillsStore } from '../../stores/skills-store'
 import { AlertCircle } from 'lucide-react'
 import { ipc } from '../../lib/ipc-client'
-import type { MessageAttachment } from '../../types/agent'
+import type { MessageAttachment, TaskMode } from '../../types/agent'
 import MessageList from './MessageList'
 import ChatInput from './ChatInput'
 import ThemeWaves from './ThemeWaves'
@@ -85,9 +85,9 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
   const isCurrentSessionStreaming = streamingSessionIds.has(activeSessionId || '')
   const isEmpty = messages.length === 0
 
-  const handleSend = async (content: string, attachments?: MessageAttachment[]) => {
+  const handleSend = async (content: string, attachments?: MessageAttachment[], taskMode?: TaskMode) => {
     if (!sessionId) return
-    await sendMessage(content, attachments)
+    await sendMessage(content, attachments, taskMode)
   }
 
   // Welcome screen: centered layout with icon + greeting + skill loader + input

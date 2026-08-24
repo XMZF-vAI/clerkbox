@@ -46,6 +46,8 @@ export interface MessageRow {
   is_compact?: number  // 0 or 1 — marks compact boundary/summary messages
   is_sub_agent_card?: number  // 0 or 1 — marks sub-agent card placeholder messages
   sub_agent_id?: string | null  // associated sub-agent run id
+  /** 发送时的任务工作流（'spec' | 'plan' | 'goal'），仅 user 消息携带 */
+  task_mode?: string | null
 }
 
 export interface WebSearchResult {

@@ -135,6 +135,7 @@ function mapMessageRows(msgRows: import('../types/ipc').MessageRow[]): Message[]
     isCompactSummary: m.is_compact === 1 ? true : undefined,
     isSubAgentCard: m.is_sub_agent_card === 1 ? true : undefined,
     subAgentId: m.sub_agent_id || undefined,
+    taskMode: m.task_mode === 'spec' || m.task_mode === 'plan' || m.task_mode === 'goal' ? m.task_mode : undefined,
   }))
 }
 
@@ -456,6 +457,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       is_compact: message.isCompactSummary ? 1 : 0,
       is_sub_agent_card: message.isSubAgentCard ? 1 : 0,
       sub_agent_id: message.subAgentId || null,
+      task_mode: message.taskMode || null,
     }))
     // Auto-update session title from first user message
     const session = get().sessions.find((s) => s.id === sessionId)
@@ -623,6 +625,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // Preserve subagent-card metadata when rewriting compacted history.
         is_sub_agent_card: msg.isSubAgentCard ? 1 : 0,
         sub_agent_id: msg.subAgentId || null,
+        // Preserve task workflow mode when rewriting compacted history.
+        task_mode: msg.taskMode || null,
         // Preserve attachments when rewriting compacted history.
         attachments: msg.attachments ? JSON.stringify(msg.attachments) : null,
       }))

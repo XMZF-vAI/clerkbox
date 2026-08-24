@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo, memo } from 'react'
 import { createPortal } from 'react-dom'
-import { Copy, Check, Terminal, FileText, FolderOpen, AlertTriangle, ChevronDown, ChevronUp, Wrench, FilePen, Globe, Pencil, Archive, Loader2 } from 'lucide-react'
+import { Copy, Check, Terminal, FileText, FolderOpen, AlertTriangle, ChevronDown, ChevronUp, Wrench, FilePen, Globe, Pencil, Archive, Loader2, BookOpen, GitBranch, Target } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { Message, StreamingToolCall } from '../../types/agent'
 import { useChatStore } from '../../stores/chat-store'
@@ -829,6 +829,8 @@ function MessageItem({ message, vibe = false, sessionId }: MessageItemProps) {
   // Collapsed intermediate messages — show as expandable summary
   if (message.collapsed && !isUser) {
     const toolCallsCount = message.toolCalls?.length || 0
+    // 既无正文也无工具调用的空折叠消息直接不渲染（历史数据兜底，避免出现空气泡）
+    if (toolCallsCount === 0 && !message.content.trim()) return null
     return (
       <div className="flex justify-start animate-slide-up">
         <div className="max-w-[90%]">
@@ -879,6 +881,15 @@ function MessageItem({ message, vibe = false, sessionId }: MessageItemProps) {
   // 用户消息附件：图片缩略图 + 文件 chip（与正文气泡分开渲染，正文为空时也要显示）
   const userImages = isUser ? (message.attachments || []).filter((a) => a.kind === 'image' && a.dataUrl) : []
   const userFiles = isUser ? (message.attachments || []).filter((a) => a.kind === 'file') : []
+
+  // 发送时选中的任务工作流（/spec /plan /goal）→ 气泡上方的小标识
+  const taskModeMeta = isUser && message.taskMode
+    ? ({
+        spec: { icon: BookOpen, name: 'Spec', cls: 'bg-md-info/15 text-md-info' },
+        plan: { icon: GitBranch, name: 'Plan', cls: 'bg-md-primary/15 text-md-primary' },
+        goal: { icon: Target, name: 'Goal', cls: 'bg-md-tertiary/15 text-md-tertiary' },
+      } as const)[message.taskMode]
+    : null
 
   return (
     <div className={`animate-slide-up ${isUser ? 'flex justify-end' : 'flex justify-start'}`}>
@@ -932,6 +943,16 @@ function MessageItem({ message, vibe = false, sessionId }: MessageItemProps) {
             onToggle={() => setThinkingExpanded(!thinkingExpanded)}
             vibe={vibe}
           />
+        )}
+
+        {/* Task workflow badge (/spec /plan /goal) - above the content bubble */}
+        {taskModeMeta && (
+          <div className={`flex items-center gap-1 px-2 py-0.5 rounded-md3-sm text-[11px] font-medium mb-1 ${
+            vibe ? 'bg-white/15 text-white/90' : taskModeMeta.cls
+          }`}>
+            <taskModeMeta.icon size={11} className="flex-shrink-0" />
+            <span>{taskModeMeta.name}</span>
+          </div>
         )}
 
         {/* Message content bubble */}
@@ -997,10 +1018,13 @@ function MessageItem({ message, vibe = false, sessionId }: MessageItemProps) {
           </span>
         )}
 
-        {/* Timestamp */}
-        <span className={`text-[10px] mt-1 px-1 ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/30'}`}>
-          {new Date(message.timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
-        </span>
+        {/* Timestamp —— 仅在有可见主体（正文/思考/用户消息）时渲染；
+            纯工具调用轮次（content 为空）只保留工具组，避免看起来像一条空消息 */}
+        {(isUser || !!message.content.trim() || hasThinking) && (
+          <span className={`text-[10px] mt-1 px-1 ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/30'}`}>
+            {new Date(message.timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
+          </span>
+        )}
       </div>
     </div>
   )

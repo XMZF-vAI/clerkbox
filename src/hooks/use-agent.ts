@@ -25,7 +25,7 @@ import {
   type AnthropicThinkingBlock,
   type NeutralMessage,
 } from '../lib/api-adapters'
-import type { ApiCompat, Message, MessageAttachment, ToolCall, ToolResult, StreamingToolCall, TokenUsage } from '../types/agent'
+import type { ApiCompat, Message, MessageAttachment, TaskMode, ToolCall, ToolResult, StreamingToolCall, TokenUsage } from '../types/agent'
 
 /** Vite 注入的 env（tsconfig 未含 vite/client 类型，安全取值） */
 const IS_DEV = (import.meta as unknown as { env?: { DEV?: boolean } }).env?.DEV ?? false
@@ -214,23 +214,50 @@ The user has activated several skills. Below is a lightweight **skill index** (n
 **Skill Index:**
 (see the "Currently Active Skills" list injected below)
 
-### Plan Mode
-When you are in Plan Mode:
-1. Analyze the user's requirements and formulate a detailed work plan
-2. Write the plan to \`.clerkbox/plan/plan.md\` (use the write_file tool)
-3. Inform the user that the plan has been written and wait for confirmation before executing
-4. After the user confirms, execute step by step according to the plan`
+### Task Workflows (/spec /plan /goal)
+When the user starts a message with one of these workflows (a mode chip shown in their input):
+- **Plan**: analyze requirements, write a detailed plan to \`.clerkbox/plan/plan.md\`, then stop and wait for the user's confirmation before executing.
+- **Spec**: refine requirements into \`.clerkbox/specs/<task-name>/\` (spec.md + tasks.md + checklist.md), then stop and wait for confirmation before implementing.
+- **Goal**: work autonomously toward the stated objective with verifiable success criteria until the goal is achieved.
+When the user confirms a plan/spec in a follow-up message, re-read the documents and execute them step by step.`
 
-/** Build plan mode specific prompt */
+/** Build plan mode specific prompt（Plan 工作流：先规划，停下等用户确认，确认后下一轮再执行） */
 const PLAN_MODE_PROMPT = `
 
-## ⚠️ Current Mode: Plan Mode
-You are now in Plan Mode. In this mode:
-1. **Do not execute operations directly.** First analyze the user's requirements and formulate a detailed plan.
-2. Use the write_file tool to write the plan to \`.clerkbox/plan/plan.md\`
-3. The plan should include: objectives, steps, specific operations for each step, and expected results
-4. After writing, include the marker \`[PLAN_COMPLETE]\` at the end of your reply message. The system will automatically switch to Craft (execution) mode, and you can then begin executing step by step according to the plan.
-5. If the user asks to modify the plan, rewrite plan.md and include \`[PLAN_COMPLETE]\` again.`
+## ⚠️ Current Workflow: Plan (/plan)
+You are running the Plan workflow. In this workflow:
+1. **Do not execute operations directly.** Analyze the user's requirements and formulate a detailed plan first.
+2. Use the write_file tool to write the plan to \`.clerkbox/plan/plan.md\`.
+3. The plan should include: objectives, steps, specific operations for each step, and expected results.
+4. After writing the plan file, include the marker \`[PLAN_COMPLETE]\` at the end of your reply message, then STOP. The run ends there — do NOT start executing.
+5. The user will review the plan (they may edit plan.md or ask you to revise it). Only after the user explicitly confirms in a follow-up message will execution begin; at that point you are in normal mode: re-read \`.clerkbox/plan/plan.md\` and execute it step by step.
+6. If the user asks to modify the plan, rewrite plan.md and include \`[PLAN_COMPLETE]\` again.`
+
+/** Build spec mode specific prompt（Spec 工作流：规范/任务/验收三件套，停下等用户确认，确认后严格按文档执行） */
+const SPEC_MODE_PROMPT = `
+
+## ⚠️ Current Workflow: Spec (/spec)
+You are running the Spec workflow, designed for complex, long-horizon tasks. In this workflow:
+1. **Do not implement anything yet.** First refine the user's requirements into a complete documentation set under \`.clerkbox/specs/<task-name>/\` (derive a short kebab-case task name from the requirement):
+   - \`spec.md\` — the specification: background, goals, non-goals, functional requirements, technical design/approach.
+   - \`tasks.md\` — a numbered, dependency-ordered task list broken into concrete, executable steps.
+   - \`checklist.md\` — an acceptance checklist: verifiable acceptance criteria for the deliverable, each with a checkbox \`- [ ]\`.
+2. Use the write_file tool to create these files. They are project knowledge assets — keep them precise and reviewable.
+3. After all three files are written, include the marker \`[SPEC_COMPLETE]\` at the end of your reply message, then STOP. The run ends there — do NOT start implementing.
+4. The user will review the documents (they may edit them or ask you to revise). Only after the user explicitly confirms in a follow-up message will implementation begin; at that point you are in normal mode: re-read the spec documents and execute tasks.md strictly, one task at a time, updating \`tasks.md\` progress and checking off \`checklist.md\` items as you complete them.
+5. If the user asks to modify the documents, rewrite them and include \`[SPEC_COMPLETE]\` again.`
+
+/** Build goal mode specific prompt（Goal 工作流：目标导向，持续自主运行直到可验证完成） */
+const GOAL_MODE_PROMPT = `
+
+## ⚠️ Current Workflow: Goal (/goal)
+You are running the Goal workflow: an autonomous, goal-oriented run that keeps working until the goal is verifiably achieved.
+1. Parse the user's message into: **Objective** (what to achieve), **Success criteria** (verifiable completion states — commands that can be run with expected outputs), and **Constraints** (boundaries that must not be crossed), deriving any that are implicit.
+2. Restate the objective, success criteria and constraints briefly at the start of your first reply so the user can course-correct early.
+3. Work autonomously: plan, execute, verify, and iterate. Do NOT pause to ask for permission between steps — keep driving toward the goal until every success criterion is met and verified (e.g. by running tests/builds/greps and checking their outputs).
+4. Respect the constraints strictly: never touch files, directories or dependencies that are out of bounds.
+5. When ALL success criteria are verifiably met, include the marker \`[GOAL_COMPLETE]\` at the end of your final message together with a completion report (what was achieved, evidence for each criterion, and any deviations).
+6. If you get genuinely stuck (blocked by missing credentials/information only the user can provide), stop and explain precisely what is blocked and what you need — do not fabricate completion.`
 
 const MAX_REACT_ITERATIONS = 100 // Loop exits when model stops calling tools or hits this cap
 
@@ -292,8 +319,11 @@ export function useAgent(sessionId: string) {
    *  而 save_memory 会在会话中途改写记忆文件 → memoryPrompt 变化 → 动态段之后全部缓存作废。
    *  故同一会话（含 workingDir/homeDir）内只构建一次，新记忆下个会话生效（快照语义）。 */
   const sessionMemoryRef = useRef<{ key: string; prompt: string } | null>(null)
-  /** dev 校验用：静态 system 段最近一次的 (来源, 哈希) */
+  /** dev 校验用：静�?system 段最近一次的 (来源, 哈希) */
   const staticSystemHashRef = useRef<{ origin: string; hash: string } | null>(null)
+  /** 当前运行中的任务工作流模式（/spec /plan /goal，随 sendMessage 传入，run 结束清空）。
+   *  用 ref 而非参数透传：checkToolPermission 在工具执行深处读取，避免层层传参 */
+  const activeTaskModeRef = useRef<TaskMode | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   /** Get working directory for current session, with default fallback */
@@ -587,7 +617,8 @@ export function useAgent(sessionId: string) {
     opts: {
       memoryPrompt?: string
       workingDir?: string
-      permissionMode?: string
+      /** 任务工作流模式（/spec /plan /goal 菜单选择，随本次消息生效） */
+      taskMode?: TaskMode
       activeSkillIndex?: Array<{
         slug: string
         name: string
@@ -604,7 +635,7 @@ export function useAgent(sessionId: string) {
     const {
       memoryPrompt = '',
       workingDir = getWorkingDir(),
-      permissionMode = settings.permissionMode,
+      taskMode,
       activeSkillIndex = useSkillsStore.getState().getActiveSkillIndex(),
       extraSystemPrompt,
       agentsMdContent = '',
@@ -641,7 +672,10 @@ export function useAgent(sessionId: string) {
           dynamicSystemContent += `\n\n### ⚡ Currently Active Skills (Index)\n${indexLines.join('\n')}\n\n**Follow the Skill Router rules above. Do NOT read all skills — only read those matching the current task.**`
         }
       }
-      if (permissionMode === 'plan') dynamicSystemContent += PLAN_MODE_PROMPT
+      // 任务工作流提示词：spec/plan/goal 各自注入对应段（plan 复用 PLAN_MODE_PROMPT）
+      if (taskMode === 'plan') dynamicSystemContent += PLAN_MODE_PROMPT
+      else if (taskMode === 'spec') dynamicSystemContent += SPEC_MODE_PROMPT
+      else if (taskMode === 'goal') dynamicSystemContent += GOAL_MODE_PROMPT
     }
 
     // 静/动拆分成两条 system 消息：供应商前缀缓存按"首个不一致 token"作废其后全部。
@@ -802,7 +836,7 @@ export function useAgent(sessionId: string) {
 
   /** Main send message function with full ReAct loop */
   const sendMessage = useCallback(
-    async (content: string, attachments?: MessageAttachment[]) => {
+    async (content: string, attachments?: MessageAttachment[], taskMode?: TaskMode) => {
       // Prevent concurrent sends on the same session（per-session 粒度，不阻塞其他会话并发）
       if (getSessionAbortController(sessionId)) {
         setError('当前正在处理中，请等待完成后再发送')
@@ -829,6 +863,8 @@ export function useAgent(sessionId: string) {
       setSessionAbortController(sessionId, controller)
       const currentSession = useChatStore.getState().sessions.find((s) => s.id === sessionId)
       requestWorkingDirRef.current = currentSession?.workingDir || currentSession?.defaultWorkDir || ''
+      // 记录本次运行的任务工作流模式（/spec /plan /goal；工具权限检查与提示词注入都会读取）
+      activeTaskModeRef.current = taskMode ?? null
       // 记录是否是用户主动 abort，用于决定是否发"异常停下"通知
       let abortedByUser = false
 
@@ -840,6 +876,8 @@ export function useAgent(sessionId: string) {
         timestamp: Date.now(),
         // 附件随消息入内存 + 持久化（仅在非空时携带）
         ...(attachments && attachments.length > 0 ? { attachments } : {}),
+        // 任务工作流随消息记录（气泡内展示 + 重启后可见）
+        ...(taskMode ? { taskMode } : {}),
       }
       addMessage(sessionId, userMsg)
 
@@ -849,7 +887,7 @@ export function useAgent(sessionId: string) {
       const contextMessages = session ? [...session.messages, userMsg] : [userMsg]
 
       try {
-        await reactLoop(contextMessages, controller)
+        await reactLoop(contextMessages, controller, taskMode)
       } catch (err) {
         if (controller.signal.aborted) {
           abortedByUser = true
@@ -868,6 +906,7 @@ export function useAgent(sessionId: string) {
         notifyIfNotViewing(sessionId, 'error', msg.slice(0, 200))
       } finally {
         requestWorkingDirRef.current = null
+        activeTaskModeRef.current = null
         // Do not clear a controller installed by a newer request for this session.
         if (getSessionAbortController(sessionId) === controller) {
           setSessionAbortController(sessionId, null)
@@ -894,7 +933,8 @@ export function useAgent(sessionId: string) {
   /** ReAct loop: think → act → observe → repeat */
   const reactLoop = async (
     initialMessages: Message[],
-    controller: AbortController
+    controller: AbortController,
+    taskMode?: TaskMode
   ) => {
     let conversationMessages = [...initialMessages]
 
@@ -1027,7 +1067,7 @@ export function useAgent(sessionId: string) {
       }
 
       // Build API messages from conversation history (with auto-truncation for long conversations)
-      const apiMessages = truncateMessages(buildAPIMessages(conversationMessages, { memoryPrompt, agentsMdContent }))
+      const apiMessages = truncateMessages(buildAPIMessages(conversationMessages, { memoryPrompt, agentsMdContent, taskMode }))
 
       // Parse streaming response
       let content = ''
@@ -1187,32 +1227,20 @@ export function useAgent(sessionId: string) {
 
       // No tool calls → we're done
       if (toolCalls.length === 0) {
-        // Plan mode: detect [PLAN_COMPLETE] marker → auto-switch to craft
-        if (settings.permissionMode === 'plan' && content.includes('[PLAN_COMPLETE]')) {
-          // Remove marker from display
-          const cleanedContent = content.replace(/\[PLAN_COMPLETE\]/g, '').trim()
+        // 工作流标记处理（/plan /spec /goal）：
+        // - plan/spec：检测到完成标记 → 仅从显示中剥离并结束本轮（停下等用户确认，
+        //   用户确认后的下一条消息以普通模式运行，模型会重读文档开始执行）
+        // - goal：[GOAL_COMPLETE] 仅做显示剥离，完成报告保留
+        const currentTaskMode = taskMode
+        const completionMarkers: Array<{ marker: string; enabled: boolean }> = [
+          { marker: '[PLAN_COMPLETE]', enabled: currentTaskMode === 'plan' },
+          { marker: '[SPEC_COMPLETE]', enabled: currentTaskMode === 'spec' },
+          { marker: '[GOAL_COMPLETE]', enabled: currentTaskMode === 'goal' },
+        ]
+        const hitMarker = completionMarkers.find((m) => m.enabled && content.includes(m.marker))
+        if (hitMarker) {
+          const cleanedContent = content.split(hitMarker.marker).join('').trim()
           updateMessage(sessionId, assistantId, { content: cleanedContent })
-          // Auto-switch to craft mode
-          useSettingsStore.getState().updateSettings({ permissionMode: 'craft' })
-          // Read plan.md and inject as system message for AI to reference
-          const wd = getWorkingDir()
-          const planPath = wd ? wd + '\\.clerkbox\\plan\\plan.md' : '.clerkbox\\plan\\plan.md'
-          try {
-            const planContent = await ipc.readFile(planPath)
-            addMessage(sessionId, {
-              id: makeId(),
-              role: 'user',
-              content: `[System] \n\n## 📋 Execution Plan\n${planContent}\n\nPlease follow the above plan strictly and execute step by step.`,
-              timestamp: Date.now(),
-            })
-          } catch {
-            addMessage(sessionId, {
-              id: makeId(),
-              role: 'user',
-              content: '[System] \n\n✅ Plan mode is complete. Automatically switched to Craft execution mode. Please read `.clerkbox/plan/plan.md` to understand the plan and execute.',
-              timestamp: Date.now(),
-            })
-          }
         }
         // Collapse all intermediate assistant messages (those that had tool calls)
         // Only keep the final assistant message expanded
@@ -1363,18 +1391,23 @@ export function useAgent(sessionId: string) {
 
   /** Check permission for a tool call.
    *  Agent allowlists and denylists can further restrict access, never elevate it.
-   *  opts.permissionMode: 覆盖权限模式（默认 settings.permissionMode）。 */
+   *  审批档位（settings.approvalMode）控制确认策略：
+   *  - manual：危险命令 / 工作目录外操作 / 系统目录写入 全部弹窗确认
+   *  - auto：AI 审核并自动批准（危险命令与目录外操作免确认；系统目录写入仍弹窗兜底）
+   *  - full：完全访问，无需询问直接执行
+   *  任务工作流（taskMode）：plan/spec 规划期仅允许读取与写入对应文档目录 */
   const checkToolPermission = async (
     toolName: string,
     args: Record<string, unknown>,
     opts: {
-      permissionMode?: string
+      /** 覆盖任务工作流模式；不传读 activeTaskModeRef，子 agent 显式传 null 走普通模式 */
+      taskMode?: TaskMode | null
       allowedTools?: string[]
       disallowedTools?: string[]
     } = {}
   ): Promise<{ allowed: boolean; reason?: string }> => {
     const {
-      permissionMode = settings.permissionMode,
+      taskMode = activeTaskModeRef.current,
       allowedTools,
       disallowedTools,
     } = opts
@@ -1388,51 +1421,44 @@ export function useAgent(sessionId: string) {
       return { allowed: false, reason: `子 agent 工具黑名单禁止: ${toolName}` }
     }
 
-    const mode = permissionMode
+    const approvalMode = settings.approvalMode
+    const READ_TOOLS = ['read_file', 'read_image', 'list_dir', 'search_files', 'search_content', 'web_search', 'web_fetch', 'search_memory']
 
-    // Ask mode: only allow safe read operations + web tools + memory search
-    if (mode === 'ask') {
-      if (['read_file', 'read_image', 'list_dir', 'search_files', 'search_content', 'web_search', 'web_fetch', 'search_memory'].includes(toolName)) {
-        return { allowed: true }
-      }
-      return { allowed: false, reason: '当前处于 Ask 模式，仅允许读取和网络操作。如需执行写操作或命令，请切换到 Craft 模式。' }
-    }
-
-    // Plan mode: allow read + write_file (for plan.md only) + list_dir + memory tools, but no execute_command
-    if (mode === 'plan') {
-      if (['read_file', 'read_image', 'list_dir', 'search_files', 'search_content', 'web_search', 'web_fetch', 'search_memory'].includes(toolName)) {
-        return { allowed: true }
-      }
-      if (toolName === 'save_memory') {
+    // ── 任务工作流规划期（plan/spec）：只许读 + 写对应文档目录，禁命令 ──
+    // 用户确认文档后的下一条消息以普通模式运行，届时不再受限
+    if (taskMode === 'plan' || taskMode === 'spec') {
+      const docDirName = taskMode === 'plan' ? 'plan' : 'specs'
+      const label = taskMode === 'plan' ? 'Plan' : 'Spec'
+      if (READ_TOOLS.includes(toolName) || toolName === 'save_memory') {
         return { allowed: true }
       }
       if (toolName === 'write_file' || toolName === 'search_replace') {
-        const isInsidePlanDir = (() => {
+        const isInsideDocDir = (() => {
           const wd = getWorkingDir()
           if (!wd) return false
           const filePath = resolveToolPath(wd, args.path)
           const separator = wd.includes('\\') ? '\\' : '/'
-          const planDir = `${wd}${separator}.clerkbox${separator}plan`
-          return isPathInside(filePath, planDir) &&
-            !isPathInside(planDir, filePath)
+          const docDir = `${wd}${separator}.clerkbox${separator}${docDirName}`
+          return isPathInside(filePath, docDir) &&
+            !isPathInside(docDir, filePath)
         })()
-        if (isInsidePlanDir) {
+        if (isInsideDocDir) {
           return { allowed: true }
         }
-        return { allowed: false, reason: '计划模式下仅允许写入 .clerkbox/plan/ 目录。如需执行操作，请切换到 Craft 模式。' }
+        return { allowed: false, reason: `${label} 工作流规划期仅允许写入 .clerkbox/${docDirName}/ 目录。文档经用户确认后即可开始执行。` }
       }
       if (toolName === 'execute_command') {
-        return { allowed: false, reason: '计划模式下不允许执行命令。请先确认计划，再切换到 Craft 模式执行。' }
+        return { allowed: false, reason: `${label} 工作流规划期不允许执行命令。文档经用户确认后即可开始执行。` }
       }
-      return { allowed: false, reason: '计划模式下仅允许读取和写入计划文件。' }
+      return { allowed: false, reason: `${label} 工作流规划期仅允许读取和写入工作流文档。` }
     }
 
-    // Craft mode: allow everything, but dangerous commands need user confirmation
-    if (toolName === 'execute_command') {
+    // ── 审批档位：命令执行确认（full 档全部免询问） ──
+    if (toolName === 'execute_command' && approvalMode !== 'full') {
       const cmd = String(args.command || '')
       const workingDir = getWorkingDir()
       const commandCwd = workingDir ? resolveToolPath(workingDir, args.cwd || workingDir) : String(args.cwd || '')
-      if (isDangerousCommand(cmd)) {
+      if (approvalMode === 'manual' && isDangerousCommand(cmd)) {
         // 危险命令确认前：标记 confirm-danger + 通知（仅当用户不在此会话时）
         setSessionStatus(sessionId, 'confirm-danger')
         notifyIfNotViewing(sessionId, 'confirm-danger', `命令：${cmd.slice(0, 100)}`)
@@ -1446,7 +1472,8 @@ export function useAgent(sessionId: string) {
           return { allowed: false, reason: '用户取消了高风险命令的执行' }
         }
       }
-      if (workingDir && commandCwd && !isPathInside(commandCwd, workingDir)) {
+      // auto 档：AI 已自审该操作，目录外执行免确认；manual 档仍弹窗
+      if (approvalMode === 'manual' && workingDir && commandCwd && !isPathInside(commandCwd, workingDir)) {
         const confirmed = await ipc.confirmDialog(
           '工作目录外执行确认',
           `ClerkBox 即将在工作目录外执行命令：\n${commandCwd}\n\n当前工作目录：${workingDir}\n\n是否允许此次执行？`
@@ -1455,10 +1482,11 @@ export function useAgent(sessionId: string) {
       }
     }
 
-    // Check dangerous file writes in craft mode too
-    if (toolName === 'write_file' || toolName === 'search_replace') {
+    // ── 审批档位：文件写入确认（full 档全部免询问） ──
+    if ((toolName === 'write_file' || toolName === 'search_replace') && approvalMode !== 'full') {
       const workingDir = getWorkingDir()
       const path = resolveToolPath(workingDir, args.path)
+      // 系统目录写入：manual/auto 都弹窗（最后一道防线，仅 full 档放行）
       if (isSystemPath(path)) {
         const confirmed = await ipc.confirmDialog(
           '系统目录写入确认',
@@ -1469,8 +1497,8 @@ export function useAgent(sessionId: string) {
         }
       }
 
-      // Confirm writes outside the selected workspace after resolving relative paths.
-      if (workingDir) {
+      // auto 档：AI 已自审，目录外写入免确认；manual 档弹窗
+      if (approvalMode === 'manual' && workingDir) {
         const isOutside = !isPathInside(path, workingDir)
         if (isOutside) {
           const confirmed = await ipc.confirmDialog(
@@ -1518,6 +1546,8 @@ export function useAgent(sessionId: string) {
       if (msg.id === finalMsgId) continue  // Skip the final message
       if (msg.role === 'user') continue    // Keep user messages visible
       if (msg.role === 'assistant' && (!msg.toolCalls || msg.toolCalls.length === 0) && msg.content && !msg.content.includes('正在使用工具')) continue  // Keep assistant summaries visible
+      // 完全空的消息（无正文、无工具调用）不折叠也不展示 —— 折叠会渲染成「中间步骤 (0)」空行
+      if (msg.role === 'assistant' && (!msg.toolCalls || msg.toolCalls.length === 0) && !msg.content.trim()) continue
 
       // Collapse this message
       if (!msg.collapsed) {
@@ -1614,11 +1644,11 @@ export function useAgent(sessionId: string) {
           }
         }
 
-        // 构建 API 消息（用子 agent 的 systemPrompt 覆盖）
+        // 构建 API 消息（用子 agent 的 systemPrompt 覆盖；子 agent 不带任务工作流提示词）
         const apiMessages = truncateMessages(buildAPIMessages(conversationMessages, {
           workingDir,
           memoryPrompt: '',
-          permissionMode: 'craft',
+          taskMode: undefined,
           activeSkillIndex: [],
           extraSystemPrompt: agent.systemPrompt,
         }))
@@ -1762,7 +1792,8 @@ export function useAgent(sessionId: string) {
         const results: ToolResult[] = []
         for (const tc of toolCalls) {
           const permResult = await checkToolPermission(tc.name, tc.arguments, {
-            permissionMode: settings.permissionMode,
+            // 子 agent 不继承主对话的任务工作流（plan/spec 限制只作用于发起规划的那条消息）
+            taskMode: null,
             allowedTools: agent.tools,
             disallowedTools: agent.disallowedTools,
           })

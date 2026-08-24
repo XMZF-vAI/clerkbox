@@ -1,3 +1,7 @@
+/** 单条消息的任务工作流模式（由 "/" 命令菜单选择，随消息一次性生效）：
+ *  spec=生成规范/任务/验收三件套文档，确认后严格执行；plan=先生成计划文档，确认后执行；goal=目标导向持续运行直到完成 */
+export type TaskMode = 'spec' | 'plan' | 'goal'
+
 /** 消息附件：图片携带压缩后的 base64 data URL 真正发给模型；文件只携带绝对路径（内容由模型用工具自行读取） */
 export interface MessageAttachment {
   id: string
@@ -23,6 +27,8 @@ export interface Message {
   timestamp: number
   /** 消息附件（图片/文件）；随消息持久化 */
   attachments?: MessageAttachment[]
+  /** 发送该消息时选中的任务工作流（/spec /plan /goal）；随消息持久化，用于气泡内展示 */
+  taskMode?: TaskMode
   toolCalls?: ToolCall[]
   toolResults?: ToolResult[]
   finishReason?: string
@@ -185,7 +191,8 @@ export interface AppSettings {
   /** 自定义种子色（colorScheme 为 'custom' 时生效） */
   customSeedColor: string
   language: string
-  permissionMode: 'craft' | 'ask' | 'plan'
+  /** Agent 操作审批档位：manual=每个重要操作弹窗确认；auto=AI 审核并自动批准（系统目录写入仍确认）；full=无需询问直接执行 */
+  approvalMode: 'manual' | 'auto' | 'full'
   enableThinking: boolean
   thinkingBudget?: number
   reasoningEffort?: ReasoningEffort
