@@ -22,6 +22,7 @@
   "type": "module",
   "dependencies": {
     "@material/material-color-utilities": "^0.4.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "ai": "^6.0.195",
     "cheerio": "^1.2.0",
     "i18next": "^26.3.6",
@@ -37,6 +38,7 @@
     "sql.js": "^1.14.1",
     "tailwind-merge": "^3.6.0",
     "tailwindcss-animate": "^1.0.7",
+    "zod": "^4.4.3",
     "zustand": "^5.0.14"
   },
   "devDependencies": {

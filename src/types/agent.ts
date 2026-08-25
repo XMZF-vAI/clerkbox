@@ -1,3 +1,5 @@
+import type { McpServerConfig } from './ipc'
+
 /** 单条消息的任务工作流模式（由 "/" 命令菜单选择，随消息一次性生效）：
  *  spec=生成规范/任务/验收三件套文档，确认后严格执行；plan=先生成计划文档，确认后执行；goal=目标导向持续运行直到完成 */
 export type TaskMode = 'spec' | 'plan' | 'goal'
@@ -220,6 +222,8 @@ export interface AppSettings {
   claudeMdCompat: boolean
   /** WebUI 是否绑定 0.0.0.0 允许局域网访问（默认 false 仅本机 127.0.0.1） */
   webuiLanAccess: boolean
+  /** MCP 服务器列表（配置随设置持久化，连接由主进程 McpManager 管理） */
+  mcpServers: McpServerConfig[]
 }
 
 /** OpenAI-compatible stream chunk delta */

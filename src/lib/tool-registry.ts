@@ -1,6 +1,7 @@
 import { ipc } from './ipc-client'
 import { slugify } from './memory'
 import type { ToolDefinition, MemoryEntry } from '../types/agent'
+import type { McpToolInfo } from '../types/ipc'
 
 // ── Static (builtin) tool definitions ──
 
@@ -415,14 +416,24 @@ function computeEditDiff(path: string, oldText: string, newText: string): EditDi
 
 class ToolRegistry {
   private builtinDefinitions: ToolDefinition[]
+  private mcpDefinitions: ToolDefinition[] = []
 
   constructor() {
     this.builtinDefinitions = [...fileTools, ...shellTools, ...webTools, ...memoryTools, ...agentTools]
   }
 
+  /** 注入当前已连接 MCP 服务器提供的工具（mcp-store 同步后调用） */
+  setMcpTools(tools: McpToolInfo[]): void {
+    this.mcpDefinitions = tools.map((t) => ({
+      name: t.name,
+      description: t.description,
+      parameters: t.parameters,
+    }))
+  }
+
   /** Get all tool definitions */
   get definitions(): ToolDefinition[] {
-    return this.builtinDefinitions
+    return [...this.builtinDefinitions, ...this.mcpDefinitions]
   }
 
   /** Execute a tool by name */
@@ -790,8 +801,18 @@ class ToolRegistry {
           return `Error: 子 agent 执行失败 - ${e instanceof Error ? e.message : String(e)}`
         }
       }
-      default:
+      default: {
+        // MCP 工具（mcp__<server>__<tool>）：转发到主进程 McpManager 执行
+        if (name.startsWith('mcp__')) {
+          try {
+            const result = await ipc.mcpCallTool(name, args ?? {})
+            return result.content
+          } catch (e) {
+            return `Error: MCP 工具调用失败 ${name} - ${e instanceof Error ? e.message : String(e)}`
+          }
+        }
         return `Error: 未知工具 "${name}"`
+      }
     }
   }
 }

@@ -1,5 +1,5 @@
 import { useState, useEffect, useId, useRef } from 'react'
-import { Cpu, Palette, RotateCcw, Check, AlertCircle, Info, X, Plus, Pencil, Trash2, Sparkles, Languages, FileText, Settings, User, LogOut, Upload, Download, Loader2, RefreshCw } from 'lucide-react'
+import { Cpu, Palette, RotateCcw, Check, AlertCircle, Info, X, Plus, Pencil, Trash2, Sparkles, Languages, FileText, Settings, User, LogOut, Upload, Download, Loader2, RefreshCw, Plug } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useSettingsStore } from '../../stores/settings-store'
 import { useAccountStore, avatarColorFor, initialOf } from '../../stores/account-store'
@@ -8,12 +8,13 @@ import { MACARON_PRESETS, schemeSwatches } from '../../lib/theme-engine'
 import { SUPPORTED_LANGUAGES } from '../../i18n'
 import { ipc } from '../../lib/ipc-client'
 import ProvidersSection from './ProvidersSection'
+import McpSection from './McpSection'
 import TokenUsageStats from './TokenUsageStats'
 import ConfirmDialog from '../ui/ConfirmDialog'
 
 import APP_ICON from '../../assets/icon.png'
 
-type Tab = 'api' | 'general' | 'appearance' | 'account' | 'about'
+type Tab = 'api' | 'mcp' | 'general' | 'appearance' | 'account' | 'about'
 
 const THEME_LABEL_KEY: Record<string, string> = {
   light: 'settings.appearance.light',
@@ -113,6 +114,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
 
   const tabs: { key: Tab; label: string; icon: typeof Cpu }[] = [
     { key: 'api', label: t('settings.tabs.api'), icon: Cpu },
+    { key: 'mcp', label: t('settings.tabs.mcp'), icon: Plug },
     { key: 'general', label: t('settings.tabs.general'), icon: Settings },
     { key: 'appearance', label: t('settings.tabs.appearance'), icon: Palette },
     { key: 'account', label: t('settings.tabs.account'), icon: User },
@@ -232,6 +234,10 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
 
                 <ProvidersSection />
               </div>
+            )}
+
+            {activeTab === 'mcp' && (
+              <McpSection />
             )}
 
             {activeTab === 'general' && (

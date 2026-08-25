@@ -56,6 +56,50 @@ export interface WebSearchResult {
   url: string
 }
 
+// ── MCP (Model Context Protocol) ──
+
+/** MCP 服务器连接方式 */
+export type McpTransportType = 'stdio' | 'http'
+
+/** 一条 MCP 服务器配置（env/headers 可能含密钥，随设置一起持久化） */
+export interface McpServerConfig {
+  id: string
+  name: string
+  transport: McpTransportType
+  enabled: boolean
+  /** stdio：启动命令，如 npx / uvx / node */
+  command?: string
+  /** stdio：命令参数 */
+  args?: string[]
+  /** stdio：环境变量（可含 API Token 等密钥） */
+  env?: Record<string, string>
+  /** http：服务器 URL（streamable-http / SSE 自动识别） */
+  url?: string
+  /** http：附加请求头（可含 Authorization 等密钥） */
+  headers?: Record<string, string>
+}
+
+/** 连接后发现的单个 MCP 工具（已带 mcp__前缀名） */
+export interface McpToolInfo {
+  name: string
+  description: string
+  /** JSON Schema 参数定义 */
+  parameters: object
+}
+
+/** MCP 服务器运行状态 */
+export interface McpServerStatus {
+  id: string
+  name: string
+  transport: McpTransportType
+  enabled: boolean
+  state: 'connecting' | 'connected' | 'error' | 'disabled'
+  toolCount: number
+  /** 连接成功时返回该服务器提供的工具清单 */
+  tools: McpToolInfo[]
+  error?: string
+}
+
 // ── 热土引擎（REngine）账号系统 ──
 
 /** 热土用户信息 */
@@ -175,6 +219,19 @@ export interface ClerkBoxAPI {
   kvGet: (key: string) => Promise<string | null>
   kvSet: (key: string, value: string) => Promise<void>
   kvRemove: (key: string) => Promise<void>
+  // MCP 服务器（Model Context Protocol）
+  /** 全量同步服务器配置（主进程按需建立/断开连接），返回最新状态 */
+  mcpSync: (servers: McpServerConfig[]) => Promise<McpServerStatus[]>
+  /** 查询所有服务器当前状态 */
+  mcpStatus: () => Promise<McpServerStatus[]>
+  /** 测试一条配置（临时连接，完成后断开，不落入常驻连接池） */
+  mcpTest: (server: McpServerConfig) => Promise<{ ok: true; toolCount: number; tools: Array<{ name: string; description: string }> } | { error: string }>
+  /** 拉取所有已连接服务器提供的聚合工具清单（对话用） */
+  mcpTools: () => Promise<McpToolInfo[]>
+  /** 按 mcp__服务器__工具 全名调用工具 */
+  mcpCallTool: (toolName: string, args: Record<string, unknown>) => Promise<{ content: string; isError: boolean }>
+  /** 订阅服务器状态变化；返回退订函数 */
+  onMcpStatus: (callback: (statuses: McpServerStatus[]) => void) => () => void
   // 热土账号系统（登录 / 登出 / 数据段云同步）
   accountLogin: () => Promise<{ ok: true; status: AccountStatus } | { error: string }>
   accountLogout: () => Promise<void>

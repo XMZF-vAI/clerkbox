@@ -7,6 +7,9 @@ import type {
   ApiConnConfig,
   FetchedModel,
   FileEntry,
+  McpServerConfig,
+  McpServerStatus,
+  McpToolInfo,
   MessageRow,
   ParseSkillFileResult,
   SessionRow,
@@ -322,6 +325,23 @@ export const ipc = {
     isElectron ? window.clerkbox.saveApiKey(id, apiKey) : webInvoke('saveApiKey', [id, apiKey]),
   removeApiKey: (id: string): Promise<void> =>
     isElectron ? window.clerkbox.removeApiKey(id) : webInvoke('removeApiKey', [id]),
+
+  // MCP 服务器（Model Context Protocol）
+  // WebUI 模式无事件推送，onMcpStatus 返回空退订函数（状态靠拉取）
+  mcpSync: (servers: McpServerConfig[]): Promise<McpServerStatus[]> =>
+    isElectron ? window.clerkbox.mcpSync(servers) : webInvoke('mcpSync', [servers]),
+  mcpStatus: (): Promise<McpServerStatus[]> =>
+    isElectron ? window.clerkbox.mcpStatus() : webInvoke('mcpStatus'),
+  mcpTest: (server: McpServerConfig): Promise<{ ok: true; toolCount: number; tools: Array<{ name: string; description: string }> } | { error: string }> =>
+    isElectron ? window.clerkbox.mcpTest(server) : webInvoke('mcpTest', [server]),
+  mcpTools: (): Promise<McpToolInfo[]> =>
+    isElectron ? window.clerkbox.mcpTools() : webInvoke('mcpTools'),
+  mcpCallTool: (toolName: string, args: Record<string, unknown>): Promise<{ content: string; isError: boolean }> =>
+    isElectron ? window.clerkbox.mcpCallTool(toolName, args) : webInvoke('mcpCallTool', [toolName, args]),
+  onMcpStatus: (callback: (statuses: McpServerStatus[]) => void): (() => void) => {
+    if (isElectron) return window.clerkbox.onMcpStatus(callback)
+    return () => {}
+  },
 
   // Memory system
   scanMemory: (workingDir: string): Promise<MemoryEntry[]> =>

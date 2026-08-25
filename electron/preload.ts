@@ -12,6 +12,7 @@ import type {
   WebSearchResult,
 } from '../src/types/ipc'
 import type { MemoryEntry } from '../src/types/agent'
+import type { McpServerConfig, McpServerStatus, McpToolInfo } from '../src/types/ipc'
 
 contextBridge.exposeInMainWorld('clerkbox', {
   // File system
@@ -94,6 +95,21 @@ contextBridge.exposeInMainWorld('clerkbox', {
   loadApiKeys: (): Promise<Record<string, string>> => ipcRenderer.invoke('loadApiKeys'),
   saveApiKey: (id: string, apiKey: string): Promise<void> => ipcRenderer.invoke('saveApiKey', id, apiKey),
   removeApiKey: (id: string): Promise<void> => ipcRenderer.invoke('removeApiKey', id),
+
+  // MCP servers
+  mcpSync: (servers: McpServerConfig[]): Promise<McpServerStatus[]> =>
+    ipcRenderer.invoke('mcpSync', servers),
+  mcpStatus: (): Promise<McpServerStatus[]> => ipcRenderer.invoke('mcpStatus'),
+  mcpTest: (server: McpServerConfig): Promise<{ ok: true; toolCount: number; tools: Array<{ name: string; description: string }> } | { error: string }> =>
+    ipcRenderer.invoke('mcpTest', server),
+  mcpTools: (): Promise<McpToolInfo[]> => ipcRenderer.invoke('mcpTools'),
+  mcpCallTool: (toolName: string, args: Record<string, unknown>): Promise<{ content: string; isError: boolean }> =>
+    ipcRenderer.invoke('mcpCallTool', toolName, args),
+  onMcpStatus: (callback: (statuses: McpServerStatus[]) => void): (() => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, statuses: McpServerStatus[]) => callback(statuses)
+    ipcRenderer.on('mcp:statusChanged', listener)
+    return () => ipcRenderer.removeListener('mcp:statusChanged', listener)
+  },
 
   // Memory system
   scanMemory: (workingDir: string): Promise<MemoryEntry[]> =>

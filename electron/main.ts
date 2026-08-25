@@ -20,7 +20,8 @@ import * as yaml from 'js-yaml'
 import { registerApiProxyHandlers, bindApiProxyCleanup, startChatStream, abortChatStream, type ApiConnConfig } from './api-proxy'
 import { handlerRegistry, setStreamHandlers, startWebUI, stopWebUI, getWebUIStatus, getLanAddresses } from './webui-server'
 import * as rtAccount from './rt-account'
-import type { AccountSyncKind } from '../src/types/ipc'
+import { mcpManager } from './mcp-manager'
+import type { AccountSyncKind, McpServerConfig } from '../src/types/ipc'
 
 const SKILL_REQUEST_TIMEOUT_MS = 15_000
 const MAX_SKILL_FILE_BYTES = 512 * 1024
@@ -460,6 +461,9 @@ function createWindow() {
   mainWindow.on('closed', () => {
     mainWindow = null
   })
+
+  // MCP 状态变化通过该窗口推送给渲染进程
+  mcpManager.setMainWindow(mainWindow)
 
   // 窗口销毁 / reload 时掐掉在途的模型 API 流式请求
   bindApiProxyCleanup(mainWindow)
@@ -2021,6 +2025,28 @@ function registerIpcHandlers() {
     return rtAccount.rtSyncDownload(parsed, force === true)
   })
 
+  // ── MCP（Model Context Protocol）服务器管理 ──
+  // 配置由渲染进程 settings-store 持久化，主进程只负责连接与工具调用
+  ipcMain.handle('mcpSync', (_event, servers: unknown) => {
+    if (!Array.isArray(servers)) return mcpManager.statuses()
+    return mcpManager.sync(servers as McpServerConfig[])
+  })
+  ipcMain.handle('mcpStatus', () => mcpManager.statuses())
+  ipcMain.handle('mcpTools', () => mcpManager.allTools())
+  ipcMain.handle('mcpTest', (_event, server: unknown) => {
+    const config = server as McpServerConfig
+    if (!config || typeof config !== 'object' || !config.name) {
+      return { error: 'Invalid MCP server config' }
+    }
+    return mcpManager.test(config)
+  })
+  ipcMain.handle('mcpCallTool', (_event, toolName: unknown, args: unknown) => {
+    if (typeof toolName !== 'string') {
+      return { content: 'Error: 非法的 MCP 工具调用参数', isError: true }
+    }
+    return mcpManager.callTool(toolName, (args ?? {}) as Record<string, unknown>)
+  })
+
   // ── WebUI 控制 ──
   ipcMain.handle('startWebUI', async (_event, lanAccess?: boolean) => {
     try {
@@ -3049,4 +3075,9 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
+})
+
+// 退出前清理 MCP 子进程，避免 stdio 服务器进程残留
+app.on('before-quit', () => {
+  void mcpManager.disposeAll()
 })

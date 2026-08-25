@@ -9,6 +9,7 @@ import VibeBackground from './components/vibe/VibeBackground'
 import VibeMusicPlayer from './components/vibe/VibeMusicPlayer'
 import VibeControls from './components/vibe/VibeControls'
 import { useSettingsStore, migrateProvidersIfNeeded, hydrateProviderApiKeys } from './stores/settings-store'
+import { initMcp } from './stores/mcp-store'
 import { useAccountStore } from './stores/account-store'
 import { useUIStore } from './stores/ui-store'
 import { useVibeStore } from './stores/vibe-store'
@@ -78,6 +79,9 @@ export default function App() {
     migrateProvidersIfNeeded()
     void hydrateProviderApiKeys()
     void useAccountStore.getState().init()
+    // MCP 服务器：首次同步 + 订阅配置变化与主进程状态推送
+    const cleanupMcp = initMcp()
+    return cleanupMcp
   }, [hydrated])
 
   // 圆角 + transform 创建包含块，使内部 fixed 元素（弹窗、VIBE 控件）也被圆角裁剪

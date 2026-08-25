@@ -1,9 +1,10 @@
 import { useState, useRef, type KeyboardEvent as ReactKeyboardEvent, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type ChangeEvent as ReactChangeEvent, useEffect } from 'react'
-import { Send, Brain, FolderOpen, ChevronDown, Square, Zap, Check, X, Store, Plus, FolderPlus, Paperclip, FileText, ShieldCheck, Hand, TriangleAlert, Slash, BookOpen, GitBranch, Target, type LucideIcon } from 'lucide-react'
+import { Send, Brain, FolderOpen, ChevronDown, Square, Zap, Check, X, Store, Plus, FolderPlus, Paperclip, FileText, ShieldCheck, Hand, TriangleAlert, Slash, BookOpen, GitBranch, Target, Plug, Settings2, type LucideIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useSettingsStore } from '../../stores/settings-store'
 import { useChatStore } from '../../stores/chat-store'
 import { useSkillsStore } from '../../stores/skills-store'
+import { useMcpStore } from '../../stores/mcp-store'
 import { useUIStore } from '../../stores/ui-store'
 import { ipc, isWebUIMode } from '../../lib/ipc-client'
 import type { MessageAttachment, TaskMode } from '../../types/agent'
@@ -241,6 +242,10 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
   const { setShowSkillStore } = useUIStore()
   const activeSkills = skills.filter((s) => sessionSkillIds.includes(s.id))
 
+  // MCP 服务器（"/" 菜单里可快速启停；连接状态点来自主进程推送）
+  const mcpServers = settings.mcpServers ?? []
+  const mcpStatuses = useMcpStore((s) => s.statuses)
+
   // ── "/" 命令菜单：过滤 + 键盘导航 + 选择 ──
   // 过滤词 = 输入框中 "/" 之后的文本（菜单打开时输入框即搜索框，对齐 TRAE 交互）
   const commandQuery = showCommandMenu && content.startsWith('/') ? content.slice(1).trim().toLowerCase() : ''
@@ -250,7 +255,10 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
   const filteredSkills = skills.filter((s) =>
     !commandQuery || s.name.toLowerCase().includes(commandQuery) || (s.description || '').toLowerCase().includes(commandQuery)
   )
-  const commandFlatCount = filteredCommands.length + filteredSkills.length
+  const filteredMcp = mcpServers.filter((s) =>
+    !commandQuery || s.name.toLowerCase().includes(commandQuery)
+  )
+  const commandFlatCount = filteredCommands.length + filteredSkills.length + filteredMcp.length
   const commandSafeHighlight = commandFlatCount > 0 ? Math.min(commandHighlight, commandFlatCount - 1) : 0
 
   /** 关闭命令菜单；若输入框只剩触发用的 "/" 则一并清掉 */
@@ -268,14 +276,21 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
     requestAnimationFrame(() => textareaRef.current?.focus())
   }
 
-  /** 选中命令菜单某项：命令 → 设置任务芯片并关闭；技能 → 切换激活态并保持菜单（可连续多选） */
-  const selectCommandItem = (kind: 'command' | 'skill', id: string) => {
+  /** 选中命令菜单某项：命令 → 设置任务芯片并关闭；技能 → 切换激活态并保持菜单（可连续多选）；MCP → 切换启停 */
+  const selectCommandItem = (kind: 'command' | 'skill' | 'mcp', id: string) => {
     if (kind === 'command') {
       setTaskMode(id as TaskMode)
       // 只清掉以 "/" 开头的过滤前缀（菜单触发态），保留用户已输入的正文，避免临时切换模式时丢字
       setContent((v) => (v.startsWith('/') ? '' : v))
       setShowCommandMenu(false)
       requestAnimationFrame(() => textareaRef.current?.focus())
+      return
+    }
+    if (kind === 'mcp') {
+      // 翻转 enabled；settings 变化由 mcp-store 订阅自动同步到主进程（连接/断开 + 工具注入）
+      settings.updateSettings({
+        mcpServers: mcpServers.map((s) => (s.id === id ? { ...s, enabled: !s.enabled } : s)),
+      })
       return
     }
     toggleSessionSkill(id, effectiveWorkDir || undefined)
@@ -493,8 +508,10 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
         e.preventDefault()
         if (commandSafeHighlight < filteredCommands.length) {
           selectCommandItem('command', filteredCommands[commandSafeHighlight].id)
-        } else {
+        } else if (commandSafeHighlight < filteredCommands.length + filteredSkills.length) {
           selectCommandItem('skill', filteredSkills[commandSafeHighlight - filteredCommands.length].id)
+        } else {
+          selectCommandItem('mcp', filteredMcp[commandSafeHighlight - filteredCommands.length - filteredSkills.length].id)
         }
         return
       }
@@ -1004,6 +1021,48 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
                   )
                 })
               )}
+              {/* MCP section：列出已配置的 MCP 服务器，点击切换启停（状态点：绿=已连接 黄=连接中 红=出错 灰=停用） */}
+              <div className={`px-3 pt-2 pb-1 text-[10px] uppercase tracking-wider ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/40'}`}>
+                {t('chat.mcpSection')}
+              </div>
+              {filteredMcp.length === 0 ? (
+                <div className={`px-3 py-3 text-xs text-center ${vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/50'}`}>
+                  {mcpServers.length === 0 ? t('chat.noMcpServers') : t('chat.cmdNoMatch')}
+                </div>
+              ) : (
+                filteredMcp.map((server, k) => {
+                  const flatIndex = filteredCommands.length + filteredSkills.length + k
+                  const highlighted = flatIndex === commandSafeHighlight
+                  const status = mcpStatuses.find((s) => s.id === server.id)
+                  const state = status?.state ?? (server.enabled ? 'connecting' : 'disabled')
+                  const dotCls =
+                    state === 'connected' ? 'bg-emerald-500'
+                    : state === 'connecting' ? 'bg-amber-500'
+                    : state === 'error' ? 'bg-red-500'
+                    : vibe ? 'bg-white/25' : 'bg-dark-onSurfaceVariant/30'
+                  return (
+                    <button
+                      type="button"
+                      key={server.id}
+                      onMouseEnter={() => setCommandHighlight(flatIndex)}
+                      onClick={() => selectCommandItem('mcp', server.id)}
+                      className={`w-full flex items-center gap-2.5 px-3 py-2 max-md:py-3 text-left transition-colors ${
+                        highlighted ? (vibe ? 'bg-white/10' : 'bg-dark-surfaceContainerHigh') : ''
+                      }`}
+                    >
+                      <span className="flex-shrink-0 text-md-primary"><Plug size={16} /></span>
+                      <span className={`w-2 h-2 rounded-full flex-shrink-0 ${dotCls}`} aria-label={state} />
+                      <span className="flex-1 min-w-0">
+                        <span className={`block text-sm font-medium truncate ${server.enabled ? 'text-md-primary' : vibe ? 'text-white/90' : 'text-dark-onSurface'}`}>{server.name}</span>
+                        <span className={`block text-xs truncate ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/60'}`}>
+                          {status && status.toolCount > 0 ? t('chat.mcpToolCount', { count: status.toolCount }) : t(`chat.mcpState.${state}`)}
+                        </span>
+                      </span>
+                      {server.enabled && <Check size={14} className="flex-shrink-0 text-md-primary" />}
+                    </button>
+                  )
+                })
+              )}
               <div className={`border-t mt-1 ${vibe ? 'border-white/15' : 'border-dark-onSurfaceVariant/10'}`}>
                 <button
                   type="button"
@@ -1014,6 +1073,16 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
                 >
                   <Store size={14} />
                   <span>{t('chat.getSkills')}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setShowCommandMenu(false); setContent((v) => (v.trim() === '/' ? '' : v)); settings.updateSettings({ showSettings: true, pendingSettingsTab: 'mcp' }) }}
+                  className={`w-full flex items-center gap-2 px-3 py-2 max-md:py-3.5 text-sm transition-colors ${
+                    vibe ? 'text-white/90 hover:bg-white/10' : 'text-dark-onSurface hover:bg-dark-surfaceContainerHigh'
+                  }`}
+                >
+                  <Settings2 size={14} />
+                  <span>{t('chat.manageMcp')}</span>
                 </button>
               </div>
             </div>

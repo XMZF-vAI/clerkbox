@@ -1336,7 +1336,10 @@ export function useAgent(sessionId: string) {
       }
 
       // Preserve model order for side-effecting tools; read-only calls can still run concurrently.
+      // MCP 工具（mcp__ 前缀）可能带副作用，统一按顺序执行
       const sideEffectingTools = new Set(['write_file', 'search_replace', 'execute_command', 'save_memory', 'spawn_agent'])
+      const isSideEffecting = (toolName: string) =>
+        sideEffectingTools.has(toolName) || toolName.startsWith('mcp__')
       const orderedResults: Array<ToolResult | undefined> = Array.from({ length: toolCalls.length })
       const readOnlyJobs: Array<Promise<void>> = []
       for (const [index, toolCall] of toolCalls.entries()) {
@@ -1349,7 +1352,7 @@ export function useAgent(sessionId: string) {
           }
           continue
         }
-        if (sideEffectingTools.has(toolCall.name)) {
+        if (isSideEffecting(toolCall.name)) {
           orderedResults[index] = await execOne(toolCall, controller)
         } else {
           readOnlyJobs.push(execOne(toolCall, controller).then((result) => { orderedResults[index] = result }))
