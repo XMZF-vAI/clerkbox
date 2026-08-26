@@ -21,7 +21,9 @@ import { registerApiProxyHandlers, bindApiProxyCleanup, startChatStream, abortCh
 import { handlerRegistry, setStreamHandlers, startWebUI, stopWebUI, getWebUIStatus, getLanAddresses } from './webui-server'
 import * as rtAccount from './rt-account'
 import { mcpManager } from './mcp-manager'
-import type { AccountSyncKind, McpMarketConnection, McpServerConfig } from '../src/types/ipc'
+import { winAcrylic } from './win-acrylic'
+import { systemMedia } from './system-media'
+import type { AccountSyncKind, McpMarketConnection, McpServerConfig, SystemMediaState, VibeGlassTrack } from '../src/types/ipc'
 
 const SKILL_REQUEST_TIMEOUT_MS = 15_000
 const MAX_SKILL_FILE_BYTES = 512 * 1024
@@ -553,10 +555,16 @@ function createWindow() {
 
   mainWindow.on('closed', () => {
     mainWindow = null
+    // 窗口销毁：玻璃特效随窗口消失，系统媒体轮询随之停止（管理器保持可复用）
+    winAcrylic.terminate()
+    systemMedia.terminate()
   })
 
   // MCP 状态变化通过该窗口推送给渲染进程
   mcpManager.setMainWindow(mainWindow)
+
+  // 系统媒体状态变化通过该窗口推送给渲染进程
+  systemMedia.setMainWindow(mainWindow)
 
   // 窗口销毁 / reload 时掐掉在途的模型 API 流式请求
   bindApiProxyCleanup(mainWindow)
@@ -578,6 +586,44 @@ interface MemoryEntry {
   type: 'user' | 'feedback' | 'project' | 'reference' | undefined
   content: string
   mtime: number
+}
+
+// ── VIBE 氛围模式：壁纸读取（玻璃模式降级轨） ──
+
+const MAX_WALLPAPER_BYTES = 16 * 1024 * 1024
+let wallpaperCache: { dataUrl: string; mtimeMs: number; size: number } | null = null
+
+/** 解析当前桌面壁纸文件路径：优先 TranscodedWallpaper（实际显示内容），回退注册表 */
+async function resolveWallpaperPath(): Promise<string | null> {
+  if (process.platform !== 'win32') return null
+  const transcoded = process.env.APPDATA
+    ? path.join(process.env.APPDATA, 'Microsoft', 'Windows', 'Themes', 'TranscodedWallpaper')
+    : null
+  if (transcoded && fs.existsSync(transcoded)) return transcoded
+  try {
+    const result = await new Promise<string>((resolve, reject) => {
+      const child = spawn('reg.exe', ['query', 'HKCU\\Control Panel\\Desktop', '/v', 'WallPaper'], { windowsHide: true })
+      let out = ''
+      child.stdout?.on('data', (chunk: Buffer) => { out += chunk.toString('utf-8') })
+      child.once('error', reject)
+      child.once('exit', () => resolve(out))
+    })
+    const match = result.match(/WallPaper\s+REG_SZ\s+(.+)/i)
+    const registryPath = match?.[1]?.trim()
+    if (registryPath && fs.existsSync(registryPath)) return registryPath
+  } catch {
+    // 注册表读取失败：按无壁纸处理
+  }
+  return null
+}
+
+function sniffImageMime(buf: Buffer): string | null {
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8) return 'image/jpeg'
+  if (buf.length >= 4 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png'
+  if (buf.length >= 12 && buf.subarray(0, 4).toString('ascii') === 'RIFF' && buf.subarray(8, 12).toString('ascii') === 'WEBP') return 'image/webp'
+  if (buf.length >= 3 && buf.subarray(0, 3).toString('ascii') === 'GIF') return 'image/gif'
+  if (buf.length >= 2 && buf[0] === 0x42 && buf[1] === 0x4d) return 'image/bmp'
+  return null
 }
 
 // ── IPC Handlers ──
@@ -747,6 +793,76 @@ function registerIpcHandlers() {
       title: '选择音乐文件夹',
     })
     return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
+  })
+
+  // ── VIBE 氛围模式：玻璃特效 / 壁纸 / 系统媒体 ──
+
+  /** 设置玻璃程度。WebUI 远程调用（event 为 null）不得影响宿主机窗口，直接走降级轨 */
+  ipcMain.handle('vibeGlassSet', async (event, level: unknown): Promise<{ track: VibeGlassTrack }> => {
+    if (!event || process.platform !== 'win32' || !mainWindow || mainWindow.isDestroyed()) {
+      return { track: 'fallback' }
+    }
+    const lvl = typeof level === 'number' && Number.isFinite(level) ? level : 0
+    const result = await winAcrylic.setAcrylic(mainWindow.getNativeWindowHandle(), lvl)
+    if (!result.ok) return { track: 'fallback' }
+    return { track: lvl <= 0 ? 'transparent' : 'acrylic' }
+  })
+
+  ipcMain.handle('vibeGlassClear', async (event): Promise<void> => {
+    if (!event) return
+    const hwnd = mainWindow && !mainWindow.isDestroyed() ? mainWindow.getNativeWindowHandle() : undefined
+    await winAcrylic.clearAcrylic(hwnd)
+  })
+
+  ipcMain.handle('vibeGetWallpaper', async (): Promise<string | null> => {
+    const wallpaperPath = await resolveWallpaperPath()
+    if (!wallpaperPath) return null
+    try {
+      const stat = fs.statSync(wallpaperPath)
+      if (wallpaperCache && wallpaperCache.mtimeMs === stat.mtimeMs && wallpaperCache.size === stat.size) {
+        return wallpaperCache.dataUrl
+      }
+      if (stat.size > MAX_WALLPAPER_BYTES) return null
+      const buf = fs.readFileSync(wallpaperPath)
+      const mime = sniffImageMime(buf)
+      if (!mime) return null
+      const dataUrl = `data:${mime};base64,${buf.toString('base64')}`
+      wallpaperCache = { dataUrl, mtimeMs: stat.mtimeMs, size: stat.size }
+      return dataUrl
+    } catch {
+      return null
+    }
+  })
+
+  ipcMain.handle('vibeMediaGetState', async (): Promise<SystemMediaState | null> => {
+    try {
+      await systemMedia.ensureStarted()
+    } catch {
+      return null
+    }
+    return systemMedia.getState()
+  })
+
+  ipcMain.handle('vibeMediaCommand', async (_event, cmd: unknown): Promise<boolean> => {
+    if (typeof cmd !== 'object' || cmd === null) return false
+    const record = cmd as Record<string, unknown>
+    if (typeof record.type !== 'string') return false
+    if (record.type === 'seek') {
+      if (typeof record.positionMs !== 'number' || !Number.isFinite(record.positionMs)) return false
+      return systemMedia.sendCommand({ type: 'seek', positionMs: record.positionMs })
+    }
+    if (record.type === 'volume') {
+      if (typeof record.volume !== 'number' || !Number.isFinite(record.volume)) return false
+      return systemMedia.sendCommand({ type: 'volume', volume: record.volume })
+    }
+    if (record.type === 'toggle' || record.type === 'play' || record.type === 'pause' || record.type === 'next' || record.type === 'prev') {
+      return systemMedia.sendCommand({ type: record.type })
+    }
+    return false
+  })
+
+  ipcMain.handle('vibeMediaStop', async (): Promise<void> => {
+    systemMedia.stop()
   })
 
   /** 选择自定义技能文件：.skill（直接就是 SKILL.md）或 .zip（内含 SKILL.md） */
@@ -3262,7 +3378,9 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-// 退出前清理 MCP 子进程，避免 stdio 服务器进程残留
+// 退出前清理 MCP 子进程与 VIBE 助手进程，避免残留
 app.on('before-quit', () => {
   void mcpManager.disposeAll()
+  winAcrylic.dispose()
+  systemMedia.dispose()
 })

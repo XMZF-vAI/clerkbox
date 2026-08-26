@@ -168,6 +168,38 @@ export interface AccountSyncDownloadResult {
   models?: DownloadedModelConfig
 }
 
+// ── VIBE 氛围模式 ──
+
+/** 玻璃模式实际生效的渲染轨道 */
+export type VibeGlassTrack = 'acrylic' | 'transparent' | 'fallback'
+
+/** 系统媒体会话（SMTC）状态快照 */
+export interface SystemMediaState {
+  /** 当前是否存在活跃的系统媒体会话 */
+  available: boolean
+  title?: string
+  artist?: string
+  album?: string
+  /** Playing / Paused / Stopped / Changing */
+  status?: string
+  positionMs?: number
+  durationMs?: number
+  /** 专辑封面 data URL（仅切歌时更新一次，避免高频大流量） */
+  cover?: string
+  /** 系统主音量 0-100 */
+  volume?: number
+}
+
+/** 系统媒体控制命令 */
+export type VibeMediaCommand =
+  | { type: 'toggle' }
+  | { type: 'play' }
+  | { type: 'pause' }
+  | { type: 'next' }
+  | { type: 'prev' }
+  | { type: 'seek'; positionMs: number }
+  | { type: 'volume'; volume: number }
+
 export interface ClerkBoxAPI {
   selectFolder: () => Promise<string | null>
   selectImageFile: () => Promise<string | null>
@@ -259,6 +291,21 @@ export interface ClerkBoxAPI {
   onMcpStatus: (callback: (statuses: McpServerStatus[]) => void) => () => void
   /** 拉取 MCP 插件市场服务器列表（mcp-cn.com 全量） */
   mcpSearch: () => Promise<{ servers: McpMarketServer[] } | { error: string }>
+  // ── VIBE 氛围模式（玻璃特效 / 壁纸 / 系统媒体） ──
+  /** 设置玻璃程度（0-100）。返回实际生效轨道：acrylic=系统亚克力 / transparent=全透明 / fallback=壁纸快照降级 */
+  vibeGlassSet: (level: number) => Promise<{ track: VibeGlassTrack }>
+  /** 关闭玻璃特效，恢复普通透明窗口 */
+  vibeGlassClear: () => Promise<void>
+  /** 读取当前桌面壁纸，返回 data URL（玻璃模式降级轨与 WebUI 模式使用） */
+  vibeGetWallpaper: () => Promise<string | null>
+  /** 获取系统正在播放的媒体状态（顺带确保主进程轮询助手已启动） */
+  vibeMediaGetState: () => Promise<SystemMediaState | null>
+  /** 发送媒体控制命令（播放/暂停/切歌/进度/音量） */
+  vibeMediaCommand: (cmd: VibeMediaCommand) => Promise<boolean>
+  /** 停止系统媒体轮询（离开系统音频模式时调用，主进程延迟回收） */
+  vibeMediaStop: () => Promise<void>
+  /** 订阅系统媒体状态变化（仅 Electron 模式有效，WebUI 需轮询）；返回退订函数 */
+  onVibeMediaState: (callback: (state: SystemMediaState) => void) => () => void
   // 热土账号系统（登录 / 登出 / 数据段云同步）
   accountLogin: () => Promise<{ ok: true; status: AccountStatus } | { error: string }>
   accountLogout: () => Promise<void>

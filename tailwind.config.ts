@@ -66,8 +66,13 @@ const config: Config = {
         'pulse-soft': 'pulseSoft 2s ease-in-out infinite',
         'fade-up': 'fadeUp 0.3s cubic-bezier(0.23, 1, 0.32, 1) both',
         'pop-in': 'popIn 0.25s cubic-bezier(0.23, 1, 0.32, 1) both',
+        'vibe-cross': 'vibeCross 1.4s cubic-bezier(0.23, 1, 0.32, 1) both',
       },
       keyframes: {
+        vibeCross: {
+          '0%': { opacity: '0', transform: 'scale(1.06)', filter: 'blur(14px)' },
+          '100%': { opacity: '1', transform: 'scale(1)', filter: 'blur(0px)' },
+        },
         fadeIn: {
           '0%': { opacity: '0' },
           '100%': { opacity: '1' },

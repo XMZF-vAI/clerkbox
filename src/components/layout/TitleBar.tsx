@@ -46,17 +46,22 @@ export default function TitleBar({ onToggleSidebar }: TitleBarProps) {
       </div>
 
       <div className="flex items-center gap-1" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-        {/* VIBE mode toggle */}
+        {/* VIBE mode toggle：默认紧凑 VIBE 标签，悬停展开为完整入口文案 */}
         <button
           type="button"
           onClick={() => toggleVibeMode()}
-          className="h-7 max-md:h-10 max-md:px-3 flex items-center gap-1 px-2 mr-2 rounded-md3-sm bg-md-tertiary/15 text-md-tertiary hover:bg-md-tertiary/25 transition-colors"
+          className="group h-7 max-md:h-10 max-md:px-3 flex items-center px-2 mr-2 rounded-md3-sm bg-md-tertiary/15 text-md-tertiary hover:bg-md-tertiary/25 transition-colors"
           title={t('titlebar.vibeEnter')}
           aria-label={t('titlebar.vibeToggleAria')}
           aria-pressed={vibeMode}
         >
-          <Sparkles size={14} />
-          <span className="text-xs font-medium">VIBE</span>
+          <Sparkles size={14} className="shrink-0 transition-transform duration-300 ease-out group-hover:rotate-12 group-hover:scale-110" />
+          <span className="text-xs font-medium whitespace-nowrap overflow-hidden ml-1 max-w-10 opacity-100 group-hover:max-w-0 group-hover:opacity-0 group-hover:ml-0 transition-all duration-300 ease-out">
+            VIBE
+          </span>
+          <span className="text-xs font-medium whitespace-nowrap overflow-hidden max-w-0 opacity-0 group-hover:max-w-32 group-hover:opacity-100 group-hover:ml-1 transition-all duration-300 ease-out">
+            {t('titlebar.vibeEnter')}
+          </span>
         </button>
 
         {/* Status indicator */}

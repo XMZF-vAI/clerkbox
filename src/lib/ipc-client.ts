@@ -14,6 +14,9 @@ import type {
   MessageRow,
   ParseSkillFileResult,
   SessionRow,
+  SystemMediaState,
+  VibeGlassTrack,
+  VibeMediaCommand,
   WebUICapabilities,
   WebUIUploadResult,
 } from '../types/ipc'
@@ -445,6 +448,28 @@ export const ipc = {
     isElectron ? window.clerkbox.kvSet(key, value) : webInvoke('kvSet', [key, value]),
   kvRemove: (key: string): Promise<void> =>
     isElectron ? window.clerkbox.kvRemove(key) : webInvoke('kvRemove', [key]),
+
+  // VIBE 氛围模式
+  // 玻璃特效只作用于 Electron 本机窗口：WebUI 远程模式直接走降级轨（壁纸快照）
+  vibeGlassSet: (level: number): Promise<{ track: VibeGlassTrack }> =>
+    isElectron ? window.clerkbox.vibeGlassSet(level) : Promise.resolve({ track: 'fallback' }),
+  vibeGlassClear: (): Promise<void> =>
+    isElectron ? window.clerkbox.vibeGlassClear() : Promise.resolve(),
+  vibeGetWallpaper: (): Promise<string | null> =>
+    isElectron ? window.clerkbox.vibeGetWallpaper() : webInvoke('vibeGetWallpaper'),
+  vibeMediaGetState: (): Promise<SystemMediaState | null> =>
+    isElectron ? window.clerkbox.vibeMediaGetState() : webInvoke('vibeMediaGetState'),
+  vibeMediaCommand: (cmd: VibeMediaCommand): Promise<boolean> =>
+    isElectron ? window.clerkbox.vibeMediaCommand(cmd) : webInvoke('vibeMediaCommand', [cmd]),
+  vibeMediaStop: (): Promise<void> =>
+    isElectron ? window.clerkbox.vibeMediaStop() : webInvoke('vibeMediaStop'),
+  // 媒体状态推送仅 Electron 模式存在（WebUI 走轮询）；统一返回退订函数
+  onVibeMediaState: (callback: (state: SystemMediaState) => void): (() => void) => {
+    if (isElectron && typeof window.clerkbox.onVibeMediaState === 'function') {
+      return window.clerkbox.onVibeMediaState(callback)
+    }
+    return () => {}
+  },
 
   // 热土账号系统：登录 / 登出 / 状态 / 数据段云同步
   accountLogin: (): Promise<{ ok: true; status: AccountStatus } | { error: string }> =>

@@ -9,6 +9,9 @@ import type {
   FetchedModel,
   MessageRow,
   SessionRow,
+  SystemMediaState,
+  VibeGlassTrack,
+  VibeMediaCommand,
   WebSearchResult,
 } from '../src/types/ipc'
 import type { MemoryEntry } from '../src/types/agent'
@@ -186,6 +189,20 @@ contextBridge.exposeInMainWorld('clerkbox', {
   kvGet: (key: string): Promise<string | null> => ipcRenderer.invoke('kvGet', key),
   kvSet: (key: string, value: string): Promise<void> => ipcRenderer.invoke('kvSet', key, value),
   kvRemove: (key: string): Promise<void> => ipcRenderer.invoke('kvRemove', key),
+
+  // VIBE 氛围模式（玻璃特效 / 壁纸 / 系统媒体）
+  vibeGlassSet: (level: number): Promise<{ track: VibeGlassTrack }> =>
+    ipcRenderer.invoke('vibeGlassSet', level),
+  vibeGlassClear: (): Promise<void> => ipcRenderer.invoke('vibeGlassClear'),
+  vibeGetWallpaper: (): Promise<string | null> => ipcRenderer.invoke('vibeGetWallpaper'),
+  vibeMediaGetState: (): Promise<SystemMediaState | null> => ipcRenderer.invoke('vibeMediaGetState'),
+  vibeMediaCommand: (cmd: VibeMediaCommand): Promise<boolean> => ipcRenderer.invoke('vibeMediaCommand', cmd),
+  vibeMediaStop: (): Promise<void> => ipcRenderer.invoke('vibeMediaStop'),
+  onVibeMediaState: (callback: (state: SystemMediaState) => void): (() => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, state: SystemMediaState) => callback(state)
+    ipcRenderer.on('vibe:mediaState', listener)
+    return () => ipcRenderer.removeListener('vibe:mediaState', listener)
+  },
 
   // 热土账号系统（登录 / 登出 / 数据段云同步）
   accountLogin: (): Promise<{ ok: true; status: AccountStatus } | { error: string }> =>

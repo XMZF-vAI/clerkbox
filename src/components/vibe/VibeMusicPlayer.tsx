@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { Play, Pause, SkipBack, SkipForward, Music } from 'lucide-react'
+import { Play, Pause, SkipBack, SkipForward, Music, Volume2 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useVibeStore, DEFAULT_VIBE_MUSIC } from '../../stores/vibe-store'
-import { ipc } from '../../lib/ipc-client'
+import { ipc, isWebUIMode } from '../../lib/ipc-client'
 import { toFileUrl } from '../../lib/file-url'
+import type { SystemMediaState } from '../../types/ipc'
 
 const AUDIO_EXTENSIONS = ['mp3', 'wav', 'ogg', 'flac', 'm4a', 'aac', 'wma']
 
@@ -20,7 +21,22 @@ function ext(path: string): string {
   return path.split('.').pop()?.toLowerCase() || ''
 }
 
+function formatTime(ms: number): string {
+  if (!isFinite(ms) || isNaN(ms) || ms < 0) return '0:00'
+  const totalSec = Math.floor(ms / 1000)
+  const m = Math.floor(totalSec / 60)
+  const s = totalSec % 60
+  return `${m}:${s.toString().padStart(2, '0')}`
+}
+
 export default function VibeMusicPlayer() {
+  const audioMode = useVibeStore((s) => s.audioMode)
+  if (audioMode === 'system') return <SystemMusicPlayer />
+  return <LocalMusicPlayer />
+}
+
+/** 模式一：本地音频（原有逻辑） */
+function LocalMusicPlayer() {
   const { t } = useTranslation()
   const music = useVibeStore((s) => s.music)
   const musicFolder = useVibeStore((s) => s.musicFolder)
@@ -146,13 +162,6 @@ export default function VibeMusicPlayer() {
     setProgress(audio.currentTime)
   }
 
-  const formatTime = (t: number) => {
-    if (!isFinite(t) || isNaN(t)) return '0:00'
-    const m = Math.floor(t / 60)
-    const s = Math.floor(t % 60)
-    return `${m}:${s.toString().padStart(2, '0')}`
-  }
-
   if (!currentTrack) return null
 
   return (
@@ -183,7 +192,7 @@ export default function VibeMusicPlayer() {
             className="flex-1 h-1 bg-white/20 rounded-full appearance-none cursor-pointer accent-white"
           />
           <span className="text-[10px] text-white/60 tabular-nums">
-            {formatTime(progress)}/{formatTime(duration)}
+            {formatTime(progress * 1000)}/{formatTime(duration * 1000)}
           </span>
         </div>
       </div>
@@ -226,6 +235,199 @@ export default function VibeMusicPlayer() {
           {t('vibe.clickToPlay')}
         </button>
       )}
+    </div>
+  )
+}
+
+/** 模式二：系统正在播放 —— SMTC 会话卡片（封面/进度/控制/音量） */
+function SystemMusicPlayer() {
+  const { t } = useTranslation()
+  const [state, setState] = useState<SystemMediaState | null>(null)
+  const [positionMs, setPositionMs] = useState(0)
+  const [scrubMs, setScrubMs] = useState<number | null>(null)
+  const [volume, setVolume] = useState<number | null>(null)
+  const scrubRef = useRef<number | null>(null)
+  const volumeTimerRef = useRef<number | null>(null)
+
+  // 拉起主进程轮询助手 + 订阅状态推送（WebUI 无推送通道，走 2s 轮询）
+  useEffect(() => {
+    let cancelled = false
+
+    const pull = async () => {
+      try {
+        const s = await ipc.vibeMediaGetState()
+        if (!cancelled && s) setState(s)
+      } catch { /* 主进程暂时不可用：等待下一轮 */ }
+    }
+    void pull()
+
+    const off = ipc.onVibeMediaState((s) => setState(s))
+
+    let pollId: number | null = null
+    if (isWebUIMode) {
+      pollId = window.setInterval(() => void pull(), 2000)
+    }
+
+    return () => {
+      cancelled = true
+      off()
+      if (pollId !== null) window.clearInterval(pollId)
+      void ipc.vibeMediaStop()
+    }
+  }, [])
+
+  // 状态到达：同步进度与音量（拖动中的滑块不覆盖用户手感；scrub 走 ref 避免提交瞬间被旧状态回写）
+  useEffect(() => {
+    if (!state) return
+    const pos = state.positionMs
+    if (typeof pos === 'number' && scrubRef.current === null) {
+      setPositionMs(pos)
+    }
+    if (typeof state.volume === 'number' && volumeTimerRef.current === null) {
+      setVolume(state.volume)
+    }
+  }, [state])
+
+  // 播放中本地插值进度，进度条每 500ms 平滑走一格
+  useEffect(() => {
+    if (state?.status !== 'Playing') return
+    const id = window.setInterval(() => {
+      setPositionMs((p) => (scrubRef.current !== null ? p : p + 500))
+    }, 500)
+    return () => window.clearInterval(id)
+  }, [state?.status])
+
+  const sendCommand = useCallback((cmd: Parameters<typeof ipc.vibeMediaCommand>[0]) => {
+    void ipc.vibeMediaCommand(cmd)
+  }, [])
+
+  const beginScrub = (value: number) => {
+    scrubRef.current = value
+    setScrubMs(value)
+  }
+
+  const commitScrub = () => {
+    const value = scrubRef.current
+    if (value === null) return
+    scrubRef.current = null
+    setScrubMs(null)
+    sendCommand({ type: 'seek', positionMs: value })
+    setPositionMs(value)
+  }
+
+  const handleVolume = (value: number) => {
+    setVolume(value)
+    if (volumeTimerRef.current !== null) window.clearTimeout(volumeTimerRef.current)
+    volumeTimerRef.current = window.setTimeout(() => {
+      volumeTimerRef.current = null
+      sendCommand({ type: 'volume', volume: value })
+    }, 180)
+  }
+
+  useEffect(() => {
+    return () => {
+      if (volumeTimerRef.current !== null) window.clearTimeout(volumeTimerRef.current)
+    }
+  }, [])
+
+  const durationMs = state?.durationMs ?? 0
+  const isPlaying = state?.status === 'Playing'
+  const displayMs = scrubMs ?? positionMs
+
+  // 无活跃会话：轻量提示胶囊
+  if (!state || !state.available) {
+    return (
+      <div className="fixed top-4 right-4 z-50 flex items-center gap-2 px-4 py-2 liquid-glass rounded-full text-white/90">
+        <Music size={14} className="text-white/60" />
+        <span className="text-xs text-white/70">{t('vibe.systemNoMedia')}</span>
+      </div>
+    )
+  }
+
+  return (
+    <div className="fixed top-4 right-4 z-50 flex items-center gap-3 px-4 py-2 liquid-glass rounded-full text-white/90 max-w-[min(92vw,520px)]">
+      {/* 封面 */}
+      {state.cover ? (
+        <img
+          src={state.cover}
+          alt=""
+          className="w-10 h-10 rounded-full object-cover border border-white/20 shrink-0"
+        />
+      ) : (
+        <div className="w-10 h-10 rounded-full bg-white/10 border border-white/20 flex items-center justify-center shrink-0">
+          <Music size={16} className="text-white/70" />
+        </div>
+      )}
+
+      {/* 曲目信息 + 进度 */}
+      <div className="flex flex-col min-w-[140px] flex-1">
+        <span className="text-xs font-medium truncate max-w-[180px]">
+          {state.title || t('vibe.unknownAudio')}
+        </span>
+        <span className="text-[10px] text-white/60 truncate max-w-[180px]">
+          {state.artist || t('vibe.unknownArtist')}
+        </span>
+        <div className="flex items-center gap-2 mt-1">
+          <input
+            type="range"
+            min={0}
+            max={durationMs || 1}
+            step={1000}
+            value={displayMs}
+            onChange={(e) => beginScrub(Number(e.target.value))}
+            onPointerUp={commitScrub}
+            onKeyUp={commitScrub}
+            onBlur={commitScrub}
+            aria-label={t('vibe.seek')}
+            className="flex-1 h-1 bg-white/20 rounded-full appearance-none cursor-pointer accent-white"
+          />
+          <span className="text-[10px] text-white/60 tabular-nums whitespace-nowrap">
+            {formatTime(displayMs)}/{formatTime(durationMs)}
+          </span>
+        </div>
+      </div>
+
+      {/* 播放控制 */}
+      <div className="flex items-center gap-1 shrink-0">
+        <button
+          type="button"
+          onClick={() => sendCommand({ type: 'prev' })}
+          aria-label={t('vibe.previousTrack')}
+          className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-white/15 transition-colors"
+        >
+          <SkipBack size={14} />
+        </button>
+        <button
+          type="button"
+          onClick={() => sendCommand(isPlaying ? { type: 'pause' } : { type: 'play' })}
+          aria-label={isPlaying ? t('vibe.pause') : t('vibe.play')}
+          className="w-8 h-8 flex items-center justify-center rounded-full bg-white/20 hover:bg-white/30 transition-colors"
+        >
+          {isPlaying ? <Pause size={14} /> : <Play size={14} className="ml-0.5" />}
+        </button>
+        <button
+          type="button"
+          onClick={() => sendCommand({ type: 'next' })}
+          aria-label={t('vibe.nextTrack')}
+          className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-white/15 transition-colors"
+        >
+          <SkipForward size={14} />
+        </button>
+      </div>
+
+      {/* 系统音量 */}
+      <div className="flex items-center gap-1.5 shrink-0 max-md:hidden">
+        <Volume2 size={13} className="text-white/60" />
+        <input
+          type="range"
+          min={0}
+          max={100}
+          value={volume ?? state.volume ?? 100}
+          onChange={(e) => handleVolume(Number(e.target.value))}
+          aria-label={t('vibe.volume')}
+          className="w-16 h-1 bg-white/20 rounded-full appearance-none cursor-pointer accent-white"
+        />
+      </div>
     </div>
   )
 }
