@@ -11,7 +11,6 @@ import ChatInput from './ChatInput'
 import ThemeWaves from './ThemeWaves'
 import { SubAgentDetailPanel } from './SubAgentDetailPanel'
 import { useAgentRunsStore } from '../../stores/agent-runs-store'
-import APP_ICON from '../../assets/icon.png'
 import NEW_CHAT_ICON from '../../assets/new-chat-icon.png'
 
 interface ChatPageProps {
@@ -104,9 +103,6 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
                     src={NEW_CHAT_ICON}
                     alt="Welcome"
                     className="w-14 h-14 rounded-md3-lg object-cover"
-                    onError={(e) => {
-                      (e.target as HTMLImageElement).src = APP_ICON
-                    }}
                   />
                   <span className="text-xl font-medium text-dark-onSurface">
                     {t('chat.emptyWelcome')}
