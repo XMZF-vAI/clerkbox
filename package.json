@@ -1,6 +1,6 @@
 {
   "name": "clerkbox",
-  "version": "1.7.5",
+  "version": "1.8.0",
   "description": "XMZF vAI - ClerkBox: Single AI Agent Desktop Workbench",
   "main": "dist-electron/electron/main.js",
   "scripts": {

@@ -195,7 +195,7 @@ export default {
       errorUrl: '请填写服务器 URL',
     },
     about: {
-      version: 'v1.7.5',
+      version: 'v1.8.0',
       tagline: 'Single AI Agent Desktop Workbench',
       developer: '开发者',
       framework: '框架',
