@@ -10,6 +10,7 @@ import type {
   McpServerConfig,
   McpServerStatus,
   McpToolInfo,
+  McpMarketServer,
   MessageRow,
   ParseSkillFileResult,
   SessionRow,
@@ -342,6 +343,8 @@ export const ipc = {
     if (isElectron) return window.clerkbox.onMcpStatus(callback)
     return () => {}
   },
+  mcpSearch: (): Promise<{ servers: McpMarketServer[] } | { error: string }> =>
+    isElectron ? window.clerkbox.mcpSearch() : webInvoke('mcpSearch'),
 
   // Memory system
   scanMemory: (workingDir: string): Promise<MemoryEntry[]> =>

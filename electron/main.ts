@@ -21,7 +21,7 @@ import { registerApiProxyHandlers, bindApiProxyCleanup, startChatStream, abortCh
 import { handlerRegistry, setStreamHandlers, startWebUI, stopWebUI, getWebUIStatus, getLanAddresses } from './webui-server'
 import * as rtAccount from './rt-account'
 import { mcpManager } from './mcp-manager'
-import type { AccountSyncKind, McpServerConfig } from '../src/types/ipc'
+import type { AccountSyncKind, McpMarketConnection, McpServerConfig } from '../src/types/ipc'
 
 const SKILL_REQUEST_TIMEOUT_MS = 15_000
 const MAX_SKILL_FILE_BYTES = 512 * 1024
@@ -207,6 +207,99 @@ function fetchHttpsText(
     request.setTimeout(SKILL_REQUEST_TIMEOUT_MS, () => request.destroy(new Error('Request timed out')))
     request.on('error', reject)
   })
+}
+
+/**
+ * 宽松 JSON 解析：mcp-cn.com 的 connections 字段是「无引号的 JSON」字符串，
+ * 如 [{type:stdio,config:{command:npx,args:[-y,@scope/pkg],env:{KEY:<your-key>}}}]。
+ * 标准 JSON.parse 会失败，这里先分词（标点单独成 token，字面量一律加引号），
+ * 再用递归下降还原成对象。键/值靠栈区分：对象内紧跟 '{' 或 ',' 的是键（扫描到 ':' 截止），
+ * 值不做冒号断词（保住 https:// 里的冒号）。
+ */
+function parseLenientJson(raw: string): unknown {
+  const tokens: string[] = []
+  const stack: string[] = []
+  let i = 0
+  while (i < raw.length) {
+    const ch = raw[i]
+    if (ch === '{' || ch === '[') {
+      tokens.push(ch)
+      stack.push(ch)
+      i++
+    } else if (ch === '}' || ch === ']') {
+      tokens.push(ch)
+      stack.pop()
+      i++
+    } else if (ch === ',' || ch === ':') {
+      tokens.push(ch)
+      i++
+    } else if (/\s/.test(ch)) {
+      i++
+    } else {
+      const last = tokens[tokens.length - 1]
+      const isKey = stack[stack.length - 1] === '{' && (last === '{' || last === ',')
+      let j = i
+      while (j < raw.length) {
+        const c = raw[j]
+        if (c === ',' || c === '}' || c === ']') break
+        if (isKey && c === ':') break
+        j++
+      }
+      const value = raw.slice(i, j).trim()
+      if (value) tokens.push(JSON.stringify(value))
+      i = j
+    }
+  }
+
+  let pos = 0
+  const parseValue = (): unknown => {
+    const tok = tokens[pos]
+    if (tok === undefined) return undefined
+    if (tok === '{') return parseObject()
+    if (tok === '[') return parseArray()
+    pos++
+    try {
+      return JSON.parse(tok)
+    } catch {
+      return tok
+    }
+  }
+  const parseObject = (): Record<string, unknown> => {
+    const obj: Record<string, unknown> = {}
+    pos++ // consume '{'
+    while (pos < tokens.length && tokens[pos] !== '}') {
+      if (tokens[pos] === ',') {
+        pos++
+        continue
+      }
+      const keyToken = tokens[pos]
+      pos++
+      if (tokens[pos] === ':') pos++
+      let key: string
+      try {
+        key = JSON.parse(keyToken) as string
+      } catch {
+        key = String(keyToken)
+      }
+      obj[key] = parseValue()
+    }
+    pos++ // consume '}'
+    return obj
+  }
+  const parseArray = (): unknown[] => {
+    const arr: unknown[] = []
+    pos++ // consume '['
+    while (pos < tokens.length && tokens[pos] !== ']') {
+      if (tokens[pos] === ',') {
+        pos++
+        continue
+      }
+      arr.push(parseValue())
+    }
+    pos++ // consume ']'
+    return arr
+  }
+  return parseValue()
 }
 
 /** Resolve path relative to project root */
@@ -2045,6 +2138,98 @@ function registerIpcHandlers() {
       return { content: 'Error: 非法的 MCP 工具调用参数', isError: true }
     }
     return mcpManager.callTool(toolName, (args ?? {}) as Record<string, unknown>)
+  })
+
+  // ── MCP 插件市场：抓取 mcp-cn.com（MCP Hub 中国版，中文描述 + 国内直连）──
+  ipcMain.handle('mcpSearch', async () => {
+    try {
+      const res = await fetchHttpsText(
+        'https://www.mcp-cn.com/api/servers?page=1&pageSize=100',
+        {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ClerkBox/1.7',
+          Accept: 'application/json',
+        },
+        4 * 1024 * 1024
+      )
+      if (res.statusCode !== 200) throw new Error(`mcp-cn.com returned HTTP ${res.statusCode}`)
+      const payload = JSON.parse(res.body) as { code?: number; data?: unknown }
+      const list = Array.isArray(payload.data) ? (payload.data as Array<Record<string, unknown>>) : []
+
+      const servers = list.map((item) => {
+        // connections 是无引号 JSON 字符串，取第一个可解析的连接配置
+        let connection: McpMarketConnection | null = null
+        const rawConn = typeof item.connections === 'string' ? item.connections : ''
+        if (rawConn) {
+          try {
+            const parsed = parseLenientJson(rawConn)
+            const entries = Array.isArray(parsed)
+              ? parsed
+              : parsed && typeof parsed === 'object'
+                ? [parsed]
+                : []
+            const first = entries.find(
+              (e): e is Record<string, unknown> => !!e && typeof e === 'object'
+            ) as Record<string, unknown> | undefined
+            if (first) {
+              const config = (first.config && typeof first.config === 'object'
+                ? first.config
+                : first) as Record<string, unknown>
+              const type = String(first.type ?? 'stdio').toLowerCase()
+              if (type === 'stdio') {
+                connection = {
+                  type: 'stdio',
+                  command: typeof config.command === 'string' ? config.command : undefined,
+                  args: Array.isArray(config.args) ? config.args.map((a) => String(a)) : undefined,
+                  env:
+                    config.env && typeof config.env === 'object'
+                      ? Object.fromEntries(
+                          Object.entries(config.env as Record<string, unknown>).map(([k, v]) => [k, String(v)])
+                        )
+                      : undefined,
+                }
+              } else {
+                // http / sse / streamable-http 统一归一为 http
+                connection = {
+                  type: 'http',
+                  url: typeof config.url === 'string' ? config.url : undefined,
+                  headers:
+                    config.headers && typeof config.headers === 'object'
+                      ? Object.fromEntries(
+                          Object.entries(config.headers as Record<string, unknown>).map(([k, v]) => [
+                            k,
+                            String(v),
+                          ])
+                        )
+                      : undefined,
+                }
+              }
+            }
+          } catch {
+            connection = null
+          }
+        }
+        return {
+          id: String(item.server_id ?? item.id ?? ''),
+          name: String(item.display_name ?? item.name ?? ''),
+          qualifiedName: String(item.qualified_name ?? ''),
+          description: String(item.description ?? ''),
+          logo: typeof item.logo === 'string' && item.logo ? item.logo : null,
+          creator: String(item.creator ?? ''),
+          useCount: Number(item.use_count ?? 0) || 0,
+          tags: typeof item.tag === 'string' && item.tag
+            ? item.tag.split(/[,，]/).map((s) => s.trim()).filter(Boolean)
+            : Array.isArray(item.tags)
+              ? item.tags.map((s) => String(s))
+              : [],
+          isDomestic: item.is_domestic === true,
+          packageUrl: typeof item.package_url === 'string' && item.package_url ? item.package_url : null,
+          connection,
+        }
+      })
+      return { servers }
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) }
+    }
   })
 
   // ── WebUI 控制 ──

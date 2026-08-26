@@ -100,6 +100,31 @@ export interface McpServerStatus {
   error?: string
 }
 
+/** MCP 插件市场条目的连接配置（解析自 mcp-cn.com 的 connections 字段） */
+export interface McpMarketConnection {
+  type: McpTransportType
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
+  url?: string
+  headers?: Record<string, string>
+}
+
+/** MCP 插件市场（mcp-cn.com / MCP Hub 中国版）的服务器条目 */
+export interface McpMarketServer {
+  id: string
+  name: string
+  qualifiedName: string
+  description: string
+  logo: string | null
+  creator: string
+  useCount: number
+  tags: string[]
+  isDomestic: boolean
+  packageUrl: string | null
+  connection: McpMarketConnection | null
+}
+
 // ── 热土引擎（REngine）账号系统 ──
 
 /** 热土用户信息 */
@@ -232,6 +257,8 @@ export interface ClerkBoxAPI {
   mcpCallTool: (toolName: string, args: Record<string, unknown>) => Promise<{ content: string; isError: boolean }>
   /** 订阅服务器状态变化；返回退订函数 */
   onMcpStatus: (callback: (statuses: McpServerStatus[]) => void) => () => void
+  /** 拉取 MCP 插件市场服务器列表（mcp-cn.com 全量） */
+  mcpSearch: () => Promise<{ servers: McpMarketServer[] } | { error: string }>
   // 热土账号系统（登录 / 登出 / 数据段云同步）
   accountLogin: () => Promise<{ ok: true; status: AccountStatus } | { error: string }>
   accountLogout: () => Promise<void>

@@ -12,7 +12,7 @@ import type {
   WebSearchResult,
 } from '../src/types/ipc'
 import type { MemoryEntry } from '../src/types/agent'
-import type { McpServerConfig, McpServerStatus, McpToolInfo } from '../src/types/ipc'
+import type { McpServerConfig, McpServerStatus, McpToolInfo, McpMarketServer } from '../src/types/ipc'
 
 contextBridge.exposeInMainWorld('clerkbox', {
   // File system
@@ -110,6 +110,8 @@ contextBridge.exposeInMainWorld('clerkbox', {
     ipcRenderer.on('mcp:statusChanged', listener)
     return () => ipcRenderer.removeListener('mcp:statusChanged', listener)
   },
+  mcpSearch: (): Promise<{ servers: McpMarketServer[] } | { error: string }> =>
+    ipcRenderer.invoke('mcpSearch'),
 
   // Memory system
   scanMemory: (workingDir: string): Promise<MemoryEntry[]> =>
