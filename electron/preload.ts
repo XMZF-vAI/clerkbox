@@ -213,4 +213,25 @@ contextBridge.exposeInMainWorld('clerkbox', {
     ipcRenderer.invoke('accountSyncUpload', kinds),
   accountSyncDownload: (kinds: AccountSyncKind[], force: boolean): Promise<AccountSyncDownloadResult> =>
     ipcRenderer.invoke('accountSyncDownload', kinds, force),
+
+  // 工作台内置终端（node-pty 真 TTY）
+  ptyCreate: (info: { id: string; cwd?: string; cols?: number; rows?: number }): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('ptyCreate', info),
+  ptyInput: (id: string, data: string): void => {
+    ipcRenderer.send('ptyInput', id, data)
+  },
+  ptyResize: (id: string, cols: number, rows: number): void => {
+    ipcRenderer.send('ptyResize', id, cols, rows)
+  },
+  ptyKill: (id: string): Promise<void> => ipcRenderer.invoke('ptyKill', id),
+  onPtyData: (callback: (id: string, data: string) => void): (() => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, id: string, data: string) => callback(id, data)
+    ipcRenderer.on('pty:data', listener)
+    return () => ipcRenderer.removeListener('pty:data', listener)
+  },
+  onPtyExit: (callback: (id: string, exitCode: number) => void): (() => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, id: string, exitCode: number) => callback(id, exitCode)
+    ipcRenderer.on('pty:exit', listener)
+    return () => ipcRenderer.removeListener('pty:exit', listener)
+  },
 })

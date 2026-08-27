@@ -1,12 +1,16 @@
 import { useState, useEffect } from 'react'
-import { LogOut, Settings2, Maximize, Minimize } from 'lucide-react'
+import { LogOut, Settings2, Maximize, Minimize, PanelRight } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useVibeStore } from '../../stores/vibe-store'
+import { useWorkbenchStore } from '../../stores/workbench-store'
 import VibeCustomizeMenu from './VibeCustomizeMenu'
 
 export default function VibeControls() {
   const { t } = useTranslation()
   const toggleVibeMode = useVibeStore((s) => s.toggleVibeMode)
+  // VIBE 模式无标题栏：工作台面板隐藏时提供浮动唤出入口
+  const workbenchVisible = useWorkbenchStore((s) => s.visible)
+  const toggleWorkbench = useWorkbenchStore((s) => s.toggleVisible)
   const [showMenu, setShowMenu] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
 
@@ -72,6 +76,20 @@ export default function VibeControls() {
         <LogOut size={16} />
         <span className="text-xs font-medium">{t('vibe.exit')}</span>
       </button>
+
+      {/* Workbench launcher - top right（面板已开时由其自带收起按钮负责） */}
+      {!workbenchVisible && (
+        <button
+          type="button"
+          onClick={toggleWorkbench}
+          className="fixed top-4 right-4 z-50 flex items-center gap-2 px-3 py-2 liquid-glass-btn rounded-full text-white/90"
+          aria-label={t('titlebar.toggleWorkbench')}
+          title={t('titlebar.toggleWorkbench')}
+        >
+          <PanelRight size={14} />
+          <span className="text-xs font-medium">{t('workbench.launcher')}</span>
+        </button>
+      )}
 
       {showMenu && <VibeCustomizeMenu onClose={() => setShowMenu(false)} />}
     </>

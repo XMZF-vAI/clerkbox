@@ -9,8 +9,6 @@ import type { MessageAttachment, TaskMode } from '../../types/agent'
 import MessageList from './MessageList'
 import ChatInput from './ChatInput'
 import ThemeWaves from './ThemeWaves'
-import { SubAgentDetailPanel } from './SubAgentDetailPanel'
-import { useAgentRunsStore } from '../../stores/agent-runs-store'
 import NEW_CHAT_ICON from '../../assets/new-chat-icon.png'
 
 interface ChatPageProps {
@@ -27,8 +25,7 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
   const initialized = useChatStore((s) => s.initialized)
   const loadFromDb = useChatStore((s) => s.loadFromDb)
   const sessionId = activeSessionId || ''
-  const { sendMessage, abort, error } = useAgent(sessionId)
-  const selectedRunId = useAgentRunsStore((s) => s.selectedRunId)
+  const { sendMessage, abort, manualCompact, isCompacting, error } = useAgent(sessionId)
 
   useEffect(() => {
     if (!initialized) {
@@ -115,6 +112,8 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
               <ChatInput
                 onSend={handleSend}
                 onStop={abort}
+                onManualCompact={manualCompact}
+                isCompacting={isCompacting}
                 isStreaming={isCurrentSessionStreaming}
                 variant={vibe ? 'default' : 'welcome'}
                 vibe={vibe}
@@ -140,7 +139,7 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
   // Normal layout: message list + input at bottom, with optional detail panel on the right
   return (
     <div className={`relative flex h-full ${vibe ? 'bg-transparent' : 'bg-dark-surface'}`}>
-      <div className="flex flex-1 flex-col min-h-0">
+      <div className="flex flex-1 flex-col min-h-0 min-w-0 overflow-x-hidden">
         <MessageList messages={messages} isStreaming={isCurrentSessionStreaming} vibe={vibe} />
         {error && (
           <div role="alert" className={`flex items-center gap-2 px-4 py-2 mx-4 rounded-md3-sm text-sm ${
@@ -152,9 +151,8 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
             <span className="flex-1">{error}</span>
           </div>
         )}
-        <ChatInput onSend={handleSend} onStop={abort} isStreaming={isCurrentSessionStreaming} vibe={vibe} />
+        <ChatInput onSend={handleSend} onStop={abort} onManualCompact={manualCompact} isCompacting={isCompacting} isStreaming={isCurrentSessionStreaming} vibe={vibe} />
       </div>
-      {selectedRunId && <SubAgentDetailPanel sessionId={sessionId} vibe={vibe} />}
     </div>
   )
 }

@@ -482,6 +482,22 @@ export const ipc = {
     isElectron ? window.clerkbox.accountSyncUpload(kinds) : webInvoke('accountSyncUpload', [kinds]),
   accountSyncDownload: (kinds: AccountSyncKind[], force: boolean): Promise<AccountSyncDownloadResult> =>
     isElectron ? window.clerkbox.accountSyncDownload(kinds, force) : webInvoke('accountSyncDownload', [kinds, force]),
+
+  // 工作台内置终端（node-pty）：仅 Electron 桌面端可用，WebUI 一律拒绝
+  ptyCreate: (info: { id: string; cwd?: string; cols?: number; rows?: number }): Promise<{ ok: boolean }> =>
+    isElectron ? window.clerkbox.ptyCreate(info) : Promise.reject(new Error('Terminal is desktop-only')),
+  ptyInput: (id: string, data: string): void => {
+    if (isElectron) window.clerkbox.ptyInput(id, data)
+  },
+  ptyResize: (id: string, cols: number, rows: number): void => {
+    if (isElectron) window.clerkbox.ptyResize(id, cols, rows)
+  },
+  ptyKill: (id: string): Promise<void> =>
+    isElectron ? window.clerkbox.ptyKill(id) : Promise.resolve(),
+  onPtyData: (callback: (id: string, data: string) => void): (() => void) =>
+    isElectron ? window.clerkbox.onPtyData(callback) : () => {},
+  onPtyExit: (callback: (id: string, exitCode: number) => void): (() => void) =>
+    isElectron ? window.clerkbox.onPtyExit(callback) : () => {},
 }
 
 // ── WebUI 模式下异步预取 platform / homeDir ──

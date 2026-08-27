@@ -1,8 +1,10 @@
-import { Menu, Minus, Square, X, Sparkles, Copy } from 'lucide-react'
+import { Menu, Minus, Square, X, Sparkles, Copy, PanelRight } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useChatStore } from '../../stores/chat-store'
 import { useVibeStore } from '../../stores/vibe-store'
+import { useWorkbenchStore } from '../../stores/workbench-store'
+import ContextUsageIndicator from '../chat/ContextUsageIndicator'
 import { isWebUIMode } from '../../lib/ipc-client'
 import pkg from '../../../package.json'
 
@@ -16,6 +18,9 @@ export default function TitleBar({ onToggleSidebar }: TitleBarProps) {
   const hasStreaming = useChatStore((s) => s.streamingSessionIds.size > 0)
   const vibeMode = useVibeStore((s) => s.isVibeMode)
   const toggleVibeMode = useVibeStore((s) => s.toggleVibeMode)
+  // 工作台面板显隐：激活态高亮按钮
+  const workbenchVisible = useWorkbenchStore((s) => s.visible)
+  const toggleWorkbench = useWorkbenchStore((s) => s.toggleVisible)
 
   // 监听窗口最大化状态，根据状态切换中间按钮的图标和 hover 提示
   const [isMaximized, setIsMaximized] = useState(false)
@@ -27,7 +32,7 @@ export default function TitleBar({ onToggleSidebar }: TitleBarProps) {
 
   return (
     <div
-      className="h-11 max-md:h-14 flex items-center justify-between px-4 max-md:px-3 bg-dark-surface/80 backdrop-blur-md border-b border-dark-onSurfaceVariant/10 select-none"
+      className="relative z-30 h-11 max-md:h-14 flex items-center justify-between px-4 max-md:px-3 bg-dark-surface/80 backdrop-blur-md border-b border-dark-onSurfaceVariant/10 select-none"
       style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
     >
       <div className="flex items-center gap-3" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
@@ -64,6 +69,9 @@ export default function TitleBar({ onToggleSidebar }: TitleBarProps) {
           </span>
         </button>
 
+        {/* Context usage indicator：环形用量 + 统计面板（含手动压缩入口） */}
+        <ContextUsageIndicator />
+
         {/* Status indicator */}
         <div className={`flex items-center gap-2 mr-2 px-2 py-1 rounded-md3-sm ${
           hasStreaming ? 'bg-md-info/10' : 'bg-dark-surfaceContainerHigh'
@@ -75,6 +83,22 @@ export default function TitleBar({ onToggleSidebar }: TitleBarProps) {
             {hasStreaming ? t('titlebar.statusExecuting') : t('titlebar.statusReady')}
           </span>
         </div>
+
+        {/* 工作台面板开关（普通模式；VIBE 模式无标题栏，走 VibeControls 里的入口） */}
+        <button
+          type="button"
+          onClick={toggleWorkbench}
+          aria-label={t('titlebar.toggleWorkbench')}
+          title={t('titlebar.toggleWorkbench')}
+          aria-pressed={workbenchVisible}
+          className={`w-8 h-8 flex items-center justify-center rounded-md3-sm transition-colors ${
+            workbenchVisible
+              ? 'bg-md-primary/15 text-md-primary'
+              : 'hover:bg-dark-surfaceContainerHigh text-dark-onSurfaceVariant'
+          }`}
+        >
+          <PanelRight size={16} />
+        </button>
 
         {/* Window controls：WebUI 模式下隐藏（浏览器无窗口控制） */}
         {!isWebUIMode && (

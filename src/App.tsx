@@ -3,6 +3,7 @@ import ChatPage from './components/chat/ChatPage'
 import SkillStore from './components/chat/SkillStore'
 import Sidebar from './components/layout/Sidebar'
 import TitleBar from './components/layout/TitleBar'
+import WorkbenchPanel from './components/workbench/WorkbenchPanel'
 import SettingsPage from './components/settings/SettingsPage'
 import OnboardingFlow from './components/onboarding/OnboardingFlow'
 import VibeBackground from './components/vibe/VibeBackground'
@@ -105,8 +106,12 @@ export default function App() {
       <div className={`app-window relative h-screen max-md:h-dvh w-screen overflow-hidden text-white ${windowShape} ${isWebUIMode || isMaximized ? '' : 'border border-white/15'}`}>
         <VibeBackground />
         <VibeMusicPlayer />
-        <main className="relative z-10 h-full w-full">
-          <ChatPage vibe />
+        <main className="relative z-10 flex h-full w-full">
+          <div className="min-w-0 flex-1">
+            <ChatPage vibe />
+          </div>
+          {/* VIBE 模式下工作台走玻璃拟态皮肤；面板自身控制显隐 */}
+          <WorkbenchPanel vibe />
         </main>
         <VibeControls />
         {showSettings && <SettingsPage onClose={() => useSettingsStore.getState().updateSettings({ showSettings: false })} />}
@@ -144,7 +149,13 @@ export default function App() {
         <div className="flex flex-col flex-1 min-w-0">
           <TitleBar onToggleSidebar={isMobile ? () => setMobileSidebarOpen(true) : () => setSidebarCollapsed(!sidebarCollapsed)} />
           <main className="flex-1 min-h-0 overflow-hidden">
-            {showSkillStore ? <SkillStore /> : <ChatPage />}
+            <div className="flex h-full">
+              <div className="min-w-0 flex-1 overflow-hidden">
+                {showSkillStore ? <SkillStore /> : <ChatPage />}
+              </div>
+              {/* 技能商店页为独立全屏页，工作台仅在聊天视图挂载 */}
+              {!showSkillStore && <WorkbenchPanel />}
+            </div>
           </main>
         </div>
         {showSettings && <SettingsPage onClose={() => useSettingsStore.getState().updateSettings({ showSettings: false })} />}

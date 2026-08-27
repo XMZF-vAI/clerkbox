@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Bot, CheckCircle, XCircle, Loader2 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useAgentRunsStore } from '../../stores/agent-runs-store'
+import { useWorkbenchStore } from '../../stores/workbench-store'
 import { useShallow } from 'zustand/react/shallow'
 import type { Message } from '../../types/agent'
 
@@ -45,7 +46,6 @@ export function SubAgentCard({ message, sessionId, vibe }: SubAgentCardProps) {
     }
   }))
   const selectedRunId = useAgentRunsStore((s) => s.selectedRunId)
-  const selectRun = useAgentRunsStore((s) => s.selectRun)
   const [elapsed, setElapsed] = useState(0)
 
   const run = runFields
@@ -89,7 +89,10 @@ export function SubAgentCard({ message, sessionId, vibe }: SubAgentCardProps) {
       aria-expanded={isSelected}
       aria-label={t('chat.subAgentAria', { name: run.agentName, status: statusConfig.label, action: isSelected ? t('chat.subAgentAriaClose') : t('chat.subAgentAriaOpen') })}
       className={`my-1 w-full max-w-full min-w-0 cursor-pointer rounded-md border ${color.border} ${vibe ? 'liquid-glass-subtle' : color.bg} px-2 py-1.5 text-left transition-all hover:border-md-primary/50 focus:outline-none focus-visible:ring-2 focus-visible:ring-md-primary/50 ${isSelected ? 'ring-2 ring-md-primary/50' : ''}`}
-      onClick={() => selectRun(isSelected ? null : run.id)}
+      onClick={() => {
+        // 子 Agent 详情的唯一入口：打开/聚焦工作台对应标签；再次点击（激活态）= 关闭
+        useWorkbenchStore.getState().toggleSubAgent(sessionId, run.id, run.agentName)
+      }}
     >
       <div className="flex items-center gap-1.5">
         {/* agent 类型圆点 */}

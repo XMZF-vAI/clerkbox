@@ -44,6 +44,7 @@ export interface MessageRow {
   attachments?: string | null
   finish_reason?: string | null
   is_compact?: number  // 0 or 1 — marks compact boundary/summary messages
+  is_compact_attachment?: number  // 0 or 1 — marks post-compaction file-restore messages
   is_sub_agent_card?: number  // 0 or 1 — marks sub-agent card placeholder messages
   sub_agent_id?: string | null  // associated sub-agent run id
   /** 发送时的任务工作流（'spec' | 'plan' | 'goal'），仅 user 消息携带 */
@@ -200,6 +201,17 @@ export type VibeMediaCommand =
   | { type: 'seek'; positionMs: number }
   | { type: 'volume'; volume: number }
 
+// ── 内置工作台（Trae 式右侧面板坞） ──
+
+/** 创建 PTY 终端的入参（仅桌面端可用） */
+export interface PtyCreateInfo {
+  /** 渲染层生成的终端实例 id（与工作台标签 id 一致） */
+  id: string
+  cwd?: string
+  cols?: number
+  rows?: number
+}
+
 export interface ClerkBoxAPI {
   selectFolder: () => Promise<string | null>
   selectImageFile: () => Promise<string | null>
@@ -312,6 +324,15 @@ export interface ClerkBoxAPI {
   accountGetStatus: () => Promise<AccountStatus>
   accountSyncUpload: (kinds: AccountSyncKind[]) => Promise<{ results: AccountSyncResultItem[] }>
   accountSyncDownload: (kinds: AccountSyncKind[], force: boolean) => Promise<AccountSyncDownloadResult>
+  // ── 内置终端（node-pty 真 TTY，仅桌面端） ──
+  ptyCreate: (info: PtyCreateInfo) => Promise<{ ok: boolean }>
+  ptyInput: (id: string, data: string) => void
+  ptyResize: (id: string, cols: number, rows: number) => void
+  ptyKill: (id: string) => Promise<void>
+  /** 订阅终端输出流；返回退订函数 */
+  onPtyData: (callback: (id: string, data: string) => void) => () => void
+  /** 订阅终端退出事件；返回退订函数 */
+  onPtyExit: (callback: (id: string, exitCode: number) => void) => () => void
 }
 
 /** 模型 API 连接配置（主进程代理入参） */

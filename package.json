@@ -23,12 +23,15 @@
   "dependencies": {
     "@material/material-color-utilities": "^0.4.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "ai": "^6.0.195",
     "cheerio": "^1.2.0",
     "i18next": "^26.3.6",
     "iconv-lite": "^0.7.3",
     "js-yaml": "^4.3.1",
     "lucide-react": "^1.17.0",
+    "node-pty": "^1.1.0",
     "qrcode": "^1.5.4",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
@@ -72,6 +75,9 @@
       "build/**/*"
     ],
     "extraResources": [],
+    "asarUnpack": [
+      "node_modules/node-pty/**"
+    ],
     "win": {
       "target": [
         "nsis"

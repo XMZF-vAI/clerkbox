@@ -4,9 +4,15 @@ import { useTranslation } from 'react-i18next'
 import { useAgentRunsStore } from '../../stores/agent-runs-store'
 import type { Message, ToolCall, ToolResult } from '../../types/agent'
 
-interface SubAgentDetailPanelProps {
+interface SubAgentDetailContentProps {
   sessionId: string
+  runId: string
+  /** 打开时的 agentName 快照：run 被清理后标签头仍可显示 */
+  titleSnapshot?: string
+  /** 标签是否激活（仅激活时绑定 Escape 关闭） */
+  active?: boolean
   vibe?: boolean
+  onClose: () => void
 }
 
 // 工具调用条（轻量版，不依赖 chat-store）
@@ -125,14 +131,15 @@ function SubAgentMessage({ msg, vibe }: { msg: Message; vibe?: boolean }) {
   )
 }
 
-export function SubAgentDetailPanel({ sessionId, vibe }: SubAgentDetailPanelProps) {
+/**
+ * 子 Agent 运行详情的工作台内容（原右侧浮层迁移版，由 WorkbenchPanel 的标签承载）。
+ * 无任何用户入口——只有聊天中的子 Agent 卡片点击才会打开对应标签。
+ */
+export function SubAgentDetailContent({ sessionId, runId, titleSnapshot, active, vibe, onClose }: SubAgentDetailContentProps) {
   const { t } = useTranslation()
   // 精细化订阅：只拿需要的字段，避免每次 set 都触发面板重渲染
-  const selectRun = useAgentRunsStore((s) => s.selectRun)
   const run = useAgentRunsStore((s) => {
-    const id = s.selectedRunId
-    if (!id) return null
-    return (s.runsBySession[sessionId] || []).find((r) => r.id === id) || null
+    return (s.runsBySession[sessionId] || []).find((r) => r.id === runId) || null
   })
   const [elapsed, setElapsed] = useState(0)
   const panelRef = useRef<HTMLDivElement>(null)
@@ -150,20 +157,17 @@ export function SubAgentDetailPanel({ sessionId, vibe }: SubAgentDetailPanelProp
     return () => clearInterval(timer)
   }, [run?.status, run?.startedAt])
 
-  // Escape 关闭面板 + 打开时焦点移入。
-  // 依赖 run?.id 而非 run 引用，避免流式期间每 50ms 重新挂载/卸载 keydown 监听器
+  // Escape 关闭面板 + 激活时焦点移入。
+  // 终端里的 Escape 属于应用层输入（vim 等），不做关闭语义
   useEffect(() => {
-    if (!run) return
+    if (!active) return
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
     const panel = panelRef.current
-    if (panel) {
-      // 聚焦面板使其可接收键盘事件
-      panel.focus()
-    }
+    if (panel) panel.focus()
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
+      if (e.key === 'Escape' && !(e.target instanceof HTMLElement && e.target.closest('.xterm'))) {
         e.stopPropagation()
-        selectRun(null)
+        onClose()
       }
     }
     document.addEventListener('keydown', onKey)
@@ -171,9 +175,20 @@ export function SubAgentDetailPanel({ sessionId, vibe }: SubAgentDetailPanelProp
       document.removeEventListener('keydown', onKey)
       previousFocus?.focus()
     }
-  }, [run?.id, selectRun])
+  }, [active, onClose])
 
-  if (!run) return null
+  if (!run) {
+    return (
+      <div ref={panelRef} tabIndex={-1} className={`flex h-full flex-col items-center justify-center gap-2 text-xs focus:outline-none ${vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/60'}`}>
+        {titleSnapshot && (
+          <div className={`flex items-center gap-1.5 ${vibe ? 'text-white/80' : 'text-dark-onSurfaceVariant'}`}>
+            <Bot size={14} /> {titleSnapshot}
+          </div>
+        )}
+        <span>{t('workbench.subAgentGone')}</span>
+      </div>
+    )
+  }
 
   const statusConfig = ({
     running: { icon: <Loader2 className="h-4 w-4 animate-spin text-md-primary" />, label: t('common.running'), class: 'text-md-primary' },
@@ -188,20 +203,20 @@ export function SubAgentDetailPanel({ sessionId, vibe }: SubAgentDetailPanelProp
       tabIndex={-1}
       role="complementary"
       aria-label={t('chat.subAgentDetailAria', { name: run.agentName })}
-      className={`absolute inset-0 z-30 flex h-full w-full max-w-none flex-col border-l focus:outline-none sm:static sm:z-auto sm:w-[min(480px,40vw)] sm:min-w-[320px] sm:max-w-[480px] ${vibe ? 'liquid-glass-strong border-white/20' : 'border-md-outlineVariant/30 bg-dark-surfaceContainer'}`}
+      className="flex h-full min-h-0 w-full flex-col focus:outline-none"
     >
       {/* 头部 */}
       <div className={`flex items-center gap-2 border-b px-3 py-2 ${vibe ? 'border-white/10' : 'border-md-outlineVariant/30'}`}>
         <button
           type="button"
           className={`rounded p-1 ${vibe ? 'hover:bg-white/10' : 'hover:bg-md-primaryContainer/20'}`}
-          onClick={() => selectRun(null)}
+          onClick={onClose}
           title={t('chat.closePanelTitle')}
           aria-label={t('chat.closePanelAria')}
         >
           <ArrowLeft className={`h-4 w-4 ${vibe ? 'text-white/60' : 'text-md-onSurfaceVariant'}`} />
         </button>
-        <Bot className="h-4 w-4 text-md-primary" />
+        <Bot className="h-4 w-4 shrink-0 text-md-primary" />
         <span className={`min-w-0 truncate text-sm font-medium ${vibe ? 'text-white/90' : 'text-md-onSurface'}`}>{run.agentName}</span>
         <span className="shrink-0 rounded bg-md-primaryContainer/30 px-1.5 py-0.5 text-[10px] text-md-primary">{run.agentType}</span>
       </div>
@@ -224,7 +239,7 @@ export function SubAgentDetailPanel({ sessionId, vibe }: SubAgentDetailPanelProp
       </div>
 
       {/* 消息列表 */}
-      <div className="flex-1 overflow-y-auto px-3 py-2">
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
         {run.messages.length === 0 ? (
           <div className={`text-center text-xs ${vibe ? 'text-white/50' : 'text-md-onSurfaceVariant'}`}>{t('chat.subAgentNoMessages')}</div>
         ) : (

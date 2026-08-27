@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { FolderOpen, Folder, File, ChevronRight, ChevronDown, HardDrive } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { ipc, isWebUIMode } from '../../lib/ipc-client'
@@ -39,20 +39,39 @@ function updateNode(nodes: TreeNode[], targetPath: string, update: (node: TreeNo
   })
 }
 
-function FileTreeNode({ node, depth = 0, onToggle }: { node: TreeNode; depth?: number; onToggle: (path: string) => void }) {
+function FileTreeNode({ node, depth = 0, onToggle, onFileSelect }: { node: TreeNode; depth?: number; onToggle: (path: string) => void; onFileSelect?: (path: string) => void }) {
   const { t } = useTranslation()
   const paddingLeft = depth * 16 + 8
 
   if (!node.isDirectory) {
-    return (
-      <div
-        title={node.path}
-        className="flex items-center gap-2 py-1 px-2 rounded-md3-sm text-sm text-dark-onSurfaceVariant"
-        style={{ paddingLeft }}
-      >
+    // 工作台面板传入 onFileSelect 时，文件可点击预览；否则维持原纯展示行为
+    const inner = (
+      <>
         <File size={14} aria-hidden="true" />
         <span className="truncate">{node.name}</span>
-      </div>
+      </>
+    )
+    if (!onFileSelect) {
+      return (
+        <div
+          title={node.path}
+          className="flex items-center gap-2 py-1 px-2 rounded-md3-sm text-sm text-dark-onSurfaceVariant"
+          style={{ paddingLeft }}
+        >
+          {inner}
+        </div>
+      )
+    }
+    return (
+      <button
+        type="button"
+        title={node.path}
+        onClick={() => onFileSelect(node.path)}
+        className="w-full flex items-center gap-2 py-1 px-2 rounded-md3-sm text-sm text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh hover:text-dark-onSurface transition-colors text-left"
+        style={{ paddingLeft }}
+      >
+        {inner}
+      </button>
     )
   }
 
@@ -74,7 +93,7 @@ function FileTreeNode({ node, depth = 0, onToggle }: { node: TreeNode; depth?: n
       {node.expanded && node.children && (
         <div>
           {node.children.map((child) => (
-            <FileTreeNode key={child.path} node={child} depth={depth + 1} onToggle={onToggle} />
+            <FileTreeNode key={child.path} node={child} depth={depth + 1} onToggle={onToggle} onFileSelect={onFileSelect} />
           ))}
         </div>
       )}
@@ -87,7 +106,14 @@ function FileTreeNode({ node, depth = 0, onToggle }: { node: TreeNode; depth?: n
   )
 }
 
-export default function FileTree() {
+interface FileTreeProps {
+  /** 传入后：点击文件节点回调该文件路径（工作台预览用）；缺省维持纯浏览行为 */
+  onFileSelect?: (path: string) => void
+  /** 传入后：自动以该目录为根并跟随变化（工作台把当前会话工作目录传进来） */
+  initialRoot?: string
+}
+
+export default function FileTree({ onFileSelect, initialRoot }: FileTreeProps) {
   const { t } = useTranslation()
   const [rootPath, setRootPath] = useState<string | null>(null)
   const [tree, setTree] = useState<TreeNode[]>([])
@@ -173,7 +199,17 @@ export default function FileTree() {
     updateTree((nodes) => updateNode(nodes, targetPath, (node) => ({ ...node, children, loading: false })))
   }, [loadDir, updateTree])
 
-  if (!rootPath) {
+  // 工作台模式：跟随传入的会话工作目录自动挂根（目录变化/切换会话时重挂）
+  // rootPath 不进依赖：用户手动「更换」后保持其选择，直到会话目录再次变化
+  const rootRef = useRef<string | null>(null)
+  rootRef.current = rootPath
+  useEffect(() => {
+    if (!initialRoot || rootRef.current === initialRoot) return
+    void applyRootFolder(initialRoot)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialRoot])
+
+  if (!rootPath && !initialRoot) {
     return (
       <>
         <div className="flex flex-col items-center justify-center h-48 gap-3 text-dark-onSurfaceVariant">
@@ -201,7 +237,7 @@ export default function FileTree() {
     <>
       <div className="py-1">
       <div className="flex items-center justify-between px-2 mb-2">
-        <span title={rootPath} className="text-xs text-dark-onSurfaceVariant/50 truncate flex-1">{rootPath}</span>
+        <span title={rootPath ?? undefined} className="text-xs text-dark-onSurfaceVariant/50 truncate flex-1">{rootPath}</span>
         <button
           type="button"
           onClick={handleSelectFolder}
@@ -212,7 +248,7 @@ export default function FileTree() {
       </div>
       <div>
         {tree.map((node) => (
-          <FileTreeNode key={node.path} node={node} onToggle={handleToggle} />
+          <FileTreeNode key={node.path} node={node} onToggle={handleToggle} onFileSelect={onFileSelect} />
         ))}
       </div>
       </div>

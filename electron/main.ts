@@ -23,6 +23,7 @@ import * as rtAccount from './rt-account'
 import { mcpManager } from './mcp-manager'
 import { winAcrylic } from './win-acrylic'
 import { systemMedia } from './system-media'
+import { registerTerminalHandlers, disposeAllTerminals } from './terminal'
 import type { AccountSyncKind, McpMarketConnection, McpServerConfig, SystemMediaState, VibeGlassTrack } from '../src/types/ipc'
 
 const SKILL_REQUEST_TIMEOUT_MS = 15_000
@@ -512,6 +513,8 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: true,
       webSecurity: true,
+      // 工作台浏览器面板需要内嵌 <webview>
+      webviewTag: true,
     },
   })
 
@@ -674,6 +677,9 @@ function registerIpcHandlers() {
 
   // 模型 API 代理（拉模型列表 / 测连接 / 流式对话 / 中止）
   registerApiProxyHandlers()
+
+  // 工作台终端（node-pty 真 TTY）
+  registerTerminalHandlers()
 
   // The sandboxed preload cannot access OS APIs directly.
   ipcMain.on('getPlatform', (event) => {
@@ -3378,9 +3384,10 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-// 退出前清理 MCP 子进程与 VIBE 助手进程，避免残留
+// 退出前清理 MCP 子进程、终端 PTY 与 VIBE 助手进程，避免残留
 app.on('before-quit', () => {
   void mcpManager.disposeAll()
   winAcrylic.dispose()
   systemMedia.dispose()
+  disposeAllTerminals()
 })
