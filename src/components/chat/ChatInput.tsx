@@ -1,5 +1,5 @@
 import { useState, useRef, type KeyboardEvent as ReactKeyboardEvent, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type ChangeEvent as ReactChangeEvent, useEffect } from 'react'
-import { Send, Brain, FolderOpen, ChevronDown, Square, Zap, Check, X, Store, Plus, FolderPlus, Paperclip, FileText, ShieldCheck, Hand, TriangleAlert, Slash, BookOpen, GitBranch, Target, Plug, Settings2, type LucideIcon } from 'lucide-react'
+import { Send, Brain, FolderOpen, ChevronDown, Square, Zap, Check, X, Store, Plus, FolderPlus, Paperclip, FileText, ShieldCheck, Hand, TriangleAlert, Slash, BookOpen, GitBranch, Target, Plug, Settings2, FoldVertical, Loader2, type LucideIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useSettingsStore } from '../../stores/settings-store'
 import { useChatStore } from '../../stores/chat-store'
@@ -12,11 +12,14 @@ import type { FileEntry, WebUICapabilities } from '../../types/ipc'
 import ConfirmDialog from '../ui/ConfirmDialog'
 import { useIsMobile } from '../../hooks/use-mobile'
 
-// ── "/" 命令菜单里的任务工作流命令（对齐 TRAE：Spec / Plan / Goal；Browser 模式不做） ──
-const TASK_COMMANDS: Array<{ id: TaskMode; name: string; icon: LucideIcon; descKey: string }> = [
+// ── "/" 命令菜单里的命令（任务工作流 + 上下文压缩；工作流对齐 TRAE：Spec / Plan / Goal；Browser 模式不做） ──
+// 上下文压缩命令：选中后出现芯片，回车即手动压缩（输入文本作为可选的压缩重点指令）
+const COMPACT_COMMAND = { id: 'compact' as const, name: '压缩', icon: FoldVertical, descKey: 'chat.cmdCompactDesc' }
+const TASK_COMMANDS: Array<{ id: TaskMode | 'compact'; name: string; icon: LucideIcon; descKey: string }> = [
   { id: 'spec', name: 'Spec', icon: BookOpen, descKey: 'chat.cmdSpecDesc' },
   { id: 'plan', name: 'Plan', icon: GitBranch, descKey: 'chat.cmdPlanDesc' },
   { id: 'goal', name: 'Goal', icon: Target, descKey: 'chat.cmdGoalDesc' },
+  COMPACT_COMMAND,
 ]
 
 // 取路径的最后一节作为显示名（兼容 Windows/Unix 两种分隔符）
@@ -106,17 +109,21 @@ function parentFolderPath(value: string): string | null {
 
 interface ChatInputProps {
   onSend: (content: string, attachments?: MessageAttachment[], taskMode?: TaskMode) => void
+  onManualCompact?: (instructions?: string) => void | Promise<void>
+  isCompacting?: boolean
   onStop?: () => void
   isStreaming?: boolean
   variant?: 'default' | 'welcome'
   vibe?: boolean
 }
 
-export default function ChatInput({ onSend, onStop, isStreaming, variant = 'default', vibe = false }: ChatInputProps) {
+export default function ChatInput({ onSend, onManualCompact, isCompacting, onStop, isStreaming, variant = 'default', vibe = false }: ChatInputProps) {
   const { t } = useTranslation()
   const [content, setContent] = useState('')
   // 任务工作流芯片（/ 命令菜单选择的 Spec/Plan/Goal，随下一条消息一次性生效）
   const [taskMode, setTaskMode] = useState<TaskMode | null>(null)
+  // 上下文压缩芯片（/ 命令菜单选择的「压缩」，回车触发手动压缩，输入文本作为可选压缩重点）
+  const [compactMode, setCompactMode] = useState(false)
   const [folderSelecting, setFolderSelecting] = useState(false)
   const [attachSelecting, setAttachSelecting] = useState(false)
   const [dragging, setDragging] = useState(false)
@@ -276,11 +283,21 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
     requestAnimationFrame(() => textareaRef.current?.focus())
   }
 
-  /** 选中命令菜单某项：命令 → 设置任务芯片并关闭；技能 → 切换激活态并保持菜单（可连续多选）；MCP → 切换启停 */
+  /** 选中命令菜单某项：命令 → 设置任务芯片并关闭；压缩 → 设置压缩芯片并关闭；技能 → 切换激活态并保持菜单（可连续多选）；MCP → 切换启停 */
   const selectCommandItem = (kind: 'command' | 'skill' | 'mcp', id: string) => {
     if (kind === 'command') {
-      setTaskMode(id as TaskMode)
       // 只清掉以 "/" 开头的过滤前缀（菜单触发态），保留用户已输入的正文，避免临时切换模式时丢字
+      // 压缩与任务工作流互斥：选中其一即清除另一个，避免残留脏状态
+      if (id === COMPACT_COMMAND.id) {
+        setTaskMode(null)
+        setCompactMode(true)
+        setContent((v) => (v.startsWith('/') ? '' : v))
+        setShowCommandMenu(false)
+        requestAnimationFrame(() => textareaRef.current?.focus())
+        return
+      }
+      setCompactMode(false)
+      setTaskMode(id as TaskMode)
       setContent((v) => (v.startsWith('/') ? '' : v))
       setShowCommandMenu(false)
       requestAnimationFrame(() => textareaRef.current?.focus())
@@ -298,7 +315,18 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
 
   const handleSend = () => {
     const trimmed = content.trim()
-    if (isStreaming) return
+    if (isStreaming || isCompacting) return
+    // 压缩模式：回车执行手动压缩（输入文本作为可选自定义指令），不走普通消息发送
+    if (compactMode) {
+      void onManualCompact?.(trimmed || undefined)
+      setContent('')
+      setCompactMode(false)
+      commitAttachments([])
+      if (textareaRef.current) {
+        textareaRef.current.style.height = 'auto'
+      }
+      return
+    }
     if (!trimmed && attachments.length === 0) return
     if (trimmed.length > 50000) {
       alert(t('chat.messageTooLong'))
@@ -525,10 +553,15 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
       e.preventDefault()
       handleSend()
     }
-    // 空输入框按 Backspace：先移除任务工作流芯片
-    if (e.key === 'Backspace' && !content && taskMode) {
-      e.preventDefault()
-      setTaskMode(null)
+    // 空输入框按 Backspace：先移除任务工作流芯片 / 压缩芯片
+    if (e.key === 'Backspace' && !content) {
+      if (taskMode) {
+        e.preventDefault()
+        setTaskMode(null)
+      } else if (compactMode) {
+        e.preventDefault()
+        setCompactMode(false)
+      }
     }
   }
 
@@ -753,6 +786,8 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
     : taskMode === 'plan'
       ? (vibe ? 'bg-md-primary/25 text-md-primary' : 'bg-md-primary/15 text-md-primary')
       : (vibe ? 'bg-md-tertiary/25 text-md-tertiary' : 'bg-md-tertiary/15 text-md-tertiary')
+  // 压缩芯片配色（primary，与 Plan 同色系）
+  const compactChipClass = vibe ? 'bg-md-primary/25 text-md-primary' : 'bg-md-primary/15 text-md-primary'
 
   // 当前模型显示名：优先取所属提供商里登记的 label，回落到 model id；都没有则提示未配置
   const currentModelLabel = (() => {
@@ -894,7 +929,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
           </div>
         )}
 
-        {/* Textarea - top area（左侧可带任务工作流芯片，如 Goal，点击芯片可移除） */}
+        {/* Textarea - top area（左侧可带任务工作流芯片，如 Goal；或压缩芯片，点击芯片可移除） */}
         <div className="flex items-start gap-2">
           {taskMode && (() => {
             const chipMeta = TASK_COMMANDS.find((c) => c.id === taskMode)
@@ -913,6 +948,18 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
               </button>
             )
           })()}
+          {compactMode && (
+            <button
+              type="button"
+              onClick={() => setCompactMode(false)}
+              title={t('chat.compactChipRemove')}
+              className={`flex items-center gap-1.5 mt-1 px-2 py-0.5 rounded-md3-sm text-sm font-medium flex-shrink-0 transition-colors ${compactChipClass}`}
+            >
+              <COMPACT_COMMAND.icon size={14} />
+              <span>{COMPACT_COMMAND.name}</span>
+              <X size={11} className="opacity-50" />
+            </button>
+          )}
           <textarea
             ref={textareaRef}
             value={content}
@@ -920,13 +967,17 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
             onKeyDown={handleKeyDown}
             onInput={handleInput}
             onPaste={handlePaste}
-            disabled={isStreaming}
+            disabled={isStreaming || isCompacting}
             aria-label={t('chat.messageInputAria')}
-            placeholder={taskMode
-              ? t('chat.taskPlaceholder')
-              : vibe
-                ? t('chat.placeholderVibe')
-                : (effectiveWorkDir ? t('chat.placeholderWorkDir', { name: effectiveWorkDir.split(/[/\\]/).pop() }) : t('chat.placeholderDefault'))}
+            placeholder={isCompacting
+              ? t('chat.compactingContext')
+              : compactMode
+                ? t('chat.compactPlaceholder')
+                : taskMode
+                  ? t('chat.taskPlaceholder')
+                  : vibe
+                    ? t('chat.placeholderVibe')
+                    : (effectiveWorkDir ? t('chat.placeholderWorkDir', { name: effectiveWorkDir.split(/[/\\]/).pop() }) : t('chat.placeholderDefault'))}
             rows={1}
             className={`w-full bg-transparent text-sm max-md:text-base resize-none outline-none min-h-[20px] max-md:min-h-6 max-h-[200px] py-1 ${
               vibe
@@ -1651,7 +1702,7 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
           <button
             type="button"
             onClick={isStreaming ? onStop : handleSend}
-            disabled={!isStreaming && !content.trim() && attachments.length === 0}
+            disabled={isCompacting || (!isStreaming && !compactMode && !content.trim() && attachments.length === 0)}
             aria-label={isStreaming ? t('chat.stopResponseAria') : t('chat.sendMessageAria')}
             className={`h-9 w-9 max-md:h-12 max-md:w-12 flex-shrink-0 flex items-center justify-center rounded-full transition-colors disabled:opacity-30 disabled:cursor-not-allowed ${
               isStreaming
@@ -1661,7 +1712,11 @@ export default function ChatInput({ onSend, onStop, isStreaming, variant = 'defa
                   : 'bg-md-primary text-md-onPrimary hover:bg-md-primary/90'
             }`}
           >
-            {isStreaming ? <Square size={isMobile ? 18 : 14} /> : <Send size={isMobile ? 20 : 16} />}
+            {isCompacting
+              ? <Loader2 size={isMobile ? 18 : 14} className="animate-spin" />
+              : isStreaming
+                ? <Square size={isMobile ? 18 : 14} />
+                : <Send size={isMobile ? 20 : 16} />}
           </button>
         </div>
       </div>

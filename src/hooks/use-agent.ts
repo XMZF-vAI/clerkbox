@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useSettingsStore } from '../stores/settings-store'
 import { useChatStore, getSessionAbortController, setSessionAbortController } from '../stores/chat-store'
 import { useTokenUsageStore } from '../stores/token-usage-store'
@@ -10,6 +10,7 @@ import { buildMemoryPrompt } from '../lib/memory'
 import { TokenTracker } from '../lib/token-tracker'
 import { estimateTokensForText } from '../lib/token-estimate'
 import { compactConversation, findKeepBoundaryIndex } from '../lib/compact'
+import { computeContextUsage, getApiVisibleMessages, type ContextUsageInfo } from '../lib/context-usage'
 import i18n from '../i18n'
 import { findAgent } from '../lib/agent-registry'
 import { useAgentRunsStore } from '../stores/agent-runs-store'
@@ -29,6 +30,16 @@ import type { ApiCompat, Message, MessageAttachment, TaskMode, ToolCall, ToolRes
 
 /** Vite 注入的 env（tsconfig 未含 vite/client 类型，安全取值） */
 const IS_DEV = (import.meta as unknown as { env?: { DEV?: boolean } }).env?.DEV ?? false
+
+/** 会话级 Agent 能力注册表：供 TitleBar 等 hook 外部组件调用当前会话的手动压缩 / 用量统计 */
+export interface SessionAgentEntry {
+  manualCompact: (instructions?: string) => Promise<void>
+  getUsage: (messages: Message[]) => ContextUsageInfo
+}
+const sessionAgentRegistry = new Map<string, SessionAgentEntry>()
+export function getSessionAgent(sessionId: string | null | undefined): SessionAgentEntry | undefined {
+  return sessionId ? sessionAgentRegistry.get(sessionId) : undefined
+}
 
 /** 每张多模态图片的固定 token 粗估成本（视觉输入按图片 token 计价，粗估 1000/张，用于截断/预算估算） */
 const IMAGE_TOKEN_ESTIMATE = 1000
@@ -325,6 +336,9 @@ export function useAgent(sessionId: string) {
    *  用 ref 而非参数透传：checkToolPermission 在工具执行深处读取，避免层层传参 */
   const activeTaskModeRef = useRef<TaskMode | null>(null)
   const [error, setError] = useState<string | null>(null)
+  /** 手动压缩进行中（/压缩 命令）：输入栏即时反馈 + 锁定，防止压缩期间并发发送 */
+  const [isCompacting, setIsCompacting] = useState(false)
+  const isCompactingRef = useRef(false)
 
   /** Get working directory for current session, with default fallback */
   const getWorkingDir = () => {
@@ -709,7 +723,13 @@ export function useAgent(sessionId: string) {
       },
     ]
 
-    for (const m of msgs) {
+    // 压缩边界过滤：API 只发送「最后一个压缩摘要之后」的消息子集。
+    // UI/DB 保留全量历史供用户查看，但旧历史不再发给模型（真正释放 token，
+    // 也与自动压缩判定 / 上下文用量指示器保持同一口径）。
+    // 工具配对完整性由下方后处理兜底（补齐丢失的 tool 响应/丢弃孤立 tool 消息）。
+    const visibleMsgs = getApiVisibleMessages(msgs)
+
+    for (const m of visibleMsgs) {
       if (m.role === 'system') continue // We already added system prompt
       // 跳过 UI 占位消息（子 agent 卡片），它们不是真实对话内容，会破坏 tool_calls ↔ tool 配对
       if (m.isSubAgentCard) continue
@@ -930,6 +950,111 @@ export function useAgent(sessionId: string) {
     [sessionId, settings, addMessage, updateMessage, setStreaming, setSessionStatus]
   )
 
+  /** 手动压缩上下文（/压缩 命令触发）：
+   *  编排与 reactLoop 内的自动压缩完全一致（占位提示 → compactConversation → 双消息数组 → 原子持久化 → 重置计数），
+   *  仅两处差异：trigger 标记为 'manual'、支持可选自定义指令（留空则行为等同自动压缩）。 */
+  const manualCompact = useCallback(
+    async (customInstructions?: string) => {
+      // 重入防护 + Agent 运行中忽略（避免与 ReAct 循环中途的消息状态冲突）
+      if (isCompactingRef.current || getSessionAbortController(sessionId)) return
+      if (!settings.baseUrl) {
+        setError('请先在设置中配置 API Base URL')
+        return
+      }
+      const activeProvider = settings.providers.find((p) => p.id === settings.activeProviderId)
+      if (!settings.apiKey && requiresApiKey(settings.baseUrl, activeProvider?.presetId)) {
+        setError('请先在设置中配置 API Key')
+        return
+      }
+
+      const session = useChatStore.getState().sessions.find((s) => s.id === sessionId)
+      const conversationMessages = session?.messages ?? []
+      if (conversationMessages.length === 0) return
+
+      setError(null)
+      isCompactingRef.current = true
+      setIsCompacting(true)
+
+      // ── 压缩过程展示：插入"正在压缩上下文"占位消息（同自动压缩路径） ──
+      const compactingId = makeId()
+      addMessage(sessionId, {
+        id: compactingId,
+        role: 'assistant',
+        content: '',
+        timestamp: Date.now(),
+        _isCompacting: true,
+      })
+      try {
+        const compactionResult = await compactConversation(
+          conversationMessages,
+          settings,
+          sessionReadFilesRef.current,
+          customInstructions?.trim() || undefined,
+          'manual'
+        )
+        // Recompute the keep boundary (same logic as inside compactConversation)
+        const keepStartIndex = findKeepBoundaryIndex(conversationMessages)
+        const keptMessages = conversationMessages.slice(keepStartIndex)
+        // 被压缩的历史消息（压缩点之前）——用户仍要在界面上看到它们，故保留但不发给 API
+        const summarizedMessages = conversationMessages.slice(0, keepStartIndex)
+
+        // 界面/DB 消息：完整保留全部历史，压缩组件（边界 + 摘要）插在压缩点位置。
+        // 手动压缩不接续对话循环，无需构建 API 子集。
+        const newMessages = [
+          ...summarizedMessages,
+          compactionResult.boundaryMessage,
+          compactionResult.summaryMessage,
+          ...keptMessages,
+          ...compactionResult.fileAttachments,
+        ]
+
+        // Sync to store and DB（保留全部历史）
+        compactSession(sessionId, newMessages, compactionResult.boundaryMessage.id)
+
+        // Clear the read file state (it's now in file attachments)
+        sessionReadFilesRef.current = new Map()
+        // Reset the token tracker after compaction so stale usage cannot retrigger auto-compact.
+        tokenTrackerRef.current.reset()
+
+        console.log(`[compact] Manually compacted: ${compactionResult.preCompactTokenCount} → ${compactionResult.postCompactTokenCount} tokens, ${compactionResult.boundaryMessage.compactMetadata?.messagesSummarized} messages summarized`)
+      } catch (err) {
+        console.error('[compact] Manual compaction failed:', err)
+        // 失败：把"正在压缩"占位消息改为可见提示，避免残留空白占位
+        updateMessage(sessionId, compactingId, {
+          content: i18n.t('chat.compactFailed'),
+          _isCompacting: false,
+        })
+      } finally {
+        isCompactingRef.current = false
+        setIsCompacting(false)
+      }
+    },
+    [sessionId, settings, addMessage, updateMessage, compactSession]
+  )
+
+  /** 上下文用量统计（TitleBar 环形指示器面板）：
+   *  总量与自动压缩判定同源（tokenTracker.getTokenCount），预算与阈值口径同 reactLoop 的 autoCompactThreshold。
+   *  注意：先过滤为 API 实际发送的消息子集，压缩后旧历史不计入总量/细分。 */
+  const getContextUsage = useCallback(
+    (messages: Message[]): ContextUsageInfo => {
+      const budget = settings.providers
+        .find((p) => p.id === settings.activeProviderId)
+        ?.models.find((x) => x.id === settings.activeModelId)?.maxInputTokens
+        ?? settings.maxInputTokens ?? 184000
+      // API 实际发送的消息子集（摘要 + 边界之后的消息）
+      const apiMessages = getApiVisibleMessages(messages)
+      const total = tokenTrackerRef.current.getTokenCount(apiMessages)
+      return computeContextUsage(apiMessages, total, budget, estimateTokensForText(SYSTEM_PROMPT))
+    },
+    [settings]
+  )
+
+  // 注册到模块级注册表（切换会话/卸载时清理），供 TitleBar 的上下文用量面板调用
+  useEffect(() => {
+    sessionAgentRegistry.set(sessionId, { manualCompact, getUsage: getContextUsage })
+    return () => { sessionAgentRegistry.delete(sessionId) }
+  }, [sessionId, manualCompact, getContextUsage])
+
   /** ReAct loop: think → act → observe → repeat */
   const reactLoop = async (
     initialMessages: Message[],
@@ -997,8 +1122,12 @@ export function useAgent(sessionId: string) {
         return m?.maxInputTokens ?? settings.maxInputTokens ?? 184000
       })()
       const autoCompactThreshold = Math.max(compactInputBudget - 20000, Math.floor(compactInputBudget * 0.8))
-      const currentTokenCount = tokenTrackerRef.current.getTokenCount(conversationMessages)
-      if (currentTokenCount > autoCompactThreshold && conversationMessages.length > 12) {
+      // 判定口径与 buildAPIMessages 一致：只统计 API 实际发送的消息子集。
+      // 旧实现对全量历史（含已被压缩的旧消息）估算，导致压缩后依然超阈值、
+      // 每次发消息都误触发压缩（而用量指示器按子集统计显示 30%+，两边对不上）。
+      const apiVisibleMessages = getApiVisibleMessages(conversationMessages)
+      const currentTokenCount = tokenTrackerRef.current.getTokenCount(apiVisibleMessages)
+      if (currentTokenCount > autoCompactThreshold && apiVisibleMessages.length > 12) {
         // ── 压缩过程展示：插入一条"正在压缩上下文"占位消息，让用户看到压缩在进行中 ──
         const compactingId = makeId()
         addMessage(sessionId, {
@@ -1622,8 +1751,10 @@ export function useAgent(sessionId: string) {
           return m?.maxInputTokens ?? subSettings.maxInputTokens ?? 184000
         })()
         const subAutoCompactThreshold = Math.max(subInputBudget - 20000, Math.floor(subInputBudget * 0.8))
-        const tokenCount = subTokenTracker.getTokenCount(conversationMessages)
-        if (tokenCount > subAutoCompactThreshold && conversationMessages.length > 12) {
+        // 与主循环同口径：只统计 API 实际发送的消息子集（压缩边界之后）
+        const subApiVisible = getApiVisibleMessages(conversationMessages)
+        const tokenCount = subTokenTracker.getTokenCount(subApiVisible)
+        if (tokenCount > subAutoCompactThreshold && subApiVisible.length > 12) {
           try {
             const compactionResult = await compactConversation(
               conversationMessages,
@@ -1868,5 +1999,5 @@ export function useAgent(sessionId: string) {
     }
   }
 
-  return { sendMessage, abort, error }
+  return { sendMessage, abort, manualCompact, isCompacting, error }
 }

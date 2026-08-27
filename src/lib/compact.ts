@@ -257,6 +257,9 @@ export function createPostCompactFileAttachments(
       role: 'user',
       content: `[Previously read file: ${file.filePath}]\n\`\`\`\n${truncatedContent}\n\`\`\``,
       timestamp: file.timestamp,
+      // 标记为压缩文件恢复消息：UI 渲染为折叠卡片而非用户气泡（role 为 user
+      // 仅为满足 API 消息结构，模型需要以 user 身份接收文件内容）
+      isCompactAttachment: true,
     })
   }
 

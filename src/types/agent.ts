@@ -37,6 +37,7 @@ export interface Message {
   usage?: TokenUsage
   collapsed?: boolean  // When true, this message is collapsed (hidden by default, expandable)
   isCompactSummary?: boolean  // Marks compact boundary/summary messages
+  isCompactAttachment?: boolean  // Marks post-compaction file-restore messages (UI 折叠卡片渲染，非用户消息)
   compactMetadata?: CompactMetadata  // Metadata for compact boundary messages
   streamingToolCalls?: StreamingToolCall[]  // Tool calls currently being streamed (transient, not persisted)
   _isCompacting?: boolean  // Transient: true 表示该消息是"正在压缩上下文"的过程占位（不入库，压缩完成后被替换）

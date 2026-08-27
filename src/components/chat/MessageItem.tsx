@@ -10,6 +10,8 @@ interface MessageItemProps {
   message: Message
   vibe?: boolean
   sessionId?: string
+  /** 中间过程消息（非最终回复），隐藏时间戳和缓存统计 */
+  isIntermediate?: boolean
 }
 
 /** Extract path and content from partial JSON args for write_file preview */
@@ -327,14 +329,23 @@ function DiffChips({ metas, vibe }: { metas: EditDiffMetaView[]; vibe?: boolean 
 }
 
 /** 工具运行组：折叠头部「N 个工具调用」+ 紧凑行列表 + 差异 chips */
-function ToolRunGroup({ toolCalls, toolResults, vibe, defaultOpen = false }: {
+function ToolRunGroup({ toolCalls, toolResults, vibe, defaultOpen = false, finishReason }: {
   toolCalls: NonNullable<Message['toolCalls']>
   toolResults?: Message['toolResults']
   vibe?: boolean
   defaultOpen?: boolean
+  /** 消息完成原因；流式过程中工具组默认展开，完成后自动收起 */
+  finishReason?: string
 }) {
   const { t } = useTranslation()
   const [open, setOpen] = useState(defaultOpen)
+
+  // 流式过程中保持工具组展开，消息完成后自动收起
+  useEffect(() => {
+    if (defaultOpen && finishReason) {
+      setOpen(false)
+    }
+  }, [finishReason, defaultOpen])
   const visible = toolCalls.filter((tc) => tc.name !== 'spawn_agent')
   const running = visible.some((tc) => !toolResults?.some((r) => r.toolCallId === tc.id))
   const diffMetas = useMemo(() => {
@@ -699,7 +710,7 @@ function escapeHtml(text: string): string {
     .replace(/"/g, '&quot;')
 }
 
-function MessageItem({ message, vibe = false, sessionId }: MessageItemProps) {
+function MessageItem({ message, vibe = false, sessionId, isIntermediate = false }: MessageItemProps) {
   const { t } = useTranslation()
   const [copied, setCopied] = useState(false)
   const [thinkingExpanded, setThinkingExpanded] = useState(false)
@@ -752,8 +763,8 @@ function MessageItem({ message, vibe = false, sessionId }: MessageItemProps) {
   // Compact summary message — render as collapsible card with "摘要" label
   if (message.isCompactSummary && message.role !== 'system') {
     return (
-      <div className="flex justify-center animate-slide-up my-1">
-        <div className="w-full max-w-[90%]">
+      <div className="flex justify-center animate-slide-up my-1 min-w-0 overflow-hidden">
+        <div className="w-full max-w-[90%] min-w-0">
           <button
             onClick={() => setSummaryExpanded(!summaryExpanded)}
             className={`w-full flex items-center gap-2 px-3 py-1.5 rounded-md3-sm text-[11px] transition-colors ${
@@ -767,7 +778,43 @@ function MessageItem({ message, vibe = false, sessionId }: MessageItemProps) {
             <span>{t('chat.compactSummary')}</span>
           </button>
           {summaryExpanded && (
-            <div className={`mt-2 px-4 py-2.5 rounded-md3-md text-sm leading-relaxed ${
+            <div className={`mt-2 px-4 py-2.5 rounded-md3-md text-sm leading-relaxed min-w-0 break-words overflow-hidden [&_pre]:overflow-x-auto ${
+              vibe
+                ? 'bg-white/10 border border-white/20 text-white/90'
+                : 'bg-dark-surfaceContainerHigh text-dark-onSurface'
+            }`}>
+              <MarkdownContent content={message.content} vibe={vibe} />
+            </div>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  // 压缩后恢复的文件消息（isCompactAttachment）—— 折叠卡片渲染，而非用户气泡。
+  // 它是压缩机制自动注入的文件内容恢复（role 为 user 仅为满足 API 结构），
+  // 不是用户真实发送的消息，不能渲染成绿色用户气泡。
+  // 内容模式兜底：旧版本写入 DB 的文件恢复消息没有 isCompactAttachment 标记，按内容识别。
+  if (message.isCompactAttachment || (message.role === 'user' && /^\[Previously read file: .+?\]\n```/.test(message.content))) {
+    const fileMatch = message.content.match(/^\[Previously read file: (.+?)\]/m)
+    const filePath = fileMatch?.[1] || ''
+    return (
+      <div className="flex justify-center animate-slide-up my-1 min-w-0 overflow-hidden">
+        <div className="w-full max-w-[90%] min-w-0">
+          <button
+            onClick={() => setSummaryExpanded(!summaryExpanded)}
+            className={`w-full flex items-center gap-2 px-3 py-1.5 rounded-md3-sm text-[11px] transition-colors ${
+              vibe
+                ? 'bg-white/10 border border-white/20 text-white/60 hover:text-white/80 hover:bg-white/15'
+                : 'bg-dark-surfaceContainer/40 border border-dark-onSurfaceVariant/8 text-dark-onSurfaceVariant/50 hover:text-dark-onSurfaceVariant/70 hover:bg-dark-surfaceContainer/60'
+            }`}
+          >
+            {summaryExpanded ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+            <FileText size={11} className="flex-shrink-0" />
+            <span className="truncate">{t('chat.compactFileRestored')}{filePath ? `: ${filePath}` : ''}</span>
+          </button>
+          {summaryExpanded && (
+            <div className={`mt-2 px-4 py-2.5 rounded-md3-md text-sm leading-relaxed min-w-0 break-words overflow-hidden [&_pre]:overflow-x-auto ${
               vibe
                 ? 'bg-white/10 border border-white/20 text-white/90'
                 : 'bg-dark-surfaceContainerHigh text-dark-onSurface'
@@ -956,7 +1003,7 @@ function MessageItem({ message, vibe = false, sessionId }: MessageItemProps) {
         )}
 
         {/* Message content bubble */}
-        {message.content && (
+        {message.content.trim() && (
           <div
             className={`relative group px-4 py-2.5 rounded-md3-md text-sm leading-relaxed ${
               isUser
@@ -990,14 +1037,25 @@ function MessageItem({ message, vibe = false, sessionId }: MessageItemProps) {
           <StreamingToolRows calls={message.streamingToolCalls} vibe={vibe} />
         ) : null}
 
-        {/* 工具运行组：折叠头部 + 紧凑行 + 文件差异 chips（含已完成与执行中的调用） */}
+        {/* 工具运行组：过程消息直接平铺工具行，最终回复保留折叠头部 */}
         {!isUser && message.toolCalls && (
-          <ToolRunGroup
-            toolCalls={message.toolCalls}
-            toolResults={message.toolResults}
-            vibe={vibe}
-            defaultOpen={!!message.streamingToolCalls?.length || !message.finishReason}
-          />
+          isIntermediate ? (
+            <div className="w-full mt-1 flex flex-col gap-0.5">
+              {message.toolCalls
+                .filter((tc) => tc.name !== 'spawn_agent')
+                .map((tc) => (
+                  <ToolRow key={tc.id} toolCall={tc} result={message.toolResults} vibe={vibe} />
+                ))}
+            </div>
+          ) : (
+            <ToolRunGroup
+              toolCalls={message.toolCalls}
+              toolResults={message.toolResults}
+              vibe={vibe}
+              defaultOpen={!!message.streamingToolCalls?.length || !message.finishReason}
+              finishReason={message.finishReason}
+            />
+          )
         )}
 
         {/* Truncation warning */}
@@ -1008,7 +1066,7 @@ function MessageItem({ message, vibe = false, sessionId }: MessageItemProps) {
           </div>
         )}
 
-        {cacheEligibleTokens > 0 && !isUser && (
+        {cacheEligibleTokens > 0 && !isUser && !isIntermediate && (
           <span className={`text-[10px] mt-1 px-1 ${vibe ? 'text-white/45' : 'text-dark-onSurfaceVariant/40'}`}>
             {t('chat.cacheStats', {
               rate: cacheHitRate,
@@ -1018,9 +1076,8 @@ function MessageItem({ message, vibe = false, sessionId }: MessageItemProps) {
           </span>
         )}
 
-        {/* Timestamp —— 仅在有可见主体（正文/思考/用户消息）时渲染；
-            纯工具调用轮次（content 为空）只保留工具组，避免看起来像一条空消息 */}
-        {(isUser || !!message.content.trim() || hasThinking) && (
+        {/* Timestamp —— 过程消息不显示时间戳，仅在用户消息和最终回复上显示 */}
+        {!isIntermediate && (isUser || !!message.content.trim() || hasThinking) && (
           <span className={`text-[10px] mt-1 px-1 ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/30'}`}>
             {new Date(message.timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
           </span>

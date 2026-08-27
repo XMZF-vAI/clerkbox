@@ -135,7 +135,7 @@ const TurnPanel = memo(function TurnPanel({ turn, isLastTurn, isStreaming, vibe 
               vibe ? 'border-white/15' : 'border-dark-onSurfaceVariant/8'
             }`}>
               {intermediateMsgs.map((msg) => (
-                <MessageItem key={msg.id} message={msg} vibe={vibe} />
+                <MessageItem key={msg.id} message={msg} vibe={vibe} isIntermediate />
               ))}
             </div>
           )}
@@ -144,7 +144,7 @@ const TurnPanel = memo(function TurnPanel({ turn, isLastTurn, isStreaming, vibe 
 
       {/* 流式中或无需折叠时，按自然顺序渲染中间消息 */}
       {(!shouldFold || isActiveTurn) && intermediateMsgs.map((msg) => (
-        <MessageItem key={msg.id} message={msg} vibe={vibe} />
+        <MessageItem key={msg.id} message={msg} vibe={vibe} isIntermediate />
       ))}
 
       {/* 最终回复（含 thinking + content） */}
@@ -184,7 +184,7 @@ export default function MessageList({ messages, isStreaming, vibe }: MessageList
   }
 
   return (
-    <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-6 space-y-6">
+    <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden px-4 py-6 space-y-6">
       {turns.map((turn, index) => (
         <TurnPanel
           key={turn.turnId}

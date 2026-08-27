@@ -133,6 +133,7 @@ function mapMessageRows(msgRows: import('../types/ipc').MessageRow[]): Message[]
     attachments: parseAttachments(m.attachments),
     finishReason: m.finish_reason || undefined,
     isCompactSummary: m.is_compact === 1 ? true : undefined,
+    isCompactAttachment: m.is_compact_attachment === 1 ? true : undefined,
     isSubAgentCard: m.is_sub_agent_card === 1 ? true : undefined,
     subAgentId: m.sub_agent_id || undefined,
     taskMode: m.task_mode === 'spec' || m.task_mode === 'plan' || m.task_mode === 'goal' ? m.task_mode : undefined,
@@ -455,6 +456,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       attachments: message.attachments ? JSON.stringify(message.attachments) : null,
       finish_reason: message.finishReason || null,
       is_compact: message.isCompactSummary ? 1 : 0,
+      is_compact_attachment: message.isCompactAttachment ? 1 : 0,
       is_sub_agent_card: message.isSubAgentCard ? 1 : 0,
       sub_agent_id: message.subAgentId || null,
       task_mode: message.taskMode || null,
@@ -622,6 +624,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         tool_results: msg.toolResults ? JSON.stringify(msg.toolResults) : null,
         finish_reason: msg.finishReason || null,
         is_compact: msg.isCompactSummary ? 1 : 0,
+        is_compact_attachment: msg.isCompactAttachment ? 1 : 0,
         // Preserve subagent-card metadata when rewriting compacted history.
         is_sub_agent_card: msg.isSubAgentCard ? 1 : 0,
         sub_agent_id: msg.subAgentId || null,
