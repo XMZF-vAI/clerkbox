@@ -2050,14 +2050,17 @@ function registerIpcHandlers() {
       //    另外：服务端 SSR 忽略 ?q=（返回固定热门列表），只有 ?page=N 分页是服务端生效的 ——
       //    站点的搜索框是客户端行为。因此带关键词时并行拉多页聚合候选池，再做本地过滤，
       //    否则只在一个 20 条的热门列表里找，搜什么都接近零结果。
-      const SEARCH_POOL_PAGES = 5
+      // CocoLoop 的 SSR 不会处理 q 参数，因此搜索必须在本地候选池中匹配。
+      // 旧实现只抓 5 页（约 100 条），热门排序会让大量技能永远没有机会被搜索到。
+      // 抓取更大的、有界候选池，仍通过并发请求控制总延迟和网络开销。
+      const SEARCH_POOL_PAGES = 20
       const pagesToFetch = safeQuery
         ? Array.from({ length: SEARCH_POOL_PAGES }, (_, i) => i + 1)
         : [safePage]
       const responses = await Promise.all(
         pagesToFetch.map((p) =>
           fetchHttpsText(
-            `https://hub.cocoloop.cn/search?q=${encodeURIComponent(safeQuery)}&page=${p}`,
+            `https://hub.cocoloop.cn/search?keyword=${encodeURIComponent(safeQuery)}&page=${p}`,
             { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ClerkBox/1.7' },
             2 * 1024 * 1024
           )
@@ -2075,16 +2078,27 @@ function registerIpcHandlers() {
           return true
         })
 
-      // 3. 关键词过滤：服务端不响应 ?q=，客户端做 name/titleCn/description/author 模糊匹配
-      const q = safeQuery.toLowerCase()
-      const filtered = q
-        ? allSkills.filter((s) =>
-            s.name.toLowerCase().includes(q) ||
-            (s.titleCn || '').toLowerCase().includes(q) ||
-            s.description.toLowerCase().includes(q) ||
-            (s.author || '').toLowerCase().includes(q) ||
-            (s.creatorSlug || '').toLowerCase().includes(q)
-          )
+      // 3. 关键词过滤：服务端不响应 ?q=，客户端做宽松的本地模糊匹配。
+      //    支持中文、大小写、连字符/下划线和多个空格分隔的关键词；多个词需全部命中，
+      //    但可命中名称、中文标题、描述、作者、slug 或 id 的任意字段。
+      const normalizeSearchText = (value: string) => value
+        .normalize('NFKC')
+        .toLocaleLowerCase()
+        .replace(/[\s\-_\/\\]+/g, ' ')
+        .trim()
+      const queryTokens = normalizeSearchText(safeQuery).split(' ').filter(Boolean)
+      const filtered = queryTokens.length > 0
+        ? allSkills.filter((s) => {
+            const haystack = normalizeSearchText([
+              s.id,
+              s.name,
+              s.titleCn || '',
+              s.description,
+              s.author || '',
+              s.creatorSlug || '',
+            ].join(' '))
+            return queryTokens.every((token) => haystack.includes(token))
+          })
         : allSkills
 
       // 4. 分页
