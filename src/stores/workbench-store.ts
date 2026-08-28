@@ -8,7 +8,7 @@ export type WorkbenchTabKind = 'files' | 'terminal' | 'browser' | 'subagent'
 
 /** 一个已打开的工作台标签页 */
 export interface WorkbenchTab {
-  /** 全局唯一 id；files/browser 固定单例 id，terminal/subagent 各自唯一 */
+  /** 全局唯一 id；files 单例，其余面板可各自打开多个 */
   id: string
   kind: WorkbenchTabKind
   /** 仅 subagent 使用：所属会话与对应 run */
@@ -16,10 +16,11 @@ export interface WorkbenchTab {
   runId?: string
   /** 仅 subagent 使用：标签展示名（agentName），打开时快照 */
   title?: string
+  /** 仅 browser 使用：新标签页首次打开的 URL */
+  url?: string
 }
 
 const FILES_TAB_ID = 'files'
-const BROWSER_TAB_ID = 'browser'
 
 const MIN_WIDTH = 300
 const MAX_WIDTH = 760
@@ -34,8 +35,9 @@ interface WorkbenchState {
   width: number
   tabs: WorkbenchTab[]
   activeTabId: string | null
-  /** 终端自增序号，保证多终端 tab id 不冲突 */
+  /** 终端/浏览器自增序号，保证多标签 id 不冲突 */
   terminalSeq: number
+  browserSeq: number
 
   setVisible: (v: boolean) => void
   toggleVisible: () => void
@@ -44,8 +46,8 @@ interface WorkbenchState {
   openFiles: () => void
   /** 每次新建一个独立终端标签页 */
   openTerminal: () => void
-  /** 单例浏览器面板 */
-  openBrowser: () => void
+  /** 新建浏览器面板，可选定向到指定 URL */
+  openBrowser: (url?: string) => void
   /**
    * 子 Agent 详情的唯一打开入口（聊天中的卡片点击）。
    * 已存在该 run 的标签 → 聚焦它；若其本就是当前激活标签则视为「再点一次关闭」。
@@ -63,6 +65,7 @@ export const useWorkbenchStore = create<WorkbenchState>()(
       tabs: [],
       activeTabId: null,
       terminalSeq: 0,
+      browserSeq: 0,
 
       setVisible: (v) => set({ visible: v }),
       toggleVisible: () => set((s) => ({ visible: !s.visible })),
@@ -84,14 +87,17 @@ export const useWorkbenchStore = create<WorkbenchState>()(
           return { visible: true, terminalSeq: seq, tabs: [...s.tabs, { id, kind: 'terminal' }], activeTabId: id }
         }),
 
-      openBrowser: () =>
-        set((s) => ({
-          visible: true,
-          tabs: s.tabs.some((t) => t.kind === 'browser')
-            ? s.tabs
-            : [...s.tabs, { id: BROWSER_TAB_ID, kind: 'browser' }],
-          activeTabId: BROWSER_TAB_ID,
-        })),
+      openBrowser: (url) =>
+        set((s) => {
+          const seq = (s.browserSeq ?? 0) + 1
+          const id = `browser-${seq}`
+          return {
+            visible: true,
+            browserSeq: seq,
+            tabs: [...s.tabs, { id, kind: 'browser', url }],
+            activeTabId: id,
+          }
+        }),
 
       toggleSubAgent: (sessionId, runId, agentName) => {
         const id = `subagent:${sessionId}:${runId}`

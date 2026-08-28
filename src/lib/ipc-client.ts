@@ -266,6 +266,8 @@ export const ipc = {
   // 按磁盘路径读图片为 base64 data URL（渲染进程无法直接读本地文件）
   readImageFileBase64: (path: string): Promise<string> =>
     isElectron ? window.clerkbox.readImageFileBase64(path) : webInvoke('readImageFileBase64', [path]),
+  readFileBase64: (path: string): Promise<{ data: string; mimeType: string; size: number }> =>
+    isElectron ? window.clerkbox.readFileBase64(path) : webInvoke('readFileBase64', [path]),
   selectAudioFile: (): Promise<string | null> =>
     isElectron
       ? window.clerkbox.selectAudioFile()
@@ -322,6 +324,8 @@ export const ipc = {
     chunkListeners.add(callback)
     return () => { chunkListeners.delete(callback) }
   },
+  onBrowserNewTab: (callback: (url: string) => void): (() => void) =>
+    isElectron ? window.clerkbox.onBrowserNewTab(callback) : () => {},
 
   loadApiKeys: (): Promise<Record<string, string>> =>
     isElectron ? window.clerkbox.loadApiKeys() : webInvoke('loadApiKeys'),

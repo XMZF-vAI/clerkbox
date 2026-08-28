@@ -1,9 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Bot,
   Folder,
   Globe,
-  PanelRightClose,
   Plus,
   Search,
   SquareTerminal,
@@ -13,10 +12,12 @@ import { useTranslation } from 'react-i18next'
 import { isWebUIMode } from '../../lib/ipc-client'
 import { useWorkbenchStore, type WorkbenchTabKind } from '../../stores/workbench-store'
 import { useChatStore } from '../../stores/chat-store'
-import FilesPanel from './FilesPanel'
-import TerminalPanel from './TerminalPanel'
-import BrowserPanel from './BrowserPanel'
-import { SubAgentDetailContent } from '../chat/SubAgentDetailPanel'
+
+// 文件预览包含 PDF/Office/3D 等重依赖，只在用户打开对应标签时下载。
+const FilesPanel = lazy(() => import('./FilesPanel'))
+const TerminalPanel = lazy(() => import('./TerminalPanel'))
+const BrowserPanel = lazy(() => import('./BrowserPanel'))
+const SubAgentDetailContent = lazy(() => import('../chat/SubAgentDetailPanel').then((module) => ({ default: module.SubAgentDetailContent })))
 
 /** 「+」菜单与空态引导条目。子 Agent 为对话产物，刻意不提供任何用户入口 */
 type MenuEntry = {
@@ -52,7 +53,6 @@ export default function WorkbenchPanel({ vibe }: { vibe?: boolean }) {
   const width = useWorkbenchStore((s) => s.width)
   const tabs = useWorkbenchStore((s) => s.tabs)
   const activeTabId = useWorkbenchStore((s) => s.activeTabId)
-  const setVisible = useWorkbenchStore((s) => s.setVisible)
   const setWidth = useWorkbenchStore((s) => s.setWidth)
   const openFiles = useWorkbenchStore((s) => s.openFiles)
   const openTerminal = useWorkbenchStore((s) => s.openTerminal)
@@ -261,18 +261,6 @@ export default function WorkbenchPanel({ vibe }: { vibe?: boolean }) {
           )}
         </div>
 
-        {/* 收起整块面板 */}
-        <button
-          type="button"
-          onClick={() => setVisible(false)}
-          className={`ml-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md3-sm transition-colors ${
-            vibe ? 'text-white/70 hover:bg-white/10' : 'text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh'
-          }`}
-          aria-label={t('workbench.collapse')}
-          title={t('workbench.collapse')}
-        >
-          <PanelRightClose size={15} />
-        </button>
       </div>
 
       {/* 内容区 */}
@@ -306,18 +294,20 @@ export default function WorkbenchPanel({ vibe }: { vibe?: boolean }) {
             const isActive = tab.id === activeTabId
             return (
               <div key={tab.id} className={`h-full ${isActive ? '' : 'hidden'}`}>
-                {tab.kind === 'files' && <FilesPanel vibe={vibe} rootDir={activeWorkingDir} />}
-                {tab.kind === 'terminal' && <TerminalPanel termId={tab.id} active={isActive} vibe={vibe} cwd={activeWorkingDir} />}
-                {tab.kind === 'browser' && <BrowserPanel vibe={vibe} />}
+                {tab.kind === 'files' && <Suspense fallback={null}><FilesPanel vibe={vibe} rootDir={activeWorkingDir} /></Suspense>}
+                {tab.kind === 'terminal' && <Suspense fallback={null}><TerminalPanel termId={tab.id} active={isActive} vibe={vibe} cwd={activeWorkingDir} /></Suspense>}
+                {tab.kind === 'browser' && <Suspense fallback={null}><BrowserPanel vibe={vibe} active={isActive} initialUrl={tab.url} onOpenNewTab={openBrowser} /></Suspense>}
                 {tab.kind === 'subagent' && (
-                  <SubAgentDetailContent
-                    sessionId={tab.sessionId!}
-                    runId={tab.runId!}
-                    titleSnapshot={tab.title}
-                    active={isActive}
-                    vibe={vibe}
-                    onClose={() => closeTab(tab.id)}
-                  />
+                  <Suspense fallback={null}>
+                    <SubAgentDetailContent
+                      sessionId={tab.sessionId!}
+                      runId={tab.runId!}
+                      titleSnapshot={tab.title}
+                      active={isActive}
+                      vibe={vibe}
+                      onClose={() => closeTab(tab.id)}
+                    />
+                  </Suspense>
                 )}
               </div>
             )

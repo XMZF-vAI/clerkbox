@@ -37,18 +37,28 @@ function normalizeAddressInput(raw: string): string | null {
 
 /**
  * 工作台浏览器面板：<webview> 内嵌预览 + 地址栏 + 导航按钮。
- * 单例标签共享同一实例（隐藏不销毁，保页面现场）。
+ * 每个工作台标签维护一个独立实例（隐藏不销毁，保页面现场）。
  *
  * 导航分两轨：guest 页面就绪前靠 src 属性触发首次导航
  * （无 src 的 webview 不会创建 guest，loadURL 会直接抛错）；就绪后走 loadURL。
  */
-export default function BrowserPanel({ vibe }: { vibe?: boolean }) {
+export default function BrowserPanel({
+  vibe,
+  initialUrl,
+  active,
+  onOpenNewTab,
+}: {
+  vibe?: boolean
+  initialUrl?: string
+  active: boolean
+  onOpenNewTab?: (url: string) => void
+}) {
   const { t } = useTranslation()
   const webviewRef = useRef<WebviewEl | null>(null)
   const [input, setInput] = useState('')
   const [currentUrl, setCurrentUrl] = useState('')
   // src 属性态：仅在 guest 未就绪时用于触发首次导航
-  const [navSrc, setNavSrc] = useState('')
+  const [navSrc, setNavSrc] = useState(initialUrl || '')
   const [ready, setReady] = useState(false)
   const [loading, setLoading] = useState(false)
   const [canBack, setCanBack] = useState(false)
@@ -99,7 +109,17 @@ export default function BrowserPanel({ vibe }: { vibe?: boolean }) {
       wv.removeEventListener('did-navigate-in-page', onNavEnd)
       wv.removeEventListener('will-navigate', onWillNavigate)
     }
-  }, [syncNavState])
+  }, [onOpenNewTab, syncNavState])
+
+  useEffect(() => {
+    if (!active || !onOpenNewTab) return
+    return ipc.onBrowserNewTab((url) => {
+      try {
+        const parsed = new URL(url)
+        if (parsed.protocol === 'http:' || parsed.protocol === 'https:') onOpenNewTab(parsed.toString())
+      } catch { /* 主进程已校验，渲染层再做一次边界保护 */ }
+    })
+  }, [active, onOpenNewTab])
 
   const navigate = (raw: string) => {
     const url = normalizeAddressInput(raw)

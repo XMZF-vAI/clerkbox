@@ -1,71 +1,107 @@
-import { useCallback, useState } from 'react'
-import { File as FileIcon, Loader2, X } from 'lucide-react'
+import { useCallback, useMemo, useRef, useState } from 'react'
+import { File as FileIcon, Loader2, PanelLeftClose, PanelLeftOpen, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import {
+  archivePlugin, assetPlugin, audioPlugin, cadPlugin, drawingPlugin, emailPlugin,
+  epubPlugin, fallbackPlugin, gisPlugin, imagePlugin, model3dPlugin, officePlugin,
+  ofdPlugin, pdfPlugin, textPlugin, videoPlugin, xmindPlugin, xpsPlugin,
+} from '@open-file-viewer/core'
+import type { PreviewTheme, PreviewToolbarOptions } from '@open-file-viewer/core'
+import '@open-file-viewer/core/style.css'
+import { FileViewer } from '@open-file-viewer/react'
+import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.mjs?url'
 import { ipc } from '../../lib/ipc-client'
 import FileTree from '../layout/FileTree'
 
-const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|ico)$/i
+function base64ToBytes(value: string): Uint8Array {
+  const binary = atob(value)
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index)
+  return bytes
+}
 
 /**
  * 工作台文件面板：左侧浏览当前会话工作目录的文件树，右侧预览选中内容。
- * 目录来源沿用现有 ipc.listDir / ipc.readFile 通道；图片走 base64 通道直接渲染。
+ * 目录来源沿用现有 ipc.listDir 通道，预览由 Open File Viewer 统一处理。
  */
 export default function FilesPanel({ vibe, rootDir }: { vibe?: boolean; rootDir?: string }) {
   const { t } = useTranslation()
   const [previewPath, setPreviewPath] = useState<string | null>(null)
-  const [textContent, setTextContent] = useState<string | null>(null)
-  const [imageDataUrl, setImageDataUrl] = useState<string | null>(null)
+  const [previewFile, setPreviewFile] = useState<File | null>(null)
+  const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
-  // 预览请求序号：快速连点文件时丢弃过期响应
-  const [reqSeq, setReqSeq] = useState(0)
+  const requestIdRef = useRef(0)
+  const [fileTreeVisible, setFileTreeVisible] = useState(true)
+
+  const plugins = useMemo(() => [
+    imagePlugin(), videoPlugin(), audioPlugin(), pdfPlugin({ workerSrc: pdfWorkerSrc }),
+    epubPlugin(), xpsPlugin(), officePlugin(), ofdPlugin(), archivePlugin(), emailPlugin(),
+    drawingPlugin(), xmindPlugin(), cadPlugin(), model3dPlugin(), gisPlugin(), assetPlugin(),
+    textPlugin(), fallbackPlugin(),
+  ], [])
+
+  const toolbar = useMemo<PreviewToolbarOptions>(() => ({
+    zoom: true,
+    rotate: true,
+    download: false,
+    fullscreen: false,
+    print: false,
+    search: false,
+    order: ['zoom-out', 'zoom-in', 'zoom-reset', 'rotate-left', 'rotate-right'],
+  }), [])
 
   const handleFileSelect = useCallback(async (path: string) => {
-    const seq = reqSeq + 1
-    setReqSeq(seq)
+    const currentRequest = ++requestIdRef.current
     setPreviewPath(path)
+    setPreviewFile(null)
+    setError(null)
     setLoading(true)
-    setTextContent(null)
-    setImageDataUrl(null)
 
     try {
-      if (IMAGE_EXT_RE.test(path)) {
-        const dataUrl = await ipc.readImageFileBase64(path)
-        if (seq !== reqSeq + 1) return
-        setImageDataUrl(dataUrl)
-      } else {
-        const content = await ipc.readFile(path)
-        if (seq !== reqSeq + 1) return
-        setTextContent(content)
-      }
+      const result = await ipc.readFileBase64(path)
+      if (currentRequest !== requestIdRef.current) return
+      const fileName = path.split(/[\\/]/).filter(Boolean).pop() || path
+      setPreviewFile(new File([base64ToBytes(result.data) as unknown as BlobPart], fileName, { type: result.mimeType }))
     } catch (e) {
-      if (seq !== reqSeq + 1) return
-      setTextContent(`${t('workbench.previewFailed')}\n${String((e as Error)?.message || e)}`)
+      if (currentRequest !== requestIdRef.current) return
+      setError(`${t('workbench.previewFailed')}\n${String((e as Error)?.message || e)}`)
     } finally {
-      if (seq === reqSeq + 1) setLoading(false)
+      if (currentRequest === requestIdRef.current) setLoading(false)
     }
-  }, [reqSeq, t])
+  }, [t])
 
   const closePreview = () => {
     setPreviewPath(null)
-    setTextContent(null)
-    setImageDataUrl(null)
+    setPreviewFile(null)
+    setError(null)
   }
 
   const fileName = previewPath ? previewPath.split(/[\\/]/).filter(Boolean).pop() || previewPath : ''
+  const viewerTheme: PreviewTheme = vibe ? 'dark' : 'auto'
 
   return (
     <div className="flex h-full min-h-0">
       {/* 左：目录树（自动跟随会话工作目录） */}
-      <div className={`h-full w-[45%] min-w-[140px] overflow-y-auto border-r ${vibe ? 'border-white/10' : 'border-dark-onSurfaceVariant/10'}`}>
-        <FileTree onFileSelect={handleFileSelect} initialRoot={rootDir} />
-      </div>
+      {fileTreeVisible && (
+        <div className={`h-full w-[45%] min-w-[140px] overflow-y-auto border-r ${vibe ? 'border-white/10' : 'border-dark-onSurfaceVariant/10'}`}>
+          <FileTree onFileSelect={handleFileSelect} initialRoot={rootDir} />
+        </div>
+      )}
 
       {/* 右：预览 */}
       <div className="relative flex h-full min-w-0 flex-1 flex-col">
-        {previewPath && (
-          <div className={`flex items-center gap-2 px-3 py-1.5 text-xs border-b ${vibe ? 'border-white/10 text-white/70' : 'border-dark-onSurfaceVariant/10 text-dark-onSurfaceVariant'}`}>
-            <FileIcon size={12} className="shrink-0" />
-            <span className="min-w-0 truncate" title={previewPath}>{fileName}</span>
+        <div className={`flex min-h-8 items-center gap-2 border-b px-3 py-1.5 text-xs ${vibe ? 'border-white/10 text-white/70' : 'border-dark-onSurfaceVariant/10 text-dark-onSurfaceVariant'}`}>
+          <button
+            type="button"
+            onClick={() => setFileTreeVisible((visible) => !visible)}
+            aria-label={fileTreeVisible ? t('workbench.hideFileList') : t('workbench.showFileList')}
+            aria-pressed={fileTreeVisible}
+            title={fileTreeVisible ? t('workbench.hideFileList') : t('workbench.showFileList')}
+            className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md3-sm transition-colors ${vibe ? 'hover:bg-white/10' : 'hover:bg-dark-surfaceContainerHigh'}`}
+          >
+            {fileTreeVisible ? <PanelLeftClose size={14} /> : <PanelLeftOpen size={14} />}
+          </button>
+          {previewPath && (
             <button
               type="button"
               onClick={closePreview}
@@ -75,10 +111,10 @@ export default function FilesPanel({ vibe, rootDir }: { vibe?: boolean; rootDir?
             >
               <X size={12} />
             </button>
-          </div>
-        )}
+          )}
+        </div>
 
-        <div className="min-h-0 flex-1 overflow-auto">
+        <div className={`ofv-sidebar-preview min-h-0 flex-1 overflow-auto ${vibe ? 'ofv-vibe-preview' : ''}`}>
           {!previewPath ? (
             <div className={`flex h-full flex-col items-center justify-center gap-2 text-xs ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/50'}`}>
               <FileIcon size={24} aria-hidden />
@@ -88,16 +124,22 @@ export default function FilesPanel({ vibe, rootDir }: { vibe?: boolean; rootDir?
             <div className="flex h-full items-center justify-center">
               <Loader2 size={18} className="animate-spin opacity-50" />
             </div>
-          ) : imageDataUrl ? (
-            <img src={imageDataUrl} alt={fileName} className="mx-auto max-h-full max-w-full object-contain p-2" />
-          ) : textContent !== null ? (
-            <pre
-              className={`whitespace-pre-wrap break-all p-3 font-mono text-[11px] leading-relaxed ${
-                vibe ? 'text-white/85' : 'text-dark-onSurface'
-              }`}
-            >
-              {textContent}
-            </pre>
+          ) : error ? (
+            <pre className={`whitespace-pre-wrap break-all p-3 text-xs ${vibe ? 'text-white/75' : 'text-dark-onSurfaceVariant'}`}>{error}</pre>
+          ) : previewFile ? (
+            <FileViewer
+              file={previewFile}
+              fileName={fileName}
+              width="100%"
+              height="100%"
+              fit="contain"
+              toolbar={toolbar}
+              theme={viewerTheme}
+              plugins={plugins}
+              fallback="inline"
+              onError={(viewerError) => setError(`${t('workbench.previewFailed')}\n${String(viewerError?.message || viewerError)}`)}
+              onUnsupported={() => setError(t('workbench.previewUnsupported'))}
+            />
           ) : null}
         </div>
       </div>

@@ -1,5 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { FolderOpen, Folder, File, ChevronRight, ChevronDown, HardDrive } from 'lucide-react'
+import {
+  ChevronDown,
+  ChevronRight,
+  File,
+  FileArchive,
+  FileCode,
+  FileImage,
+  FileSpreadsheet,
+  FileText,
+  FileType,
+  Folder,
+  FolderOpen,
+  HardDrive,
+  Presentation,
+  type LucideIcon,
+} from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { ipc, isWebUIMode } from '../../lib/ipc-client'
 import type { FileEntry } from '../../types/ipc'
@@ -23,6 +38,70 @@ function displayName(filePath: string): string {
   return filePath.split(/[\\/]/).filter(Boolean).pop() || filePath
 }
 
+type FileIconInfo = {
+  Icon: LucideIcon
+  color: string
+}
+
+function fileIconForName(name: string): FileIconInfo {
+  const extension = name.toLowerCase().match(/\.([^.]+)$/)?.[1] ?? ''
+
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico', 'bmp', 'tif', 'tiff', 'avif'].includes(extension)) {
+    return { Icon: FileImage, color: 'text-md-info' }
+  }
+  if (['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz', 'iso'].includes(extension)) {
+    return { Icon: FileArchive, color: 'text-md-warning' }
+  }
+  if (['xls', 'xlsx', 'xlsm', 'csv', 'ods', 'numbers'].includes(extension)) {
+    return { Icon: FileSpreadsheet, color: 'text-md-success' }
+  }
+  if (['ppt', 'pptx', 'odp', 'key'].includes(extension)) {
+    return { Icon: Presentation, color: 'text-md-error' }
+  }
+  if (['doc', 'docx', 'odt', 'rtf', 'pages'].includes(extension)) {
+    return { Icon: FileType, color: 'text-md-primary' }
+  }
+  if (
+    [
+      'c',
+      'cc',
+      'cpp',
+      'css',
+      'go',
+      'h',
+      'hpp',
+      'html',
+      'java',
+      'js',
+      'json',
+      'jsx',
+      'kt',
+      'less',
+      'php',
+      'ps1',
+      'py',
+      'rs',
+      'scss',
+      'sh',
+      'sql',
+      'swift',
+      'ts',
+      'tsx',
+      'vue',
+      'xml',
+      'yaml',
+      'yml',
+    ].includes(extension)
+  ) {
+    return { Icon: FileCode, color: 'text-md-tertiary' }
+  }
+  if (['md', 'mdx', 'pdf', 'txt', 'log', 'tex'].includes(extension)) {
+    return { Icon: FileText, color: 'text-dark-onSurfaceVariant' }
+  }
+
+  return { Icon: File, color: 'text-dark-onSurfaceVariant/70' }
+}
+
 function findNode(nodes: TreeNode[], targetPath: string): TreeNode | null {
   for (const node of nodes) {
     if (node.path === targetPath) return node
@@ -44,10 +123,11 @@ function FileTreeNode({ node, depth = 0, onToggle, onFileSelect }: { node: TreeN
   const paddingLeft = depth * 16 + 8
 
   if (!node.isDirectory) {
+    const { Icon, color } = fileIconForName(node.name)
     // 工作台面板传入 onFileSelect 时，文件可点击预览；否则维持原纯展示行为
     const inner = (
       <>
-        <File size={14} aria-hidden="true" />
+        <Icon size={14} className={`shrink-0 ${color}`} aria-hidden="true" />
         <span className="truncate">{node.name}</span>
       </>
     )

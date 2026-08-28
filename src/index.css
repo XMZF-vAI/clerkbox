@@ -284,6 +284,88 @@
 }
 
 @layer components {
+  /* Open File Viewer integration: keep the preview visually native to ClerkBox
+     and reserve the sidebar for the actual document rather than controls. */
+  .ofv-sidebar-preview {
+    --ofv-bg: rgb(var(--dark-surfaceDim-rgb));
+    --ofv-surface: rgb(var(--dark-surface-rgb));
+    --ofv-surface-muted: rgb(var(--dark-surfaceContainer-rgb));
+    --ofv-text: rgb(var(--dark-onSurface-rgb));
+    --ofv-text-muted: rgb(var(--dark-onSurfaceVariant-rgb));
+    --ofv-border: rgb(var(--dark-onSurfaceVariant-rgb) / 0.14);
+    --ofv-button-hover: rgb(var(--dark-onSurface-rgb) / 0.08);
+    --ofv-accent: rgb(var(--md-primary-rgb));
+  }
+
+  .ofv-sidebar-preview .ofv-root {
+    border: 0;
+    border-radius: 0;
+    --ofv-bg: rgb(var(--dark-surfaceDim-rgb)) !important;
+    --ofv-surface: rgb(var(--dark-surface-rgb)) !important;
+    --ofv-surface-muted: rgb(var(--dark-surfaceContainer-rgb)) !important;
+    --ofv-text: rgb(var(--dark-onSurface-rgb)) !important;
+    --ofv-text-muted: rgb(var(--dark-onSurfaceVariant-rgb)) !important;
+    --ofv-border: rgb(var(--dark-onSurfaceVariant-rgb) / 0.14) !important;
+    --ofv-button-hover: rgb(var(--dark-onSurface-rgb) / 0.08) !important;
+    --ofv-accent: rgb(var(--md-primary-rgb)) !important;
+    --ofv-accent-soft: rgb(var(--md-primary-rgb) / 0.16) !important;
+    --ofv-toolbar-bg: rgb(var(--dark-surface-rgb)) !important;
+  }
+
+  .ofv-sidebar-preview .ofv-toolbar {
+    min-height: 36px;
+    padding: 3px 6px;
+    gap: 2px;
+  }
+
+  .ofv-sidebar-preview .ofv-toolbar button {
+    min-height: 28px;
+    padding: 0 7px;
+    border-radius: 5px;
+  }
+
+  .ofv-sidebar-preview .ofv-toolbar-icon-button {
+    width: 28px;
+    padding: 0;
+  }
+
+  .ofv-sidebar-preview .ofv-toolbar-zoom-reset {
+    min-width: 46px;
+    padding: 0 5px;
+  }
+
+  .ofv-sidebar-preview .ofv-code-actions {
+    display: none !important;
+  }
+
+  /* 文件名和类型/行数/大小属于预览上下文，不占用正文的首屏空间。 */
+  .ofv-sidebar-preview .ofv-code-header {
+    display: none !important;
+  }
+
+  .ofv-sidebar-preview .ofv-code-action[aria-pressed="true"] {
+    border-color: rgb(var(--md-outline-rgb) / 0.28) !important;
+    background: rgb(var(--md-primary-rgb) / 0.10) !important;
+    color: rgb(var(--dark-onSurface-rgb)) !important;
+  }
+
+  .ofv-sidebar-preview .ofv-tabs button.is-active {
+    border-color: rgb(var(--md-outline-rgb) / 0.28) !important;
+    background: rgb(var(--dark-surfaceContainerHigh-rgb)) !important;
+    color: rgb(var(--dark-onSurface-rgb)) !important;
+  }
+
+  .ofv-vibe-preview {
+    --ofv-bg: rgb(12 14 20 / 0.72);
+    --ofv-surface: rgb(18 20 28 / 0.82);
+    --ofv-surface-muted: rgb(28 31 42 / 0.88);
+    --ofv-text: rgb(255 255 255 / 0.92);
+    --ofv-text-muted: rgb(255 255 255 / 0.66);
+    --ofv-border: rgb(255 255 255 / 0.14);
+    --ofv-button-hover: rgb(255 255 255 / 0.10);
+    --ofv-accent: rgb(255 255 255 / 0.9);
+  }
+
   .md3-surface {
     @apply bg-dark-surface rounded-md3-md;
   }

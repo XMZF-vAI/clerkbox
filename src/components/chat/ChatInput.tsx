@@ -11,6 +11,7 @@ import type { MessageAttachment, TaskMode } from '../../types/agent'
 import type { FileEntry, WebUICapabilities } from '../../types/ipc'
 import ConfirmDialog from '../ui/ConfirmDialog'
 import { useIsMobile } from '../../hooks/use-mobile'
+import { useShallow } from 'zustand/react/shallow'
 
 // ── "/" 命令菜单里的命令（任务工作流 + 上下文压缩；工作流对齐 TRAE：Spec / Plan / Goal；Browser 模式不做） ──
 // 上下文压缩命令：选中后出现芯片，回车即手动压缩（输入文本作为可选的压缩重点指令）
@@ -174,8 +175,30 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
   const hostFolderEnabled = isWebUIMode
   const remoteUploadLimit = webuiCapabilities?.maxUploadBytes || FALLBACK_WEBUI_UPLOAD_LIMIT
   const textareaRef = useRef<HTMLTextAreaElement>(null)
-  const settings = useSettingsStore()
-  const { sessions, activeSessionId, updateSessionWorkingDir, recentsFolders, pushRecentFolder } = useChatStore()
+  // 只订阅输入区实际使用的字段，避免聊天流式更新或无关设置变化重绘整个输入面板。
+  const settings = useSettingsStore(useShallow((s) => ({
+    mcpServers: s.mcpServers,
+    providers: s.providers,
+    activeProviderId: s.activeProviderId,
+    activeModelId: s.activeModelId,
+    reasoningEffort: s.reasoningEffort,
+    enableThinking: s.enableThinking,
+    approvalMode: s.approvalMode,
+    model: s.model,
+    updateSettings: s.updateSettings,
+    setProviderModels: s.setProviderModels,
+    activateModel: s.activateModel,
+  })))
+  const { sessions, activeSessionId, createSession, updateSessionWorkingDir, recentsFolders, pushRecentFolder } = useChatStore(
+    useShallow((s) => ({
+      sessions: s.sessions,
+      activeSessionId: s.activeSessionId,
+      createSession: s.createSession,
+      updateSessionWorkingDir: s.updateSessionWorkingDir,
+      recentsFolders: s.recentsFolders,
+      pushRecentFolder: s.pushRecentFolder,
+    }))
+  )
   const currentSession = sessions.find((s) => s.id === activeSessionId)
   const defaultWorkDir = currentSession?.defaultWorkDir
   const effectiveWorkDir = currentSession?.workingDir || defaultWorkDir
@@ -579,21 +602,41 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
   //  - 其他：弹授权弹窗让用户确认
   const requestSetFolder = (dir: string) => {
     setShowFolderPopover(false)
-    if (!dir || !activeSessionId) return
-    if (effectiveWorkDir && comparableFolderPath(dir) === comparableFolderPath(effectiveWorkDir)) return // 已经是这个目录
-    const isDefault = defaultWorkDir && comparableFolderPath(dir) === comparableFolderPath(defaultWorkDir)
-    const isRecents = recentsFolders.some((p) => comparableFolderPath(p) === comparableFolderPath(dir))
+    if (!dir) return
+
+    // 欢迎页首次渲染时会话可能还没完成初始化；异步选择器返回后也不能依赖旧闭包。
+    const initialState = useChatStore.getState()
+    const activeId = initialState.activeSessionId || activeSessionId
+    const sessionId = activeId && initialState.sessions.some((session) => session.id === activeId)
+      ? activeId
+      : createSession()
+    if (!sessionId) return
+    const latestState = useChatStore.getState()
+    const latestSession = latestState.sessions.find((session) => session.id === sessionId)
+    const latestEffectiveWorkDir = latestSession?.workingDir || latestSession?.defaultWorkDir || effectiveWorkDir
+    const latestDefaultWorkDir = latestSession?.defaultWorkDir || defaultWorkDir
+    const latestRecentsFolders = latestState.recentsFolders.length > 0 ? latestState.recentsFolders : recentsFolders
+
+    if (latestEffectiveWorkDir && comparableFolderPath(dir) === comparableFolderPath(latestEffectiveWorkDir)) return // 已经是这个目录
+    const isDefault = latestDefaultWorkDir && comparableFolderPath(dir) === comparableFolderPath(latestDefaultWorkDir)
+    const isRecents = latestRecentsFolders.some((p) => comparableFolderPath(p) === comparableFolderPath(dir))
     if (isDefault || isRecents) {
-      applyFolder(dir)
+      applyFolder(dir, sessionId)
     } else {
       setPendingFolder(dir)
     }
   }
 
   // 真正切换工作目录：更新 session + 加入 recents（默认目录也加入 recents，这样下次切换可以免授权）
-  const applyFolder = (dir: string) => {
-    if (!activeSessionId) return
-    updateSessionWorkingDir(activeSessionId, dir)
+  const applyFolder = (dir: string, sessionId = activeSessionId) => {
+    setShowFolderPopover(false)
+    const state = useChatStore.getState()
+    const activeId = state.activeSessionId || sessionId
+    const targetSessionId = activeId && state.sessions.some((session) => session.id === activeId)
+      ? activeId
+      : createSession()
+    if (!targetSessionId) return
+    updateSessionWorkingDir(targetSessionId, dir)
     void pushRecentFolder(dir)
   }
 
@@ -1256,7 +1299,7 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
                           <button
                             type="button"
                             key={p}
-                            onClick={() => requestSetFolder(p)}
+                            onClick={() => applyFolder(p)}
                             className={`w-full px-3 py-1.5 max-md:py-3 mx-1 rounded-md3-sm flex items-center gap-2 text-xs max-md:text-sm text-left transition-colors ${
                               isCurrent
                                 ? (vibe ? 'bg-white/10' : 'bg-dark-surfaceContainerHigh')

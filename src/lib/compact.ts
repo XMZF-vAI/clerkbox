@@ -124,7 +124,7 @@ export function getCompactUserSummaryMessage(summary: string): string {
  */
 export async function callCompactAPI(
   messages: Message[],
-  settings: AppSettings,
+  settings: Pick<AppSettings, 'apiCompat' | 'model' | 'baseUrl' | 'apiKey' | 'directFetch'>,
   customInstructions?: string
 ): Promise<string> {
   const systemPrompt = getCompactPrompt(customInstructions)
@@ -413,7 +413,7 @@ export function findKeepBoundaryIndex(
  */
 export async function compactConversation(
   messages: Message[],
-  settings: AppSettings,
+  settings: Pick<AppSettings, 'apiCompat' | 'model' | 'baseUrl' | 'apiKey' | 'directFetch'>,
   readFileState: Map<string, { content: string; timestamp: number }>,
   customInstructions?: string,
   trigger: 'auto' | 'manual' = 'auto'
@@ -544,5 +544,4 @@ function estimateTokensForMessages(messages: Message[]): number {
   }
   return total
 }
-
 

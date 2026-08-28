@@ -43,7 +43,15 @@ interface SidebarProps {
 
 export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProps) {
   const { t } = useTranslation()
-  const { sessions, activeSessionId, createSession, setActiveSession, deleteSession } = useChatStore()
+  const { sessions, activeSessionId, createSession, setActiveSession, deleteSession } = useChatStore(
+    useShallow((s) => ({
+      sessions: s.sessions,
+      activeSessionId: s.activeSessionId,
+      createSession: s.createSession,
+      setActiveSession: s.setActiveSession,
+      deleteSession: s.deleteSession,
+    }))
+  )
   // 订阅 sessionStatus 变化以触发 loading 圈重渲染
   const sessionStatus = useChatStore((s) => s.sessionStatus)
   // 激活技能派生列表：useShallow 对数组元素做浅比较，避免 filter 每次返回新数组引用触发无意义重渲染

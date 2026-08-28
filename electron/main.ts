@@ -518,20 +518,37 @@ function createWindow() {
     },
   })
 
-  const openInBrowser = (url: string) => {
+  const normalizeHttpUrl = (url: string): string | null => {
     try {
       const parsed = new URL(url)
-      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
-        void shell.openExternal(parsed.toString())
-      }
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
+      return parsed.toString()
     } catch {
-      // Ignore malformed popup URLs instead of navigating the application window.
+      return null
     }
+  }
+
+  const openInBrowser = (url: string) => {
+    const safeUrl = normalizeHttpUrl(url)
+    if (safeUrl) void shell.openExternal(safeUrl)
   }
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     openInBrowser(url)
     return { action: 'deny' }
+  })
+
+  // <webview> 使用独立的 guest WebContents，主窗口的 window-open handler 不会拦截它。
+  // 将 guest 的 target="_blank" / window.open 请求转发给工作台，由渲染层新建标签。
+  const hostWindow = mainWindow
+  mainWindow.webContents.on('did-attach-webview', (_event, guestContents) => {
+    guestContents.setWindowOpenHandler(({ url }) => {
+      const safeUrl = normalizeHttpUrl(url)
+      if (safeUrl && !hostWindow.isDestroyed()) {
+        hostWindow.webContents.send('browser:new-tab', safeUrl)
+      }
+      return { action: 'deny' }
+    })
   })
 
   const trustedOrigin = devUrl ? new URL(devUrl).origin : null
@@ -780,6 +797,35 @@ function registerIpcHandlers() {
                 : ext === '.svg' ? 'image/svg+xml'
                   : 'image/png'
     return `data:${mime};base64,${buf.toString('base64')}`
+  })
+
+  // 按磁盘路径读取预览文件为 base64，供渲染进程交给 Open File Viewer。
+  // 设上限避免一次预览超大二进制文件导致渲染进程内存暴涨。
+  ipcMain.handle('readFileBase64', async (_e, filePath: string) => {
+    const safe = assertSafePath(filePath)
+    let stat: fs.Stats
+    try {
+      stat = await fs.promises.stat(safe)
+    } catch {
+      throw new Error(`File not found: ${safe}`)
+    }
+    if (!stat.isFile()) throw new Error(`Not a file: ${safe}`)
+    const maxBytes = 128 * 1024 * 1024
+    if (stat.size > maxBytes) throw new Error('Preview file too large (max 128MB)')
+    const buf = await fs.promises.readFile(safe)
+    const ext = path.extname(safe).toLowerCase()
+    const mimeByExt: Record<string, string> = {
+      '.pdf': 'application/pdf', '.json': 'application/json', '.xml': 'application/xml', '.csv': 'text/csv',
+      '.txt': 'text/plain', '.md': 'text/markdown', '.html': 'text/html', '.htm': 'text/html', '.css': 'text/css',
+      '.js': 'text/javascript', '.ts': 'text/typescript', '.tsx': 'text/typescript', '.jsx': 'text/javascript',
+      '.doc': 'application/msword', '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      '.xls': 'application/vnd.ms-excel', '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      '.ppt': 'application/vnd.ms-powerpoint', '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      '.zip': 'application/zip', '.rar': 'application/vnd.rar', '.7z': 'application/x-7z-compressed',
+      '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.mp4': 'video/mp4', '.webm': 'video/webm',
+      '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.svg': 'image/svg+xml',
+    }
+    return { data: buf.toString('base64'), mimeType: mimeByExt[ext] || 'application/octet-stream', size: stat.size }
   })
 
   ipcMain.handle('selectAudioFile', async () => {

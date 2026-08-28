@@ -532,10 +532,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         s.id === sessionId ? { ...s, workingDir: dir, updatedAt: now } : s
       ),
     }))
-    // 持久化：workingDir 必须落库，否则重启后 AI 的系统提示里工作目录丢失
-    // （dbCreateSession 为 upsert 语义，行不存在时会补建）
+    // 空会话不落库：后台同步会清理没有消息的「新会话」行，提前写入会导致
+    // 刚选中的目录先显示、随后又被同步清掉。首条消息落库时会带上 workingDir。
     const session = get().sessions.find((s) => s.id === sessionId)
-    if (session) {
+    if (session && session.messages.length > 0) {
       logPersistenceFailure('update session working dir', ipc.dbCreateSession({
         id: sessionId,
         title: session.title,

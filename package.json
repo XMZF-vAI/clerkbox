@@ -23,6 +23,8 @@
   "dependencies": {
     "@material/material-color-utilities": "^0.4.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "@open-file-viewer/core": "^0.1.42",
+    "@open-file-viewer/react": "^0.1.42",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "ai": "^6.0.195",
@@ -32,6 +34,7 @@
     "js-yaml": "^4.3.1",
     "lucide-react": "^1.17.0",
     "node-pty": "^1.1.0",
+    "pdfjs-dist": "^6.2.108",
     "qrcode": "^1.5.4",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",

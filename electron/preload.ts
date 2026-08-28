@@ -23,6 +23,8 @@ contextBridge.exposeInMainWorld('clerkbox', {
   selectImageFile: (): Promise<string | null> => ipcRenderer.invoke('selectImageFile'),
   selectChatFiles: (): Promise<string[] | null> => ipcRenderer.invoke('selectChatFiles'),
   readImageFileBase64: (filePath: string): Promise<string> => ipcRenderer.invoke('readImageFileBase64', filePath),
+  readFileBase64: (filePath: string): Promise<{ data: string; mimeType: string; size: number }> =>
+    ipcRenderer.invoke('readFileBase64', filePath),
   selectAudioFile: (): Promise<string | null> => ipcRenderer.invoke('selectAudioFile'),
   selectMusicFolder: (): Promise<string | null> => ipcRenderer.invoke('selectMusicFolder'),
   selectSkillFile: (): Promise<string | null> => ipcRenderer.invoke('selectSkillFile'),
@@ -50,6 +52,11 @@ contextBridge.exposeInMainWorld('clerkbox', {
     const listener = (_e: Electron.IpcRendererEvent, isMaximized: boolean) => callback(isMaximized)
     ipcRenderer.on('windowStateChanged', listener)
     return () => ipcRenderer.removeListener('windowStateChanged', listener)
+  },
+  onBrowserNewTab: (callback: (url: string) => void): (() => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, url: string) => callback(url)
+    ipcRenderer.on('browser:new-tab', listener)
+    return () => ipcRenderer.removeListener('browser:new-tab', listener)
   },
 
   // Shell

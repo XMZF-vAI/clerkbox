@@ -14,6 +14,7 @@ import { computeContextUsage, getApiVisibleMessages, type ContextUsageInfo } fro
 import i18n from '../i18n'
 import { findAgent } from '../lib/agent-registry'
 import { useAgentRunsStore } from '../stores/agent-runs-store'
+import { useShallow } from 'zustand/react/shallow'
 import { notifyIfNotViewing } from '../lib/notify'
 import { openChatStream, sseLines } from '../lib/api-transport'
 import { requiresApiKey } from '../lib/provider-catalog'
@@ -321,7 +322,26 @@ export async function runWithRetry<T>(
 }
 
 export function useAgent(sessionId: string) {
-  const settings = useSettingsStore()
+  // Agent 只订阅请求构造和上下文预算所需的设置，减少设置页/主题等变化带来的重建。
+  const settings = useSettingsStore(useShallow((s) => ({
+    model: s.model,
+    apiCompat: s.apiCompat,
+    activeProviderId: s.activeProviderId,
+    activeModelId: s.activeModelId,
+    providers: s.providers,
+    temperature: s.temperature,
+    maxTokens: s.maxTokens,
+    reasoningEffort: s.reasoningEffort,
+    enableThinking: s.enableThinking,
+    thinkingBudget: s.thinkingBudget,
+    approvalMode: s.approvalMode,
+    baseUrl: s.baseUrl,
+    apiKey: s.apiKey,
+    directFetch: s.directFetch,
+    maxInputTokens: s.maxInputTokens,
+    agentsMdEnabled: s.agentsMdEnabled,
+    claudeMdCompat: s.claudeMdCompat,
+  })))
   const { addMessage, updateMessage, setStreaming, compactSession, setSessionStatus } = useChatStore()
   const requestWorkingDirRef = useRef<string | null>(null)
   const tokenTrackerRef = useRef<TokenTracker>(new TokenTracker())

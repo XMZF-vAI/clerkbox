@@ -1,14 +1,8 @@
-import { useState, useEffect } from 'react'
+import { lazy, Suspense, useState, useEffect } from 'react'
 import ChatPage from './components/chat/ChatPage'
-import SkillStore from './components/chat/SkillStore'
 import Sidebar from './components/layout/Sidebar'
 import TitleBar from './components/layout/TitleBar'
 import WorkbenchPanel from './components/workbench/WorkbenchPanel'
-import SettingsPage from './components/settings/SettingsPage'
-import OnboardingFlow from './components/onboarding/OnboardingFlow'
-import VibeBackground from './components/vibe/VibeBackground'
-import VibeMusicPlayer from './components/vibe/VibeMusicPlayer'
-import VibeControls from './components/vibe/VibeControls'
 import { useSettingsStore, migrateProvidersIfNeeded, hydrateProviderApiKeys } from './stores/settings-store'
 import { initMcp } from './stores/mcp-store'
 import { useAccountStore } from './stores/account-store'
@@ -18,6 +12,14 @@ import { applyColorScheme, resolveSeed } from './lib/theme-engine'
 import { I18nProvider } from './components/I18nProvider'
 import { isWebUIMode } from './lib/ipc-client'
 import { useIsMobile } from './hooks/use-mobile'
+
+// 非首屏模块按需加载，避免普通聊天启动时加载设置、技能商店和 VIBE 资源。
+const SkillStore = lazy(() => import('./components/chat/SkillStore'))
+const SettingsPage = lazy(() => import('./components/settings/SettingsPage'))
+const OnboardingFlow = lazy(() => import('./components/onboarding/OnboardingFlow'))
+const VibeBackground = lazy(() => import('./components/vibe/VibeBackground'))
+const VibeMusicPlayer = lazy(() => import('./components/vibe/VibeMusicPlayer'))
+const VibeControls = lazy(() => import('./components/vibe/VibeControls'))
 
 function ThemeProvider({ children }: { children: React.ReactNode }) {
   const theme = useSettingsStore((s) => s.theme)
@@ -163,6 +165,6 @@ export default function App() {
     )
   }
 
-  return <ThemeProvider><I18nProvider>{content}</I18nProvider></ThemeProvider>
+  return <ThemeProvider><I18nProvider><Suspense fallback={null}>{content}</Suspense></I18nProvider></ThemeProvider>
 }
 //别蹦别蹦别蹦

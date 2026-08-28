@@ -75,7 +75,25 @@ function countMsgToolCalls(msg: Message): number {
 }
 
 /** Turn panel - 只保留一个回合级折叠按钮：折叠时只显示最终回复，展开时按自然顺序显示所有中间步骤 */
-const TurnPanel = memo(function TurnPanel({ turn, isLastTurn, isStreaming, vibe }: { turn: Turn; isLastTurn: boolean; isStreaming: boolean; vibe?: boolean }) {
+type TurnPanelProps = { turn: Turn; isLastTurn: boolean; isStreaming: boolean; vibe?: boolean }
+
+function areTurnPanelPropsEqual(previous: TurnPanelProps, next: TurnPanelProps): boolean {
+  if (
+    previous.isLastTurn !== next.isLastTurn ||
+    previous.isStreaming !== next.isStreaming ||
+    previous.vibe !== next.vibe ||
+    previous.turn.turnId !== next.turn.turnId ||
+    previous.turn.userMsg !== next.turn.userMsg ||
+    previous.turn.aiMessages.length !== next.turn.aiMessages.length
+  ) {
+    return false
+  }
+  // groupIntoTurns creates fresh arrays on each stream update. Compare their
+  // message references so completed turns remain memoized.
+  return previous.turn.aiMessages.every((message, index) => message === next.turn.aiMessages[index])
+}
+
+const TurnPanel = memo(function TurnPanel({ turn, isLastTurn, isStreaming, vibe }: TurnPanelProps) {
   const { t } = useTranslation()
   const [stepsExpanded, setStepsExpanded] = useState(false)
 
@@ -151,11 +169,12 @@ const TurnPanel = memo(function TurnPanel({ turn, isLastTurn, isStreaming, vibe 
       {finalMsg && <MessageItem message={finalMsg} vibe={vibe} />}
     </div>
   )
-})
+}, areTurnPanelPropsEqual)
 
 export default function MessageList({ messages, isStreaming, vibe }: MessageListProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
+  const scrollRafRef = useRef<number | null>(null)
   const isNearBottomRef = useRef(true)
 
   // Only auto-scroll while the user is already near the latest message.
@@ -173,9 +192,20 @@ export default function MessageList({ messages, isStreaming, vibe }: MessageList
 
   useEffect(() => {
     if (isNearBottomRef.current) {
-      bottomRef.current?.scrollIntoView({ behavior: isStreaming ? 'instant' : 'smooth' })
+      // Streaming can update state many times per frame. Coalesce scroll work
+      // to one layout pass per animation frame instead of forcing a layout on
+      // every token.
+      if (scrollRafRef.current !== null) return
+      scrollRafRef.current = requestAnimationFrame(() => {
+        scrollRafRef.current = null
+        bottomRef.current?.scrollIntoView({ behavior: isStreaming ? 'instant' : 'smooth' })
+      })
     }
   }, [messages, isStreaming])
+
+  useEffect(() => () => {
+    if (scrollRafRef.current !== null) cancelAnimationFrame(scrollRafRef.current)
+  }, [])
 
   const turns = useMemo(() => groupIntoTurns(messages), [messages])
 

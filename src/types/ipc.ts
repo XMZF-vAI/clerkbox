@@ -218,6 +218,8 @@ export interface ClerkBoxAPI {
   selectChatFiles: () => Promise<string[] | null>
   /** 按磁盘路径读取图片文件，返回 base64 data URL */
   readImageFileBase64: (path: string) => Promise<string>
+  /** 按磁盘路径读取预览文件，返回 base64 内容和 MIME 类型 */
+  readFileBase64: (path: string) => Promise<{ data: string; mimeType: string; size: number }>
   selectAudioFile: () => Promise<string | null>
   selectMusicFolder: () => Promise<string | null>
   fileExists: (path: string) => Promise<boolean>
@@ -228,6 +230,8 @@ export interface ClerkBoxAPI {
   windowAction: (action: 'minimize' | 'maximize' | 'close') => void
   isWindowMaximized: boolean
   onWindowStateChange: (callback: (isMaximized: boolean) => void) => () => void
+  /** 订阅内嵌浏览器的 target="_blank" / window.open 请求 */
+  onBrowserNewTab: (callback: (url: string) => void) => () => void
   readFile: (path: string) => Promise<string>
   writeFile: (path: string, content: string) => Promise<void>
   selectSkillFile: () => Promise<string | null>
