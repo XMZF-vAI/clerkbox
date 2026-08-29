@@ -52,7 +52,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 
 /** 建立 Client 连接（stdio 或 HTTP，HTTP 自动回退 SSE） */
 async function createClient(config: McpServerConfig): Promise<Client> {
-  const client = new Client({ name: 'ClerkBox', version: '1.8.0' })
+  const client = new Client({ name: 'ClerkBox', version: '2.0.0' })
 
   if (config.transport === 'stdio') {
     if (!config.command?.trim()) throw new Error('缺少启动命令（command）')
@@ -87,7 +87,7 @@ async function createClient(config: McpServerConfig): Promise<Client> {
     await client.connect(new StreamableHTTPClientTransport(url, { requestInit }))
     return client
   } catch (httpError) {
-    const fallback = new Client({ name: 'ClerkBox', version: '1.8.0' })
+    const fallback = new Client({ name: 'ClerkBox', version: '2.0.0' })
     try {
       await fallback.connect(new SSEClientTransport(url, { requestInit }))
       return fallback

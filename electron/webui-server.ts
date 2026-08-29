@@ -189,7 +189,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
   if (process.env.VITE_DEV_SERVER_URL) {
     proxyToVite(req, res)
   } else {
-    serveStatic(req, res, url.pathname)
+    void serveStatic(req, res, url.pathname)
   }
 }
 
@@ -380,7 +380,7 @@ function getDistDir(): string {
   return path.join(process.cwd(), 'dist')
 }
 
-function serveStatic(req: http.IncomingMessage, res: http.ServerResponse, pathname: string): void {
+async function serveStatic(_req: http.IncomingMessage, res: http.ServerResponse, pathname: string): Promise<void> {
   const distDir = getDistDir()
   // 解码 URL 编码的路径
   let decodedPath: string
@@ -392,31 +392,38 @@ function serveStatic(req: http.IncomingMessage, res: http.ServerResponse, pathna
     return
   }
 
-  let filePath = path.join(distDir, decodedPath === '/' ? 'index.html' : decodedPath)
+  const distRoot = path.resolve(distDir)
+  let filePath = path.join(distRoot, decodedPath === '/' ? 'index.html' : decodedPath)
 
   // 浏览器默认请求 /favicon.ico：复用应用图标（public/icon.png → dist/icon.png）
   if (decodedPath === '/favicon.ico') {
-    filePath = path.join(distDir, 'icon.png')
+    filePath = path.join(distRoot, 'icon.png')
   }
 
-  // 防止路径遍历
+  // 防止路径遍历。简单的 startsWith 会把 dist-other 误判为 dist 子目录，
+  // 使用 path.relative 同时覆盖 Windows 分隔符和大小写规则。
   const resolved = path.resolve(filePath)
-  if (!resolved.startsWith(path.resolve(distDir))) {
+  const relative = path.relative(distRoot, resolved)
+  if (relative.startsWith(`..${path.sep}`) || relative === '..' || path.isAbsolute(relative)) {
     res.writeHead(403)
     res.end()
     return
   }
 
-  // 文件不存在或是目录 → SPA fallback 到 index.html
-  if (!fs.existsSync(resolved) || fs.statSync(resolved).isDirectory()) {
-    filePath = path.join(distDir, 'index.html')
+  // 文件不存在或是目录 → SPA fallback 到 index.html。异步 stat/read 避免
+  // WebUI 请求静态资源时同步 I/O 阻塞聊天 SSE 和其他 API。
+  try {
+    const stats = await fs.promises.stat(resolved)
+    if (stats.isDirectory()) filePath = path.join(distRoot, 'index.html')
+  } catch {
+    filePath = path.join(distRoot, 'index.html')
   }
 
   const ext = path.extname(filePath).toLowerCase()
   const contentType = MIME_TYPES[ext] || 'application/octet-stream'
 
   try {
-    const content = fs.readFileSync(filePath)
+    const content = await fs.promises.readFile(filePath)
     res.writeHead(200, { 'Content-Type': contentType })
     res.end(content)
   } catch {

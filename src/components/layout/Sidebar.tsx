@@ -6,7 +6,6 @@ import {
   Trash2,
   FolderClosed,
   FolderOpen,
-  Zap,
   Store,
   Loader2,
   AlertTriangle,
@@ -29,7 +28,6 @@ import { ipc, isWebUIMode } from '../../lib/ipc-client'
 
 import APP_ICON from '../../assets/icon.png'
 import { useShallow } from 'zustand/react/shallow'
-import { useSkillsStore } from '../../stores/skills-store'
 import { useSettingsStore } from '../../stores/settings-store'
 import { useUIStore } from '../../stores/ui-store'
 import { useAccountStore, avatarColorFor, initialOf } from '../../stores/account-store'
@@ -54,19 +52,12 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
   )
   // 订阅 sessionStatus 变化以触发 loading 圈重渲染
   const sessionStatus = useChatStore((s) => s.sessionStatus)
-  // 激活技能派生列表：useShallow 对数组元素做浅比较，避免 filter 每次返回新数组引用触发无意义重渲染
-  const enabledSkills = useSkillsStore(
-    useShallow((s) => s.skills.filter((sk) => s.sessionSkillIds.includes(sk.id)))
-  )
-  const toggleSessionSkill = useSkillsStore((s) => s.toggleSessionSkill)
   const { showSkillStore, setShowSkillStore } = useUIStore()
   // 账户入口：登录态与用户信息（用于头像/文案切换）
   const accountLoggedIn = useAccountStore((s) => s.loggedIn)
   const accountUser = useAccountStore((s) => s.user)
-  const [showSkillPicker, setShowSkillPicker] = useState(false)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
   const [hoveredSessionId, setHoveredSessionId] = useState<string | null>(null)
-  const pickerRef = useRef<HTMLDivElement>(null)
   // ── 任务列表分组：每个 workingDir 一组；null/空 workingDir 归到「默认」组 ──
   // 每组独立折叠状态：Set 里存的是"已折叠"的分组 key，不在 Set 内 = 展开（默认）
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
@@ -148,22 +139,6 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
     }
   }
 
-  // Close picker on outside click
-  useEffect(() => {
-    if (!showSkillPicker) return
-    const handler = (e: MouseEvent) => {
-      if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) {
-        setShowSkillPicker(false)
-      }
-    }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
-  }, [showSkillPicker])
-
-  // Get current session's workingDir for skill sync (user-picked or default)
-  const currentSession = sessions.find((s) => s.id === activeSessionId)
-  const workingDir = currentSession?.workingDir || currentSession?.defaultWorkDir || ''
-
   // 任务列表分组：从 sessions 派生
   //   - 分组键只用 workingDir（用户主动选过的工作目录）
   //   - defaultWorkDir（自动生成的时间戳目录）不作为分组键，全部归入「默认」组，
@@ -209,10 +184,6 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
     })
   }
 
-  const handleToggleSkill = (id: string) => {
-    toggleSessionSkill(id, workingDir)
-  }
-
   // 账户入口点击：打开设置页并定位到"账户"标签（一次性 transient 标记）
   const handleOpenAccountSettings = () => {
     useSettingsStore.getState().updateSettings({ showSettings: true, pendingSettingsTab: 'account' })
@@ -248,14 +219,6 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
           <Store size={18} />
         </button>
         <div className="flex-1" />
-        {enabledSkills.length > 0 && (
-          <div className="relative mb-1">
-            <Zap size={16} className="text-md-primary" />
-            <span className="absolute -top-1 -right-1.5 w-3 h-3 bg-md-primary rounded-full text-[7px] flex items-center justify-center text-md-onPrimary font-bold">
-              {enabledSkills.length}
-            </span>
-          </div>
-        )}
         {!isWebUIMode && (
           <button
             type="button"
@@ -359,24 +322,6 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
         >
           {groups.some((g) => !collapsedGroups.has(g.key)) ? <ChevronsDownUp size={13} /> : <ChevronsUpDown size={13} />}
         </button>
-      </div>
-
-      {/* Active skills */}
-      <div className="px-3 pb-2">
-        {enabledSkills.length > 0 && (
-          <div className="flex items-center gap-1 flex-wrap">
-            {enabledSkills.map((s) => (
-              <span
-                key={s.id}
-                title={s.description || s.name}
-                className="flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-md-primary/10 text-md-primary text-[10px] cursor-default"
-              >
-                <span>{s.icon}</span>
-                {s.name}
-              </span>
-            ))}
-          </div>
-        )}
       </div>
 
       <div className="flex-1 overflow-y-auto px-2">

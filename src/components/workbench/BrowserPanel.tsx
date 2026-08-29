@@ -196,6 +196,9 @@ export default function BrowserPanel({
           src={navSrc || undefined}
           partition="persist:workbench-browser"
           useragent={FAKE_UA}
+          // Allow target="_blank"/window.open to reach the main-process handler,
+          // which forwards the safe URL to a new workbench tab.
+          allowpopups
           className="h-full w-full"
         />
         {!currentUrl && !loading && (

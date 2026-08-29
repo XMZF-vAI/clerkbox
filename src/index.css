@@ -284,6 +284,60 @@
 }
 
 @layer components {
+  /* Chat input stays compact when the workbench takes horizontal space. */
+  .chat-input-box {
+    container: chat-input / inline-size;
+  }
+
+  .chat-input-toolbar,
+  .chat-input-chip-row {
+    scrollbar-width: none;
+  }
+
+  .chat-input-toolbar::-webkit-scrollbar,
+  .chat-input-chip-row::-webkit-scrollbar {
+    display: none;
+  }
+
+  @container chat-input (max-width: 560px) {
+    .chat-input-toolbar .chat-toolbar-label {
+      display: none;
+    }
+
+    .chat-input-toolbar > button,
+    .chat-input-toolbar > div > button {
+      gap: 0 !important;
+      padding-left: 0.5rem !important;
+      padding-right: 0.5rem !important;
+    }
+  }
+
+  @container chat-input (max-width: 380px) {
+    .chat-input-toolbar .chat-toolbar-thinking-level {
+      display: none;
+    }
+
+    .chat-input-toolbar .chat-toolbar-chevron,
+    .chat-input-toolbar .chat-toolbar-model-label {
+      display: none;
+    }
+
+    .chat-input-toolbar .chat-toolbar-model-icon {
+      display: block !important;
+    }
+
+    .chat-input-toolbar > button,
+    .chat-input-toolbar > div > button {
+      padding-left: 0.375rem !important;
+      padding-right: 0.375rem !important;
+    }
+
+    .chat-input-toolbar .chat-toolbar-send {
+      width: 2rem !important;
+      height: 2rem !important;
+    }
+  }
+
   /* Open File Viewer integration: keep the preview visually native to ClerkBox
      and reserve the sidebar for the actual document rather than controls. */
   .ofv-sidebar-preview {

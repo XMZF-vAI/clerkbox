@@ -45,8 +45,10 @@ export default defineConfig({
     },
   },
   server: {
-    host: '0.0.0.0',
-    allowedHosts: true,
+    // 开发服务器只供本机 Electron/WebUI 代理访问，避免暴露给局域网后
+    // 触发 Vite/esbuild 的跨站请求风险；生产 WebUI 仍由独立服务控制 LAN 绑定。
+    host: '127.0.0.1',
+    allowedHosts: ['localhost', '127.0.0.1'],
     port: 5175,
   },
 })

@@ -2100,17 +2100,28 @@ function registerIpcHandlers() {
       // 旧实现只抓 5 页（约 100 条），热门排序会让大量技能永远没有机会被搜索到。
       // 抓取更大的、有界候选池，仍通过并发请求控制总延迟和网络开销。
       const SEARCH_POOL_PAGES = 20
+      const SEARCH_POOL_CONCURRENCY = 6
       const pagesToFetch = safeQuery
         ? Array.from({ length: SEARCH_POOL_PAGES }, (_, i) => i + 1)
         : [safePage]
-      const responses = await Promise.all(
-        pagesToFetch.map((p) =>
-          fetchHttpsText(
+      // 保持有限并发，避免一次搜索同时分配 20 个 2MB 响应缓冲区，
+      // 也避免远端站点因突发请求触发限流。
+      const responses = new Array<Awaited<ReturnType<typeof fetchHttpsText>>>(pagesToFetch.length)
+      let nextPageIndex = 0
+      const fetchPage = async () => {
+        while (true) {
+          const index = nextPageIndex++
+          if (index >= pagesToFetch.length) return
+          const p = pagesToFetch[index]
+          responses[index] = await fetchHttpsText(
             `https://hub.cocoloop.cn/search?keyword=${encodeURIComponent(safeQuery)}&page=${p}`,
             { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ClerkBox/1.7' },
             2 * 1024 * 1024
           )
-        )
+        }
+      }
+      await Promise.all(
+        Array.from({ length: Math.min(SEARCH_POOL_CONCURRENCY, pagesToFetch.length) }, () => fetchPage())
       )
       const okResponse = responses.find((r) => r.statusCode === 200)
       if (!okResponse) throw new Error(`CocoLoop returned HTTP ${responses[0]?.statusCode ?? 0}`)

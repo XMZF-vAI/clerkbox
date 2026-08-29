@@ -1,5 +1,5 @@
 import { useState, useRef, type KeyboardEvent as ReactKeyboardEvent, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type ChangeEvent as ReactChangeEvent, useEffect } from 'react'
-import { Send, Brain, FolderOpen, ChevronDown, Square, Zap, Check, X, Store, Plus, FolderPlus, Paperclip, FileText, ShieldCheck, Hand, TriangleAlert, Slash, BookOpen, GitBranch, Target, Plug, Settings2, FoldVertical, Loader2, type LucideIcon } from 'lucide-react'
+import { Send, Brain, FolderOpen, ChevronDown, Square, Check, X, Store, Plus, FolderPlus, Paperclip, FileText, ShieldCheck, Hand, TriangleAlert, Slash, BookOpen, GitBranch, Target, Plug, Settings2, FoldVertical, Loader2, type LucideIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useSettingsStore } from '../../stores/settings-store'
 import { useChatStore } from '../../stores/chat-store'
@@ -258,10 +258,6 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
   const inputBoxRef = useRef<HTMLDivElement>(null)
   const [commandHighlight, setCommandHighlight] = useState(0)
 
-  // Skill dropdown state
-  const [showSkillMenu, setShowSkillMenu] = useState(false)
-  const skillMenuRef = useRef<HTMLDivElement>(null)
-  const skillTriggerRef = useRef<HTMLButtonElement>(null)
   const [showThinkingMenu, setShowThinkingMenu] = useState(false)
   const thinkingMenuRef = useRef<HTMLDivElement>(null)
   const thinkingTriggerRef = useRef<HTMLButtonElement>(null)
@@ -768,9 +764,6 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
           setContent((v) => (v.trim() === '/' ? '' : v))
         }
       }
-      if (skillMenuRef.current && !skillMenuRef.current.contains(e.target as Node)) {
-        setShowSkillMenu(false)
-      }
       if (thinkingMenuRef.current && !thinkingMenuRef.current.contains(e.target as Node)) {
         setShowThinkingMenu(false)
       }
@@ -778,14 +771,14 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
         setShowFolderPopover(false)
       }
     }
-    if (showModelMenu || showApprovalMenu || showCommandMenu || showSkillMenu || showThinkingMenu || showFolderPopover) {
+    if (showModelMenu || showApprovalMenu || showCommandMenu || showThinkingMenu || showFolderPopover) {
       document.addEventListener('mousedown', handleClickOutside)
       return () => document.removeEventListener('mousedown', handleClickOutside)
     }
-  }, [showModelMenu, showApprovalMenu, showCommandMenu, showSkillMenu, showThinkingMenu, showFolderPopover])
+  }, [showModelMenu, showApprovalMenu, showCommandMenu, showThinkingMenu, showFolderPopover])
 
   useEffect(() => {
-    if (!showModelMenu && !showApprovalMenu && !showCommandMenu && !showSkillMenu && !showThinkingMenu && !showFolderPopover) return
+    if (!showModelMenu && !showApprovalMenu && !showCommandMenu && !showThinkingMenu && !showFolderPopover) return
 
     const handleEscape = (event: globalThis.KeyboardEvent) => {
       if (event.key !== 'Escape') return
@@ -795,16 +788,13 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
           ? approvalTriggerRef.current
           : showCommandMenu
             ? textareaRef.current
-            : showSkillMenu
-              ? skillTriggerRef.current
-              : showThinkingMenu
-                ? thinkingTriggerRef.current
-                : folderTriggerRef.current
+            : showThinkingMenu
+              ? thinkingTriggerRef.current
+              : folderTriggerRef.current
       event.stopPropagation()
       setShowModelMenu(false)
       setShowApprovalMenu(false)
       setShowCommandMenu(false)
-      setShowSkillMenu(false)
       setShowThinkingMenu(false)
       setShowFolderPopover(false)
       if (showCommandMenu) setContent((v) => (v.trim() === '/' ? '' : v))
@@ -813,7 +803,7 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
 
     document.addEventListener('keydown', handleEscape)
     return () => document.removeEventListener('keydown', handleEscape)
-  }, [showModelMenu, showApprovalMenu, showCommandMenu, showSkillMenu, showThinkingMenu, showFolderPopover])
+  }, [showModelMenu, showApprovalMenu, showCommandMenu, showThinkingMenu, showFolderPopover])
 
   // 审批档位元数据（图标 + 标签；完全访问用警告色，对齐 TRAE）
   const approvalMode = settings.approvalMode
@@ -862,8 +852,8 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
 
   // Box class: vibe uses liquid glass（relative 供 "/" 命令菜单 absolute 锚定）
   const boxClass = vibe
-    ? `relative flex flex-col ${boxMaxWidth} mx-auto liquid-glass rounded-[28px] px-5 py-3.5 gap-2 focus-within:border-white/40 transition-colors`
-    : `relative flex flex-col ${boxMaxWidth} mx-auto bg-dark-surfaceContainerHigh rounded-[28px] px-5 py-3.5 gap-2 border border-dark-onSurfaceVariant/8 focus-within:border-md-primary/30 transition-colors`
+    ? `chat-input-box relative flex flex-col ${boxMaxWidth} mx-auto liquid-glass rounded-[28px] px-5 py-3.5 gap-2 focus-within:border-white/40 transition-colors`
+    : `chat-input-box relative flex flex-col ${boxMaxWidth} mx-auto bg-dark-surfaceContainerHigh rounded-[28px] px-5 py-3.5 gap-2 border border-dark-onSurfaceVariant/8 focus-within:border-md-primary/30 transition-colors`
 
   return (
     <div className={outerClass} style={outerStyle}>
@@ -894,29 +884,6 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
             aria-hidden="true"
           />
         )}
-        {/* Active skills pills - shown when any skill is loaded */}
-        {activeSkills.length > 0 && (
-          <div className="flex items-center gap-1 flex-wrap">
-            {activeSkills.map((skill) => (
-              <button
-                type="button"
-                key={skill.id}
-                onClick={() => toggleSessionSkill(skill.id, effectiveWorkDir || undefined)}
-                className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] transition-colors group ${
-                  vibe
-                    ? 'bg-white/15 text-white/90 hover:bg-white/25'
-                    : 'bg-md-primary/15 text-md-primary hover:bg-md-primary/25'
-                }`}
-                title={t('chat.unloadSkillTitle', { name: skill.name })}
-              >
-                <span>{skill.icon}</span>
-                <span>{skill.name}</span>
-                <X size={10} className="opacity-0 group-hover:opacity-70 transition-opacity" />
-              </button>
-            ))}
-          </div>
-        )}
-
         {/* Attachments preview - images as thumbnails, files as chips */}
         {attachments.length > 0 && (
           <div>
@@ -972,8 +939,8 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
           </div>
         )}
 
-        {/* Textarea - top area（左侧可带任务工作流芯片，如 Goal；或压缩芯片，点击芯片可移除） */}
-        <div className="flex items-start gap-2">
+        {/* Textarea - top area：命令与已加载 Skill 芯片都直接嵌在消息区域内 */}
+        <div className="flex min-w-0 flex-nowrap items-start gap-2 overflow-x-auto chat-input-chip-row">
           {taskMode && (() => {
             const chipMeta = TASK_COMMANDS.find((c) => c.id === taskMode)
             if (!chipMeta) return null
@@ -1003,6 +970,23 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
               <X size={11} className="opacity-50" />
             </button>
           )}
+          {activeSkills.map((skill) => (
+            <button
+              type="button"
+              key={skill.id}
+              onClick={() => toggleSessionSkill(skill.id, effectiveWorkDir || undefined)}
+              className={`flex items-center gap-1 px-2 py-0.5 rounded-md3-sm text-[11px] font-medium flex-shrink-0 transition-colors group ${
+                vibe
+                  ? 'bg-white/15 text-white/90 hover:bg-white/25'
+                  : 'bg-md-primary/15 text-md-primary hover:bg-md-primary/25'
+              }`}
+              title={t('chat.unloadSkillTitle', { name: skill.name })}
+            >
+              <span>{skill.icon}</span>
+              <span className="max-w-[160px] truncate">{skill.name}</span>
+              <X size={10} className="opacity-50 group-hover:opacity-90 transition-opacity" />
+            </button>
+          ))}
           <textarea
             ref={textareaRef}
             value={content}
@@ -1022,7 +1006,7 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
                     ? t('chat.placeholderVibe')
                     : (effectiveWorkDir ? t('chat.placeholderWorkDir', { name: effectiveWorkDir.split(/[/\\]/).pop() }) : t('chat.placeholderDefault'))}
             rows={1}
-            className={`w-full bg-transparent text-sm max-md:text-base resize-none outline-none min-h-[20px] max-md:min-h-6 max-h-[200px] py-1 ${
+            className={`min-w-[96px] flex-1 bg-transparent text-sm max-md:text-base resize-none outline-none min-h-[20px] max-md:min-h-6 max-h-[200px] py-1 ${
               vibe
                 ? 'text-white/90 placeholder-white/50'
                 : 'text-dark-onSurface placeholder-dark-onSurfaceVariant/40'
@@ -1184,7 +1168,7 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
         )}
 
         {/* Bottom button row - inside the box */}
-        <div className="flex items-center gap-1 flex-wrap">
+        <div className="chat-input-toolbar flex min-w-0 items-center gap-1 flex-nowrap overflow-visible">
           {/* Attach (images / files) button */}
           <button
             type="button"
@@ -1357,8 +1341,8 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
               aria-expanded={showApprovalMenu}
             >
               <ApprovalIcon size={14} />
-              <span className="text-xs font-medium">{approvalMeta.label}</span>
-              <ChevronDown size={12} className={`transition-transform ${showApprovalMenu ? 'rotate-180' : ''}`} />
+              <span className="chat-toolbar-label text-xs font-medium">{approvalMeta.label}</span>
+              <ChevronDown size={12} className={`chat-toolbar-chevron transition-transform ${showApprovalMenu ? 'rotate-180' : ''}`} />
             </button>
             {showApprovalMenu && (
               <>
@@ -1456,7 +1440,7 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
                 type="button"
                 onClick={() => setShowThinkingMenu((v) => !v)}
                 disabled={!thinkingSupported}
-                className={`h-8 max-md:h-11 flex items-center gap-1 px-1.5 flex-shrink-0 rounded-r-md3-sm transition-colors ${
+                className={`chat-toolbar-thinking-level h-8 max-md:h-11 flex items-center gap-1 px-1.5 flex-shrink-0 rounded-r-md3-sm transition-colors ${
                   settings.enableThinking && thinkingSupported
                     ? vibe
                       ? 'bg-md-tertiary/30 text-md-tertiary'
@@ -1469,8 +1453,8 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
                 aria-expanded={showThinkingMenu}
                 aria-controls="chat-reasoning-menu"
               >
-                <span className="text-[10px] capitalize">{reasoningEfforts[currentEffortIndex]}</span>
-                <ChevronDown size={11} className={`transition-transform ${showThinkingMenu ? 'rotate-180' : ''}`} />
+                <span className="chat-toolbar-label text-[10px] capitalize">{reasoningEfforts[currentEffortIndex]}</span>
+                <ChevronDown size={11} className={`chat-toolbar-chevron transition-transform ${showThinkingMenu ? 'rotate-180' : ''}`} />
               </button>
             )}
             {showThinkingMenu && thinkingSupported && hasReasoningLevels && (
@@ -1517,115 +1501,6 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
             )}
           </div>
 
-          {/* Skill selector dropdown */}
-          <div className="relative" ref={skillMenuRef}>
-            <button
-              ref={skillTriggerRef}
-              type="button"
-              onClick={() => setShowSkillMenu(!showSkillMenu)}
-              className={`h-8 max-md:h-11 max-md:px-3 flex items-center gap-1 px-2 flex-shrink-0 rounded-md3-sm transition-colors ${
-                activeSkills.length > 0
-                  ? vibe
-                    ? 'bg-md-primary/25 text-md-primary hover:bg-md-primary/35'
-                    : 'bg-md-primary/15 text-md-primary hover:bg-md-primary/25'
-                  : vibe
-                    ? 'hover:bg-white/15 text-white/70'
-                    : 'hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant'
-              }`}
-              title={t('chat.skillsAria')}
-              aria-label={t('chat.skillsAria')}
-              aria-expanded={showSkillMenu}
-              aria-controls="chat-skill-menu"
-            >
-              <Zap size={14} />
-              <span className="text-xs font-medium">{t('chat.skillsAria')}</span>
-              {activeSkills.length > 0 && (
-                <span className={`text-[10px] px-1 rounded-full ${
-                  vibe ? 'bg-md-primary/30 text-md-primary' : 'bg-md-primary/25 text-md-primary'
-                }`}>
-                  {activeSkills.length}
-                </span>
-              )}
-              <ChevronDown size={12} className={`transition-transform ${showSkillMenu ? 'rotate-180' : ''}`} />
-            </button>
-            {showSkillMenu && (
-              <>
-                <div
-                  className="max-md:block hidden fixed inset-0 z-[65] bg-black/55 animate-fade-in"
-                  onClick={() => setShowSkillMenu(false)}
-                  aria-hidden
-                />
-                <div id="chat-skill-menu" className={`absolute bottom-full mb-1 left-0 w-64 rounded-md3-md overflow-hidden z-50
-                  max-md:fixed max-md:inset-x-0 max-md:bottom-0 max-md:left-auto max-md:mb-0 max-md:w-full max-md:max-h-[72dvh]
-                  max-md:rounded-t-2xl max-md:rounded-b-none max-md:border-t max-md:border-dark-onSurfaceVariant/15
-                  max-md:z-[66] max-md:pb-[calc(env(safe-area-inset-bottom)+8px)] ${
-                  vibe
-                    ? 'liquid-glass-strong'
-                    : 'bg-dark-surfaceContainerHighest border border-dark-onSurfaceVariant/10 shadow-lg'
-                }`}>
-                  <div className="hidden max-md:flex justify-center pt-2 pb-1 flex-shrink-0" aria-hidden>
-                    <div className={`w-10 h-1 rounded-full ${vibe ? 'bg-white/25' : 'bg-dark-onSurfaceVariant/25'}`} />
-                  </div>
-                  <div className={`px-3 py-2 text-[10px] uppercase tracking-wide ${
-                    vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/40'
-                  }`}>
-                    {t('chat.installedSkills')}
-                  </div>
-                  {skills.length === 0 ? (
-                    <div className={`px-3 py-3 text-xs text-center ${vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/50'}`}>
-                      {t('chat.noSkills')}
-                    </div>
-                  ) : (
-                    <div className="max-h-56 max-md:max-h-none overflow-y-auto overscroll-contain">
-                      {skills.map((skill) => {
-                        const isActive = sessionSkillIds.includes(skill.id)
-                        return (
-                          <button
-                            type="button"
-                            key={skill.id}
-                            onClick={() => toggleSessionSkill(skill.id, effectiveWorkDir || undefined)}
-                            className={`w-full flex items-center gap-2 px-3 py-2 max-md:py-3 text-sm transition-colors ${
-                              isActive
-                                ? vibe
-                                  ? 'bg-md-primary/20 text-md-primary'
-                                  : 'bg-md-primary/10 text-md-primary'
-                                : vibe
-                                  ? 'text-white/90 hover:bg-white/10'
-                                  : 'text-dark-onSurface hover:bg-dark-surfaceContainerHigh'
-                            }`}
-                          >
-                            <span className="flex-shrink-0">{skill.icon}</span>
-                            <div className="flex-1 text-left min-w-0">
-                              <div className="truncate font-medium">{skill.name}</div>
-                              {skill.description && (
-                                <div className={`text-[10px] max-md:text-xs truncate ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/40'}`}>
-                                  {skill.description}
-                                </div>
-                              )}
-                            </div>
-                            {isActive && <Check size={14} className="flex-shrink-0 text-md-primary" />}
-                          </button>
-                        )
-                      })}
-                    </div>
-                  )}
-                  <div className={`border-t ${vibe ? 'border-white/15' : 'border-dark-onSurfaceVariant/10'}`}>
-                    <button
-                      type="button"
-                      onClick={() => { setShowSkillMenu(false); setShowSkillStore(true) }}
-                      className={`w-full flex items-center gap-2 px-3 py-2 max-md:py-3.5 text-sm transition-colors ${
-                        vibe ? 'text-white/90 hover:bg-white/10' : 'text-dark-onSurface hover:bg-dark-surfaceContainerHigh'
-                      }`}
-                    >
-                      <Store size={14} />
-                      <span>{t('chat.getSkills')}</span>
-                    </button>
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
-
           {/* Model selector dropdown */}
           <div className="relative" ref={modelMenuRef}>
             <button
@@ -1639,8 +1514,9 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
               aria-controls="chat-model-menu"
               aria-expanded={showModelMenu}
             >
-              <span className="max-w-[100px] truncate text-xs">{currentModelLabel}</span>
-              <ChevronDown size={12} className={`transition-transform ${showModelMenu ? 'rotate-180' : ''}`} />
+              <Settings2 size={14} className="chat-toolbar-model-icon hidden" />
+              <span className="chat-toolbar-model-label max-w-[100px] truncate text-xs">{currentModelLabel}</span>
+              <ChevronDown size={12} className={`chat-toolbar-chevron transition-transform ${showModelMenu ? 'rotate-180' : ''}`} />
             </button>
             {showModelMenu && (
               <>
@@ -1747,7 +1623,7 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
             onClick={isStreaming ? onStop : handleSend}
             disabled={isCompacting || (!isStreaming && !compactMode && !content.trim() && attachments.length === 0)}
             aria-label={isStreaming ? t('chat.stopResponseAria') : t('chat.sendMessageAria')}
-            className={`h-9 w-9 max-md:h-12 max-md:w-12 flex-shrink-0 flex items-center justify-center rounded-full transition-colors disabled:opacity-30 disabled:cursor-not-allowed ${
+            className={`chat-toolbar-send h-9 w-9 max-md:h-12 max-md:w-12 flex-shrink-0 flex items-center justify-center rounded-full transition-colors disabled:opacity-30 disabled:cursor-not-allowed ${
               isStreaming
                 ? 'bg-md-error text-md-onError hover:bg-md-error/90'
                 : vibe
