@@ -8,6 +8,7 @@ export default {
     retry: '重试',
     loading: '加载中...',
     close: '关闭',
+    back: '返回',
     copy: '复制',
     current: '当前',
     default: '默认',
@@ -205,6 +206,12 @@ export default {
     },
     resetConfirm: '确定要恢复所有设置到默认值吗？此操作不可撤销。',
     resetSettings: '恢复默认设置',
+    // 移动端 Settings 列表的副标题与账户页占位
+    generalTitleHint: '语言 / AGENTS.md / 用量统计',
+    accountMobileOnlyHint: '需在电脑上操作',
+    accountMobileOnlyTitle: '账户管理仅在桌面端可用',
+    accountMobileOnlyDesc: '登录、同步、上传/下载等操作会触发云端 OAuth 授权与本地数据覆盖，请前往电脑端 ClerkBox 完成。',
+    mcpListHint: 'MCP 服务器列表',
   },
 
   macaron: {
@@ -246,7 +253,10 @@ export default {
     newChat: '新会话',
     newTask: '新建任务',
     skills: '插件市场',
-    account: '账户',
+    account: {
+      label: '账户',
+      mobileOnlyAlert: '账户操作请在电脑上完成',
+    },
     notLoggedIn: '未登录',
     newChatAria: '新建会话',
     newTaskAria: '新建任务',

@@ -3,6 +3,8 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as crypto from 'crypto'
 import * as os from 'os'
+import * as dgram from 'dgram'
+import { isIPv4 } from 'net'
 import { app } from 'electron'
 
 /**
@@ -77,22 +79,82 @@ export function getWebUIStatus(): { running: boolean; url?: string } {
   return { running: true, url: `http://localhost:${currentPort}/?token=${currentToken}` }
 }
 
-/** 枚举本机非内部 IPv4 地址（供移动端扫码/拼局域网 URL 用），按可用性排序 */
-export function getLanAddresses(): string[] {
-  const out: string[] = []
-  const interfaces = os.networkInterfaces()
-  for (const addrs of Object.values(interfaces)) {
+/** 探测目标：UDP socket connect() 时不会真正发包，但内核会依据路由表
+ *  把“本机出口 IP”绑到该 socket 上 — 借此读出真正用于上网的 IPv4 地址。
+ * 同时使用 Google DNS（8.8.8.8）和阿里云 DNS（223.5.5.5）做冗余探测，
+ * 国内网络可能屏蔽其中一个，另一个仍能给出正确出口。 */
+const UDP_PROBES: ReadonlyArray<{ host: string; port: number }> = [
+  { host: '223.5.5.5', port: 53 },
+  { host: '8.8.8.8', port: 53 },
+]
+
+/** 通过 UDP socket 探测本机出口 IP（最多取第一可用结果），超时 800ms。 */
+function probeLocalIpViaUdp(): Promise<string | null> {
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = (ip: string | null) => {
+      if (settled) return
+      settled = true
+      try { socket.close() } catch { /* ignore */ }
+      resolve(ip)
+    }
+    const socket = dgram.createSocket('udp4')
+    socket.once('error', () => finish(null))
+    // 安全超时：connect() 通常瞬时返回，写一个 hard timeout 兜底
+    const timer = setTimeout(() => finish(null), 800)
+    // 顺序探测，首个成功即返回；都失败则返回 null
+    let idx = 0
+    const tryNext = (): void => {
+      if (idx >= UDP_PROBES.length) {
+        clearTimeout(timer)
+        finish(null)
+        return
+      }
+      const { host, port } = UDP_PROBES[idx++]
+      try {
+        socket.connect(port, host, () => {
+          const addr = socket.address()
+          const ip = typeof addr === 'object' && addr && 'address' in addr ? (addr as { address: string }).address : ''
+          clearTimeout(timer)
+          // IPv4 only；若拿到 :: 形式跳过
+          if (ip && isIPv4(ip)) finish(ip)
+          else tryNext()
+        })
+      } catch {
+        tryNext()
+      }
+    }
+    tryNext()
+  })
+}
+
+/** 枚举本机非内部 IPv4 地址，按可用性排序；优先使用 UDP 探测法选出口 IP。 */
+export async function getLanAddresses(): Promise<string[]> {
+  // 1) 首选：UDP 探测得到真实上网出口，绕开 Hyper-V / WSL / Docker 等虚拟交换机
+  let probed: string | null = null
+  try {
+    probed = await probeLocalIpViaUdp()
+  } catch {
+    probed = null
+  }
+
+  // 2) 兜底：枚举系统所有网卡，剔除回环/链路本地/VPN 段，按 RFC1918 排序
+  const fallback: string[] = []
+  for (const addrs of Object.values(os.networkInterfaces())) {
     for (const addr of addrs ?? []) {
       if (addr.family !== 'IPv4' || addr.internal) continue
-      // 排除链路本地与基准测试保留段（VPN TUN 常占用 198.18.0.0/15，手机无法访问）
       if (/^169\.254\./.test(addr.address) || /^198\.(18|19)\./.test(addr.address)) continue
-      out.push(addr.address)
+      fallback.push(addr.address)
     }
   }
   // 真实局域网网段优先（RFC1918），其余排在后面兜底
   const isPrivate = (ip: string) =>
     /^192\.168\./.test(ip) || /^10\./.test(ip) || /^172\.(1[6-9]|2\d|3[01])\./.test(ip)
-  return out.sort((a, b) => Number(isPrivate(b)) - Number(isPrivate(a)))
+  fallback.sort((a, b) => Number(isPrivate(b)) - Number(isPrivate(a)))
+
+  if (probed && isPrivate(probed)) return [probed, ...fallback.filter((x) => x !== probed)]
+  if (probed) return [probed, ...fallback]
+  return fallback
 }
 
 export async function startWebUI(options: { lanAccess?: boolean } = {}): Promise<{ port: number; token: string; url: string }> {

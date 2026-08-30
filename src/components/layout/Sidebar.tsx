@@ -31,6 +31,7 @@ import { useShallow } from 'zustand/react/shallow'
 import { useSettingsStore } from '../../stores/settings-store'
 import { useUIStore } from '../../stores/ui-store'
 import { useAccountStore, avatarColorFor, initialOf } from '../../stores/account-store'
+import { useIsMobile } from '../../hooks/use-mobile'
 
 interface SidebarProps {
   collapsed: boolean
@@ -186,6 +187,11 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
 
   // 账户入口点击：打开设置页并定位到"账户"标签（一次性 transient 标记）
   const handleOpenAccountSettings = () => {
+    // 手机端禁用账户相关操作：登录/同步走云端 OAuth + 本地覆盖流程，统一交给桌面
+    if (useIsMobile()) {
+      alert(t('sidebar.account.mobileOnlyAlert'))
+      return
+    }
     useSettingsStore.getState().updateSettings({ showSettings: true, pendingSettingsTab: 'account' })
   }
 
@@ -471,7 +477,7 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
           onClick={() => { handleOpenAccountSettings(); onNavigate?.() }}
           className="w-full flex items-center gap-2 px-3 py-2 max-md:py-3 rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-sm max-md:text-base text-dark-onSurfaceVariant"
           aria-label={accountLoggedIn && accountUser ? accountUser.username : t('sidebar.notLoggedIn')}
-          title={accountLoggedIn && accountUser ? accountUser.username : t('sidebar.account')}
+          title={accountLoggedIn && accountUser ? accountUser.username : t('sidebar.account.label')}
         >
           {accountLoggedIn && accountUser ? (
             <span

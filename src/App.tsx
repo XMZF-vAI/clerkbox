@@ -16,6 +16,8 @@ import { useIsMobile } from './hooks/use-mobile'
 // 非首屏模块按需加载，避免普通聊天启动时加载设置、技能商店和 VIBE 资源。
 const SkillStore = lazy(() => import('./components/chat/SkillStore'))
 const SettingsPage = lazy(() => import('./components/settings/SettingsPage'))
+// 移动端 WebUI：仿 Android 设置的列表/详情页（手机/窄屏使用，电脑仍走 SettingsPage）
+const MSettingsPage = lazy(() => import('./components/settings/MSettingsPage'))
 const OnboardingFlow = lazy(() => import('./components/onboarding/OnboardingFlow'))
 const VibeBackground = lazy(() => import('./components/vibe/VibeBackground'))
 // VibeMusicPlayer 已并入 VibeControls 的顶部右侧统一槽位，避免与唤出按钮互相叠压
@@ -115,7 +117,13 @@ export default function App() {
           <WorkbenchPanel vibe />
         </main>
         <VibeControls />
-        {showSettings && <SettingsPage onClose={() => useSettingsStore.getState().updateSettings({ showSettings: false })} />}
+        {showSettings && (
+          isMobile ? (
+            <MSettingsPage onClose={() => useSettingsStore.getState().updateSettings({ showSettings: false })} />
+          ) : (
+            <SettingsPage onClose={() => useSettingsStore.getState().updateSettings({ showSettings: false })} />
+          )
+        )}
       </div>
     )
   } else {
@@ -159,7 +167,13 @@ export default function App() {
             </div>
           </main>
         </div>
-        {showSettings && <SettingsPage onClose={() => useSettingsStore.getState().updateSettings({ showSettings: false })} />}
+        {showSettings && (
+          isMobile ? (
+            <MSettingsPage onClose={() => useSettingsStore.getState().updateSettings({ showSettings: false })} />
+          ) : (
+            <SettingsPage onClose={() => useSettingsStore.getState().updateSettings({ showSettings: false })} />
+          )
+        )}
       </div>
     )
   }

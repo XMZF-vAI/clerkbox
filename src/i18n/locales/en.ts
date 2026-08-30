@@ -8,6 +8,7 @@ export default {
     retry: 'Retry',
     loading: 'Loading...',
     close: 'Close',
+    back: 'Back',
     copy: 'Copy',
     current: 'Current',
     default: 'Default',
@@ -205,6 +206,12 @@ export default {
     },
     resetConfirm: 'Restore all settings to defaults? This action cannot be undone.',
     resetSettings: 'Reset to default settings',
+    // Mobile Settings list subtitles and account placeholder
+    generalTitleHint: 'Language / AGENTS.md / Usage',
+    accountMobileOnlyHint: 'Available on desktop only',
+    accountMobileOnlyTitle: 'Account management is desktop-only',
+    accountMobileOnlyDesc: 'Sign-in, sync, and cloud upload/download trigger OAuth authorization and overwrite local data — please complete these on the desktop ClerkBox client.',
+    mcpListHint: 'MCP server list',
   },
 
   macaron: {
@@ -246,7 +253,10 @@ export default {
     newChat: 'New chat',
     newTask: 'New task',
     skills: 'Plugin Market',
-    account: 'Account',
+    account: {
+      label: 'Account',
+      mobileOnlyAlert: 'Please manage your account on the desktop client.',
+    },
     notLoggedIn: 'Not signed in',
     newChatAria: 'New session',
     newTaskAria: 'New task',
