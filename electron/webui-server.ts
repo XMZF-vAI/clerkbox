@@ -95,33 +95,37 @@ function probeLocalIpViaUdp(): Promise<string | null> {
     const finish = (ip: string | null) => {
       if (settled) return
       settled = true
-      try { socket.close() } catch { /* ignore */ }
+      clearTimeout(timer)
       resolve(ip)
     }
-    const socket = dgram.createSocket('udp4')
-    socket.once('error', () => finish(null))
     // 安全超时：connect() 通常瞬时返回，写一个 hard timeout 兜底
     const timer = setTimeout(() => finish(null), 800)
-    // 顺序探测，首个成功即返回；都失败则返回 null
+    // 顺序探测，单个目标失败（error / 非 IPv4）继续尝试下一个；都失败则返回 null
     let idx = 0
     const tryNext = (): void => {
-      if (idx >= UDP_PROBES.length) {
-        clearTimeout(timer)
+      if (settled) return
+      const target = UDP_PROBES[idx++]
+      if (!target) {
         finish(null)
         return
       }
-      const { host, port } = UDP_PROBES[idx++]
+      // 每个目标用全新 socket：error 之后的旧 socket 状态不可复用
+      const socket = dgram.createSocket('udp4')
+      const done = (ip: string | null) => {
+        try { socket.close() } catch { /* ignore */ }
+        if (ip) finish(ip)
+        else tryNext()
+      }
+      socket.once('error', () => done(null))
       try {
-        socket.connect(port, host, () => {
+        socket.connect(target.port, target.host, () => {
           const addr = socket.address()
           const ip = typeof addr === 'object' && addr && 'address' in addr ? (addr as { address: string }).address : ''
-          clearTimeout(timer)
           // IPv4 only；若拿到 :: 形式跳过
-          if (ip && isIPv4(ip)) finish(ip)
-          else tryNext()
+          done(ip && isIPv4(ip) ? ip : null)
         })
       } catch {
-        tryNext()
+        done(null)
       }
     }
     tryNext()
