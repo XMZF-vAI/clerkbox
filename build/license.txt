@@ -1,7 +1,7 @@
 ClerkBox 软件许可及服务协议
 
 XMZF vAI - ClerkBox: Single AI Agent Desktop Workbench
-版本 2.0.0
+版本 2.1.0
 
 Copyright (c) 2026 XMZF Studio. All rights reserved.
 
