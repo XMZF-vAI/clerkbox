@@ -1,7 +1,7 @@
 ClerkBox 软件许可及服务协议
 
 XMZF vAI - ClerkBox: Single AI Agent Desktop Workbench
-版本 0.5.4-beta
+版本 2.0.0
 
 Copyright (c) 2026 XMZF Studio. All rights reserved.
 
@@ -39,6 +39,7 @@ Copyright (c) 2026 XMZF Studio. All rights reserved.
   4.2 AI 模型可能产生不准确、不完整或不适当的内容，您应自行判断其可靠性和适用性。
   4.3 您不得利用本软件的 AI 功能生成违法、暴力、色情、歧视性或侵犯他人权益的内容。
   4.4 使用 AI 功能时，您理解并同意相关数据（包括对话内容）可能会被发送至第三方 AI 服务提供商进行处理。
+  4.5 本软件的 AI 代理（Agent）功能可在您逐次授权或预先授权的范围内，在本地执行命令、读写文件及访问网络。您应审慎授予相关权限，并对在授权范围内执行的操作及其结果负责。
 
 五、数据与隐私
 
@@ -68,4 +69,4 @@ Copyright (c) 2026 XMZF Studio. All rights reserved.
 如您对本协议有任何疑问，请联系 XMZF Studio。
 
 XMZF Studio
-2026年6月
+2026年8月
