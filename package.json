@@ -69,6 +69,7 @@
   "build": {
     "appId": "com.xmzf.clerkbox",
     "productName": "ClerkBox",
+    "npmRebuild": false,
     "directories": {
       "output": "release-out",
       "buildResources": "build"

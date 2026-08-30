@@ -50,5 +50,11 @@ export default defineConfig({
     host: '127.0.0.1',
     allowedHosts: ['localhost', '127.0.0.1'],
     port: 5175,
+    // release-out 是 electron-builder 的产物目录：dev 服务器若监听它，其目录
+    // 句柄会阻止 electron-builder 解压后的 win-unpacked.tmp 重命名（EPERM），
+    // 导致 dev 运行期间打包必然失败。产物无需热更新，直接排除。
+    watch: {
+      ignored: ['**/release-out/**'],
+    },
   },
 })
