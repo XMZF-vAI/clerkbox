@@ -4,7 +4,7 @@
 
 # ClerkBox
 
-**本地优先的 AI 桌面工作台：多供应商对话、工具调用、子 Agent、技能与 VIBE 沉浸模式**
+**本地优先的 AI 桌面工作台：多供应商对话、MCP 工具生态、子 Agent、技能、工作台与 VIBE 沉浸模式**
 
 [![Version](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.github.com%2Frepos%2FXMZF-vAI%2Fclerkbox%2Freleases%2Flatest&query=%24.tag_name&label=version&style=flat-square&color=7C5CFC)](https://github.com/XMZF-vAI/clerkbox/releases)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-26A2C3?style=flat-square)](LICENSE)
@@ -36,7 +36,10 @@
 - [工具系统](#工具系统)
 - [子 Agent](#子-agent)
 - [Skills 技能系统](#skills-技能系统)
+- [MCP 服务器](#mcp-服务器)
 - [长期记忆](#长期记忆)
+- [工作台面板](#工作台面板)
+- [/goal 目标模式](#goal-目标模式)
 - [WebUI 远程访问](#webui-远程访问)
 - [AGENTS.md 项目指令](#agentsmd-项目指令)
 - [VIBE 沉浸模式](#vibe-沉浸模式)
@@ -55,13 +58,17 @@
 | 能力 | 说明 |
 | --- | --- |
 | **多供应商预设** | 内置 22 家供应商（Lunora / OpenAI / Anthropic / Gemini / DeepSeek / 通义千问 / 智谱 GLM / Ollama 等），每个供应商自动从 `/models` 拉取可用模型；支持自定义端点与 OpenAI / Anthropic 双协议 |
-| **ReAct 工具循环** | 推理 → 工具调用 → 观察 → 再推理，最多 999 轮，可任意时刻中止 |
+| **ReAct 工具循环** | 推理 → 工具调用 → 观察 → 再推理，最多 100 轮，轮次用尽自动收尾总结，可任意时刻中止 |
+| **MCP 工具生态** | 接入 Model Context Protocol 服务器，外部工具动态注入对话；扩展商店可一键安装 MCP Hub 中国版的服务器 |
+| **审批模式** | TRAE 风格 manual / auto / full 三档审批，`/` 命令菜单直达 Spec / Plan / Goal 工作流 |
 | **子 Agent 编排** | 内置只读侦察兵与全工具通用助手，支持 frontmatter 自定义 Agent，独立上下文隔离 |
-| **Skills 技能市场** | 一键安装 CocoLoop 社区的提示词模板，自动注入 system prompt |
+| **Skills 技能自动发现** | 全量技能目录注入，AI 免手动激活即可发现并按需加载技能；扩展商店 / MCP Hub / 6 个内置预置技能开箱即用 |
+| **/goal 目标模式** | 会话目标每轮自动评估（进行中 / 已达成 / 无法完成）并驱动自动续跑；AI 可主动产出 TodoList 计划卡片、就关键决策提问 |
+| **工作台面板** | Trae 式右侧工作台：文件树 / 终端 / 浏览器 / 子 Agent 一体 |
 | **长期记忆** | user / feedback / project / reference 四类记忆条目，跨会话延续上下文 |
 | **思考与模型调优** | 每个模型独立配置思考开关 / 档位（low / medium / high）、温度与 token 上限，模型选择器按思考能力自动分组 |
 | **AGENTS.md 项目指令** | 自动读取工作目录根目录的 `AGENTS.md` 注入系统提示词；可回退 `CLAUDE.md` |
-| **VIBE 沉浸模式** | 全屏背景 + 液态玻璃 UI + 悬浮音乐播放器 |
+| **VIBE 沉浸模式** | 全屏背景三模式（单图 / 轮播 / 玻璃）+ 液态玻璃 UI + 悬浮音乐播放器（支持系统音频） |
 | **MD3 动态主题** | Material Design 3 色彩引擎，浅色 / 深色 / 跟随系统，可自定义种子色 |
 | **WebUI 远程访问** | 内置 Web 服务，把完整界面暴露给任意浏览器；默认仅本机访问，可一键开启局域网并扫码直达，桌面端与网页端数据实时同步，窄屏自动切换移动端布局 |
 | **本地优先** | 会话、记忆、技能、配置全部存在本地，零云端依赖 |
@@ -99,7 +106,7 @@ LLM 推理（thinking）
 - 流式输出，思考过程实时显示
 - 任意时刻可点 **停止** 按钮中止（含子进程跟踪与强制终止）
 - 危险命令（`rm -rf`、`format`、`Stop-Computer` 等）自动拦截并要求确认
-- 文件写入前自动创建 `.clerkbox-bak` 备份
+- **工具链加固**：`read_file` 分页与截断续读、命令超时保护（默认 120 秒）与超大输出自动转存、ripgrep 加速检索、重复调用自动拦截（doom-loop 检测）、截断响应拒绝执行工具，长会话更稳、更省
 
 ### 3. 子 Agent 编排
 
@@ -115,14 +122,23 @@ LLM 推理（thinking）
 
 ### 4. Skills 技能系统
 
-Skills 是可复用的提示词模板（`SKILL.md` + frontmatter），存放在 `.clerkbox/skills/` 目录。
+Skills 是可复用的能力包（`SKILL.md` + frontmatter），配合脚本与参考资料随安装包内置或从市场安装：
 
-- **技能市场**：数据源 [CocoLoop Hub](https://hub.cocoloop.cn)，一键安装
-- **自定义**：在 `.clerkbox/skills/<slug>/SKILL.md` 编写自己的技能
-- **自动注入**：激活后的技能会在会话开始时注入 system prompt
-- **热切换**：会话中可随时启用 / 禁用技能
+- **技能自动发现**：全部技能以目录形式注入上下文（预算内三级降级），AI 免手动激活即可发现并按需读取加载
+- **预置技能内置**：docx / pdf / pptx / xlsx / find-skills / create-skill 六个技能随安装包分发，首次启动自动播种
+- **扩展商店**：技能与 MCP 服务器双标签市场，接入 CocoLoop Hub 与 MCP Hub 中国版，一键安装、安装即落盘
+- **`/slug` 直达**：输入 `/技能名` 即刻激活技能；触发词命中时自动收到加载提醒
+- 详见 [Skills 技能系统](#skills-技能系统) 与 [MCP 服务器](#mcp-服务器)
 
-### 5. 长期记忆
+### 5. MCP 服务器生态
+
+通过 Model Context Protocol 接入外部工具服务器，工具动态注册进对话循环：
+
+- **扩展商店一键安装**：MCP 标签页浏览 MCP Hub 中国版服务器，点击安装
+- **自定义服务器**：支持 stdio / SSE 等传输方式手动添加
+- 详见 [MCP 服务器](#mcp-服务器)
+
+### 6. 长期记忆
 
 `.clerkbox/memory/` 目录下按类型组织记忆条目：
 
@@ -135,7 +151,7 @@ Skills 是可复用的提示词模板（`SKILL.md` + frontmatter），存放在 
 
 Agent 通过 `save_memory` 工具主动写入，通过 frontmatter 索引快速检索。
 
-### 6. AGENTS.md 项目指令
+### 7. AGENTS.md 项目指令
 
 ClerkBox 遵循跨工具标准，在每个会话开始时自动读取工作目录根目录的 `AGENTS.md` 并注入到系统提示词，让 AI 立即了解项目技术栈、构建命令、编码规范等。
 
@@ -143,7 +159,7 @@ ClerkBox 遵循跨工具标准，在每个会话开始时自动读取工作目�
 - **CLAUDE.md 兼容**：在 **设置 → 通用** 开启「兼容 CLAUDE.md」后，若工作目录没有 `AGENTS.md` 会回退读取 `CLAUDE.md`
 - **完全可选**：不需要时可关闭注入功能，Agent 行为不受影响
 
-### 7. VIBE 沉浸模式
+### 8. VIBE 沉浸模式
 
 一键进入专注模式，详见 [VIBE 沉浸模式](#vibe-沉浸模式) 章节。
 
@@ -153,9 +169,9 @@ ClerkBox 遵循跨工具标准，在每个会话开始时自动读取工作目�
 
 前往 [Releases](https://github.com/XMZF-vAI/clerkbox/releases) 下载最新的 `ClerkBox Setup x.x.x.exe`，双击安装即可。
 
-- 安装包大小：约 120 MB
+- 安装包大小：约 200 MB
 - 支持 Windows 10 / 11 (x64)
-- NSIS 安装器，可选安装路径、创建桌面快捷方式
+- NSIS 安装器，内置使用协议（EULA）页面，可选安装路径、创建桌面快捷方式、自带卸载器
 
 ---
 
@@ -214,7 +230,8 @@ npm run build
    - "分析这个项目的依赖结构"
    - "搜索所有 TODO 注释并列出来"
 6. **派生子 Agent**：Agent 会自动判断是否需要派生子 Agent 处理复杂子任务
-7. **进入 VIBE 模式**：点击标题栏 VIBE 按钮进入沉浸模式
+7. **设定目标自动跑**：输入 `/目标描述`（goal 模式），AI 每轮自动评估进度并自动续跑，长任务一口气完成
+8. **进入 VIBE 模式**：点击标题栏 VIBE 按钮进入沉浸模式
 
 ---
 
@@ -244,13 +261,14 @@ npm run build
 │   ├── feedback/
 │   ├── project/
 │   └── reference/
-├── skills/              # 已安装技能
+├── skills/              # 已安装技能（含首次启动播种的预置技能）
 │   └── <slug>/
 │       └── SKILL.md
 ├── agents/              # 自定义 Agent
 │   └── <name>.md
-└── *.clerkbox-bak       # 文件修改前备份
 ```
+
+> 用户主目录下还有 `~/.clerkbox/`（技能全局库、命令超长输出转存 `tmp/` 等）。
 
 ---
 
@@ -262,12 +280,12 @@ Agent 可调用以下工具完成实际任务：
 
 | 工具 | 说明 |
 | --- | --- |
-| `read_file` | 读取指定路径文件，返回带行号的完整文本 |
-| `write_file` | 写入文件（自动备份原文件到 `.clerkbox-bak`） |
-| `search_replace` | 精确字符串匹配的局部编辑（无需行号） |
+| `read_file` | 分页读取文件（`offset` / `limit`），单次最多 50KB，截断时返回续读提示 |
+| `write_file` | 写入文件（受权限引擎与审批模式约束） |
+| `search_replace` | 精确字符串匹配的局部编辑（无需行号；CRLF 归一化、过期检测、模糊匹配错误提示） |
 | `list_dir` | 列出目录内容 |
-| `search_files` | 按 glob 模式搜索文件 |
-| `search_content` | 按正则搜索文件内容 |
+| `search_files` | 按 glob 模式搜索文件（ripgrep 优先，无 ripgrep 时回退内置实现） |
+| `search_content` | 按正则搜索文件内容（ripgrep 优先） |
 
 ### 网络工具
 
@@ -276,19 +294,22 @@ Agent 可调用以下工具完成实际任务：
 | `web_search` | 联网搜索（HTML 解析 cn.bing.com，无需 API Key） |
 | `web_fetch` | 抓取网页，自动降级到隐藏 BrowserWindow 渲染 SPA |
 
-### 系统工具
+### 系统与扩展工具
 
 | 工具 | 说明 |
 | --- | --- |
-| `execute_command` | 执行 shell 命令（危险命令自动拦截） |
+| `execute_command` | 执行 shell 命令（危险命令自动拦截；默认 120 秒超时，最长 600 秒；超过 50KB 的输出自动转存为文件） |
 | `spawn_agent` | 派生子 Agent 处理子任务 |
 | `save_memory` | 写入长期记忆条目 |
+| MCP 工具 | 已连接 MCP 服务器暴露的工具动态注入，与内置工具同一循环调用 |
 
 ### 安全机制
 
+- **审批模式**：manual（逐次确认）/ auto（白名单自动放行）/ full（全部放行）三档，TRAE 风格
 - **危险命令拦截**：`DANGEROUS_PATTERNS` 黑名单覆盖 `rm -rf`、`format`、`fork bomb`、`Stop-Computer` 等
 - **写入白名单**：Plan 模式仅允许写入 `.clerkbox/plan/` 目录
-- **路径校验**：所有文件操作路径必须在当前工作目录内
+- **路径校验**：所有文件操作路径必须在当前工作目录内（跨平台路径比较规则收敛于 `path-safety.ts` 单一来源）
+- **重复调用拦截**：连续相同工具调用自动拒绝，避免 doom-loop 空转
 - **URL scheme 校验**：`openExternal` 仅允许 `http://` / `https://`
 
 ---
@@ -377,13 +398,42 @@ version: 1.0.0
 
 ### 安装技能
 
-- **从技能市场安装**：侧边栏点击 "Skills" → 浏览推荐 → 一键安装（数据源 [CocoLoop Hub](https://hub.cocoloop.cn)）
+- **预置技能**：docx / pdf / pptx / xlsx / find-skills / create-skill 六个技能随安装包内置，首次启动自动播种到 `.clerkbox/skills/`
+- **从扩展商店安装**：侧边栏点击 "Skills" → 技能标签页 → 一键安装（数据源 [CocoLoop Hub](https://hub.cocoloop.cn)）；安装即落盘本地技能库，重启不丢
 - **手动安装**：将技能目录放入 `.clerkbox/skills/<slug>/`
 - **从 URL 安装**：技能市场支持输入 GitHub raw URL 拉取远程 SKILL.md
 
+### 技能自动发现
+
+ClerkBox 对标 Claude Code / Codex 的技能机制，AI 无需手动激活即可使用技能：
+
+- **全量目录注入**：所有技能的 name / description / 路径以轻量目录注入系统上下文（预算 8000 字符，单条 250 字符，超预算自动三级降级），已激活技能带 ⚡ 标记排最前
+- **智能触发提醒**：对话内容命中技能 `trigger_keywords` 或名称时，自动附加 `<system-reminder>` 提示 AI 加载对应技能
+- **按需全文加载**：AI 通过 `read_file` 读取 `SKILL.md` 全文，消息气泡上显示已加载技能芯片
+- **`/slug` 直达**：输入框输入 `/技能名` 即刻激活并附着发送内容；纯 `/slug` 仅激活
+- **任务演变感知**：任务焦点变化时（如从写代码转向做 PPT），Skill Router 规约引导 AI 主动检查更匹配的技能
+
 ### 启用 / 禁用
 
-每个会话开始时可选择性启用技能，激活的技能会自动注入 system prompt。
+每个会话可选择性启用技能，激活的技能在目录中置顶并保证全文可用；会话中可随时切换。
+
+---
+
+## MCP 服务器
+
+ClerkBox 通过 [Model Context Protocol](https://modelcontextprotocol.io) 接入外部工具服务器，让对话可以直接调用第三方工具生态。
+
+### 安装与管理
+
+- **扩展商店一键安装**：Skills 面板切换到 MCP 标签页，浏览并安装 [MCP Hub 中国版](https://mcp.cocoloop.cn) 的服务器
+- **自定义服务器**：在 MCP 管理界面手动添加，支持 stdio 本地命令与远程端点
+- **启停控制**：每个服务器可独立启用 / 禁用，连接状态实时可见
+
+### 工作方式
+
+- 已启用服务器的工具在会话开始时动态注册，与内置工具（`read_file` / `execute_command`...）同一 ReAct 循环调用
+- 工具结果以统一格式回流对话，支持流式与中断
+- MCP 连接由主进程托管，渲染进程通过 IPC 访问
 
 ---
 
@@ -418,6 +468,36 @@ mtime: 2026-07-20
 ```
 
 Agent 通过 `save_memory` 工具自动写入，会话开始时扫描 frontmatter 索引快速加载相关条目。
+
+---
+
+## 工作台面板
+
+Trae 风格的右侧工作台，把 Agent 的工作现场集中在一处（WorkbenchPanel）：
+
+- **文件**：工作目录文件树，点击预览
+- **终端**：内置 PTY 终端（node-pty），可直接观察 Agent 命令的执行现场，也可手动介入
+- **浏览器**：内嵌网页视图
+- **子 Agent**：子 Agent 运行状态与产出查看
+
+面板与对话共享同一工作目录，可折叠收纳。
+
+---
+
+## /goal 目标模式
+
+对标 Claude Code 的 goal 机制，让长任务自动推进：
+
+- **设定目标**：输入框输入 `/` 开头的 goal 命令或通过命令菜单设定会话目标，输入栏上方出现常驻 Goal 状态条
+- **自动评估**：每轮工具循环收尾时由独立评估器判定三态——**进行中 / 已达成 / 无法完成**，并展示评估理由
+- **自动续跑**：判定「进行中」时自动开始下一轮，直到达成或确认无法完成；随时可点停止
+- **跨重启恢复**：目标状态本地持久化，应用重启后仍在
+
+配套的交互卡片让 AI 主动沟通：
+
+- **TodoListCard**：AI 主动给出任务计划清单，随执行推进勾选
+- **QuestionCard**：AI 就关键决策向用户提问，点击选项即回答
+- **技能芯片**：AI 加载技能时在消息气泡上显示已加载技能
 
 ---
 
@@ -514,10 +594,14 @@ ClerkBox/
 │   │   ├── agent-registry.ts    # Agent 注册表
 │   │   ├── api-adapters.ts      # 多协议适配器
 │   │   ├── api-transport.ts     # 流式传输层
-│   │   ├── tool-registry.ts     # 工具定义
+│   │   ├── tool-registry.ts     # 工具定义（含 MCP 动态工具）
 │   │   ├── permission-engine.ts # 权限引擎（危险命令检测）
 │   │   ├── provider-catalog.ts  # 供应商预设目录
 │   │   ├── theme-engine.ts      # MD3 主题引擎
+│   │   ├── prompts.ts           # 系统提示词构建（静/动态分段，前缀缓存）
+│   │   ├── skill-catalog.ts     # 技能目录渲染（预算内三级降级）
+│   │   ├── skill-matcher.ts     # 技能触发匹配（trigger_keywords / 名称）
+│   │   ├── path-safety.ts       # 跨平台路径比较与安全判断
 │   │   ├── compact.ts           # 长上下文压缩
 │   │   ├── token-estimate.ts    # Token 估算
 │   │   ├── token-tracker.ts     # Token 用量追踪
@@ -529,7 +613,8 @@ ClerkBox/
 │   ├── App.tsx                  # 应用根组件
 │   ├── main.tsx                 # 渲染进程入口
 │   └── index.css                # 全局样式（Tailwind）
-├── build/                       # 构建资源（图标）
+├── build/                       # 构建资源（图标、安装器使用协议 license.txt）
+├── resources/preset-skills/     # 随安装包分发的预置技能
 ├── public/                      # 静态资源
 ├── package.json
 ├── vite.config.ts
@@ -557,6 +642,7 @@ electron-builder 配置见 [package.json](package.json) 的 `build` 字段。
 | [Vercel AI SDK](https://sdk.vercel.ai/) | 6 | 流式 LLM 调用 |
 | [@material/material-color-utilities](https://github.com/material-foundation/material-color-utilities) | 0.4 | MD3 色彩引擎 |
 | [cheerio](https://cheerio.js.org/) | 1.2 | HTML 解析（web_search） |
+| [@modelcontextprotocol/sdk](https://github.com/modelcontextprotocol/typescript-sdk) | 1.30 | MCP 服务器接入 |
 
 ### 桌面端
 
@@ -564,6 +650,7 @@ electron-builder 配置见 [package.json](package.json) 的 `build` 字段。
 | --- | --- | --- |
 | [Electron](https://www.electronjs.org/) | 42 | 跨平台桌面框架 |
 | [electron-builder](https://www.electronjs.org/) | 26 | 打包工具 |
+| [node-pty](https://github.com/microsoft/node-pty) | 1.1 | 工作台内置终端 |
 
 ### 数据存储
 
@@ -598,6 +685,18 @@ electron-builder 配置见 [package.json](package.json) 的 `build` 字段。
 - 思考控制（开关 / 档位双模式 + 模型选择器按思考能力分组）
 - 模型级高级设置（每模型独立温度 / 思考档位 / token 上限）
 - WebUI 远程访问（浏览器操控 + 双模式数据同步 + 服务器部署自动启动）
+- MCP 服务器接入（对话直连外部工具生态 + MCP Hub 中国版市场）
+- 扩展商店（技能 + MCP 双标签市场）
+- Trae 式工作台面板（文件 / 终端 / 浏览器 / 子 Agent）
+- TRAE 风格审批模式（manual / auto / full）与 `/` 命令菜单（Spec / Plan / Goal 工作流）
+- /goal 目标模式（收尾评估器三态判定 + 自动续跑 + 跨重启恢复）
+- TodoList / Question 交互卡片与已加载技能芯片
+- 技能自动发现（全量目录注入 + 触发提醒 + /slug 直达 + 6 个预置技能内置）
+- 工具链加固（read_file 分页、命令超时与大输出转存、ripgrep 优先、doom-loop 拦截、截断响应拒执行、search_replace 加固）
+- 系统提示词静/动态分段（前缀缓存命中率提升）
+- 上下文用量指示器与手动压缩
+- 氛围模式升级（背景单图 / 轮播 / 玻璃三模式 + 系统音频）
+- 技能市场搜索覆盖率改进
 
 ---
 

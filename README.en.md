@@ -4,7 +4,7 @@
 
 # ClerkBox
 
-**A local-first AI desktop workbench: multi-provider chat, tool calling, sub-agents, skills, and VIBE immersive mode.**
+**A local-first AI desktop workbench: multi-provider chat, MCP tool ecosystem, sub-agents, skills, workbench, and VIBE immersive mode.**
 
 [![Version](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.github.com%2Frepos%2FXMZF-vAI%2Fclerkbox%2Freleases%2Flatest&query=%24.tag_name&label=version&style=flat-square&color=7C5CFC)](https://github.com/XMZF-vAI/clerkbox/releases)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-26A2C3?style=flat-square)](LICENSE)
@@ -36,7 +36,10 @@
 - [Tool System](#tool-system)
 - [Sub-Agents](#sub-agents)
 - [Skills System](#skills-system)
+- [MCP Servers](#mcp-servers)
 - [Long-Term Memory](#long-term-memory)
+- [Workbench Panel](#workbench-panel)
+- [/goal Mode](#goal-mode)
 - [WebUI Remote Access](#webui-remote-access)
 - [AGENTS.md Project Instructions](#agentsmd-project-instructions)
 - [VIBE Immersive Mode](#vibe-immersive-mode)
@@ -55,13 +58,17 @@
 | Capability | Description |
 | --- | --- |
 | **Multi-provider presets** | 22 built-in providers (Lunora / OpenAI / Anthropic / Gemini / DeepSeek / Qwen / Zhipu GLM / Ollama, etc.). Each provider pulls its model list from `/models` automatically. Custom endpoints with OpenAI or Anthropic protocol supported. |
-| **ReAct tool loop** | Reason → call tools → observe → reason again, up to 999 iterations, abortable at any time. |
+| **ReAct tool loop** | Reason → call tools → observe → reason again, up to 100 iterations with an automatic wrap-up summary, abortable at any time. |
+| **MCP tool ecosystem** | Connect Model Context Protocol servers and inject external tools into the conversation; one-click install from the MCP Hub China marketplace in the extension store. |
+| **Approval modes** | TRAE-style manual / auto / full approval tiers, plus a `/` command menu for the Spec / Plan / Goal workflows. |
 | **Sub-agent orchestration** | Built-in read-only Scout and full-tool General assistant, plus custom sub-agents via frontmatter with isolated contexts. |
-| **Skills marketplace** | One-click install of prompt templates from the CocoLoop community, auto-injected into the system prompt. |
+| **Skills auto-discovery** | Full skill catalog injected into context — the AI discovers and loads skills on demand without manual activation; extension store / MCP Hub / 6 bundled preset skills out of the box. |
+| **/goal mode** | Session goals are evaluated every round (in-progress / achieved / impossible) and the agent auto-continues; the AI can proactively produce TodoList plan cards and ask questions on key decisions. |
+| **Workbench panel** | Trae-style right-side workbench: file tree / terminal / browser / sub-agents in one place. |
 | **Long-term memory** | `user` / `feedback` / `project` / `reference` memory entries persist across sessions. |
 | **Thinking & per-model tuning** | Per-model thinking toggle / tiers (low / medium / high), temperature and token limits; model picker groups models by thinking capability. |
 | **AGENTS.md project instructions** | Auto-reads `AGENTS.md` from the working directory and injects it into the system prompt; falls back to `CLAUDE.md`. |
-| **VIBE immersive mode** | Fullscreen background, liquid-glass UI, and a floating music player. |
+| **VIBE immersive mode** | Fullscreen background in three modes (single / slideshow / glass), liquid-glass UI, and a floating music player (system audio supported). |
 | **MD3 dynamic theming** | Material Design 3 color engine with light / dark / system modes and custom seed color. |
 | **WebUI remote access** | Built-in web server exposes the full UI to any browser; binds to localhost by default, with a one-click LAN toggle and scan-to-connect QR code, real-time data sync between desktop and web, and an auto-switching mobile layout on narrow screens. |
 | **Local-first** | All sessions, memory, skills, and config live on disk — no cloud dependency. |
@@ -99,7 +106,7 @@ Keep reasoning or return the final answer
 - Streaming output with real-time thinking display
 - Hit **Stop** at any time to abort, including force-kill of child processes
 - Dangerous commands (`rm -rf`, `format`, `Stop-Computer`, etc.) are auto-blocked and require confirmation
-- A `.clerkbox-bak` backup is created before any file write
+- **Hardened toolchain**: `read_file` pagination with truncation-resume, command timeouts (120s default) with oversized-output spill, ripgrep-accelerated search, doom-loop detection, truncated-response refusal — long sessions stay stable and cheap
 
 ### 3. Sub-Agent Orchestration
 
@@ -115,14 +122,23 @@ Sub-agents only return a **final summary** to the parent agent, so the main cont
 
 ### 4. Skills System
 
-Skills are reusable prompt templates (`SKILL.md` + frontmatter) stored in `.clerkbox/skills/`.
+Skills are reusable capability packs (`SKILL.md` + frontmatter) bundled with the installer or installed from the marketplace, complete with scripts and reference material:
 
-- **Marketplace**: one-click install from the [CocoLoop Hub](https://hub.cocoloop.cn)
-- **Custom**: write your own skills in `.clerkbox/skills/<slug>/SKILL.md`
-- **Auto-injection**: active skills are injected into the system prompt at session start
-- **Hot toggle**: enable / disable skills anytime during a session
+- **Auto-discovery**: the full skill catalog is injected into context (with in-budget three-level degradation) — the AI discovers and loads skills on demand, no manual activation needed
+- **Bundled preset skills**: six skills (docx / pdf / pptx / xlsx / find-skills / create-skill) ship with the installer and are seeded on first launch
+- **Extension store**: a dual-tab marketplace for skills and MCP servers, backed by CocoLoop Hub and MCP Hub China — one-click install, persisted to disk
+- **`/slug` direct activation**: type `/skill-name` to activate instantly; trigger-word hits bring a loading reminder
+- See [Skills System](#skills-system) and [MCP Servers](#mcp-servers) for details
 
-### 5. Long-Term Memory
+### 5. MCP Server Ecosystem
+
+Connect external tool servers via the Model Context Protocol; their tools register dynamically into the conversation loop:
+
+- **One-click install**: browse MCP Hub China servers from the MCP tab of the extension store
+- **Custom servers**: add manually via stdio / SSE transports
+- See [MCP Servers](#mcp-servers) for details
+
+### 6. Long-Term Memory
 
 Memory entries are organized by type under `.clerkbox/memory/`:
 
@@ -135,7 +151,7 @@ Memory entries are organized by type under `.clerkbox/memory/`:
 
 The agent writes entries via the `save_memory` tool and retrieves them through a frontmatter index.
 
-### 6. AGENTS.md Project Instructions
+### 7. AGENTS.md Project Instructions
 
 ClerkBox follows the cross-tool standard: at the start of every session, it auto-reads `AGENTS.md` from the working-directory root and injects it into the system prompt, so the AI immediately knows the project's stack, build commands, and coding conventions.
 
@@ -143,7 +159,7 @@ ClerkBox follows the cross-tool standard: at the start of every session, it auto
 - **CLAUDE.md fallback**: under **Settings → General**, enable "CLAUDE.md compatibility" to fall back to `CLAUDE.md` when `AGENTS.md` is absent
 - **Fully optional**: turn injection off if you don't need it
 
-### 7. VIBE Immersive Mode
+### 8. VIBE Immersive Mode
 
 One click to enter a focused conversation environment. See [VIBE Immersive Mode](#vibe-immersive-mode) for details.
 
@@ -153,9 +169,9 @@ One click to enter a focused conversation environment. See [VIBE Immersive Mode]
 
 Download the latest `ClerkBox Setup x.x.x.exe` from [Releases](https://github.com/XMZF-vAI/clerkbox/releases) and double-click to install.
 
-- Installer size: ~120 MB
+- Installer size: ~200 MB
 - Supports Windows 10 / 11 (x64)
-- NSIS installer with optional install path and desktop shortcut
+- NSIS installer with a built-in EULA page, optional install path, desktop shortcut, and uninstaller
 
 ---
 
@@ -214,7 +230,8 @@ Build artifacts land in `release-out/`:
    - "Analyze this project's dependency structure"
    - "Search for all TODO comments and list them"
 6. **Spawn sub-agents**: the agent decides automatically whether a sub-agent is needed for complex subtasks
-7. **Enter VIBE mode**: click the VIBE button in the title bar
+7. **Set a goal and let it run**: type a goal command to enter goal mode — the AI evaluates progress each round and auto-continues until done
+8. **Enter VIBE mode**: click the VIBE button in the title bar
 
 ---
 
@@ -244,13 +261,14 @@ All configuration is managed through the **Settings panel** and persisted locall
 │   ├── feedback/
 │   ├── project/
 │   └── reference/
-├── skills/              # installed skills
+├── skills/              # installed skills (incl. seeded preset skills)
 │   └── <slug>/
 │       └── SKILL.md
 ├── agents/              # custom agents
 │   └── <name>.md
-└── *.clerkbox-bak       # backups before file modification
 ```
+
+> The user home directory also hosts `~/.clerkbox/` (global skill library, oversized command-output spill under `tmp/`, etc.).
 
 ---
 
@@ -262,12 +280,12 @@ The agent can call the following tools to get work done:
 
 | Tool | Description |
 | --- | --- |
-| `read_file` | Read a file at the given path, returning full text with line numbers |
-| `write_file` | Write a file (auto-backs up the original to `.clerkbox-bak`) |
-| `search_replace` | Precise string-match local edit (no line numbers needed) |
+| `read_file` | Paginated file reading (`offset` / `limit`), 50KB max per call, with a resume hint when truncated |
+| `write_file` | Write a file (subject to the permission engine and approval mode) |
+| `search_replace` | Precise string-match local edit (no line numbers; CRLF normalization, staleness detection, fuzzy-miss suggestions) |
 | `list_dir` | List directory contents |
-| `search_files` | Search files by glob pattern |
-| `search_content` | Search file contents by regex |
+| `search_files` | Search files by glob pattern (ripgrep first, built-in fallback) |
+| `search_content` | Search file contents by regex (ripgrep first) |
 
 ### Web Tools
 
@@ -276,19 +294,22 @@ The agent can call the following tools to get work done:
 | `web_search` | Web search (parses cn.bing.com HTML, no API key needed) |
 | `web_fetch` | Fetch a webpage, auto-falling back to a hidden BrowserWindow to render SPAs |
 
-### System Tools
+### System & Extension Tools
 
 | Tool | Description |
 | --- | --- |
-| `execute_command` | Execute shell commands (dangerous commands auto-blocked) |
+| `execute_command` | Execute shell commands (dangerous commands auto-blocked; 120s default timeout, 600s max; output over 50KB spills to a file) |
 | `spawn_agent` | Spawn a sub-agent for a subtask |
 | `save_memory` | Write a long-term memory entry |
+| MCP tools | Tools exposed by connected MCP servers register dynamically and run in the same loop as built-ins |
 
 ### Security Mechanisms
 
+- **Approval modes**: manual (confirm each time) / auto (whitelist pass-through) / full (allow all), TRAE-style
 - **Dangerous command blocking**: `DANGEROUS_PATTERNS` blacklist covers `rm -rf`, `format`, fork bombs, `Stop-Computer`, etc.
 - **Write whitelist**: Plan mode only allows writes under `.clerkbox/plan/`
-- **Path validation**: all file operations must stay within the current working directory
+- **Path validation**: all file operations must stay within the current working directory (cross-platform path comparison unified in `path-safety.ts`)
+- **Doom-loop guard**: repeated identical tool calls are refused automatically
 - **URL scheme validation**: `openExternal` only allows `http://` / `https://`
 
 ---
@@ -377,13 +398,42 @@ Output format:
 
 ### Installing Skills
 
-- **From the marketplace**: click "Skills" in the sidebar → browse recommendations → one-click install (data source: [CocoLoop Hub](https://hub.cocoloop.cn))
+- **Preset skills**: six skills (docx / pdf / pptx / xlsx / find-skills / create-skill) ship with the installer and are seeded into `.clerkbox/skills/` on first launch
+- **From the extension store**: click "Skills" in the sidebar → skills tab → one-click install (data source: [CocoLoop Hub](https://hub.cocoloop.cn)); installs persist to the local skill library and survive restarts
 - **Manually**: put the skill directory into `.clerkbox/skills/<slug>/`
 - **From a URL**: the marketplace accepts a GitHub raw URL to pull a remote SKILL.md
 
+### Skill Auto-Discovery
+
+Modeled after Claude Code / Codex, ClerkBox lets the AI use skills without manual activation:
+
+- **Full catalog injection**: every skill's name / description / path is injected as a lightweight catalog (8000-char budget, 250 chars per entry, automatic three-level degradation when over budget); active skills are pinned to the top with a ⚡ marker
+- **Smart trigger reminders**: when the conversation hits a skill's `trigger_keywords` or name, a `<system-reminder>` nudges the AI to load it
+- **On-demand full load**: the AI reads the full `SKILL.md` via `read_file`; loaded skills show as chips on the message bubble
+- **`/slug` direct activation**: type `/skill-name` in the input to activate instantly, with optional trailing prompt; a bare `/slug` only activates
+- **Task-shift awareness**: Skill Router guidance tells the AI to re-check for better-matching skills when the task focus changes
+
 ### Enable / Disable
 
-Skills can be selectively enabled at the start of each session; active skills are auto-injected into the system prompt.
+Skills can be selectively enabled per session; active skills are pinned in the catalog with guaranteed full-text availability, and can be toggled anytime.
+
+---
+
+## MCP Servers
+
+ClerkBox connects to external tool servers via the [Model Context Protocol](https://modelcontextprotocol.io), so conversations can call the third-party tool ecosystem directly.
+
+### Install & Manage
+
+- **One-click install**: switch to the MCP tab in the Skills panel and browse servers from [MCP Hub China](https://mcp.cocoloop.cn)
+- **Custom servers**: add manually via stdio local commands or remote endpoints
+- **Toggle per server**: enable / disable each server independently, with live connection status
+
+### How It Works
+
+- Tools from enabled servers register dynamically at session start and run in the same ReAct loop as built-ins (`read_file` / `execute_command`...)
+- Tool results flow back in a unified format, with streaming and abort support
+- MCP connections are owned by the main process; the renderer accesses them over IPC
 
 ---
 
@@ -418,6 +468,36 @@ User preferences:
 ```
 
 The agent writes entries via the `save_memory` tool, and scans the frontmatter index at session start to quickly load relevant entries.
+
+---
+
+## Workbench Panel
+
+A Trae-style right-side workbench that keeps the agent's working context in one place (WorkbenchPanel):
+
+- **Files**: working-directory file tree with click-to-preview
+- **Terminal**: built-in PTY terminal (node-pty) — watch the agent's commands live or step in manually
+- **Browser**: embedded web view
+- **Sub-agents**: sub-agent run status and output
+
+The panel shares the same working directory as the conversation and can be collapsed.
+
+---
+
+## /goal Mode
+
+Modeled after Claude Code's goal mechanism, long tasks keep moving on their own:
+
+- **Set a goal**: enter a goal via the `/` command menu; a persistent goal banner appears above the input
+- **Auto evaluation**: an independent evaluator at the end of each tool loop judges **in-progress / achieved / impossible** and shows its reasoning
+- **Auto-continue**: "in-progress" automatically starts the next round until the goal is achieved or confirmed impossible; stop any time
+- **Restart-safe**: goal state persists locally and survives app restarts
+
+Companion interactive cards keep the AI communicating proactively:
+
+- **TodoListCard**: the AI proposes a task plan checklist and checks items off as it progresses
+- **QuestionCard**: the AI asks the user about key decisions — click an option to answer
+- **Skill chips**: loaded skills show as chips on the message bubble
 
 ---
 
@@ -514,10 +594,14 @@ ClerkBox/
 │   │   ├── agent-registry.ts    # agent registry
 │   │   ├── api-adapters.ts      # multi-protocol adapters
 │   │   ├── api-transport.ts     # streaming transport layer
-│   │   ├── tool-registry.ts     # tool definitions
+│   │   ├── tool-registry.ts     # tool definitions (incl. dynamic MCP tools)
 │   │   ├── permission-engine.ts # permission engine (dangerous command detection)
 │   │   ├── provider-catalog.ts  # provider preset catalog
 │   │   ├── theme-engine.ts      # MD3 theme engine
+│   │   ├── prompts.ts           # system prompt construction (static/dynamic split for prefix caching)
+│   │   ├── skill-catalog.ts     # skill catalog rendering (in-budget three-level degradation)
+│   │   ├── skill-matcher.ts     # skill trigger matching (trigger_keywords / names)
+│   │   ├── path-safety.ts       # cross-platform path comparison & safety
 │   │   ├── compact.ts           # long-context compaction
 │   │   ├── token-estimate.ts    # token estimation
 │   │   ├── token-tracker.ts     # token usage tracking
@@ -529,7 +613,8 @@ ClerkBox/
 │   ├── App.tsx                  # app root component
 │   ├── main.tsx                 # renderer entry
 │   └── index.css                # global styles (Tailwind)
-├── build/                       # build assets (icons)
+├── build/                       # build assets (icons, installer EULA license.txt)
+├── resources/preset-skills/     # preset skills bundled with the installer
 ├── public/                      # static assets
 ├── package.json
 ├── vite.config.ts
@@ -557,6 +642,7 @@ electron-builder configuration lives in the `build` field of [package.json](pack
 | [Vercel AI SDK](https://sdk.vercel.ai/) | 6 | Streaming LLM calls |
 | [@material/material-color-utilities](https://github.com/material-foundation/material-color-utilities) | 0.4 | MD3 color engine |
 | [cheerio](https://cheerio.js.org/) | 1.2 | HTML parsing (web_search) |
+| [@modelcontextprotocol/sdk](https://github.com/modelcontextprotocol/typescript-sdk) | 1.30 | MCP server integration |
 
 ### Desktop
 
@@ -564,6 +650,7 @@ electron-builder configuration lives in the `build` field of [package.json](pack
 | --- | --- | --- |
 | [Electron](https://www.electronjs.org/) | 42 | Cross-platform desktop framework |
 | [electron-builder](https://www.electronjs.org/) | 26 | Packaging tool |
+| [node-pty](https://github.com/microsoft/node-pty) | 1.1 | Workbench built-in terminal |
 
 ### Data Storage
 
@@ -598,6 +685,18 @@ electron-builder configuration lives in the `build` field of [package.json](pack
 - Thinking control (toggle / tier modes + model picker grouped by thinking capability)
 - Per-model advanced settings (independent temperature / thinking tiers / token limits per model)
 - WebUI remote access (browser control + dual-mode data sync + server auto-start)
+- MCP server integration (external tool ecosystem + MCP Hub China marketplace)
+- Extension store (dual-tab marketplace for skills + MCP)
+- Trae-style workbench panel (files / terminal / browser / sub-agents)
+- TRAE-style approval modes (manual / auto / full) + `/` command menu (Spec / Plan / Goal workflows)
+- /goal mode (end-of-round evaluator + auto-continue + restart-safe)
+- TodoList / Question interactive cards and loaded-skill chips
+- Skill auto-discovery (full catalog injection + trigger reminders + `/slug` + 6 bundled preset skills)
+- Hardened toolchain (read_file pagination, command timeout & output spill, ripgrep-first search, doom-loop guard, truncated-response refusal, search_replace hardening)
+- Static/dynamic system-prompt split (better prefix-cache hit rate)
+- Context usage indicator with manual compaction
+- VIBE upgrade (background single / slideshow / glass modes + system audio)
+- Skill marketplace search coverage improvements
 
 ---
 
