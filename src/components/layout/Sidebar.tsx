@@ -62,6 +62,8 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
   // ── 任务列表分组：每个 workingDir 一组；null/空 workingDir 归到「默认」组 ──
   // 每组独立折叠状态：Set 里存的是"已折叠"的分组 key，不在 Set 内 = 展开（默认）
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
+  // 手机端布局开关：账户入口据此禁用（Hook 必须在组件顶层调用，不能放进事件回调）
+  const isMobile = useIsMobile()
 
   // ── WebUI 控制 ──
   const [webuiStarting, setWebuiStarting] = useState(false)
@@ -188,7 +190,7 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
   // 账户入口点击：打开设置页并定位到"账户"标签（一次性 transient 标记）
   const handleOpenAccountSettings = () => {
     // 手机端禁用账户相关操作：登录/同步走云端 OAuth + 本地覆盖流程，统一交给桌面
-    if (useIsMobile()) {
+    if (isMobile) {
       alert(t('sidebar.account.mobileOnlyAlert'))
       return
     }
