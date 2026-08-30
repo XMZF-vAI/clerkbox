@@ -29,7 +29,7 @@ import type { AccountSyncKind, McpMarketConnection, McpServerConfig, SystemMedia
 const SKILL_REQUEST_TIMEOUT_MS = 15_000
 const MAX_SKILL_FILE_BYTES = 512 * 1024
 const MAX_SKILL_TREE_BYTES = 5 * 1024 * 1024
-const MAX_SKILL_FILES = 50
+const MAX_SKILL_FILES = 128
 const MAX_SKILL_DIRECTORY_BYTES = 2 * 1024 * 1024
 const MAX_SKILL_ARCHIVE_BYTES = 20 * 1024 * 1024
 const MAX_SKILL_SCAN_ENTRIES = 1_000
@@ -1229,6 +1229,17 @@ function registerIpcHandlers() {
     set.delete(child)
     if (set.size === 0) sessionChildProcesses.delete(sessionId)
   }
+  /** 超时/中断时杀掉整个进程树。Windows 下 cmd/powershell 的直接子进程不会随 shell 一起死，
+   *  必须 taskkill /T 递归击杀，否则挂起的长任务会继续占用资源。 */
+  const killProcessTree = (child: import('child_process').ChildProcess) => {
+    if (process.platform === 'win32' && child.pid) {
+      try {
+        spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true })
+        return
+      } catch { /* fallback below */ }
+    }
+    try { child.kill('SIGKILL') } catch { /* already dead */ }
+  }
   ipcMain.handle(
     'cancelSessionCommands',
     async (_event, sessionId: string) => {
@@ -1250,13 +1261,14 @@ function registerIpcHandlers() {
   )
   ipcMain.handle(
     'executeCommand',
-    async (_event, command: string, cwd?: string, sessionId?: string) => {
+    async (_event, command: string, cwd?: string, sessionId?: string, timeoutMs?: number) => {
       const blockReason = checkDangerousCommand(command)
       if (blockReason) {
         return { stdout: '', stderr: `命令被主进程拒绝：${blockReason}`, exitCode: -1 }
       }
       const MAX_BUFFER = 10 * 1024 * 1024
-      const TIMEOUT_MS = 60000
+      // 可调超时：默认 120s，钳制到 1s ~ 600s（防误传导致永久挂起或秒杀正常命令）
+      const TIMEOUT_MS = Math.min(Math.max(Number(timeoutMs) || 120_000, 1_000), 600_000)
       // Windows 默认 cmd.exe，强制 UTF-8 代码页
       const isWin = process.platform === 'win32'
       const shellCmd = isWin ? `chcp 65001 >nul 2>&1 && ${command}` : command
@@ -1274,38 +1286,14 @@ function registerIpcHandlers() {
         let stdoutLen = 0
         let stderrLen = 0
         let killed = false
+        let timedOut = false
         let settled = false
-        const timer = setTimeout(() => {
-          killed = true
-          child.kill()
-        }, TIMEOUT_MS)
-        child.stdout.on('data', (chunk: Buffer) => {
-          stdoutLen += chunk.length
-          if (stdoutLen > MAX_BUFFER) {
-            if (!killed) { killed = true; child.kill() }
-            return
-          }
-          stdoutChunks.push(chunk)
-        })
-        child.stderr.on('data', (chunk: Buffer) => {
-          stderrLen += chunk.length
-          if (stderrLen > MAX_BUFFER) {
-            if (!killed) { killed = true; child.kill() }
-            return
-          }
-          stderrChunks.push(chunk)
-        })
-        child.on('error', (err) => {
+        let forceTimer: NodeJS.Timeout | undefined
+        const finish = (code: number | null | undefined) => {
           if (settled) return
           settled = true
           clearTimeout(timer)
-          unregisterChild(sessionId, child)
-          resolve({ stdout: '', stderr: String(err), exitCode: 1, encodingFallback: false })
-        })
-        child.on('close', (code) => {
-          if (settled) return
-          settled = true
-          clearTimeout(timer)
+          if (forceTimer) clearTimeout(forceTimer)
           unregisterChild(sessionId, child)
           const out = decodeOutput(Buffer.concat(stdoutChunks))
           const err = decodeOutput(Buffer.concat(stderrChunks))
@@ -1314,7 +1302,41 @@ function registerIpcHandlers() {
             stderr: err.text,
             exitCode: killed ? -1 : (code ?? 0),
             encodingFallback: out.fallbackUsed || err.fallbackUsed,
+            ...(timedOut ? { timedOut: true } : {}),
           })
+        }
+        const timer = setTimeout(() => {
+          killed = true
+          timedOut = true
+          killProcessTree(child)
+          // 安全网：进程树击杀后 3s 仍未退出则直接结算，避免渲染端永久等待
+          forceTimer = setTimeout(() => finish(null), 3_000)
+        }, TIMEOUT_MS)
+        child.stdout.on('data', (chunk: Buffer) => {
+          stdoutLen += chunk.length
+          if (stdoutLen > MAX_BUFFER) {
+            if (!killed) { killed = true; killProcessTree(child) }
+            return
+          }
+          stdoutChunks.push(chunk)
+        })
+        child.stderr.on('data', (chunk: Buffer) => {
+          stderrLen += chunk.length
+          if (stderrLen > MAX_BUFFER) {
+            if (!killed) { killed = true; killProcessTree(child) }
+            return
+          }
+          stderrChunks.push(chunk)
+        })
+        child.on('error', (err) => {
+          if (settled) return
+          clearTimeout(timer)
+          settled = true
+          unregisterChild(sessionId, child)
+          resolve({ stdout: '', stderr: String(err), exitCode: 1, encodingFallback: false })
+        })
+        child.on('close', (code) => {
+          finish(code)
         })
       })
     }
@@ -1322,7 +1344,7 @@ function registerIpcHandlers() {
 
   ipcMain.handle(
     'executeCommandWithShell',
-    async (_event, command: string, cwd: string | undefined, shellType: string, sessionId?: string) => {
+    async (_event, command: string, cwd: string | undefined, shellType: string, sessionId?: string, timeoutMs?: number) => {
       const blockReason = checkDangerousCommand(command)
       if (blockReason) {
         return { stdout: '', stderr: `命令被主进程拒绝：${blockReason}`, exitCode: -1 }
@@ -1337,7 +1359,8 @@ function registerIpcHandlers() {
         ? `& { [Console]::OutputEncoding=[Text.Encoding]::UTF8; chcp 65001 > $null; ${command} }`
         : `chcp 65001 >nul 2>&1 && ${command}`
       const MAX_BUFFER = 10 * 1024 * 1024
-      const TIMEOUT_MS = 60000
+      // 可调超时：默认 120s，钳制到 1s ~ 600s（防误传导致永久挂起或秒杀正常命令）
+      const TIMEOUT_MS = Math.min(Math.max(Number(timeoutMs) || 120_000, 1_000), 600_000)
       return new Promise((resolve) => {
         const child = spawn(shellPath, isPS ? ['-NoProfile', '-Command', shellCmd] : ['/c', shellCmd], {
           cwd,
@@ -1350,38 +1373,14 @@ function registerIpcHandlers() {
         let stdoutLen = 0
         let stderrLen = 0
         let killed = false
+        let timedOut = false
         let settled = false
-        const timer = setTimeout(() => {
-          killed = true
-          child.kill()
-        }, TIMEOUT_MS)
-        child.stdout.on('data', (chunk: Buffer) => {
-          stdoutLen += chunk.length
-          if (stdoutLen > MAX_BUFFER) {
-            if (!killed) { killed = true; child.kill() }
-            return
-          }
-          stdoutChunks.push(chunk)
-        })
-        child.stderr.on('data', (chunk: Buffer) => {
-          stderrLen += chunk.length
-          if (stderrLen > MAX_BUFFER) {
-            if (!killed) { killed = true; child.kill() }
-            return
-          }
-          stderrChunks.push(chunk)
-        })
-        child.on('error', (err) => {
+        let forceTimer: NodeJS.Timeout | undefined
+        const finish = (code: number | null | undefined) => {
           if (settled) return
           settled = true
           clearTimeout(timer)
-          unregisterChild(sessionId, child)
-          resolve({ stdout: '', stderr: String(err), exitCode: 1, encodingFallback: false })
-        })
-        child.on('close', (code) => {
-          if (settled) return
-          settled = true
-          clearTimeout(timer)
+          if (forceTimer) clearTimeout(forceTimer)
           unregisterChild(sessionId, child)
           const out = decodeOutput(Buffer.concat(stdoutChunks))
           const err = decodeOutput(Buffer.concat(stderrChunks))
@@ -1390,7 +1389,41 @@ function registerIpcHandlers() {
             stderr: err.text,
             exitCode: killed ? -1 : (code ?? 0),
             encodingFallback: out.fallbackUsed || err.fallbackUsed,
+            ...(timedOut ? { timedOut: true } : {}),
           })
+        }
+        const timer = setTimeout(() => {
+          killed = true
+          timedOut = true
+          killProcessTree(child)
+          // 安全网：进程树击杀后 3s 仍未退出则直接结算，避免渲染端永久等待
+          forceTimer = setTimeout(() => finish(null), 3_000)
+        }, TIMEOUT_MS)
+        child.stdout.on('data', (chunk: Buffer) => {
+          stdoutLen += chunk.length
+          if (stdoutLen > MAX_BUFFER) {
+            if (!killed) { killed = true; killProcessTree(child) }
+            return
+          }
+          stdoutChunks.push(chunk)
+        })
+        child.stderr.on('data', (chunk: Buffer) => {
+          stderrLen += chunk.length
+          if (stderrLen > MAX_BUFFER) {
+            if (!killed) { killed = true; killProcessTree(child) }
+            return
+          }
+          stderrChunks.push(chunk)
+        })
+        child.on('error', (err) => {
+          if (settled) return
+          clearTimeout(timer)
+          settled = true
+          unregisterChild(sessionId, child)
+          resolve({ stdout: '', stderr: String(err), exitCode: 1, encodingFallback: false })
+        })
+        child.on('close', (code) => {
+          finish(code)
         })
       })
     }
@@ -2985,6 +3018,90 @@ function scanSkillDirs(workingDir: string): Array<{
   return result
 }
 
+// ── 预装技能播种（Preset Skills Seeding）──
+
+/** 递归复制目录。来源路径可能在 asar 包内（打包后的 resources/preset-skills），
+ *  Electron 对 fs 做了 asar 补丁，逐文件 readdir/stat/copyFile 均可正常读取。 */
+function copyDirPresets(src: string, dst: string): void {
+  fs.mkdirSync(dst, { recursive: true })
+  for (const ent of fs.readdirSync(src, { withFileTypes: true })) {
+    const s = path.join(src, ent.name)
+    const d = path.join(dst, ent.name)
+    if (ent.isDirectory()) copyDirPresets(s, d)
+    else if (ent.isFile()) fs.copyFileSync(s, d)
+  }
+}
+
+/** 点分版本号比较：a > b 时返回 true（如 '2.1.0' > '2.0.9'）。
+ *  任一侧解析失败（空串/非法格式）按 0 处理，即无法证明"内置更新"时不会覆盖。 */
+function isPresetVersionNewer(a: string, b: string): boolean {
+  const pa = a.split('.').map((n) => parseInt(n, 10) || 0)
+  const pb = b.split('.').map((n) => parseInt(n, 10) || 0)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i += 1) {
+    const da = pa[i] ?? 0
+    const db = pb[i] ?? 0
+    if (da !== db) return da > db
+  }
+  return false
+}
+
+/** 启动时把打包内置的预装技能播种到 ~/.clerkbox/skills/（全局路径，所有会话可用）。
+ *  规则：
+ *    - 目标 slug 不存在 → 直接复制
+ *    - 目标已存在 → 对比双方 SKILL.md 的 version，仅当内置版本更高时才升级；
+ *      旧目录整体挪到 ~/.clerkbox/skill-backups/<slug>-<时间戳>/ 保留（不放
+ *      skills 根目录，避免被 scanSkillDirs 当作技能扫出来），不删除任何文件
+ *    - 内置版本不高于已装版本 → 跳过，尊重用户本地修改
+ *  资源位置：dev 取 <项目根>/resources/preset-skills/；打包后位于 asar 内，
+ *  统一用 app.getAppPath() 解析即可（Electron fs 补丁支持读 asar）。 */
+function seedPresetSkills(): void {
+  try {
+    const presetRoot = path.join(app.getAppPath(), 'resources', 'preset-skills')
+    if (!fs.existsSync(presetRoot)) return
+    let presets: fs.Dirent[]
+    try {
+      presets = fs.readdirSync(presetRoot, { withFileTypes: true })
+    } catch {
+      return
+    }
+    const targetRoot = path.join(os.homedir(), '.clerkbox', 'skills')
+    fs.mkdirSync(targetRoot, { recursive: true })
+    for (const ent of presets) {
+      if (!ent.isDirectory()) continue
+      const slug = ent.name
+      try {
+        const srcDir = path.join(presetRoot, slug)
+        const srcSkillMd = path.join(srcDir, 'SKILL.md')
+        if (!fs.existsSync(srcSkillMd)) continue
+        const dstDir = path.join(targetRoot, slug)
+        const dstSkillMd = path.join(dstDir, 'SKILL.md')
+        if (fs.existsSync(dstSkillMd)) {
+          let srcVersion = ''
+          let dstVersion = ''
+          try {
+            srcVersion = parseSkillMd(fs.readFileSync(srcSkillMd, 'utf-8')).version
+            dstVersion = parseSkillMd(fs.readFileSync(dstSkillMd, 'utf-8')).version
+          } catch {
+            // 版本解析失败则无法比较，跳过以免覆盖用户数据
+          }
+          if (!isPresetVersionNewer(srcVersion, dstVersion)) continue
+          const backupRoot = path.join(os.homedir(), '.clerkbox', 'skill-backups')
+          const backupDir = path.join(backupRoot, `${slug}-${Date.now()}`)
+          fs.mkdirSync(backupRoot, { recursive: true })
+          fs.renameSync(dstDir, backupDir)
+          console.log(`[PresetSkills] '${slug}' upgraded, old version moved to ${backupDir}`)
+        }
+        copyDirPresets(srcDir, dstDir)
+        console.log(`[PresetSkills] Seeded preset skill '${slug}' -> ${dstDir}`)
+      } catch (e) {
+        console.error(`[PresetSkills] Failed to seed '${slug}':`, e)
+      }
+    }
+  } catch (e) {
+    console.error('[PresetSkills] Seeding failed:', e)
+  }
+}
+
 // ── Web search/fetch helpers ──
 
 interface SearchResult {
@@ -3427,7 +3544,39 @@ if (process.platform === 'win32') {
   app.setAppUserModelId('com.xmzf.clerkbox')
 }
 
+/** 工具输出转存文件保留期：7 天（超期视为垃圾自动清理，防止长期使用无限堆积） */
+const SPILL_FILE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
+
+/**
+ * 清理 ~/.clerkbox/tmp/ 下过期的工具输出转存文件。
+ * 文件名由 tool-registry 的 spillOutputToTempFile 生成：`<tag>-<base36时间戳>-<rand>.log`。
+ * 启动时执行一次，此后每小时执行一次。
+ */
+function cleanupOldSpillFiles(): void {
+  try {
+    const tmpDir = path.join(app.getPath('home'), '.clerkbox', 'tmp')
+    if (!fs.existsSync(tmpDir)) return
+    const now = Date.now()
+    for (const name of fs.readdirSync(tmpDir)) {
+      const m = /^([a-z-]+)-([0-9a-z]+)-[0-9a-z]+\.log$/i.exec(name)
+      if (!m) continue
+      const ts = parseInt(m[2]!, 36)
+      if (!Number.isFinite(ts) || now - ts < SPILL_FILE_RETENTION_MS) continue
+      try {
+        fs.unlinkSync(path.join(tmpDir, name))
+      } catch { /* 单个文件删除失败不影响其他 */ }
+    }
+  } catch { /* 清理失败静默忽略 */ }
+}
+
 app.whenReady().then(() => {
+  // 播种内置预装技能到 ~/.clerkbox/skills/（幂等：已存在且版本不旧则跳过）
+  seedPresetSkills()
+
+  // 清理过期的工具输出转存文件（启动一次 + 每小时一次）
+  cleanupOldSpillFiles()
+  setInterval(cleanupOldSpillFiles, 60 * 60 * 1000).unref()
+
   registerIpcHandlers()
   createWindow()
 

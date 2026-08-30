@@ -5,11 +5,14 @@ import { useAgent } from '../../hooks/use-agent'
 import { useSkillsStore } from '../../stores/skills-store'
 import { AlertCircle } from 'lucide-react'
 import { ipc } from '../../lib/ipc-client'
-import type { MessageAttachment, TaskMode } from '../../types/agent'
+import type { MessageAttachment, MessageSkillSnapshot, TaskMode } from '../../types/agent'
 import MessageList from './MessageList'
 import ChatInput from './ChatInput'
 import ThemeWaves from './ThemeWaves'
 import NEW_CHAT_ICON from '../../assets/new-chat-icon.png'
+import QuestionCard from './QuestionCard'
+import TodoListCard from './TodoListCard'
+import GoalBanner from './GoalBanner'
 
 interface ChatPageProps {
   vibe?: boolean
@@ -81,9 +84,14 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
   const isCurrentSessionStreaming = streamingSessionIds.has(activeSessionId || '')
   const isEmpty = messages.length === 0
 
-  const handleSend = async (content: string, attachments?: MessageAttachment[], taskMode?: TaskMode) => {
+  const handleSend = async (
+    content: string,
+    attachments?: MessageAttachment[],
+    taskMode?: TaskMode,
+    skills?: MessageSkillSnapshot[]
+  ) => {
     if (!sessionId) return
-    await sendMessage(content, attachments, taskMode)
+    await sendMessage(content, attachments, taskMode, skills)
   }
 
   // Welcome screen: centered layout with icon + greeting + skill loader + input
@@ -141,6 +149,9 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
     <div className={`relative flex h-full ${vibe ? 'bg-transparent' : 'bg-dark-surface'}`}>
       <div className="flex flex-1 flex-col min-h-0 min-w-0 overflow-x-hidden">
         <MessageList messages={messages} isStreaming={isCurrentSessionStreaming} vibe={vibe} />
+        <GoalBanner sessionId={sessionId} vibe={vibe} />
+        <TodoListCard sessionId={sessionId} vibe={vibe} />
+        <QuestionCard sessionId={sessionId} vibe={vibe} />
         {error && (
           <div role="alert" className={`flex items-center gap-2 px-4 py-2 mx-4 rounded-md3-sm text-sm ${
             vibe

@@ -76,7 +76,8 @@
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
-      "build/**/*"
+      "build/**/*",
+      "resources/preset-skills/**/*"
     ],
     "extraResources": [],
     "asarUnpack": [

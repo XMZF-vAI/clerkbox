@@ -18,7 +18,7 @@ const SkillStore = lazy(() => import('./components/chat/SkillStore'))
 const SettingsPage = lazy(() => import('./components/settings/SettingsPage'))
 const OnboardingFlow = lazy(() => import('./components/onboarding/OnboardingFlow'))
 const VibeBackground = lazy(() => import('./components/vibe/VibeBackground'))
-const VibeMusicPlayer = lazy(() => import('./components/vibe/VibeMusicPlayer'))
+// VibeMusicPlayer 已并入 VibeControls 的顶部右侧统一槽位，避免与唤出按钮互相叠压
 const VibeControls = lazy(() => import('./components/vibe/VibeControls'))
 
 function ThemeProvider({ children }: { children: React.ReactNode }) {
@@ -99,15 +99,14 @@ export default function App() {
   let content: React.ReactNode
   if (!hasCompletedOnboarding) {
     content = (
-      <div className={`app-window relative h-screen max-md:h-dvh w-screen overflow-hidden bg-dark-surface text-dark-onSurface ${windowShape} ${isWebUIMode || isMaximized ? '' : 'border border-dark-onSurfaceVariant/20'}`}>
+      <div className={`app-window relative h-screen max-md:h-dvh w-screen max-md:w-full overflow-hidden bg-dark-surface text-dark-onSurface ${windowShape} ${isWebUIMode || isMaximized ? '' : 'border border-dark-onSurfaceVariant/20'}`}>
         <OnboardingFlow />
       </div>
     )
   } else if (isVibeMode) {
     content = (
-      <div className={`app-window relative h-screen max-md:h-dvh w-screen overflow-hidden text-white ${windowShape} ${isWebUIMode || isMaximized ? '' : 'border border-white/15'}`}>
+      <div className={`app-window relative h-screen max-md:h-dvh w-screen max-md:w-full overflow-hidden text-white ${windowShape} ${isWebUIMode || isMaximized ? '' : 'border border-white/15'}`}>
         <VibeBackground />
-        <VibeMusicPlayer />
         <main className="relative z-10 flex h-full w-full">
           <div className="min-w-0 flex-1">
             <ChatPage vibe />
@@ -121,7 +120,7 @@ export default function App() {
     )
   } else {
     content = (
-      <div className={`app-window flex h-screen max-md:h-dvh w-screen bg-dark-surface text-dark-onSurface overflow-hidden ${windowShape} ${isWebUIMode || isMaximized ? '' : 'border border-dark-onSurfaceVariant/20'}`}>
+      <div className={`app-window flex h-screen max-md:h-dvh w-screen max-md:w-full bg-dark-surface text-dark-onSurface overflow-hidden ${windowShape} ${isWebUIMode || isMaximized ? '' : 'border border-dark-onSurfaceVariant/20'}`}>
         {isMobile ? (
           <>
             {/* 移动端：覆盖式抽屉 + 遮罩 */}
@@ -149,7 +148,7 @@ export default function App() {
           />
         )}
         <div className="flex flex-col flex-1 min-w-0">
-          <TitleBar onToggleSidebar={isMobile ? () => setMobileSidebarOpen(true) : () => setSidebarCollapsed(!sidebarCollapsed)} />
+          <TitleBar sidebarVisible={isMobile ? mobileSidebarOpen : !sidebarCollapsed} onToggleSidebar={isMobile ? () => setMobileSidebarOpen(true) : () => setSidebarCollapsed(!sidebarCollapsed)} />
           <main className="flex-1 min-h-0 overflow-hidden">
             <div className="flex h-full">
               <div className="min-w-0 flex-1 overflow-hidden">

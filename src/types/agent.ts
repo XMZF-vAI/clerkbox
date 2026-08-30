@@ -4,6 +4,52 @@ import type { McpServerConfig } from './ipc'
  *  spec=生成规范/任务/验收三件套文档，确认后严格执行；plan=先生成计划文档，确认后执行；goal=目标导向持续运行直到完成 */
 export type TaskMode = 'spec' | 'plan' | 'goal'
 
+export interface QuestionOption {
+  label: string
+  description: string
+}
+
+export interface UserQuestion {
+  id: string
+  header: string
+  question: string
+  options: QuestionOption[]
+}
+
+export interface TodoItem {
+  text: string
+  status: 'pending' | 'in_progress' | 'completed'
+}
+
+/** /goal 评估器的三态判定 */
+export type GoalVerdict = 'in_progress' | 'achieved' | 'impossible'
+
+/** 会话级目标（/goal 设定）：跨消息持续生效，直到评估达成/判定无法完成/用户清除 */
+export interface SessionGoal {
+  /** 目标条件（用户输入原文，含可验证的成功标准） */
+  condition: string
+  /** active=进行中；achieved=已达成；failed=判定无法完成 */
+  status: 'active' | 'achieved' | 'failed'
+  /** 设定时间（用于展示已用时；断点恢复后不重置） */
+  createdAt: number
+  updatedAt: number
+  /** 累计评估次数（跨运行累计） */
+  evaluations: number
+  /** 最近一次评估的理由（进行中时展示） */
+  lastReason?: string
+  /** 终态结论（achieved/failed 时的说明） */
+  conclusion?: string
+}
+
+/** 消息上的 Goal 判定卡片元数据（system 消息，UI 专用，不发给模型） */
+export interface MessageGoalEvent {
+  verdict: GoalVerdict
+  /** 评估/暂停原因 */
+  reason: string
+  /** 本次运行内第几次评估 */
+  evaluations: number
+}
+
 /** 消息附件：图片携带压缩后的 base64 data URL 真正发给模型；文件只携带绝对路径（内容由模型用工具自行读取） */
 export interface MessageAttachment {
   id: string
@@ -21,6 +67,14 @@ export interface MessageAttachment {
   size?: number
 }
 
+/** 发送消息时选中的 Skill 快照；只保存展示与追溯所需字段，不携带 SKILL.md 正文 */
+export interface MessageSkillSnapshot {
+  id: string
+  name: string
+  icon?: string
+  slug?: string
+}
+
 export interface Message {
   id: string
   role: 'user' | 'assistant' | 'system' | 'tool'
@@ -31,6 +85,13 @@ export interface Message {
   attachments?: MessageAttachment[]
   /** 发送该消息时选中的任务工作流（/spec /plan /goal）；随消息持久化，用于气泡内展示 */
   taskMode?: TaskMode
+  /** 发送该消息时激活的 Skill 快照；随消息持久化，用于对应气泡内展示 */
+  skills?: MessageSkillSnapshot[]
+  /** AI 自主加载的技能快照（read_file 命中技能 SKILL.md 时由 agent 循环记录）；
+   *  随助手消息持久化，用于气泡内"已加载技能"芯片展示 */
+  loadedSkills?: MessageSkillSnapshot[]
+  /** /goal 目标评估判定卡（system 消息专用；UI 渲染判定结果，不进入模型上下文） */
+  goalEvent?: MessageGoalEvent
   toolCalls?: ToolCall[]
   toolResults?: ToolResult[]
   finishReason?: string
@@ -70,6 +131,15 @@ export interface CompactMetadata {
   preTokens: number
   messagesSummarized: number
   compactedAt: number
+}
+
+/** read_file 读取快照（工具层维护：staleness 检测 + 同区间重复读去重 + 压缩后文件恢复） */
+export interface ReadFileSnapshot {
+  content: string
+  timestamp: number
+  /** 上次 read_file 的分页参数（去重判定用：同路径同区间且内容未变 → 返回 stub） */
+  lastOffset?: number
+  lastLimit?: number
 }
 
 export interface ToolDefinition {

@@ -518,4 +518,14 @@
   body {
     overscroll-behavior: none;
   }
+  /* Markdown 表格窄屏变为块级横向滚动，避免撑破消息气泡 */
+  .markdown-body table.markdown-table {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  /* 代码块小屏字号微升，改善可读性 */
+  .markdown-body .code-block {
+    @apply text-[13px] leading-5;
+  }
 }

@@ -120,6 +120,27 @@ function parseAttachments(value: string | null | undefined): MessageAttachment[]
   }
 }
 
+function parseMessageSkills(value: string | null | undefined): Message['skills'] | undefined {
+  if (!value) return undefined
+  try {
+    const parsed: unknown = JSON.parse(value)
+    if (!Array.isArray(parsed)) return undefined
+    const skills = parsed.flatMap((item) =>
+      isRecord(item) && typeof item.id === 'string' && typeof item.name === 'string'
+        ? [{
+            id: item.id,
+            name: item.name,
+            ...(typeof item.icon === 'string' ? { icon: item.icon } : {}),
+            ...(typeof item.slug === 'string' ? { slug: item.slug } : {}),
+          }]
+        : []
+    )
+    return skills.length > 0 ? skills : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /** 把 DB 消息行映射为内存 Message 结构（loadFromDb / syncFromDb 共用） */
 function mapMessageRows(msgRows: import('../types/ipc').MessageRow[]): Message[] {
   return msgRows.map((m) => ({
@@ -131,6 +152,7 @@ function mapMessageRows(msgRows: import('../types/ipc').MessageRow[]): Message[]
     toolCalls: parseToolCalls(m.tool_calls),
     toolResults: parseToolResults(m.tool_results),
     attachments: parseAttachments(m.attachments),
+    skills: parseMessageSkills(m.skills),
     finishReason: m.finish_reason || undefined,
     isCompactSummary: m.is_compact === 1 ? true : undefined,
     isCompactAttachment: m.is_compact_attachment === 1 ? true : undefined,
@@ -460,6 +482,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       is_sub_agent_card: message.isSubAgentCard ? 1 : 0,
       sub_agent_id: message.subAgentId || null,
       task_mode: message.taskMode || null,
+      skills: message.skills ? JSON.stringify(message.skills) : null,
     }))
     // Auto-update session title from first user message
     const session = get().sessions.find((s) => s.id === sessionId)
@@ -630,6 +653,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         sub_agent_id: msg.subAgentId || null,
         // Preserve task workflow mode when rewriting compacted history.
         task_mode: msg.taskMode || null,
+        skills: msg.skills ? JSON.stringify(msg.skills) : null,
         // Preserve attachments when rewriting compacted history.
         attachments: msg.attachments ? JSON.stringify(msg.attachments) : null,
       }))

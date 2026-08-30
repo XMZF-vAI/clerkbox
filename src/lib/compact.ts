@@ -1,4 +1,4 @@
-import type { ApiCompat, Message, AppSettings, CompactMetadata, CompactionResult } from '../types/agent'
+import type { ApiCompat, Message, AppSettings, CompactMetadata, CompactionResult, ReadFileSnapshot } from '../types/agent'
 import { estimateTokensForText, truncateTextToTokens } from './token-estimate'
 import { buildRequestBody, extractText } from './api-adapters'
 import { postJson } from './api-transport'
@@ -87,6 +87,35 @@ Let me review the conversation. The user asked to implement a login system...
 }
 
 /**
+ * Build the system prompt for the INCREMENTAL compaction LLM call.
+ * Used when the segment being summarized already contains a previous summary:
+ * instead of re-summarizing from scratch, the model updates the anchored summary
+ * (preserving still-true details, dropping stale ones, merging new facts).
+ */
+export function getIncrementalCompactPrompt(previousSummary: string, customInstructions?: string): string {
+  const base = `You are a helpful AI assistant tasked with updating an existing conversation summary.
+
+CRITICAL: Do not use any tools. Do not call any functions. Only produce an updated summary.
+
+A previous summary of the earlier conversation is provided between <previous-summary> tags below. The newer conversation history follows it in the messages. Update the summary using that history:
+- PRESERVE every detail from the previous summary that is still true and relevant (file paths, decisions, error fixes, current state).
+- Move completed items into the completed/current-work sections; merge in the important new facts from the newer history.
+- Remove details that have been superseded or are no longer relevant.
+- Keep the same six-section structure used by the previous summary.
+
+First, write your analysis inside <analysis> tags (this will be stripped), then write the FULL updated summary inside <summary> tags (not a diff).
+
+<previous-summary>
+${previousSummary}
+</previous-summary>`
+
+  if (customInstructions) {
+    return `${base}\n\n## Additional Instructions\n${customInstructions}`
+  }
+  return base
+}
+
+/**
  * Strip <analysis> block and convert <summary> tags to a "Summary:" header.
  * The LLM is instructed to write analysis first (which we discard) and then
  * the actual summary in <summary> tags.
@@ -125,9 +154,13 @@ export function getCompactUserSummaryMessage(summary: string): string {
 export async function callCompactAPI(
   messages: Message[],
   settings: Pick<AppSettings, 'apiCompat' | 'model' | 'baseUrl' | 'apiKey' | 'directFetch'>,
-  customInstructions?: string
+  customInstructions?: string,
+  previousSummary?: string
 ): Promise<string> {
-  const systemPrompt = getCompactPrompt(customInstructions)
+  // 增量模式：被压缩段里已有旧摘要 → 更新它而非从零重总结（保住早期决策，省 token）
+  const systemPrompt = previousSummary
+    ? getIncrementalCompactPrompt(previousSummary, customInstructions)
+    : getCompactPrompt(customInstructions)
 
   // Convert messages to API format
   const apiMessages: Array<{ role: string; content: string }> = [
@@ -136,6 +169,8 @@ export async function callCompactAPI(
 
   for (const msg of messages) {
     if (msg.role === 'system') continue // Skip system messages (we have our own)
+    // 增量模式：旧摘要消息已作为 <previous-summary> 注入 system prompt，跳过避免重复
+    if (previousSummary && msg.isCompactSummary && msg.role === 'assistant') continue
     if (msg.role === 'tool') {
       // Include tool results as user messages for the summarizer（剥离 UI 专用 __EDIT_DIFF__ 元数据）
       const toolContent = (msg.toolResults?.map(r => r.content).join('\n') || msg.content).replace(/\n__EDIT_DIFF__:.*$/s, '')
@@ -204,7 +239,7 @@ export function truncateToTokens(content: string, maxTokens: number): string {
  * @returns Array of Message objects with role='user' containing file content
  */
 export function createPostCompactFileAttachments(
-  readFileState: Map<string, { content: string; timestamp: number }>,
+  readFileState: Map<string, ReadFileSnapshot>,
   preservedMessages: Message[] = []
 ): Message[] {
   // Collect file paths already present in preserved messages (from read_file tool calls
@@ -414,7 +449,7 @@ export function findKeepBoundaryIndex(
 export async function compactConversation(
   messages: Message[],
   settings: Pick<AppSettings, 'apiCompat' | 'model' | 'baseUrl' | 'apiKey' | 'directFetch'>,
-  readFileState: Map<string, { content: string; timestamp: number }>,
+  readFileState: Map<string, ReadFileSnapshot>,
   customInstructions?: string,
   trigger: 'auto' | 'manual' = 'auto'
 ): Promise<CompactionResult> {
@@ -438,13 +473,26 @@ export async function compactConversation(
   const strippedMessages = stripImagesFromMessages(messagesToSummarize)
 
   // 4. Call LLM to generate summary (with PTL retry)
+  // 增量更新：被压缩段里已有一份旧摘要（上一次压缩产物）时，改为「更新旧摘要」
+  // 而非从零重总结 —— 早期决策不丢失，摘要请求也更省 token。
+  // 旧摘要消息内容带 "This session is being continued..." 包装话术，注入
+  // <previous-summary> 前先剥离，避免嵌套话术。
+  const prevSummaryMessage = [...messagesToSummarize].reverse().find(
+    (m) => m.isCompactSummary && m.role === 'assistant' && m.content
+  )
+  const previousSummary = prevSummaryMessage?.content
+    ? (prevSummaryMessage.content.match(
+        /Here is a summary of the conversation so far:\n\n([\s\S]*?)\n\nContinue the conversation/
+      )?.[1] ?? prevSummaryMessage.content)
+    : undefined
+
   let messagesForSummary = strippedMessages
   let rawSummary: string = ''
   let attempt = 0
 
   while (attempt <= MAX_COMPACT_RETRIES) {
     try {
-      rawSummary = await callCompactAPI(messagesForSummary, settings, customInstructions)
+      rawSummary = await callCompactAPI(messagesForSummary, settings, customInstructions, previousSummary)
       break
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err)

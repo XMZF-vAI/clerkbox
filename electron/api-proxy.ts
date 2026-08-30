@@ -192,6 +192,27 @@ export function headersFor(cfg: ApiConnConfig, opts: { direct?: boolean } = {}):
   return h
 }
 
+/**
+ * 从错误响应头提取服务端的限流重试指示，格式化为 " (retry after Ns)" 附加段。
+ * 优先 retry-after-ms（毫秒），其次 retry-after（秒数或 HTTP 日期——日期形式忽略，交给指数退避）。
+ * 渲染进程直连路径（api-transport.ts）使用同一格式，retry agent 按统一约定解析。
+ */
+export function formatRetryAfterHint(headers: Headers): string {
+  try {
+    const ms = headers.get('retry-after-ms')
+    if (ms) {
+      const v = Number(ms)
+      if (Number.isFinite(v) && v > 0) return ` (retry after ${Math.round(v)}ms)`
+    }
+    const sec = headers.get('retry-after')
+    if (sec && /^\d+(\.\d+)?$/.test(sec.trim())) {
+      const v = Number(sec)
+      if (v > 0) return ` (retry after ${Math.round(v * 1000)}ms)`
+    }
+  } catch { /* Headers 不可枚举等异常场景静默忽略 */ }
+  return ''
+}
+
 /** 归一化模型列表：OpenAI `{data:[{id}]}` / Anthropic `{data:[{id, display_name}]}` → `{id, label}` */
 export function normalizeModelList(raw: unknown): Array<{ id: string; label?: string }> {
   if (!raw || typeof raw !== 'object') return []
@@ -425,7 +446,9 @@ export function startChatStream(
 
       if (!res.ok) {
         const errText = redactApiKey(await readResponseText(res, ERROR_BODY_LIMIT).catch(() => ''), apiKeyFromConfig(cfg))
-        send({ error: `API Error ${res.status}: ${errText}` })
+        // 把服务端的 Retry-After 指示透传进错误文本（retry agent 解析后按服务端要求延迟重试）
+        const retryHint = formatRetryAfterHint(res.headers)
+        send({ error: `API Error ${res.status}${retryHint}: ${errText}` })
         return
       }
       if (!res.body) {

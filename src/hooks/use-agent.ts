@@ -11,6 +11,10 @@ import { TokenTracker } from '../lib/token-tracker'
 import { estimateTokensForText } from '../lib/token-estimate'
 import { compactConversation, findKeepBoundaryIndex } from '../lib/compact'
 import { computeContextUsage, getApiVisibleMessages, type ContextUsageInfo } from '../lib/context-usage'
+import { isPathInside, isSystemPath, resolveToolPath, normalizePathForComparison } from '../lib/path-safety'
+import { SYSTEM_PROMPT, CLERKBOX_PROMPT, PLAN_MODE_PROMPT, SPEC_MODE_PROMPT, GOAL_MODE_PROMPT, GOAL_EVALUATOR_PROMPT } from '../lib/prompts'
+import { renderSkillCatalog, type SkillCatalogEntry } from '../lib/skill-catalog'
+import { buildRelevantSkillReminder } from '../lib/skill-matcher'
 import i18n from '../i18n'
 import { findAgent } from '../lib/agent-registry'
 import { useAgentRunsStore } from '../stores/agent-runs-store'
@@ -27,7 +31,9 @@ import {
   type AnthropicThinkingBlock,
   type NeutralMessage,
 } from '../lib/api-adapters'
-import type { ApiCompat, Message, MessageAttachment, TaskMode, ToolCall, ToolResult, StreamingToolCall, TokenUsage } from '../types/agent'
+import type { ApiCompat, GoalVerdict, Message, MessageAttachment, MessageSkillSnapshot, TaskMode, ToolCall, ToolResult, StreamingToolCall, TokenUsage, ReadFileSnapshot } from '../types/agent'
+import { useInteractiveStore, useTodoStore } from '../stores/interactive-store'
+import { useGoalStore } from '../stores/goal-store'
 
 /** Vite 注入的 env（tsconfig 未含 vite/client 类型，安全取值） */
 const IS_DEV = (import.meta as unknown as { env?: { DEV?: boolean } }).env?.DEV ?? false
@@ -57,61 +63,6 @@ function hashString(s: string): string {
   return (h >>> 0).toString(36)
 }
 
-/** Normalize separators and dot segments for path-comparison only. */
-function normalizePathForComparison(value: string): string {
-  const slashNormalized = value.replace(/\\/g, '/').replace(/\/+/g, '/')
-  const driveMatch = slashNormalized.match(/^[A-Za-z]:\//)
-  const prefix = driveMatch ? driveMatch[0] : slashNormalized.startsWith('//') ? '//' : slashNormalized.startsWith('/') ? '/' : ''
-  const remainder = prefix ? slashNormalized.slice(prefix.length) : slashNormalized
-  const segments: string[] = []
-  for (const segment of remainder.split('/')) {
-    if (!segment || segment === '.') continue
-    if (segment === '..') {
-      if (segments.length > 0 && segments[segments.length - 1] !== '..') segments.pop()
-      else if (!prefix) segments.push(segment)
-      continue
-    }
-    segments.push(segment)
-  }
-  const normalized = `${prefix}${segments.join('/')}`
-  return normalized.length > prefix.length ? normalized.replace(/\/$/, '') : normalized
-}
-
-/** Determine whether one normalized path is inside another across supported platforms. */
-function isPathInside(child: string, parent: string): boolean {
-  if (!child || !parent) return false
-  const normalizedChild = normalizePathForComparison(child)
-  const normalizedParent = normalizePathForComparison(parent)
-  const usesWindowsCaseRules = /^[A-Za-z]:\//.test(normalizedChild) ||
-    /^[A-Za-z]:\//.test(normalizedParent) ||
-    normalizedChild.startsWith('//') ||
-    normalizedParent.startsWith('//')
-  const a = usesWindowsCaseRules ? normalizedChild.toLowerCase() : normalizedChild
-  const b = usesWindowsCaseRules ? normalizedParent.toLowerCase() : normalizedParent
-  if (a === b) return true
-  return a.startsWith(b.endsWith('/') ? b : `${b}/`)
-}
-
-/** Recognize absolute Windows, UNC, and POSIX paths before resolving tool input. */
-function isAbsolutePath(value: string): boolean {
-  return /^(?:[a-zA-Z]:[\\/]|[\\/]{1,2})/.test(value)
-}
-
-/** Protect platform directories regardless of slash style or letter casing. */
-function isSystemPath(value: string): boolean {
-  const normalized = normalizePathForComparison(value).toLowerCase()
-  return normalized === '/etc' || normalized.startsWith('/etc/') ||
-    normalized === 'c:/windows' || normalized.startsWith('c:/windows/') ||
-    normalized === 'c:/program files' || normalized.startsWith('c:/program files/')
-}
-
-function resolveToolPath(workingDir: string, input: unknown): string {
-  const requested = String(input || '')
-  if (!workingDir || isAbsolutePath(requested)) return requested
-  const separator = workingDir.includes('\\') ? '\\' : '/'
-  return `${workingDir}${separator}${requested}`
-}
-
 /** Combine cancellation sources on platforms that do not implement AbortSignal.any. */
 function combineAbortSignals(signals: AbortSignal[]): { signal: AbortSignal; dispose: () => void } {
   const abortSignalWithAny = AbortSignal as typeof AbortSignal & {
@@ -134,152 +85,126 @@ function combineAbortSignals(signals: AbortSignal[]): { signal: AbortSignal; dis
   }
 }
 
-const SYSTEM_PROMPT = `You are ClerkBox, a powerful AI assistant running on the user's desktop. You interact with the user's file system and terminal through tools.
-
-## Your Capabilities
-- Read, write, and list files and directories
-- Execute terminal commands (cmd / PowerShell)
-- Search files and file contents
-- Search the web for real-time information (web_search tool)
-- Fetch and extract content from web pages (web_fetch tool)
-
-## Working Principles
-1. Understand the user's intent first, then decide which tools to use
-2. Verify correct paths before operating on files
-3. Warn the user before executing dangerous commands
-4. When encountering errors, analyze the cause and attempt to fix
-5. Reply in the same language the user uses (e.g., Chinese for Chinese messages, English for English messages)
-6. When the user asks about real-time info, news, or latest information, use the web_search tool
-7. When you need detailed content from a specific webpage, first use web_search then use web_fetch on individual pages
-
-## ⚠️ File Editing Rules (Extremely Important)
-You MUST use the write_file or search_replace tools to edit files. **DO NOT** use execute_command with echo/Out-File/Set-Content or similar commands to write files.
-
-### write_file — Create new files or full rewrites
-- Use for: creating new files, making major rewrites to existing files (changes affecting >30% of the file)
-
-### search_replace — Precise modification of existing files (preferred)
-- **Step 1**: First use read_file to read the file and find the exact code block to modify
-- **Step 2**: Call search_replace with old_str set to the exact content copied from the file
-  - old_str must match the file content **character-for-character** (including spaces, indentation, line breaks)
-  - old_str must include enough surrounding context to uniquely locate the target (recommend including 2–3 extra lines before and after)
-  - new_str is the modified replacement content
-- **Modify one location at a time**. For multiple changes, call search_replace consecutively
-- If old_str is not unique in the file, the tool will return an error listing all match locations — extend the context and retry
-
-## ⚠️ Shell Selection Strategy
-The execute_command tool accepts a shell parameter: "cmd" (default) or "powershell":
-
-### Use cmd by default (recommended):
-- Simple file operations: dir, type, copy, move, del, mkdir, rmdir
-- Running programs: node, python, npm, npx, git
-- Network requests: curl, ping (& is not a special character in cmd, URLs are not truncated)
-- Simple path operations
-
-### Use powershell when:
-- PowerShell cmdlets are needed: Get-Content, Set-Content, Get-ChildItem, Select-String
-- Complex object pipelines: | Where-Object, | ForEach-Object, | Select-Object
-- JSON processing: ConvertFrom-Json, ConvertTo-Json
-- Regex matching: -match, -replace
-- Environment variables: $env:VAR
-
-### cmd Notes:
-- Wrap paths containing spaces in double quotes
-- Chinese paths have no encoding issues
-- & is not a special character in cmd, URLs with & work normally
-- % is a variable reference in cmd; use %% for a literal %
-- Chain multiple commands with & (e.g., cd /d "path" & npm run dev)
-
-### powershell Notes:
-- & is the call operator; URLs containing & must be wrapped in quotes
-- $ is a variable prefix; use single-quoted strings to avoid expansion
-- % is shorthand for ForEach-Object
-
-## Output Format
-- Use markdown code blocks for code
-- Use inline code for file paths
-- Use bold for key information`
-
-/** Build .clerkbox-aware system prompt section */
-const CLERKBOX_PROMPT = `
-
-## 📂 .clerkbox Working Directory
-Your working directory contains a \`.clerkbox/\` folder with the following structure:
-\`\`\`
-.clerkbox/
-├── skills/    ← activated skills
-├── plan/      ← plan mode work plans
-└── memory/    ← structured memory (MEMORY.md + topic files)
-\`\`\`
-
-### Skills (Progressive Loading)
-The user has activated several skills. Below is a lightweight **skill index** (name + description + trigger keywords + path). The full SKILL.md content is NOT included here to save context.
-
-**Skill Router Rules:**
-1. **Match by relevance**: Compare the user's current task against each skill's description and trigger_keywords. Only read the SKILL.md of skills that are clearly relevant to the current task.
-2. **No match → skip reading**: If no skill matches the current task, do NOT read any SKILL.md file. Respond directly.
-3. **Read on-demand**: When a skill matches, use the read_file tool to read its SKILL.md (path shown in the index), then follow its instructions.
-4. **Task evolution**: If the conversation shifts and a previously-irrelevant skill becomes relevant, read its SKILL.md at that point.
-5. **Slash command**: If the user's message starts with \`/<skill-slug>\`, treat it as an explicit activation — immediately read that skill's SKILL.md and prioritize its instructions for the subsequent input.
-6. **Skill chaining**: When a skill's main action completes and it declares \`chains_to\` (a list of successor skill slugs), evaluate whether any successor skill's description matches the current state. If it matches, read that successor's SKILL.md and continue per its instructions. Chaining is advisory (use your judgment), not mandatory.
-
-**Skill Index:**
-(see the "Currently Active Skills" list injected below)
-
-### Task Workflows (/spec /plan /goal)
-When the user starts a message with one of these workflows (a mode chip shown in their input):
-- **Plan**: analyze requirements, write a detailed plan to \`.clerkbox/plan/plan.md\`, then stop and wait for the user's confirmation before executing.
-- **Spec**: refine requirements into \`.clerkbox/specs/<task-name>/\` (spec.md + tasks.md + checklist.md), then stop and wait for confirmation before implementing.
-- **Goal**: work autonomously toward the stated objective with verifiable success criteria until the goal is achieved.
-When the user confirms a plan/spec in a follow-up message, re-read the documents and execute them step by step.`
-
-/** Build plan mode specific prompt（Plan 工作流：先规划，停下等用户确认，确认后下一轮再执行） */
-const PLAN_MODE_PROMPT = `
-
-## ⚠️ Current Workflow: Plan (/plan)
-You are running the Plan workflow. In this workflow:
-1. **Do not execute operations directly.** Analyze the user's requirements and formulate a detailed plan first.
-2. Use the write_file tool to write the plan to \`.clerkbox/plan/plan.md\`.
-3. The plan should include: objectives, steps, specific operations for each step, and expected results.
-4. After writing the plan file, include the marker \`[PLAN_COMPLETE]\` at the end of your reply message, then STOP. The run ends there — do NOT start executing.
-5. The user will review the plan (they may edit plan.md or ask you to revise it). Only after the user explicitly confirms in a follow-up message will execution begin; at that point you are in normal mode: re-read \`.clerkbox/plan/plan.md\` and execute it step by step.
-6. If the user asks to modify the plan, rewrite plan.md and include \`[PLAN_COMPLETE]\` again.`
-
-/** Build spec mode specific prompt（Spec 工作流：规范/任务/验收三件套，停下等用户确认，确认后严格按文档执行） */
-const SPEC_MODE_PROMPT = `
-
-## ⚠️ Current Workflow: Spec (/spec)
-You are running the Spec workflow, designed for complex, long-horizon tasks. In this workflow:
-1. **Do not implement anything yet.** First refine the user's requirements into a complete documentation set under \`.clerkbox/specs/<task-name>/\` (derive a short kebab-case task name from the requirement):
-   - \`spec.md\` — the specification: background, goals, non-goals, functional requirements, technical design/approach.
-   - \`tasks.md\` — a numbered, dependency-ordered task list broken into concrete, executable steps.
-   - \`checklist.md\` — an acceptance checklist: verifiable acceptance criteria for the deliverable, each with a checkbox \`- [ ]\`.
-2. Use the write_file tool to create these files. They are project knowledge assets — keep them precise and reviewable.
-3. After all three files are written, include the marker \`[SPEC_COMPLETE]\` at the end of your reply message, then STOP. The run ends there — do NOT start implementing.
-4. The user will review the documents (they may edit them or ask you to revise). Only after the user explicitly confirms in a follow-up message will implementation begin; at that point you are in normal mode: re-read the spec documents and execute tasks.md strictly, one task at a time, updating \`tasks.md\` progress and checking off \`checklist.md\` items as you complete them.
-5. If the user asks to modify the documents, rewrite them and include \`[SPEC_COMPLETE]\` again.`
-
-/** Build goal mode specific prompt（Goal 工作流：目标导向，持续自主运行直到可验证完成） */
-const GOAL_MODE_PROMPT = `
-
-## ⚠️ Current Workflow: Goal (/goal)
-You are running the Goal workflow: an autonomous, goal-oriented run that keeps working until the goal is verifiably achieved.
-1. Parse the user's message into: **Objective** (what to achieve), **Success criteria** (verifiable completion states — commands that can be run with expected outputs), and **Constraints** (boundaries that must not be crossed), deriving any that are implicit.
-2. Restate the objective, success criteria and constraints briefly at the start of your first reply so the user can course-correct early.
-3. Work autonomously: plan, execute, verify, and iterate. Do NOT pause to ask for permission between steps — keep driving toward the goal until every success criterion is met and verified (e.g. by running tests/builds/greps and checking their outputs).
-4. Respect the constraints strictly: never touch files, directories or dependencies that are out of bounds.
-5. When ALL success criteria are verifiably met, include the marker \`[GOAL_COMPLETE]\` at the end of your final message together with a completion report (what was achieved, evidence for each criterion, and any deviations).
-6. If you get genuinely stuck (blocked by missing credentials/information only the user can provide), stop and explain precisely what is blocked and what you need — do not fabricate completion.`
-
 const MAX_REACT_ITERATIONS = 100 // Loop exits when model stops calling tools or hits this cap
+
+/** 最后一轮注入的收尾指令（参考 opencode MAX_STEPS_PROMPT）：工具停用，强制文字总结 */
+const MAX_STEPS_MESSAGE = `⚠️ Maximum tool-call turns reached for this run. Tool calls are no longer executed. Reply NOW with a final text summary: what was accomplished, key results and file paths, and what remains unfinished. Do not attempt any more tool calls.`
+
+/** Goal 自动续跑护栏（防空转与失控）：单次运行评估上限 / 连续无工具调用的评估上限 */
+const GOAL_MAX_EVALUATIONS_PER_RUN = 20
+const GOAL_IDLE_EVALUATION_LIMIT = 2
+const GOAL_TRANSCRIPT_MESSAGE_LIMIT = 24
+const GOAL_TRANSCRIPT_CHARS_LIMIT = 40000
+
+/** 从对话消息构建评估器用的转录文本（user/assistant/tool 正文，长内容截断，越新越靠后） */
+function buildGoalTranscript(messages: Message[]): string {
+  const recent = messages
+    .filter((m) => (m.role === 'user' || m.role === 'assistant' || m.role === 'tool') && !m.isSubAgentCard)
+    .slice(-GOAL_TRANSCRIPT_MESSAGE_LIMIT)
+  let text = recent.map((m) => {
+    const body = (m.content || '').trim().slice(0, 2000) || '(no text)'
+    const calls = m.toolCalls?.length ? `\n[tool calls: ${m.toolCalls.map((tc) => tc.name).join(', ')}]` : ''
+    return `## ${m.role}\n${body}${calls}`
+  }).join('\n\n')
+  if (text.length > GOAL_TRANSCRIPT_CHARS_LIMIT) {
+    text = text.slice(text.length - GOAL_TRANSCRIPT_CHARS_LIMIT)
+  }
+  return text
+}
+
+/** 工具调用被拒绝时的统一文案 */
+const toolCallRefusal = (name: string, reason: string): string =>
+  `Tool call "${name}" was not executed: ${reason}`
+
+/** 截断响应（finishReason=length）时工具调用一律不执行：流式参数经 JSON 抢救解析后
+ *  可能"恰好合法但不完整"，执行有副作用的工具会损坏文件。要求模型带完整参数重发。 */
+const TRUNCATED_TOOL_CALL_REASON =
+  'the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments.'
+
+/** 连续 3 次完全相同的工具调用 → 拒绝执行（doom-loop 检测） */
+const DOOM_LOOP_THRESHOLD = 3
+
+/** 自动压缩连续失败熔断阈值（参考 Claude Code：3 次失败后停止自动重试，防死亡螺旋） */
+const MAX_AUTO_COMPACT_FAILURES = 3
+
+// ── microcompact（工具结果级清理，参考 Claude Code Function Result Clearing）──
+/** 清空老工具结果时保留的最近条数 */
+const MICROCOMPACT_KEEP_RECENT = 6
+/** 可被清空的工具：输出大且可重跑。编辑/子代理/交互结果小而关键，不清。 */
+const MICROCOMPACT_CLEARABLE_TOOLS = new Set([
+  'read_file', 'read_image', 'execute_command', 'search_files', 'search_content', 'list_dir', 'web_search', 'web_fetch',
+])
+const CLEARED_TOOL_RESULT_PLACEHOLDER =
+  '[Old tool result cleared to free context. The key info should already be captured in earlier replies; re-run the tool if you need it again.]'
+const DOOM_LOOP_REFUSAL =
+  'this exact call has already been made repeatedly with identical arguments and the results did not change. Stop repeating it: change the approach, inspect the previous results, or explain the blocker to the user.'
+
+/** git 仓库状态探测（每个 workingDir 只探测一次，供系统提示环境段使用） */
+const gitRepoCache = new Map<string, boolean>()
+async function detectGitRepo(workingDir: string): Promise<boolean> {
+  const cached = gitRepoCache.get(workingDir)
+  if (cached !== undefined) return cached
+  try {
+    const r = await ipc.executeCommandWithShell('git rev-parse --is-inside-work-tree', workingDir, 'cmd')
+    const inside = r.exitCode === 0 && r.stdout.trim() === 'true'
+    gitRepoCache.set(workingDir, inside)
+    return inside
+  } catch {
+    return false
+  }
+}
+
+/** doom-loop 判定：签名序列末尾已有 THRESHOLD-1 次连续相同调用，则本次拒绝 */
+function isDoomLoopSig(signatures: string[], sig: string): boolean {
+  const n = signatures.length
+  const need = DOOM_LOOP_THRESHOLD - 1
+  if (n < need) return false
+  for (let i = n - need; i < n; i++) {
+    if (signatures[i] !== sig) return false
+  }
+  return true
+}
+
+/** 渲染进程可得的系统环境信息（OS 版本从 userAgent 提取，避免新增 IPC） */
+function getOsDescription(): string {
+  const ua = typeof navigator !== 'undefined' ? navigator.userAgent : ''
+  const win = /Windows NT ([\d.]+)/.exec(ua)
+  if (win) {
+    const nt = win[1]
+    const version = nt === '10.0' ? '10/11' : nt
+    return `Windows ${version}`
+  }
+  const mac = /Mac OS X ([\d_.]+)/.exec(ua)
+  if (mac) return `macOS ${mac[1].replace(/_/g, '.')}`
+  if (/Linux/.test(ua)) return 'Linux'
+  return navigator.platform || 'unknown'
+}
 
 /** 可重试的 HTTP 状态码（瞬时故障，退避重试） */
 const RETRYABLE_CODES = [408, 429, 500, 502, 503, 504]
 
-/** 判断错误是否属于「瞬时、值得重试」的类型（429/502/超时/网络中断等）。 */
+/** 上下文溢出类错误（重试无用，必须压缩后重放） */
+const CONTEXT_OVERFLOW_PATTERN =
+  /context length|prompt is too long|too many tokens|maximum context|context_length_exceeded|request too large|exceed[s]? the (maximum )?context|context window/i
+
+/** 配额/计费类错误（重试无用，直接失败提示用户） */
+const NON_RETRYABLE_QUOTA_PATTERN =
+  /insufficient_quota|quota exceeded|out of budget|billing|insufficient balance|payment required|credit.*(exhaust|expired)/i
+
+/** 判断错误是否属于「上下文溢出」——触发强制压缩恢复链而非重试。 */
+export function isContextOverflowError(err: unknown): boolean {
+  if (err instanceof Error && err.name === 'AbortError') return false
+  const msg = err instanceof Error ? err.message : String(err)
+  return CONTEXT_OVERFLOW_PATTERN.test(msg)
+}
+
+/** 判断错误是否属于「瞬时、值得重试」的类型（429/502/超时/网络中断等）。
+ *  溢出与配额/计费类错误明确不可重试——前者要压缩，后者要用户处理。 */
 export function isRetryableError(err: unknown): boolean {
   if (err instanceof Error && err.name === 'AbortError') return false
   const msg = err instanceof Error ? err.message : String(err)
+  if (CONTEXT_OVERFLOW_PATTERN.test(msg)) return false
+  if (NON_RETRYABLE_QUOTA_PATTERN.test(msg)) return false
   // 网络 / 超时 / 连接类
   if (/timeout|abort|network|fetch failed|ECONNRESET|socket hang up|ENOTFOUND/i.test(msg)) return true
   // HTTP 状态码（API Error 429 / HTTP 502 等）
@@ -288,13 +213,26 @@ export function isRetryableError(err: unknown): boolean {
   return false
 }
 
+/** 从错误消息提取服务端指定的重试延迟（毫秒）。
+ *  错误文本格式由传输层统一生成："API Error 429 (retry after 8000ms): ..." */
+export function extractRetryAfterMs(err: unknown): number | null {
+  const msg = err instanceof Error ? err.message : String(err)
+  const m = msg.match(/retry after (\d+)ms/i)
+  if (!m) return null
+  const v = Number(m[1])
+  // 上限 60s：服务端要求等更久说明不是瞬时抖动，交给用户决定
+  return Number.isFinite(v) && v > 0 ? Math.min(v, 60_000) : null
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 /**
  * 带指数退避的重试：最多 retries 次，间隔按 baseDelayMs 倍增（低增）。
- * 默认间隔 1s → 2s → 4s → 8s → 16s。shouldRetry 返回 false 时立即抛出不再重试。
+ * 默认间隔 1s → 2s → 4s → 8s → 16s，乘 (1 - random*0.25) 随机抖动防惊群。
+ * 服务端通过 Retry-After 头明确指定延迟时（getRetryAfterMs）优先遵循，不加抖动。
+ * shouldRetry 返回 false 时立即抛出不再重试。
  * onRetry 在每次「将要重试」时调用（已确定可重试、等待退避前），可用来更新 UI 提示。
  */
 export async function runWithRetry<T>(
@@ -303,10 +241,11 @@ export async function runWithRetry<T>(
     retries?: number
     baseDelayMs?: number
     shouldRetry?: (err: unknown) => boolean
+    getRetryAfterMs?: (err: unknown) => number | null
     onRetry?: (attempt: number, delayMs: number, err: unknown) => void
   } = {}
 ): Promise<T> {
-  const { retries = 5, baseDelayMs = 1000, shouldRetry = () => true, onRetry } = opts
+  const { retries = 5, baseDelayMs = 1000, shouldRetry = () => true, getRetryAfterMs, onRetry } = opts
   let attempt = 0
   for (;;) {
     try {
@@ -314,7 +253,8 @@ export async function runWithRetry<T>(
     } catch (err) {
       attempt++
       if (attempt > retries || !shouldRetry(err)) throw err
-      const delay = baseDelayMs * 2 ** (attempt - 1)
+      const serverDelay = getRetryAfterMs?.(err) ?? null
+      const delay = serverDelay ?? baseDelayMs * 2 ** (attempt - 1) * (1 - Math.random() * 0.25)
       onRetry?.(attempt, delay, err)
       await sleep(delay)
     }
@@ -342,10 +282,16 @@ export function useAgent(sessionId: string) {
     agentsMdEnabled: s.agentsMdEnabled,
     claudeMdCompat: s.claudeMdCompat,
   })))
-  const { addMessage, updateMessage, setStreaming, compactSession, setSessionStatus } = useChatStore()
+  // store 动作是稳定引用，逐个 selector 订阅：避免整店订阅导致聊天流式期间
+  // （chat-store 每 ~50ms 变更一次）本 hook 及挂载它的 ChatPage 整树重渲染。
+  const addMessage = useChatStore((s) => s.addMessage)
+  const updateMessage = useChatStore((s) => s.updateMessage)
+  const setStreaming = useChatStore((s) => s.setStreaming)
+  const compactSession = useChatStore((s) => s.compactSession)
+  const setSessionStatus = useChatStore((s) => s.setSessionStatus)
   const requestWorkingDirRef = useRef<string | null>(null)
   const tokenTrackerRef = useRef<TokenTracker>(new TokenTracker())
-  const sessionReadFilesRef = useRef<Map<string, { content: string; timestamp: number }>>(new Map())
+  const sessionReadFilesRef = useRef<Map<string, ReadFileSnapshot>>(new Map())
   /** 会话级冻结的记忆快照：前缀缓存要求 system 段字节一致，
    *  而 save_memory 会在会话中途改写记忆文件 → memoryPrompt 变化 → 动态段之后全部缓存作废。
    *  故同一会话（含 workingDir/homeDir）内只构建一次，新记忆下个会话生效（快照语义）。 */
@@ -651,28 +597,35 @@ export function useAgent(sessionId: string) {
     opts: {
       memoryPrompt?: string
       workingDir?: string
-      /** 任务工作流模式（/spec /plan /goal 菜单选择，随本次消息生效） */
+      /** 任务工作流模式（/spec /plan /goal 菜单选择；goal 亦随会话级目标持续生效） */
       taskMode?: TaskMode
-      activeSkillIndex?: Array<{
-        slug: string
-        name: string
-        description: string
-        triggerKeywords: string[]
-        version: string
-        skillMdPath: string
-        chainsTo: string[]
-      }>
+      /** goal 模式下注入的目标条件原文（会话级目标跨消息持续） */
+      goalCondition?: string
+      /** 全量技能目录（含未激活技能）：AI 自主加载依赖目录发现技能，而非仅用户激活项 */
+      skillCatalog?: SkillCatalogEntry[]
+      /** 当轮相关技能提醒（<system-reminder> 文本，buildRelevantSkillReminder 产出）；
+       *  追加到最后一条 user 消息，不进 system 前缀（保前缀缓存） */
+      skillReminder?: string
       extraSystemPrompt?: string
       agentsMdContent?: string
+      /** 环境段用：当前工作目录是否为 git 仓库（reactLoop 探测后传入） */
+      isGitRepo?: boolean
+      /** microcompact：true 时把较老的大型工具输出就地替换为占位符（保留最近 N 条），
+       *  只减 token 不动 UI/DB 历史。启用后清理集合只增不减，前缀保持稳定。 */
+      clearOldToolResults?: boolean
     } = {}
   ): NeutralMessage[] => {
     const {
       memoryPrompt = '',
       workingDir = getWorkingDir(),
       taskMode,
-      activeSkillIndex = useSkillsStore.getState().getActiveSkillIndex(),
+      goalCondition,
+      skillCatalog = useSkillsStore.getState().getSkillCatalog(),
+      skillReminder,
       extraSystemPrompt,
       agentsMdContent = '',
+      isGitRepo,
+      clearOldToolResults,
     } = opts
 
     // 当前生效模型是否支持图片输入；不支持时图片不进入 API 消息
@@ -693,23 +646,29 @@ export function useAgent(sessionId: string) {
         // 权威声明：会话中途切换目录后，历史消息/工具输出里仍是旧目录路径，
         // 模型容易从上下文抄旧值回答"当前工作目录"。此声明强制以系统提示为准。
         dynamicSystemContent += `\n\nThis section is authoritative: when asked about the current working directory, report the path above — NOT any directory path seen in earlier messages or tool outputs (those reflect a previous setting).`
+        // 环境信息段（参考 Claude Code/opencode 的 env 注入）：会话内稳定的运行环境事实
+        const envLines = [
+          `- Platform: ${navigator.platform || 'unknown'}`,
+          `- OS: ${getOsDescription()} (shells available: cmd.exe, PowerShell)`,
+          `- Today's date: ${new Date().toDateString()}`,
+          `- Is a git repository: ${isGitRepo ? 'yes' : 'no'}`,
+        ]
+        dynamicSystemContent += `\n\n## Environment\n${envLines.join('\n')}`
         dynamicSystemContent += CLERKBOX_PROMPT
         if (agentsMdContent) dynamicSystemContent += agentsMdContent
         if (memoryPrompt) dynamicSystemContent += '\n\n' + memoryPrompt
-        if (activeSkillIndex.length > 0) {
-          const indexLines = activeSkillIndex.map((s) => {
-            const kw = s.triggerKeywords.length > 0 ? ` | keywords: ${s.triggerKeywords.join(', ')}` : ''
-            const ver = s.version ? `@${s.version}` : ''
-            const chain = s.chainsTo.length > 0 ? ` | chains_to: ${s.chainsTo.join(', ')}` : ''
-            return `- \`${s.slug}\`${ver} → ${s.skillMdPath} | ${s.name}: ${s.description}${kw}${chain}`
-          })
-          dynamicSystemContent += `\n\n### ⚡ Currently Active Skills (Index)\n${indexLines.join('\n')}\n\n**Follow the Skill Router rules above. Do NOT read all skills — only read those matching the current task.**`
+        if (skillCatalog.length > 0) {
+          dynamicSystemContent += `\n\n### 🧩 Skill Catalog (every installed skill)\n${renderSkillCatalog(skillCatalog)}\n\n**Follow the Skill Router rules above — load matching skills autonomously via read_file. Do NOT read all skills, only those matching the current task.**`
         }
       }
       // 任务工作流提示词：spec/plan/goal 各自注入对应段（plan 复用 PLAN_MODE_PROMPT）
       if (taskMode === 'plan') dynamicSystemContent += PLAN_MODE_PROMPT
       else if (taskMode === 'spec') dynamicSystemContent += SPEC_MODE_PROMPT
-      else if (taskMode === 'goal') dynamicSystemContent += GOAL_MODE_PROMPT
+      else if (taskMode === 'goal') {
+        dynamicSystemContent += GOAL_MODE_PROMPT
+        // 会话级目标条件：goal 跨消息持续生效时，让模型每一轮都能看到目标原文
+        if (goalCondition) dynamicSystemContent += `\n\n### 🎯 Active Goal Condition\n${goalCondition}`
+      }
     }
 
     // 静/动拆分成两条 system 消息：供应商前缀缓存按"首个不一致 token"作废其后全部。
@@ -749,6 +708,31 @@ export function useAgent(sessionId: string) {
     // 工具配对完整性由下方后处理兜底（补齐丢失的 tool 响应/丢弃孤立 tool 消息）。
     const visibleMsgs = getApiVisibleMessages(msgs)
 
+    // ── microcompact：决定哪些老工具输出要被就地清空 ──
+    // 只在 clearOldToolResults 启用时生效；通过 toolCallId → 工具名回查判定可清理性，
+    // 最近 MICROCOMPACT_KEEP_RECENT 条工具结果与 isError 结果一律保留。
+    const clearedToolIds = new Set<string>()
+    if (clearOldToolResults) {
+      const callNames = new Map<string, string>()
+      const toolMsgIndices: number[] = []
+      for (const [i, m] of visibleMsgs.entries()) {
+        if (m.role === 'assistant' && m.toolCalls) {
+          for (const tc of m.toolCalls) callNames.set(tc.id, tc.name)
+        } else if (m.role === 'tool') {
+          toolMsgIndices.push(i)
+        }
+      }
+      const keepFrom = Math.max(0, toolMsgIndices.length - MICROCOMPACT_KEEP_RECENT)
+      for (let k = 0; k < keepFrom; k++) {
+        const m = visibleMsgs[toolMsgIndices[k]!]
+        const toolCallId = m?.toolResults?.[0]?.toolCallId || ''
+        const name = callNames.get(toolCallId)
+        if (!name || !MICROCOMPACT_CLEARABLE_TOOLS.has(name)) continue
+        if (m.toolResults?.[0]?.isError) continue
+        clearedToolIds.add(toolCallId)
+      }
+    }
+
     for (const m of visibleMsgs) {
       if (m.role === 'system') continue // We already added system prompt
       // 跳过 UI 占位消息（子 agent 卡片），它们不是真实对话内容，会破坏 tool_calls ↔ tool 配对
@@ -760,9 +744,13 @@ export function useAgent(sessionId: string) {
       if (m.role === 'tool') {
         // Tool result message（剥离 UI 专用 __EDIT_DIFF__ 元数据，不发给模型）
         const toolCallId = m.toolResults?.[0]?.toolCallId || ''
+        // microcompact：被清理的老工具输出替换为占位符（UI/DB 历史不受影响）
+        const toolContent = clearedToolIds.has(toolCallId)
+          ? CLEARED_TOOL_RESULT_PLACEHOLDER
+          : m.content.replace(/\n__EDIT_DIFF__:.*$/s, '')
         result.push({
           role: 'tool',
-          content: m.content.replace(/\n__EDIT_DIFF__:.*$/s, ''),
+          content: toolContent,
           tool_call_id: toolCallId,
         })
       } else if (m.role === 'assistant' && m.toolCalls && m.toolCalls.length > 0) {
@@ -826,7 +814,7 @@ export function useAgent(sessionId: string) {
         for (const pendingId of pendingToolCallIds) {
           cleaned.push({
             role: 'tool',
-            content: '[此工具调用的结果因上下文压缩或中断丢失]',
+            content: i18n.t('agent.toolResultLost'),
             tool_call_id: pendingId,
           } as typeof result[number])
         }
@@ -854,7 +842,7 @@ export function useAgent(sessionId: string) {
         for (const pendingId of pendingToolCallIds) {
           cleaned.push({
             role: 'tool',
-            content: '[此工具调用的结果因上下文压缩或中断丢失]',
+            content: i18n.t('agent.toolResultLost'),
             tool_call_id: pendingId,
           } as typeof result[number])
         }
@@ -871,26 +859,38 @@ export function useAgent(sessionId: string) {
       } as typeof result[number])
     }
 
+    // 相关技能提醒（B4）：追加到最后一条 user 消息的消息层（<system-reminder> 包裹），
+    // 不进 system 段 → 不破坏 system 前缀缓存；同一次发送内各轮文本一致 → 轮间前缀稳定。
+    // 仅影响 API 消息，UI/DB 中的用户消息原文保持不变。
+    if (skillReminder) {
+      for (let i = cleaned.length - 1; i >= 0; i--) {
+        if (cleaned[i].role === 'user') {
+          cleaned[i] = { ...cleaned[i], content: `${cleaned[i].content}\n\n${skillReminder}` }
+          break
+        }
+      }
+    }
+
     return cleaned
   }
 
   /** Main send message function with full ReAct loop */
   const sendMessage = useCallback(
-    async (content: string, attachments?: MessageAttachment[], taskMode?: TaskMode) => {
+    async (content: string, attachments?: MessageAttachment[], taskMode?: TaskMode, skills?: MessageSkillSnapshot[]) => {
       // Prevent concurrent sends on the same session（per-session 粒度，不阻塞其他会话并发）
       if (getSessionAbortController(sessionId)) {
-        setError('当前正在处理中，请等待完成后再发送')
+        setError(i18n.t('agent.busy'))
         return
       }
 
       if (!settings.baseUrl) {
-        setError('请先在设置中配置 API Base URL')
+        setError(i18n.t('agent.needBaseUrl'))
         return
       }
       // 本地部署（Ollama / LM Studio 等）无需 Key，不能在这里一刀切拦掉
       const activeProvider = settings.providers.find((p) => p.id === settings.activeProviderId)
       if (!settings.apiKey && requiresApiKey(settings.baseUrl, activeProvider?.presetId)) {
-        setError('请先在设置中配置 API Key')
+        setError(i18n.t('agent.needApiKey'))
         return
       }
 
@@ -903,8 +903,13 @@ export function useAgent(sessionId: string) {
       setSessionAbortController(sessionId, controller)
       const currentSession = useChatStore.getState().sessions.find((s) => s.id === sessionId)
       requestWorkingDirRef.current = currentSession?.workingDir || currentSession?.defaultWorkDir || ''
-      // 记录本次运行的任务工作流模式（/spec /plan /goal；工具权限检查与提示词注入都会读取）
-      activeTaskModeRef.current = taskMode ?? null
+      // 记录本次运行的任务工作流模式（/spec /plan /goal；工具权限检查与提示词注入都会读取）。
+      // /goal 是会话级目标：设定后跨消息持续生效，后续普通消息也按 goal 模式注入语境。
+      if (taskMode === 'goal' && content.trim()) {
+        useGoalStore.getState().setGoal(sessionId, content.trim())
+      }
+      const goalActive = useGoalStore.getState().bySession[sessionId]?.status === 'active'
+      activeTaskModeRef.current = taskMode ?? (goalActive ? 'goal' : null)
       // 记录是否是用户主动 abort，用于决定是否发"异常停下"通知
       let abortedByUser = false
 
@@ -918,6 +923,7 @@ export function useAgent(sessionId: string) {
         ...(attachments && attachments.length > 0 ? { attachments } : {}),
         // 任务工作流随消息记录（气泡内展示 + 重启后可见）
         ...(taskMode ? { taskMode } : {}),
+        ...(skills && skills.length > 0 ? { skills } : {}),
       }
       addMessage(sessionId, userMsg)
 
@@ -926,8 +932,12 @@ export function useAgent(sessionId: string) {
       const session = chatStore.sessions.find((s) => s.id === sessionId)
       const contextMessages = session ? [...session.messages, userMsg] : [userMsg]
 
+      // 相关技能提醒：按本条消息内容对全部已安装技能做词面匹配（命中才注入，
+      // 未命中不注入任何内容）。与用户手动激活（skills 快照）互补。
+      const skillReminder = buildRelevantSkillReminder(content, useSkillsStore.getState().getSkillCatalog()) ?? undefined
+
       try {
-        await reactLoop(contextMessages, controller, taskMode)
+        await reactLoop(contextMessages, controller, taskMode, skillReminder)
       } catch (err) {
         if (controller.signal.aborted) {
           abortedByUser = true
@@ -938,7 +948,7 @@ export function useAgent(sessionId: string) {
         addMessage(sessionId, {
           id: makeId(),
           role: 'assistant',
-          content: `❌ 出错了：${msg}`,
+          content: i18n.t('agent.sendFailed', { message: msg }),
           timestamp: Date.now(),
         })
         // 标记 error 状态 + 系统通知（仅当用户不在此会话时）
@@ -978,12 +988,12 @@ export function useAgent(sessionId: string) {
       // 重入防护 + Agent 运行中忽略（避免与 ReAct 循环中途的消息状态冲突）
       if (isCompactingRef.current || getSessionAbortController(sessionId)) return
       if (!settings.baseUrl) {
-        setError('请先在设置中配置 API Base URL')
+        setError(i18n.t('agent.needBaseUrl'))
         return
       }
       const activeProvider = settings.providers.find((p) => p.id === settings.activeProviderId)
       if (!settings.apiKey && requiresApiKey(settings.baseUrl, activeProvider?.presetId)) {
-        setError('请先在设置中配置 API Key')
+        setError(i18n.t('agent.needApiKey'))
         return
       }
 
@@ -1079,15 +1089,84 @@ export function useAgent(sessionId: string) {
   const reactLoop = async (
     initialMessages: Message[],
     controller: AbortController,
-    taskMode?: TaskMode
+    taskMode?: TaskMode,
+    /** 当轮相关技能提醒（sendMessage 计算；跨轮复用同一文本保证 API 前缀稳定） */
+    skillReminder?: string
   ) => {
     let conversationMessages = [...initialMessages]
+
+    // ── Goal 工作流：会话级目标跨消息持续生效 ──
+    // 本次运行未显式选择工作流时，若目标处于 active，则继续按 goal 模式注入提示词
+    //（goal 不改变工具权限档位，只影响提示词语境与运行收尾的评估闭环）。
+    const sessionGoalAtStart = useGoalStore.getState().bySession[sessionId]
+    const effectiveTaskMode: TaskMode | undefined =
+      taskMode ?? (sessionGoalAtStart?.status === 'active' ? 'goal' : undefined)
+    const goalCondition = sessionGoalAtStart?.status === 'active' ? sessionGoalAtStart.condition : undefined
+    // Goal 评估器运行时状态：本次运行的续跑评估计数 / 连续无工具调用的评估计数（防空转）
+    let goalEvaluationsThisRun = 0
+    let goalIdleEvaluations = 0
+    let iterationHadToolCalls = false
+
+    /** Goal 评估器：独立模型调用，依据转录中的可见证据判定三态；不执行任何工具。
+     *  用量计入全局统计但不进 tokenTracker（避免干扰自动压缩判定）。 */
+    const evaluateGoal = async (
+      condition: string,
+      runController: AbortController
+    ): Promise<{ verdict: GoalVerdict; reason: string }> => {
+      const evalMessages: NeutralMessage[] = [
+        { role: 'system', content: GOAL_EVALUATOR_PROMPT },
+        {
+          role: 'user',
+          content: `# Goal condition\n${condition}\n\n# Recent transcript (oldest first, most recent last)\n${buildGoalTranscript(conversationMessages)}\n\nEvaluate now: has the goal been achieved?`,
+        },
+      ]
+      const response = await callAPI(evalMessages, runController)
+      let text = ''
+      await parseStream(response, runController, {
+        onContent: (t) => { text += t },
+        onThinking: () => {},
+        onToolCallUpdate: () => {},
+        onFinish: () => {},
+        onUsage: (usage) => {
+          try {
+            useTokenUsageStore.getState().recordUsage({
+              usage,
+              sessionId,
+              model: settings.model,
+              providerId: settings.activeProviderId,
+            })
+          } catch { /* 用量统计失败不影响评估流程 */ }
+        },
+      })
+      const jsonMatch = text.match(/\{[\s\S]*\}/)
+      if (jsonMatch) {
+        try {
+          const parsed = JSON.parse(jsonMatch[0]) as { verdict?: string; reason?: string }
+          if (parsed.verdict === 'achieved' || parsed.verdict === 'impossible' || parsed.verdict === 'in_progress') {
+            return { verdict: parsed.verdict, reason: (parsed.reason || '').trim() || text.trim().slice(0, 200) }
+          }
+        } catch { /* JSON 解析失败落入兜底判定 */ }
+      }
+      return { verdict: 'in_progress', reason: (text || 'evaluator returned no verdict').trim().slice(0, 200) }
+    }
 
     // Pre-fetch memory prompt —— 会话级冻结快照（见 sessionMemoryRef 注释）：
     // 每轮 reactLoop 重新构建的话，本轮 save_memory 写入的记忆会让下一轮
     // memoryPrompt 变化，动态 system 段之后的前缀缓存全部作废。
     const workingDir = getWorkingDir()
     const homeDir = ipc.homeDir()
+
+    // AI 自主加载技能的感知映射：SKILL.md 规范化绝对路径 → 技能快照。
+    // read_file 命中时在助手消息上展示"已加载技能"芯片（仅 UI，不影响提示词）。
+    const skillPathMap = new Map<string, MessageSkillSnapshot>()
+    for (const entry of useSkillsStore.getState().getSkillCatalog()) {
+      skillPathMap.set(normalizePathForComparison(entry.skillMdPath), {
+        id: entry.id,
+        name: entry.name,
+        icon: entry.icon,
+        slug: entry.slug,
+      })
+    }
     let memoryPrompt = ''
     if (homeDir) {
       const snapKey = `${sessionId}|${homeDir}|${workingDir}`
@@ -1130,7 +1209,93 @@ export function useAgent(sessionId: string) {
     // 签名只在本轮 ReAct 循环内有效，所以放内存不入库；键为 assistant 消息 id。
     const thinkingBlocks = new Map<string, AnthropicThinkingBlock[]>()
 
-    for (let iteration = 0; iteration < MAX_REACT_ITERATIONS; iteration++) {
+    // 环境信息：git 仓库探测（每目录缓存），传给 buildAPIMessages 的环境段
+    const isGitRepo = workingDir ? await detectGitRepo(workingDir) : false
+    // 运行时防护状态：doom-loop 签名序列 / 工具执行轮计数 / 收尾指令注入标记 / 连续截断轮数
+    const recentToolSignatures: string[] = []
+    let toolExecutionTurns = 0
+    let wrapUpInjected = false
+    let truncatedRefusalStreak = 0
+    // 溢出恢复链：请求真实超上下文时强制压缩一次并重放（参考 Claude Code prompt-too-long recovery）
+    let overflowRecovered = false
+    // 自动压缩连续失败计数（达到熔断阈值后停止自动触发，防止每次发消息都白跑一次压缩请求）
+    let failedAutoCompacts = 0
+    // microcompact 开关：token 超过压缩阈值 85% 时启用并在本轮内保持启用。
+    // 清理集合只增不减 → 请求前缀在后续轮次保持稳定，不会反复破坏缓存。
+    let microCompactEnabled = false
+
+    /** 执行一次自动压缩：成功后 conversationMessages 换为 API 子集并返回 true；
+     *  失败（含「消息不足」）返回 false，由调用方决定回退策略（回落 truncateMessages）。 */
+    const performAutoCompact = async (): Promise<boolean> => {
+      // ── 压缩过程展示：插入一条"正在压缩上下文"占位消息，让用户看到压缩在进行中 ──
+      const compactingId = makeId()
+      addMessage(sessionId, {
+        id: compactingId,
+        role: 'assistant',
+        content: '',
+        timestamp: Date.now(),
+        _isCompacting: true,
+      })
+      try {
+        const compactionResult = await compactConversation(
+          conversationMessages,
+          settings,
+          sessionReadFilesRef.current,
+          undefined,
+          'auto'
+        )
+        // Recompute the keep boundary (same logic as inside compactConversation)
+        const keepStartIndex = findKeepBoundaryIndex(conversationMessages)
+        const keptMessages = conversationMessages.slice(keepStartIndex)
+        // 被压缩的历史消息（压缩点之前）——用户仍要在界面上看到它们，故保留但不发给 API
+        const summarizedMessages = conversationMessages.slice(0, keepStartIndex)
+
+        // 发给 API 的消息：只含 边界 + 摘要 + 保留的新消息 + 文件附件（真正释放 token）
+        const apiMessagesAfterCompact = [
+          compactionResult.boundaryMessage,
+          compactionResult.summaryMessage,
+          ...keptMessages,
+          ...compactionResult.fileAttachments,
+        ]
+
+        // 界面/DB 消息：完整保留全部历史（含压缩点之前的 summarizedMessages），
+        // 压缩组件（边界 + 摘要）插在压缩点位置，用户依旧能看到全部对话记录。
+        const newMessages = [
+          ...summarizedMessages,
+          compactionResult.boundaryMessage,
+          compactionResult.summaryMessage,
+          ...keptMessages,
+          ...compactionResult.fileAttachments,
+        ]
+
+        // Sync to store and DB（保留全部历史）
+        compactSession(sessionId, newMessages, compactionResult.boundaryMessage.id)
+
+        // 后续迭代的 conversationMessages 用 API 子集（释放 token），
+        // 界面上则通过 compactSession 保留全量历史（见 newMessages）。
+        conversationMessages = apiMessagesAfterCompact
+
+        // Clear the read file state (it's now in file attachments)
+        sessionReadFilesRef.current = new Map()
+        // Reset the token tracker after compaction so stale usage cannot retrigger it.
+        // 下一轮 getTokenCount 会取 max(lastUsage, estimated)，导致继续误判超过阈值，
+        // 反复进入 compactConversation 并抛 "Not enough messages to compact"。
+        tokenTrackerRef.current.reset()
+
+        console.log(`[compact] Auto-compacted: ${compactionResult.preCompactTokenCount} → ${compactionResult.postCompactTokenCount} tokens, ${compactionResult.boundaryMessage.compactMetadata?.messagesSummarized} messages summarized`)
+        return true
+      } catch (err) {
+        console.error('[compact] Auto-compaction failed, falling back to truncateMessages:', err)
+        // 压缩失败：把"正在压缩"占位消息改为可见提示，避免残留空白占位
+        updateMessage(sessionId, compactingId, {
+          content: i18n.t('chat.compactFailed'),
+          _isCompacting: false,
+        })
+        return false
+      }
+    }
+
+    for (let iteration = 0; ; iteration++) {
       if (controller.signal.aborted) return
 
       // Auto-compact check: if token count exceeds threshold, summarize older messages
@@ -1147,76 +1312,16 @@ export function useAgent(sessionId: string) {
       // 每次发消息都误触发压缩（而用量指示器按子集统计显示 30%+，两边对不上）。
       const apiVisibleMessages = getApiVisibleMessages(conversationMessages)
       const currentTokenCount = tokenTrackerRef.current.getTokenCount(apiVisibleMessages)
-      if (currentTokenCount > autoCompactThreshold && apiVisibleMessages.length > 12) {
-        // ── 压缩过程展示：插入一条"正在压缩上下文"占位消息，让用户看到压缩在进行中 ──
-        const compactingId = makeId()
-        addMessage(sessionId, {
-          id: compactingId,
-          role: 'assistant',
-          content: '',
-          timestamp: Date.now(),
-          _isCompacting: true,
-        })
-        try {
-          const compactionResult = await compactConversation(
-            conversationMessages,
-            settings,
-            sessionReadFilesRef.current,
-            undefined,
-            'auto'
-          )
-          // Recompute the keep boundary (same logic as inside compactConversation)
-          const keepStartIndex = findKeepBoundaryIndex(conversationMessages)
-          const keptMessages = conversationMessages.slice(keepStartIndex)
-          // 被压缩的历史消息（压缩点之前）——用户仍要在界面上看到它们，故保留但不发给 API
-          const summarizedMessages = conversationMessages.slice(0, keepStartIndex)
-
-          // 发给 API 的消息：只含 边界 + 摘要 + 保留的新消息 + 文件附件（真正释放 token）
-          const apiMessagesAfterCompact = [
-            compactionResult.boundaryMessage,
-            compactionResult.summaryMessage,
-            ...keptMessages,
-            ...compactionResult.fileAttachments,
-          ]
-
-          // 界面/DB 消息：完整保留全部历史（含压缩点之前的 summarizedMessages），
-          // 压缩组件（边界 + 摘要）插在压缩点位置，用户依旧能看到全部对话记录。
-          const newMessages = [
-            ...summarizedMessages,
-            compactionResult.boundaryMessage,
-            compactionResult.summaryMessage,
-            ...keptMessages,
-            ...compactionResult.fileAttachments,
-          ]
-
-          // Sync to store and DB（保留全部历史）
-          compactSession(sessionId, newMessages, compactionResult.boundaryMessage.id)
-
-          // 后续迭代的 conversationMessages 用 API 子集（释放 token），
-          // 界面上则通过 compactSession 保留全量历史（见 newMessages）。
-          conversationMessages = apiMessagesAfterCompact
-
-          // Clear the read file state (it's now in file attachments)
-          sessionReadFilesRef.current = new Map()
-          // Reset the token tracker after compaction so stale usage cannot retrigger it.
-          // 下一轮 getTokenCount 会取 max(lastUsage, estimated)，导致继续误判超过阈值，
-          // 反复进入 compactConversation 并抛 "Not enough messages to compact"。
-          tokenTrackerRef.current.reset()
-
-          console.log(`[compact] Auto-compacted: ${compactionResult.preCompactTokenCount} → ${compactionResult.postCompactTokenCount} tokens, ${compactionResult.boundaryMessage.compactMetadata?.messagesSummarized} messages summarized`)
-        } catch (err) {
-          console.error('[compact] Auto-compaction failed, falling back to truncateMessages:', err)
-          // 压缩失败：把"正在压缩"占位消息改为可见提示，避免残留空白占位
-          updateMessage(sessionId, compactingId, {
-            content: i18n.t('chat.compactFailed'),
-            _isCompacting: false,
-          })
-          // Fallback: let truncateMessages handle it below
-        }
+      if (currentTokenCount > autoCompactThreshold && apiVisibleMessages.length > 12 && failedAutoCompacts < MAX_AUTO_COMPACT_FAILURES) {
+        // 连续失败计数：成功归零，达到阈值后本轮运行内不再自动触发（防死亡螺旋）
+        if (await performAutoCompact()) failedAutoCompacts = 0
+        else failedAutoCompacts++
       }
+      // microcompact 触发：接近压缩阈值但还没到 → 先清老工具输出顶一顶（比全量压缩便宜得多）
+      if (currentTokenCount > Math.floor(autoCompactThreshold * 0.85)) microCompactEnabled = true
 
       // Build API messages from conversation history (with auto-truncation for long conversations)
-      const apiMessages = truncateMessages(buildAPIMessages(conversationMessages, { memoryPrompt, agentsMdContent, taskMode }))
+      const apiMessages = truncateMessages(buildAPIMessages(conversationMessages, { memoryPrompt, agentsMdContent, taskMode: effectiveTaskMode, goalCondition, isGitRepo, skillReminder, clearOldToolResults: microCompactEnabled }))
 
       // Parse streaming response
       let content = ''
@@ -1311,6 +1416,7 @@ export function useAgent(sessionId: string) {
         toolCallBuffers = await runWithRetry(runModelTurn, {
           retries: 5,
           shouldRetry: (err) => !controller.signal.aborted && isRetryableError(err),
+          getRetryAfterMs: extractRetryAfterMs,
           onRetry: (attempt) => {
             // 重试过程中在占位消息上展示「正在重试」提示
             if (placeholderAdded) {
@@ -1328,6 +1434,12 @@ export function useAgent(sessionId: string) {
       } catch (err) {
         // 重试全部失败：把已添加的占位消息标记为非流式，避免残留一条永远 loading 的空消息
         if (placeholderAdded) updateMessage(sessionId, assistantId, { _isStreaming: false, _retrying: undefined })
+        // 溢出恢复链：请求真的超上下文时重试无意义——强制压缩一次并重放本轮。
+        // 仅恢复一次（overflowRecovered 单次标记），仍溢出则把错误抛给用户。
+        if (!overflowRecovered && !controller.signal.aborted && isContextOverflowError(err)) {
+          overflowRecovered = true
+          if (await performAutoCompact()) continue
+        }
         throw err
       }
 
@@ -1355,7 +1467,7 @@ export function useAgent(sessionId: string) {
 
       // Check for truncation
       if (finishReason === 'length') {
-        content += '\n\n⚠️ **输出被截断（达到最大 token 限制），回答可能不完整。**'
+        content += `\n\n${i18n.t('agent.outputTruncated')}`
       }
 
       // Update the assistant message with final content
@@ -1376,21 +1488,103 @@ export function useAgent(sessionId: string) {
 
       // No tool calls → we're done
       if (toolCalls.length === 0) {
-        // 工作流标记处理（/plan /spec /goal）：
-        // - plan/spec：检测到完成标记 → 仅从显示中剥离并结束本轮（停下等用户确认，
+        // 工作流标记处理（/spec /goal）：
+        // - spec：检测到完成标记 → 仅从显示中剥离并结束本轮（停下等用户确认，
         //   用户确认后的下一条消息以普通模式运行，模型会重读文档开始执行）
-        // - goal：[GOAL_COMPLETE] 仅做显示剥离，完成报告保留
-        const currentTaskMode = taskMode
+        // - goal：[GOAL_COMPLETE] 剥离显示，保留完成报告
         const completionMarkers: Array<{ marker: string; enabled: boolean }> = [
-          { marker: '[PLAN_COMPLETE]', enabled: currentTaskMode === 'plan' },
-          { marker: '[SPEC_COMPLETE]', enabled: currentTaskMode === 'spec' },
-          { marker: '[GOAL_COMPLETE]', enabled: currentTaskMode === 'goal' },
+          { marker: '[SPEC_COMPLETE]', enabled: effectiveTaskMode === 'spec' },
+          { marker: '[GOAL_COMPLETE]', enabled: effectiveTaskMode === 'goal' },
         ]
         const hitMarker = completionMarkers.find((m) => m.enabled && content.includes(m.marker))
+        let cleanedContent: string | null = null
         if (hitMarker) {
-          const cleanedContent = content.split(hitMarker.marker).join('').trim()
+          cleanedContent = content.split(hitMarker.marker).join('').trim()
           updateMessage(sessionId, assistantId, { content: cleanedContent })
         }
+
+        // ── Goal 独立评估器三态闭环（对齐 Claude Code /goal）：
+        // 目标 active 时，在每轮收尾用独立评估判定：in_progress → 注入评估理由自动续跑；
+        // achieved/impossible → 终态卡片并结束。[GOAL_COMPLETE] 为快速通道，短路评估省一次调用。 ──
+        const goalNow = useGoalStore.getState().bySession[sessionId]
+        if (goalNow?.status === 'active' && effectiveTaskMode === 'goal' && !controller.signal.aborted) {
+          goalIdleEvaluations = iterationHadToolCalls ? 0 : goalIdleEvaluations + 1
+          const addGoalCard = (verdict: GoalVerdict, reason: string) => {
+            addMessage(sessionId, {
+              id: makeId(),
+              role: 'system',
+              content: '',
+              timestamp: Date.now(),
+              goalEvent: { verdict, reason, evaluations: goalEvaluationsThisRun },
+            })
+          }
+
+          // 快速通道：模型已自报完成标记并给出完成报告 → 直接置 achieved
+          if (hitMarker?.marker === '[GOAL_COMPLETE]') {
+            goalEvaluationsThisRun++
+            const conclusion = (cleanedContent || '').slice(0, 300)
+            useGoalStore.getState().updateGoal(sessionId, {
+              status: 'achieved',
+              evaluations: goalNow.evaluations + 1,
+              conclusion,
+            })
+            addGoalCard('achieved', conclusion || i18n.t('goal.noReport'))
+            collapseIntermediateMessages(sessionId, assistantId)
+            return
+          }
+
+          // 护栏：收尾轮（工具已禁用强制总结）/ 连续空转 / 评估上限 → 暂停续跑但保留目标
+          if (wrapUpInjected || goalIdleEvaluations > GOAL_IDLE_EVALUATION_LIMIT || goalEvaluationsThisRun >= GOAL_MAX_EVALUATIONS_PER_RUN) {
+            const pauseReason = wrapUpInjected
+              ? i18n.t('goal.turnLimitPaused')
+              : goalIdleEvaluations > GOAL_IDLE_EVALUATION_LIMIT
+                ? i18n.t('goal.idlePaused', { count: GOAL_IDLE_EVALUATION_LIMIT + 1 })
+                : i18n.t('goal.evalLimitPaused', { count: GOAL_MAX_EVALUATIONS_PER_RUN })
+            addGoalCard('in_progress', pauseReason)
+            collapseIntermediateMessages(sessionId, assistantId)
+            return
+          }
+
+          // 评估器判定（调用失败不阻断：保留目标，结束本次运行，用户下一条消息自然恢复）
+          try {
+            goalEvaluationsThisRun++
+            const evaluation = await evaluateGoal(goalNow.condition, controller)
+            useGoalStore.getState().updateGoal(sessionId, {
+              evaluations: goalNow.evaluations + 1,
+              lastReason: evaluation.reason,
+            })
+            if (evaluation.verdict === 'achieved') {
+              useGoalStore.getState().updateGoal(sessionId, { status: 'achieved', conclusion: evaluation.reason })
+              addGoalCard('achieved', evaluation.reason)
+              collapseIntermediateMessages(sessionId, assistantId)
+              return
+            }
+            if (evaluation.verdict === 'impossible') {
+              useGoalStore.getState().updateGoal(sessionId, { status: 'failed', conclusion: evaluation.reason })
+              addGoalCard('impossible', evaluation.reason)
+              collapseIntermediateMessages(sessionId, assistantId)
+              return
+            }
+            // in_progress：评估理由作为下一轮引导注入对话，自动续跑
+            addGoalCard('in_progress', evaluation.reason)
+            const guidanceMsg: Message = {
+              id: makeId(),
+              role: 'user',
+              content: i18n.t('goal.continuePrompt', { n: goalEvaluationsThisRun, reason: evaluation.reason }),
+              timestamp: Date.now(),
+            }
+            addMessage(sessionId, guidanceMsg)
+            conversationMessages.push(guidanceMsg)
+            continue
+          } catch (err) {
+            if (controller.signal.aborted) return
+            console.error('[goal] evaluator failed:', err)
+            addGoalCard('in_progress', i18n.t('goal.evaluatorFailed'))
+            collapseIntermediateMessages(sessionId, assistantId)
+            return
+          }
+        }
+
         // Collapse all intermediate assistant messages (those that had tool calls)
         // Only keep the final assistant message expanded
         collapseIntermediateMessages(sessionId, assistantId)
@@ -1403,7 +1597,52 @@ export function useAgent(sessionId: string) {
         updateMessage(sessionId, assistantId, { _isStreaming: false })
         return
       }
+
+      // ── 截断响应保护：finishReason=length 时本轮所有工具调用一律不执行。
+      // 流式参数经 JSON 抢救解析后可能"恰好合法但不完整"，执行有副作用的工具会损坏文件。
+      if (finishReason === 'length') {
+        const refused: ToolResult[] = toolCalls.map((tc) => ({
+          toolCallId: tc.id,
+          content: toolCallRefusal(tc.name, TRUNCATED_TOOL_CALL_REASON),
+          isError: true,
+        }))
+        updateMessage(sessionId, assistantId, { toolResults: refused })
+        for (const r of refused) {
+          const toolMsg: Message = { id: makeId(), role: 'tool', content: r.content, timestamp: Date.now(), toolResults: [r] }
+          addMessage(sessionId, toolMsg)
+          conversationMessages.push(toolMsg)
+        }
+        continue
+      }
+
+      // ── 轮次上限收尾：工具执行轮数用尽后不再执行工具，注入收尾指令让模型文字总结
+      //（参考 opencode MAX_STEPS：硬停会丢掉整个 run 的总结）。
+      // 收尾轮若仍坚持调用工具 → 全部拒绝并退出循环，走兜底提示。 ──
+      if (toolExecutionTurns >= MAX_REACT_ITERATIONS || wrapUpInjected) {
+        const refused: ToolResult[] = toolCalls.map((tc) => ({
+          toolCallId: tc.id,
+          content: toolCallRefusal(tc.name, wrapUpInjected
+            ? 'tool calls are disabled for this run — reply with your final text summary now'
+            : 'maximum tool-call turns reached for this run'),
+          isError: true,
+        }))
+        updateMessage(sessionId, assistantId, { toolResults: refused })
+        for (const r of refused) {
+          const toolMsg: Message = { id: makeId(), role: 'tool', content: r.content, timestamp: Date.now(), toolResults: [r] }
+          addMessage(sessionId, toolMsg)
+          conversationMessages.push(toolMsg)
+        }
+        if (wrapUpInjected) break
+        wrapUpInjected = true
+        const wrapMsg: Message = { id: makeId(), role: 'user', content: MAX_STEPS_MESSAGE, timestamp: Date.now() }
+        addMessage(sessionId, wrapMsg)
+        conversationMessages.push(wrapMsg)
+        continue
+      }
+
       const results: ToolResult[] = []
+      // 本轮 read_file 命中的技能 SKILL.md（AI 自主加载感知，随本轮助手消息展示）
+      const turnLoadedSkills = new Map<string, MessageSkillSnapshot>()
       // L1: 复用循环顶部已声明的 workingDir，避免变量 shadow
 
       const execOne = async (tc: ToolCall, runController: AbortController): Promise<ToolResult> => {
@@ -1411,7 +1650,16 @@ export function useAgent(sessionId: string) {
         if (runController.signal.aborted) {
           return {
             toolCallId: tc.id,
-            content: '⏹ 已中断：用户停止了生成',
+            content: i18n.t('agent.interrupted'),
+            isError: true,
+          }
+        }
+        // doom-loop 检测：连续多次完全相同的调用直接拒绝（放在权限检查前，避免重复弹确认框）
+        const callSig = `${tc.name}\u0000${JSON.stringify(tc.arguments ?? {})}`
+        if (isDoomLoopSig(recentToolSignatures, callSig)) {
+          return {
+            toolCallId: tc.id,
+            content: toolCallRefusal(tc.name, DOOM_LOOP_REFUSAL),
             isError: true,
           }
         }
@@ -1420,7 +1668,7 @@ export function useAgent(sessionId: string) {
         if (!permResult.allowed) {
           return {
             toolCallId: tc.id,
-            content: `权限被拒绝：${permResult.reason}`,
+            content: i18n.t('agent.permissionDenied', { reason: permResult.reason }),
             isError: true,
           }
         }
@@ -1445,12 +1693,14 @@ export function useAgent(sessionId: string) {
             homeDir: ipc.homeDir(),
             sessionId,
             readFileState: sessionReadFilesRef.current,
+            requestUserInput: (questions) => useInteractiveStore.getState().requestQuestion(sessionId, questions),
+            updateTodoList: (items) => useTodoStore.getState().setTodos(sessionId, items),
             spawnSubAgent: async (agentType: string, subPrompt: string) => {
               // Validate the agent before persisting a card that must reference its run.
               // 若 findAgent 失败则卡片已持久化但 runs store 无记录，成为永久孤儿。
               const agent = await findAgent(agentType, getWorkingDir())
               if (!agent) {
-                return `Error: 未知 agent 类型: ${agentType}`
+                return i18n.t('agent.unknownAgentType', { type: agentType })
               }
               const subAgentId = `subagent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
               addMessage(sessionId, {
@@ -1465,11 +1715,18 @@ export function useAgent(sessionId: string) {
                 const subResult = await runSubAgent(agentType, subPrompt, controller, subAgentId)
                 return subResult
               } catch (e) {
-                return `Error: 子 agent 执行失败 - ${e instanceof Error ? e.message : String(e)}`
+                return i18n.t('agent.subAgentFailed', { message: e instanceof Error ? e.message : String(e) })
               }
             },
           })
+          // 记录已执行调用的签名（含失败结果），供 doom-loop 连续性判定
+          recentToolSignatures.push(callSig)
           const isError = result.startsWith('Error') || result.startsWith('❌')
+          // AI 自主加载感知：read_file 命中技能 SKILL.md → 记录快照（本轮展示芯片）
+          if (tc.name === 'read_file' && !isError) {
+            const hit = skillPathMap.get(normalizePathForComparison(String(argsWithCwd.path || '')))
+            if (hit) turnLoadedSkills.set(hit.id, hit)
+          }
           return {
             toolCallId: tc.id,
             content: result,
@@ -1478,7 +1735,7 @@ export function useAgent(sessionId: string) {
         } catch (err) {
           return {
             toolCallId: tc.id,
-            content: `工具执行失败：${err instanceof Error ? err.message : String(err)}`,
+            content: i18n.t('agent.toolExecFailed', { message: err instanceof Error ? err.message : String(err) }),
             isError: true,
           }
         }
@@ -1486,7 +1743,7 @@ export function useAgent(sessionId: string) {
 
       // Preserve model order for side-effecting tools; read-only calls can still run concurrently.
       // MCP 工具（mcp__ 前缀）可能带副作用，统一按顺序执行
-      const sideEffectingTools = new Set(['write_file', 'search_replace', 'execute_command', 'save_memory', 'spawn_agent'])
+      const sideEffectingTools = new Set(['write_file', 'search_replace', 'execute_command', 'save_memory', 'spawn_agent', 'question', 'todowrite'])
       const isSideEffecting = (toolName: string) =>
         sideEffectingTools.has(toolName) || toolName.startsWith('mcp__')
       const orderedResults: Array<ToolResult | undefined> = Array.from({ length: toolCalls.length })
@@ -1496,7 +1753,7 @@ export function useAgent(sessionId: string) {
         if (controller.signal.aborted) {
           orderedResults[index] = {
             toolCallId: toolCall.id,
-            content: '⏹ 已中断：用户停止了生成',
+            content: i18n.t('agent.interrupted'),
             isError: true,
           }
           continue
@@ -1509,9 +1766,16 @@ export function useAgent(sessionId: string) {
       }
       await Promise.all(readOnlyJobs)
       results.push(...orderedResults.filter((result): result is ToolResult => result !== undefined))
+      toolExecutionTurns++
+      // 本轮有工具调用 → 重置 goal 空转计数（评估器护栏依据）
+      iterationHadToolCalls = true
 
       // Update assistant message with tool results
-      updateMessage(sessionId, assistantId, { toolResults: results })
+      updateMessage(sessionId, assistantId, {
+        toolResults: results,
+        // 本轮 AI 自主读取的技能 → "已加载技能"芯片（随消息持久化，仅展示用）
+        ...(turnLoadedSkills.size > 0 ? { loadedSkills: [...turnLoadedSkills.values()] } : {}),
+      })
 
       // Add tool result messages to conversation
       for (const r of results) {
@@ -1532,11 +1796,11 @@ export function useAgent(sessionId: string) {
       // Continue the ReAct loop → model will process tool results and decide next action
     }
 
-    // Safety net - should almost never hit this
+    // Safety net - should almost never hit this（收尾轮模型仍坚持调用工具才会走到这里）
     addMessage(sessionId, {
       id: makeId(),
       role: 'assistant',
-      content: `⚠️ 已达到安全轮次上限（${MAX_REACT_ITERATIONS} 轮），对话可能异常。请重新开始会话。`,
+      content: i18n.t('agent.maxTurnsTerminated', { limit: MAX_REACT_ITERATIONS }),
       timestamp: Date.now(),
     })
   }
@@ -1547,7 +1811,7 @@ export function useAgent(sessionId: string) {
    *  - manual：危险命令 / 工作目录外操作 / 系统目录写入 全部弹窗确认
    *  - auto：AI 审核并自动批准（危险命令与目录外操作免确认；系统目录写入仍弹窗兜底）
    *  - full：完全访问，无需询问直接执行
-   *  任务工作流（taskMode）：plan/spec 规划期仅允许读取与写入对应文档目录 */
+   *  任务工作流（taskMode）：plan 规划期只读；spec 规划期仅允许读取与写入对应文档目录 */
   const checkToolPermission = async (
     toolName: string,
     args: Record<string, unknown>,
@@ -1566,21 +1830,29 @@ export function useAgent(sessionId: string) {
 
     // An explicitly empty allowlist means no tools. Omitted tools retain the default policy.
     if (allowedTools !== undefined && !allowedTools.includes('*') && !allowedTools.includes(toolName)) {
-      return { allowed: false, reason: `子 agent 工具白名单不允许: ${toolName}` }
+      return { allowed: false, reason: i18n.t('agent.subAgentAllowlist', { tool: toolName }) }
     }
     // 子 agent 工具黑名单检查
     if (disallowedTools?.includes(toolName)) {
-      return { allowed: false, reason: `子 agent 工具黑名单禁止: ${toolName}` }
+      return { allowed: false, reason: i18n.t('agent.subAgentDenylist', { tool: toolName }) }
     }
 
     const approvalMode = settings.approvalMode
     const READ_TOOLS = ['read_file', 'read_image', 'list_dir', 'search_files', 'search_content', 'web_search', 'web_fetch', 'search_memory']
 
-    // ── 任务工作流规划期（plan/spec）：只许读 + 写对应文档目录，禁命令 ──
+    // ── Plan 规划期：严格只读，用户确认后的下一条消息以普通模式运行 ──
+    if (taskMode === 'plan') {
+      if (READ_TOOLS.includes(toolName) || toolName === 'question') {
+        return { allowed: true }
+      }
+      return { allowed: false, reason: i18n.t('agent.planReadOnly') }
+    }
+
+    // ── Spec 规划期：只许读 + 写对应文档目录，禁命令 ──
     // 用户确认文档后的下一条消息以普通模式运行，届时不再受限
-    if (taskMode === 'plan' || taskMode === 'spec') {
-      const docDirName = taskMode === 'plan' ? 'plan' : 'specs'
-      const label = taskMode === 'plan' ? 'Plan' : 'Spec'
+    if (taskMode === 'spec') {
+      const docDirName = 'specs'
+      const label = 'Spec'
       if (READ_TOOLS.includes(toolName) || toolName === 'save_memory') {
         return { allowed: true }
       }
@@ -1597,12 +1869,12 @@ export function useAgent(sessionId: string) {
         if (isInsideDocDir) {
           return { allowed: true }
         }
-        return { allowed: false, reason: `${label} 工作流规划期仅允许写入 .clerkbox/${docDirName}/ 目录。文档经用户确认后即可开始执行。` }
+        return { allowed: false, reason: i18n.t('agent.specWriteRestricted', { label, dir: docDirName }) }
       }
       if (toolName === 'execute_command') {
-        return { allowed: false, reason: `${label} 工作流规划期不允许执行命令。文档经用户确认后即可开始执行。` }
+        return { allowed: false, reason: i18n.t('agent.specNoCommands', { label }) }
       }
-      return { allowed: false, reason: `${label} 工作流规划期仅允许读取和写入工作流文档。` }
+      return { allowed: false, reason: i18n.t('agent.specReadOnly', { label }) }
     }
 
     // ── 审批档位：命令执行确认（full 档全部免询问） ──
@@ -1613,24 +1885,24 @@ export function useAgent(sessionId: string) {
       if (approvalMode === 'manual' && isDangerousCommand(cmd)) {
         // 危险命令确认前：标记 confirm-danger + 通知（仅当用户不在此会话时）
         setSessionStatus(sessionId, 'confirm-danger')
-        notifyIfNotViewing(sessionId, 'confirm-danger', `命令：${cmd.slice(0, 100)}`)
+        notifyIfNotViewing(sessionId, 'confirm-danger', i18n.t('agent.notifyDangerCommand', { command: cmd.slice(0, 100) }))
         const confirmed = await ipc.confirmDialog(
-          '高风险命令确认',
-          `ClerkBox 即将执行以下高风险命令，是否确认？\n\n${cmd.slice(0, 200)}`
+          i18n.t('agent.confirmDangerTitle'),
+          i18n.t('agent.confirmDangerBody', { command: cmd.slice(0, 200) })
         )
         // 确认或取消后：恢复 working 状态（sendMessage 仍在执行中）
         setSessionStatus(sessionId, 'working')
         if (!confirmed) {
-          return { allowed: false, reason: '用户取消了高风险命令的执行' }
+          return { allowed: false, reason: i18n.t('agent.deniedCancelDanger') }
         }
       }
       // auto 档：AI 已自审该操作，目录外执行免确认；manual 档仍弹窗
       if (approvalMode === 'manual' && workingDir && commandCwd && !isPathInside(commandCwd, workingDir)) {
         const confirmed = await ipc.confirmDialog(
-          '工作目录外执行确认',
-          `ClerkBox 即将在工作目录外执行命令：\n${commandCwd}\n\n当前工作目录：${workingDir}\n\n是否允许此次执行？`
+          i18n.t('agent.confirmOutsideCwdTitle'),
+          i18n.t('agent.confirmOutsideCwdBody', { cwd: commandCwd, workingDir })
         )
-        if (!confirmed) return { allowed: false, reason: '用户取消了工作目录外命令执行' }
+        if (!confirmed) return { allowed: false, reason: i18n.t('agent.deniedCancelOutsideCwd') }
       }
     }
 
@@ -1641,11 +1913,11 @@ export function useAgent(sessionId: string) {
       // 系统目录写入：manual/auto 都弹窗（最后一道防线，仅 full 档放行）
       if (isSystemPath(path)) {
         const confirmed = await ipc.confirmDialog(
-          '系统目录写入确认',
-          `ClerkBox 即将写入系统目录：\n${path}\n\n此操作可能影响系统稳定性，是否确认？`
+          i18n.t('agent.confirmSystemDirTitle'),
+          i18n.t('agent.confirmSystemDirBody', { path })
         )
         if (!confirmed) {
-          return { allowed: false, reason: '用户取消了系统目录写入' }
+          return { allowed: false, reason: i18n.t('agent.deniedCancelSystemDir') }
         }
       }
 
@@ -1654,11 +1926,11 @@ export function useAgent(sessionId: string) {
         const isOutside = !isPathInside(path, workingDir)
         if (isOutside) {
           const confirmed = await ipc.confirmDialog(
-            '工作目录外写入确认',
-            `ClerkBox 即将写入工作目录外的文件：\n${path}\n\n当前工作目录：${workingDir}\n\n是否允许此次写入？`
+            i18n.t('agent.confirmOutsideWriteTitle'),
+            i18n.t('agent.confirmOutsideWriteBody', { path, workingDir })
           )
           if (!confirmed) {
-            return { allowed: false, reason: '用户取消了工作目录外写入' }
+            return { allowed: false, reason: i18n.t('agent.deniedCancelOutsideWrite') }
           }
         }
       }
@@ -1682,6 +1954,7 @@ export function useAgent(sessionId: string) {
     // 用户主动 abort：清当前会话工作状态，不发通知
     if (sessionId) {
       useChatStore.getState().setSessionStatus(sessionId, null)
+      useInteractiveStore.getState().cancelQuestion(sessionId)
     }
   }, [sessionId])
 
@@ -1697,6 +1970,7 @@ export function useAgent(sessionId: string) {
       // Do NOT collapse: user messages, the final assistant message, or assistant messages without tool calls
       if (msg.id === finalMsgId) continue  // Skip the final message
       if (msg.role === 'user') continue    // Keep user messages visible
+      if (msg.goalEvent) continue          // Goal 判定卡片不折叠（终态/续跑提示需始终可见）
       if (msg.role === 'assistant' && (!msg.toolCalls || msg.toolCalls.length === 0) && msg.content && !msg.content.includes('正在使用工具')) continue  // Keep assistant summaries visible
       // 完全空的消息（无正文、无工具调用）不折叠也不展示 —— 折叠会渲染成「中间步骤 (0)」空行
       if (msg.role === 'assistant' && (!msg.toolCalls || msg.toolCalls.length === 0) && !msg.content.trim()) continue
@@ -1721,7 +1995,7 @@ export function useAgent(sessionId: string) {
     const workingDir = getWorkingDir()
     const homeDir = ipc.homeDir()
     const agent = await findAgent(agentType, workingDir)
-    if (!agent) throw new Error(`未知 agent 类型: ${agentType}`)
+    if (!agent) throw new Error(i18n.t('agent.unknownAgentType', { type: agentType }))
 
     const subAgentId = presetSubAgentId || `subagent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     const subController = new AbortController()
@@ -1731,17 +2005,22 @@ export function useAgent(sessionId: string) {
     parentController.signal.addEventListener('abort', onParentAbort)
 
     // 子 agent 自己的 readFileState（用于 auto-compact 时的文件附件恢复）
-    let subReadFileState = new Map<string, { content: string; timestamp: number }>()
+    let subReadFileState = new Map<string, ReadFileSnapshot>()
     // Each subagent tracks its own usage to keep the parent estimate independent.
     const subTokenTracker = new TokenTracker()
     // 子 agent 自己的 settings 副本（覆盖 model）
     const subSettings = agent.model ? { ...settings, model: agent.model } : settings
 
-    // 初始消息：prompt 作为 user 消息
+    // 初始消息：prompt 作为 user 消息。
+    // goal 目标 active 时附带目标语境：子任务服务于同一目标，结果报告需与目标相关。
+    const activeGoal = useGoalStore.getState().bySession[sessionId]
+    const subPromptWithContext = activeGoal?.status === 'active'
+      ? `${prompt}\n\n[Session goal context] The main agent is pursuing this goal: ${activeGoal.condition}. Your subtask contributes to it — report results relevant to the goal.`
+      : prompt
     let conversationMessages: Message[] = [{
       id: makeId(),
       role: 'user',
-      content: prompt,
+      content: subPromptWithContext,
       timestamp: Date.now(),
     }]
 
@@ -1760,7 +2039,14 @@ export function useAgent(sessionId: string) {
       const maxTurns = agent.maxTurns || 50
       // 子 agent 独立的 thinking 签名缓存，与主 agent 互不干扰
       const thinkingBlocks = new Map<string, AnthropicThinkingBlock[]>()
-      for (let iteration = 0; iteration < maxTurns; iteration++) {
+      // 运行时防护状态（与主 agent 一致）：doom-loop 签名 / 工具执行轮计数 / 收尾注入标记
+      const recentToolSignatures: string[] = []
+      let toolExecutionTurns = 0
+      let wrapUpInjected = false
+      // microcompact（与主 agent 一致）：接近压缩阈值时清老工具输出，本轮内保持启用
+      let subMicroCompactEnabled = false
+      const subIsGitRepo = workingDir ? await detectGitRepo(workingDir) : false
+      for (let iteration = 0; ; iteration++) {
         if (subController.signal.aborted) break
 
         // ── auto-compact 检查（子 agent 也要应用） ──
@@ -1780,7 +2066,7 @@ export function useAgent(sessionId: string) {
               conversationMessages,
               subSettings,
               subReadFileState,
-              `这是子 agent ${agent.name} 的对话，请压缩以继续工作。`,
+              i18n.t('agent.subAgentCompactInstruction', { name: agent.name }),
               'auto'
             )
             const keepStartIndex = findKeepBoundaryIndex(conversationMessages)
@@ -1798,13 +2084,18 @@ export function useAgent(sessionId: string) {
           }
         }
 
-        // 构建 API 消息（用子 agent 的 systemPrompt 覆盖；子 agent 不带任务工作流提示词）
+        // microcompact 触发（与主 agent 同规则）
+        if (tokenCount > Math.floor(subAutoCompactThreshold * 0.85)) subMicroCompactEnabled = true
+
+        // 构建 API 消息（用子 agent 的 systemPrompt 覆盖；子 agent 不带任务工作流提示词与技能目录）
         const apiMessages = truncateMessages(buildAPIMessages(conversationMessages, {
           workingDir,
           memoryPrompt: '',
           taskMode: undefined,
-          activeSkillIndex: [],
+          skillCatalog: [],
           extraSystemPrompt: agent.systemPrompt,
+          isGitRepo: subIsGitRepo,
+          clearOldToolResults: subMicroCompactEnabled,
         }))
 
         // 单轮子 Agent 模型调用（可重试）：与主 agent 一致，429/502 等瞬时错误指数退避重试。
@@ -1879,6 +2170,7 @@ export function useAgent(sessionId: string) {
           toolCallBuffers = await runWithRetry(runSubModelTurn, {
             retries: 5,
             shouldRetry: (err) => !subController.signal.aborted && isRetryableError(err),
+            getRetryAfterMs: extractRetryAfterMs,
             onRetry: (attempt) => {
               if (placeholderAdded) {
                 useAgentRunsStore.getState().updateSubAgentMessage(sessionId, subAgentId, assistantId, {
@@ -1918,7 +2210,7 @@ export function useAgent(sessionId: string) {
         }
 
         if (finishReason === 'length') {
-          content += '\n\n⚠️ 输出被截断。'
+          content += `\n\n${i18n.t('agent.subAgentTruncated')}`
         }
 
         const assistantMessage: Message = {
@@ -1942,6 +2234,45 @@ export function useAgent(sessionId: string) {
           return content
         }
 
+        // ── 截断响应保护（与主 agent 一致）：被截断的工具调用参数可能残缺，一律不执行 ──
+        if (finishReason === 'length') {
+          const refused: ToolResult[] = toolCalls.map((tc) => ({
+            toolCallId: tc.id,
+            content: toolCallRefusal(tc.name, TRUNCATED_TOOL_CALL_REASON),
+            isError: true,
+          }))
+          useAgentRunsStore.getState().updateSubAgentMessage(sessionId, subAgentId, assistantId, { toolResults: refused })
+          for (const r of refused) {
+            const toolMsg: Message = { id: makeId(), role: 'tool', content: r.content, timestamp: Date.now(), toolResults: [r], subAgentId }
+            useAgentRunsStore.getState().appendSubAgentMessage(sessionId, subAgentId, toolMsg)
+            conversationMessages.push(toolMsg)
+          }
+          continue
+        }
+
+        // ── 轮次上限收尾（与主 agent 一致）：不再执行工具，注入收尾指令强制文字总结 ──
+        if (toolExecutionTurns >= maxTurns || wrapUpInjected) {
+          const refused: ToolResult[] = toolCalls.map((tc) => ({
+            toolCallId: tc.id,
+            content: toolCallRefusal(tc.name, wrapUpInjected
+              ? 'tool calls are disabled for this run — reply with your final text summary now'
+              : 'maximum tool-call turns reached for this run'),
+            isError: true,
+          }))
+          useAgentRunsStore.getState().updateSubAgentMessage(sessionId, subAgentId, assistantId, { toolResults: refused })
+          for (const r of refused) {
+            const toolMsg: Message = { id: makeId(), role: 'tool', content: r.content, timestamp: Date.now(), toolResults: [r], subAgentId }
+            useAgentRunsStore.getState().appendSubAgentMessage(sessionId, subAgentId, toolMsg)
+            conversationMessages.push(toolMsg)
+          }
+          if (wrapUpInjected) break
+          wrapUpInjected = true
+          const wrapMsg: Message = { id: makeId(), role: 'user', content: MAX_STEPS_MESSAGE, timestamp: Date.now() }
+          useAgentRunsStore.getState().appendSubAgentMessage(sessionId, subAgentId, wrapMsg)
+          conversationMessages.push(wrapMsg)
+          continue
+        }
+
         // 执行工具调用
         const results: ToolResult[] = []
         for (const tc of toolCalls) {
@@ -1952,7 +2283,14 @@ export function useAgent(sessionId: string) {
             disallowedTools: agent.disallowedTools,
           })
           if (!permResult.allowed) {
-            results.push({ toolCallId: tc.id, content: `权限被拒绝：${permResult.reason}`, isError: true })
+            results.push({ toolCallId: tc.id, content: i18n.t('agent.permissionDenied', { reason: permResult.reason }), isError: true })
+            continue
+          }
+
+          // doom-loop 检测（与主 agent 一致）
+          const callSig = `${tc.name}\u0000${JSON.stringify(tc.arguments ?? {})}`
+          if (isDoomLoopSig(recentToolSignatures, callSig)) {
+            results.push({ toolCallId: tc.id, content: toolCallRefusal(tc.name, DOOM_LOOP_REFUSAL), isError: true })
             continue
           }
 
@@ -1974,9 +2312,11 @@ export function useAgent(sessionId: string) {
               sessionId,
               readFileState: subReadFileState,
             })
+            // 记录已执行调用的签名（含失败结果），供 doom-loop 连续性判定
+            recentToolSignatures.push(callSig)
             results.push({ toolCallId: tc.id, content: result, isError: result.startsWith('Error') || result.startsWith('❌') })
           } catch (err) {
-            results.push({ toolCallId: tc.id, content: `工具执行失败：${err instanceof Error ? err.message : String(err)}`, isError: true })
+            results.push({ toolCallId: tc.id, content: i18n.t('agent.toolExecFailed', { message: err instanceof Error ? err.message : String(err) }), isError: true })
           }
         }
 
@@ -1994,10 +2334,11 @@ export function useAgent(sessionId: string) {
           useAgentRunsStore.getState().appendSubAgentMessage(sessionId, subAgentId, toolMsg)
           conversationMessages.push(toolMsg)
         }
+        toolExecutionTurns++
       }
 
       // 达到 maxTurns
-      const partialResult = conversationMessages[conversationMessages.length - 1]?.content || '子 agent 达到最大迭代数，未产生最终结果'
+      const partialResult = conversationMessages[conversationMessages.length - 1]?.content || i18n.t('agent.subAgentMaxTurns')
       // Preserve an aborted terminal state instead of reporting a completed run.
       if (subController.signal.aborted) {
         useAgentRunsStore.getState().abortSubAgentRun(sessionId, subAgentId)

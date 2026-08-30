@@ -113,7 +113,7 @@ export default function ContextUsageIndicator() {
         onClick={() => setOpen((v) => !v)}
         aria-label={t('chat.contextUsageAria')}
         title={usage ? t('chat.ctxTotalTooltip', { used: formatContextTokens(usage.total), total: formatContextTokens(usage.budget), percent }) : t('chat.contextUsageAria')}
-        className="w-8 h-8 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors"
+        className="w-8 h-8 max-md:w-10 max-md:h-10 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors"
       >
         <svg width="18" height="18" viewBox="0 0 18 18" className="-rotate-90">
           <circle cx="9" cy="9" r={R} fill="none" strokeWidth="2" stroke="#ffffff" strokeOpacity={0.18} strokeDasharray={CIRC} />
@@ -129,7 +129,7 @@ export default function ContextUsageIndicator() {
 
       {open && (
         <div
-          className="absolute right-0 top-full mt-2 w-72 z-50 rounded-md3-lg border border-dark-onSurfaceVariant/15 bg-dark-surfaceContainer shadow-2xl p-4 animate-fade-in"
+          className="absolute right-0 top-full mt-2 w-72 max-md:fixed max-md:top-[60px] max-md:left-1/2 max-md:right-auto max-md:-translate-x-1/2 max-md:w-[min(92vw,288px)] z-50 rounded-md3-lg border border-dark-onSurfaceVariant/15 bg-dark-surfaceContainer shadow-2xl p-4 animate-fade-in"
           role="dialog"
           aria-label={t('chat.contextUsageTitle')}
         >

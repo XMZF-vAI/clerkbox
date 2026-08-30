@@ -3,6 +3,8 @@ import { persist } from 'zustand/middleware'
 import type { SkillDefinition, SkillsMPSkill, SkillsMPSearchResult } from '../types/skills'
 import { ipc } from '../lib/ipc-client'
 import { sharedStorage } from '../lib/shared-storage'
+import { joinPath } from '../lib/path-safety'
+import type { SkillCatalogEntry } from '../lib/skill-catalog'
 
 // slug 级 mutex：同一技能的写盘/删除操作串行执行，防止"停用→快速激活"竞态
 // （removeSkillDir 在 writeSkillDir 之后完成导致刚写入的目录被删除）
@@ -116,16 +118,9 @@ interface SkillsState {
   getSessionSkills: () => SkillDefinition[]
   /** Get active skill slugs for system prompt */
   getActiveSkillSlugs: () => string[]
-  /** Get lightweight active skill index (不含 SKILL.md 正文) for progressive loading */
-  getActiveSkillIndex: () => Array<{
-    slug: string
-    name: string
-    description: string
-    triggerKeywords: string[]
-    version: string
-    skillMdPath: string
-    chainsTo: string[]
-  }>
+  /** Get the full catalog of installed skills (轻量索引：不含 SKILL.md 正文)，
+   *  含未激活技能 —— AI 依据目录自主发现并按需读取（渐进披露第一层） */
+  getSkillCatalog: () => SkillCatalogEntry[]
   /** Reset session skills (for new conversation) */
   resetSessionSkills: () => void
 
@@ -156,6 +151,45 @@ const generateCustomSkillId = (name: string): string => {
 
 const generateSlug = (name: string): string => {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || `skill-${Date.now()}`
+}
+
+/** online/custom 技能的完整文件列表（files 空时回退单文件 SKILL.md） */
+function skillFiles(skill: SkillDefinition): Array<{ path: string; content: string }> {
+  return skill.files && skill.files.length > 0
+    ? skill.files
+    : [{ path: 'SKILL.md', content: skill.skillMdContent }]
+}
+
+/** 把 online/custom 技能写入全局技能库 ~/.clerkbox/skills/<slug>/。
+ *  「已安装 = 磁盘可读」是 AI 自主加载的前提（不依赖用户激活时的项目级写盘）。
+ *  幂等：以 store 内容覆盖；失败仅记录（下次发现流程会重试补写）。 */
+async function writeGlobalSkillCopy(skill: SkillDefinition): Promise<void> {
+  const home = ipc.homeDir()
+  if (!home) return
+  await withSkillLock(skill.slug, async () => {
+    // 写前复查：卸载可能已移除该技能，避免发现流程的兜底写盘把已卸载技能复活回磁盘
+    if (!useSkillsStore.getState().skills.some((s) => s.id === skill.id)) return
+    try {
+      await ipc.writeSkillDir(home, skill.slug, skillFiles(skill))
+    } catch (err) {
+      console.error(`[skills-store] global skill copy failed for ${skill.slug}:`, err)
+    }
+  })
+}
+
+/** 从全局技能库移除副本（卸载时调用，防止重启后被当作 global-clerkbox 技能重新发现） */
+async function removeGlobalSkillCopy(slug: string): Promise<boolean> {
+  const home = ipc.homeDir()
+  if (!home) return true
+  try {
+    await withSkillLock(slug, async () => {
+      await ipc.removeSkillDir(home, slug)
+    })
+    return true
+  } catch (err) {
+    console.error(`[skills-store] global skill removal failed for ${slug}:`, err)
+    return false
+  }
 }
 
 function uniqueSkillSlug(baseSlug: string, skills: SkillDefinition[]): string {
@@ -265,20 +299,27 @@ export const useSkillsStore = create<SkillsState>()(
         return skills.filter((s) => sessionSkillIds.includes(s.id)).map((s) => s.slug)
       },
 
-      getActiveSkillIndex: () => {
+      getSkillCatalog: () => {
         const { skills, sessionSkillIds } = get()
-        return skills
-          .filter((s) => sessionSkillIds.includes(s.id))
-          .map((s) => ({
-            slug: s.slug,
-            name: s.name,
-            description: s.description,
-            triggerKeywords: s.triggerKeywords || [],
-            version: s.version || '',
-            // global-claude/project-claude 技能用其原绝对路径；online/custom 已写盘用相对路径
-            skillMdPath: s.skillMdPath || `.clerkbox/skills/${s.slug}/SKILL.md`,
-            chainsTo: s.chainsTo || [],
-          }))
+        const home = ipc.homeDir()
+        return skills.map((s) => ({
+          id: s.id,
+          slug: s.slug,
+          name: s.name,
+          description: s.description,
+          triggerKeywords: s.triggerKeywords || [],
+          version: s.version || '',
+          icon: s.icon || '',
+          chainsTo: s.chainsTo || [],
+          active: sessionSkillIds.includes(s.id),
+          // global/project-clerkbox 与 claude 兼容技能带原绝对路径；
+          // online/custom 技能指向全局技能库 ~/.clerkbox/skills/<slug>/SKILL.md（安装即落盘）
+          skillMdPath:
+            s.skillMdPath ||
+            (home
+              ? joinPath(home, '.clerkbox', 'skills', s.slug, 'SKILL.md')
+              : `.clerkbox/skills/${s.slug}/SKILL.md`),
+        }))
       },
 
       resetSessionSkills: () => {
@@ -331,26 +372,30 @@ export const useSkillsStore = create<SkillsState>()(
           if (!skillMdFile) return false
           const skillMdContent = skillMdFile.content
 
+          const newSkill: SkillDefinition = {
+            id,
+            slug: uniqueSkillSlug(generateSlug(mpSkill.name), get().skills),
+            name: mpSkill.titleCn || mpSkill.name,
+            description: (mpSkill.description || '').slice(0, 100),
+            icon: '',
+            category: 'online',
+            source: 'online',
+            skillMdContent,
+            warnings,
+            triggerKeywords: [],
+            version: '',
+            author: mpSkill.author || '',
+            chainsTo: [],
+            files,
+          }
+          let added = false
           set((state) => {
             if (state.skills.some((skill) => skill.id === id)) return state
-            const newSkill: SkillDefinition = {
-              id,
-              slug: uniqueSkillSlug(generateSlug(mpSkill.name), state.skills),
-              name: mpSkill.titleCn || mpSkill.name,
-              description: (mpSkill.description || '').slice(0, 100),
-              icon: '',
-              category: 'online',
-              source: 'online',
-              skillMdContent,
-              warnings,
-              triggerKeywords: [],
-              version: '',
-              author: mpSkill.author || '',
-              chainsTo: [],
-              files,
-            }
+            added = true
             return { skills: [...state.skills, newSkill] }
           })
+          // 安装即落盘全局技能库：保证 AI 无需用户激活也能读取（AI 自主加载前提）
+          if (added) await writeGlobalSkillCopy(newSkill)
           return true
         } catch {
           return false
@@ -362,6 +407,13 @@ export const useSkillsStore = create<SkillsState>()(
         const skill = skills.find((s) => s.id === id)
         if (!skill) return
 
+        // 先删全局技能库副本（失败则回滚，防止重启后被当作 global-clerkbox 技能重新发现）
+        const globalRemoved = await removeGlobalSkillCopy(skill.slug)
+        if (!globalRemoved) {
+          console.error(`[skills-store] uninstall aborted for ${skill.slug}: global copy removal failed`)
+          return
+        }
+
         // Remove from session if active
         const newSessionIds = sessionSkillIds.filter((sid) => sid !== id)
         // Remove from skills list
@@ -369,7 +421,7 @@ export const useSkillsStore = create<SkillsState>()(
 
         set({ skills: newSkills, sessionSkillIds: newSessionIds })
 
-        // Remove from disk
+        // Remove from disk (项目级激活副本)
         if (workingDir) {
           try {
             await ipc.removeSkillDir(workingDir, skill.slug)
@@ -402,24 +454,24 @@ export const useSkillsStore = create<SkillsState>()(
         const files = result.files && result.files.length > 0
           ? result.files
           : [{ path: 'SKILL.md', content: skillMdContent }]
-        set((state) => {
-          const newSkill: SkillDefinition = {
-            id,
-            slug: uniqueSkillSlug(generateSlug(name), state.skills),
-            name,
-            description: (result.description || '用户自定义技能').slice(0, 100),
-            icon: result.icon || '',
-            category: (result.category as SkillDefinition['category']) || 'custom',
-            source: 'custom',
-            skillMdContent,
-            triggerKeywords: [],
-            version: '',
-            author: '',
-            chainsTo: [],
-            files,
-          }
-          return { skills: [...state.skills, newSkill] }
-        })
+        const newSkill: SkillDefinition = {
+          id,
+          slug: uniqueSkillSlug(generateSlug(name), get().skills),
+          name,
+          description: (result.description || '用户自定义技能').slice(0, 100),
+          icon: result.icon || '',
+          category: (result.category as SkillDefinition['category']) || 'custom',
+          source: 'custom',
+          skillMdContent,
+          triggerKeywords: [],
+          version: '',
+          author: '',
+          chainsTo: [],
+          files,
+        }
+        set((state) => ({ skills: [...state.skills, newSkill] }))
+        // 安装即落盘全局技能库（同 online 技能）
+        await writeGlobalSkillCopy(newSkill)
         return { success: true }
       },
 
@@ -491,6 +543,13 @@ export const useSkillsStore = create<SkillsState>()(
             skills,
             sessionSkillIds: get().sessionSkillIds.filter((id) => skills.some((skill) => skill.id === id)),
           })
+          // 迁移兜底：早期版本安装的 online/custom 技能可能还没有全局库副本
+          // （AI 自主加载依赖「已安装 = 磁盘可读」）。发现流程顺带幂等补写。
+          for (const skill of get().skills) {
+            if (skill.source === 'online' || skill.source === 'custom') {
+              void writeGlobalSkillCopy(skill)
+            }
+          }
         } catch (e) {
           console.error('[skills-store] discoverStandardSkills failed:', e)
         }

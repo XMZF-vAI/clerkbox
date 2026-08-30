@@ -1,5 +1,5 @@
 import { ipc } from './ipc-client'
-import { endpointFor, headersFor } from './api-adapters'
+import { endpointFor, headersFor, formatRetryAfterHint } from './api-adapters'
 import type { ApiCompat } from '../types/agent'
 
 /**
@@ -181,7 +181,9 @@ async function openDirectStream(
   if (!response.ok) {
     // 截断错误响应体到前 500 字符，避免超长错误信息撑爆 UI / 日志
     const errText = redactApiKey(await readBoundedText(response, DIRECT_ERROR_LIMIT).catch(() => ''), cfg.apiKey)
-    throw new Error(`API Error ${response.status}: ${errText}`)
+    // 透传服务端 Retry-After 指示（retry agent 解析后按服务端要求延迟重试）
+    const retryHint = formatRetryAfterHint(response.headers)
+    throw new Error(`API Error ${response.status}${retryHint}: ${errText}`)
   }
   const stream = response.body
   if (!stream) throw new Error('No response body')
@@ -256,7 +258,8 @@ export async function postJson(cfg: TransportConfig, body: unknown): Promise<unk
   })
   if (!response.ok) {
     const errText = redactApiKey(await readBoundedText(response, DIRECT_ERROR_LIMIT).catch(() => ''), cfg.apiKey)
-    throw new Error(`API Error ${response.status}: ${errText}`)
+    const retryHint = formatRetryAfterHint(response.headers)
+    throw new Error(`API Error ${response.status}${retryHint}: ${errText}`)
   }
   const text = await readBoundedText(response, DIRECT_RESPONSE_LIMIT)
   try {

@@ -3,6 +3,7 @@ import {
   Bot,
   Folder,
   Globe,
+  PanelRight,
   Plus,
   Search,
   SquareTerminal,
@@ -58,6 +59,7 @@ export default function WorkbenchPanel({ vibe }: { vibe?: boolean }) {
   const openTerminal = useWorkbenchStore((s) => s.openTerminal)
   const openBrowser = useWorkbenchStore((s) => s.openBrowser)
   const closeTab = useWorkbenchStore((s) => s.closeTab)
+  const toggleVisible = useWorkbenchStore((s) => s.toggleVisible)
 
   // 当前会话工作目录：作为新建终端的起始路径（用户未选过则用自动生成的默认目录）
   const sessions = useChatStore((s) => s.sessions)
@@ -117,7 +119,14 @@ export default function WorkbenchPanel({ vibe }: { vibe?: boolean }) {
   )
 
   return (
-    <aside
+    <>
+      {/* 移动端遮罩：点击面板外空白关闭（与左侧会话抽屉行为一致） */}
+      <div
+        className="md:hidden fixed inset-0 z-30 bg-black/55 animate-fade-in"
+        onClick={toggleVisible}
+        aria-hidden
+      />
+      <aside
       className={`flex max-md:fixed max-md:inset-y-0 max-md:right-0 max-md:z-40 max-md:w-[min(92vw,430px)] max-md:flex-col max-md:shadow-2xl md:relative md:h-full md:max-h-full md:w-[var(--wb-width)] md:min-w-[300px] md:shrink-0 flex-col ${
         vibe
           ? 'liquid-glass-strong border-white/15 max-md:rounded-l-xl text-white'
@@ -261,6 +270,20 @@ export default function WorkbenchPanel({ vibe }: { vibe?: boolean }) {
           )}
         </div>
 
+        {/* 收起按钮：仅 VIBE 模式需要（无标题栏开关，否则面板打开后无法关闭）；普通模式由 TitleBar 负责 */}
+        {vibe && (
+          <button
+            type="button"
+            onClick={toggleVisible}
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md3-sm text-white/70 transition-colors hover:bg-white/10 hover:text-white"
+            aria-label={t('titlebar.toggleWorkbench')}
+            title={t('titlebar.toggleWorkbench')}
+            data-testid="workbench-collapse"
+          >
+            <PanelRight size={15} />
+          </button>
+        )}
+
       </div>
 
       {/* 内容区 */}
@@ -318,5 +341,6 @@ export default function WorkbenchPanel({ vibe }: { vibe?: boolean }) {
       {/* 拖拽 shield：覆盖视口吸收鼠标事件，避免 webview/xterm 拖穿 */}
       {dragging && <div className="fixed inset-0 z-40 cursor-col-resize" />}
     </aside>
+    </>
   )
 }

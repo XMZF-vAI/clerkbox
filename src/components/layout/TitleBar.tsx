@@ -1,7 +1,6 @@
-import { Menu, Minus, Square, X, Sparkles, Copy, PanelRight } from 'lucide-react'
+import { Minus, Square, X, Sparkles, Copy, PanelLeft, PanelRight } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useChatStore } from '../../stores/chat-store'
 import { useVibeStore } from '../../stores/vibe-store'
 import { useWorkbenchStore } from '../../stores/workbench-store'
 import ContextUsageIndicator from '../chat/ContextUsageIndicator'
@@ -10,12 +9,11 @@ import pkg from '../../../package.json'
 
 interface TitleBarProps {
   onToggleSidebar: () => void
+  sidebarVisible: boolean
 }
 
-export default function TitleBar({ onToggleSidebar }: TitleBarProps) {
+export default function TitleBar({ onToggleSidebar, sidebarVisible }: TitleBarProps) {
   const { t } = useTranslation()
-  // 多会话并发：TitleBar 只关心"是否有任意会话在 streaming"，不关心具体几个
-  const hasStreaming = useChatStore((s) => s.streamingSessionIds.size > 0)
   const vibeMode = useVibeStore((s) => s.isVibeMode)
   const toggleVibeMode = useVibeStore((s) => s.toggleVibeMode)
   // 工作台面板显隐：激活态高亮按钮
@@ -41,9 +39,10 @@ export default function TitleBar({ onToggleSidebar }: TitleBarProps) {
           onClick={onToggleSidebar}
           aria-label={t('titlebar.toggleSidebar')}
           title={t('titlebar.toggleSidebar')}
-          className="w-8 h-8 max-md:w-11 max-md:h-11 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors"
+          aria-pressed={sidebarVisible}
+          className="w-8 h-8 max-md:w-11 max-md:h-11 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh text-dark-onSurfaceVariant transition-colors"
         >
-          <Menu size={18} />
+          <PanelLeft size={16} />
         </button>
         <span className="text-xs px-1.5 py-0.5 rounded-md3-xs bg-dark-surfaceContainerHigh text-dark-onSurfaceVariant max-md:hidden">
           v{pkg.version}
@@ -51,7 +50,7 @@ export default function TitleBar({ onToggleSidebar }: TitleBarProps) {
       </div>
 
       <div className="flex items-center gap-1" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-        {/* VIBE mode toggle：默认紧凑 VIBE 标签，悬停展开为完整入口文案 */}
+        {/* 氛围模式 toggle：默认紧凑「氛围」标签，悬停展开为完整入口文案 */}
         <button
           type="button"
           onClick={() => toggleVibeMode()}
@@ -62,7 +61,7 @@ export default function TitleBar({ onToggleSidebar }: TitleBarProps) {
         >
           <Sparkles size={14} className="shrink-0 transition-transform duration-300 ease-out group-hover:rotate-12 group-hover:scale-110" />
           <span className="text-xs font-medium whitespace-nowrap overflow-hidden ml-1 max-w-10 opacity-100 group-hover:max-w-0 group-hover:opacity-0 group-hover:ml-0 transition-all duration-300 ease-out">
-            VIBE
+            {t('titlebar.vibeCompact')}
           </span>
           <span className="text-xs font-medium whitespace-nowrap overflow-hidden max-w-0 opacity-0 group-hover:max-w-32 group-hover:opacity-100 group-hover:ml-1 transition-all duration-300 ease-out">
             {t('titlebar.vibeEnter')}
@@ -72,18 +71,6 @@ export default function TitleBar({ onToggleSidebar }: TitleBarProps) {
         {/* Context usage indicator：环形用量 + 统计面板（含手动压缩入口） */}
         <ContextUsageIndicator />
 
-        {/* Status indicator */}
-        <div className={`flex items-center gap-2 mr-2 px-2 py-1 rounded-md3-sm ${
-          hasStreaming ? 'bg-md-info/10' : 'bg-dark-surfaceContainerHigh'
-        }`}>
-          <div className={`w-2 h-2 rounded-full ${
-            hasStreaming ? 'bg-md-info animate-pulse-soft' : 'bg-md-success'
-          }`} />
-          <span className="text-xs text-dark-onSurfaceVariant max-md:hidden">
-            {hasStreaming ? t('titlebar.statusExecuting') : t('titlebar.statusReady')}
-          </span>
-        </div>
-
         {/* 工作台面板开关（普通模式；VIBE 模式无标题栏，走 VibeControls 里的入口） */}
         <button
           type="button"
@@ -91,7 +78,7 @@ export default function TitleBar({ onToggleSidebar }: TitleBarProps) {
           aria-label={t('titlebar.toggleWorkbench')}
           title={t('titlebar.toggleWorkbench')}
           aria-pressed={workbenchVisible}
-          className={`w-8 h-8 flex items-center justify-center rounded-md3-sm transition-colors ${
+          className={`w-8 h-8 max-md:w-11 max-md:h-11 flex items-center justify-center rounded-md3-sm transition-colors ${
             workbenchVisible
               ? 'bg-md-primary/15 text-md-primary'
               : 'hover:bg-dark-surfaceContainerHigh text-dark-onSurfaceVariant'

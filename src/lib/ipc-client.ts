@@ -296,10 +296,10 @@ export const ipc = {
     isElectron ? window.clerkbox.writeFile(path, content) : webInvoke('writeFile', [path, content]),
   listDir: (path: string): Promise<FileEntry[]> =>
     isElectron ? window.clerkbox.listDir(path) : webInvoke('listDir', [path]),
-  executeCommand: (command: string, cwd?: string, sessionId?: string): Promise<{ stdout: string; stderr: string; exitCode: number; encodingFallback?: boolean }> =>
-    isElectron ? window.clerkbox.executeCommand(command, cwd, sessionId) : webInvoke('executeCommand', [command, cwd, sessionId]),
-  executeCommandWithShell: (command: string, cwd: string | undefined, shellType: string, sessionId?: string): Promise<{ stdout: string; stderr: string; exitCode: number; encodingFallback?: boolean }> =>
-    isElectron ? window.clerkbox.executeCommandWithShell(command, cwd, shellType, sessionId) : webInvoke('executeCommandWithShell', [command, cwd, shellType, sessionId]),
+  executeCommand: (command: string, cwd?: string, sessionId?: string, timeoutMs?: number): Promise<{ stdout: string; stderr: string; exitCode: number; encodingFallback?: boolean; timedOut?: boolean }> =>
+    isElectron ? window.clerkbox.executeCommand(command, cwd, sessionId, timeoutMs) : webInvoke('executeCommand', [command, cwd, sessionId, timeoutMs]),
+  executeCommandWithShell: (command: string, cwd: string | undefined, shellType: string, sessionId?: string, timeoutMs?: number): Promise<{ stdout: string; stderr: string; exitCode: number; encodingFallback?: boolean; timedOut?: boolean }> =>
+    isElectron ? window.clerkbox.executeCommandWithShell(command, cwd, shellType, sessionId, timeoutMs) : webInvoke('executeCommandWithShell', [command, cwd, shellType, sessionId, timeoutMs]),
   cancelSessionCommands: (sessionId: string): Promise<{ killed: number }> =>
     isElectron ? window.clerkbox.cancelSessionCommands(sessionId) : webInvoke('cancelSessionCommands', [sessionId]),
   webSearch: (query: string, count?: number): Promise<Array<{ title: string; snippet: string; url: string }> | { error: string }> =>

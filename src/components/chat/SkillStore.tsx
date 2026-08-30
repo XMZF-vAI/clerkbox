@@ -15,6 +15,7 @@ import {
   FileArchive,
   X,
   FileText,
+  Info,
   Package,
   SearchX,
   AlertTriangle,
@@ -31,7 +32,7 @@ import { useUIStore } from '../../stores/ui-store'
 import { useSettingsStore } from '../../stores/settings-store'
 import { useMcpStore } from '../../stores/mcp-store'
 import { ipc } from '../../lib/ipc-client'
-import type { SkillsMPSkill } from '../../types/skills'
+import type { SkillsMPSkill, SkillDefinition } from '../../types/skills'
 import type { McpMarketServer, McpServerConfig } from '../../types/ipc'
 
 /**
@@ -59,6 +60,13 @@ const BSS_LEVEL_BADGE: Record<string, { className: string; label: string }> = {
 }
 
 /**
+ * 详情弹窗目标：online = 商店在线技能（市场元数据），installed = 已安装技能（本地定义）。
+ */
+type DetailTarget =
+  | { kind: 'online'; skill: SkillsMPSkill }
+  | { kind: 'installed'; skill: SkillDefinition }
+
+/**
  * 渲染技能图标：严格遵守"严禁 emoji"要求，统一返回 Package SVG。
  * CocoLoop 返回的 emoji 字段一律忽略，确保视觉一致且无 emoji 依赖。
  */
@@ -76,7 +84,6 @@ export default function SkillStore() {
   const {
     skills,
     sessionSkillIds,
-    toggleSessionSkill,
     searchResults,
     searchLoading,
     searchQuery,
@@ -107,6 +114,8 @@ export default function SkillStore() {
   const [uploadError, setUploadError] = useState<string | null>(null)
   // 在线技能安装失败时的错误提示（显示在主内容区顶部）
   const [installError, setInstallError] = useState<string | null>(null)
+  // 技能详情弹窗：online = 商店在线技能，installed = 已安装技能
+  const [detailTarget, setDetailTarget] = useState<DetailTarget | null>(null)
 
   // ── 商店 tab（左侧导航：技能 / MCP 插件；默认技能）──
   const [storeTab, setStoreTab] = useState<'skills' | 'mcp'>('skills')
@@ -294,6 +303,19 @@ export default function SkillStore() {
   useEffect(() => {
     uploadLoadingRef.current = uploadLoading
   }, [uploadLoading])
+
+  // 详情弹窗：Esc 关闭（捕获阶段拦截，避免冒泡到其他全局快捷键）
+  useEffect(() => {
+    if (!detailTarget) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.stopPropagation()
+        setDetailTarget(null)
+      }
+    }
+    document.addEventListener('keydown', onKeyDown, true)
+    return () => document.removeEventListener('keydown', onKeyDown, true)
+  }, [detailTarget])
 
   useEffect(() => {
     if (!showUploadModal) return
@@ -500,6 +522,14 @@ export default function SkillStore() {
           )}
         </div>
         <div className="flex items-center gap-1.5 flex-shrink-0 mt-1">
+          <button
+            type="button"
+            onClick={() => setDetailTarget({ kind: 'online', skill: mpSkill })}
+            className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium bg-dark-surfaceContainer hover:bg-dark-surfaceContainerHighest text-dark-onSurfaceVariant transition-all flex-shrink-0"
+          >
+            <Info size={11} />
+            {t('skillstore.details')}
+          </button>
           {showInstall && (
             installed ? (
               <span className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium bg-md-success/15 text-md-success">
@@ -738,25 +768,15 @@ export default function SkillStore() {
                               ))}
                             </div>
                           )}
-                          {skill.warnings && skill.warnings.length > 0 && (
-                            <p className="text-[10px] text-md-warning/80 mt-0.5 truncate flex items-center gap-1" title={skill.warnings.join('\n')}>
-                              <AlertTriangle size={10} className="flex-shrink-0" />
-                              <span className="truncate">{skill.warnings[0]}{skill.warnings.length > 1 ? t('skillstore.warningsSuffix', { count: skill.warnings.length }) : ''}</span>
-                            </p>
-                          )}
                         </div>
                         <div className="flex items-center gap-1.5 flex-shrink-0 mt-1">
                           <button
                             type="button"
-                            onClick={() => toggleSessionSkill(skill.id, workingDir)}
-                            className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium transition-all flex-shrink-0 ${
-                              isActive
-                                ? 'bg-md-primary text-md-onPrimary hover:bg-md-primary/90'
-                                : 'bg-dark-surfaceContainer hover:bg-dark-surfaceContainerHighest text-dark-onSurfaceVariant'
-                            }`}
+                            onClick={() => setDetailTarget({ kind: 'installed', skill })}
+                            className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium bg-dark-surfaceContainer hover:bg-dark-surfaceContainerHighest text-dark-onSurfaceVariant transition-all flex-shrink-0"
                           >
-                            {isActive ? <Check size={11} /> : <Zap size={11} />}
-                            {isActive ? t('skillstore.loaded') : t('skillstore.load')}
+                            <Info size={11} />
+                            {t('skillstore.details')}
                           </button>
                           {isRemovable && (
                             <button
@@ -851,15 +871,11 @@ export default function SkillStore() {
                           <div className="flex items-center gap-1.5 flex-shrink-0 mt-1">
                             <button
                               type="button"
-                              onClick={() => toggleSessionSkill(skill.id, workingDir)}
-                              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium transition-all flex-shrink-0 ${
-                                isActive
-                                  ? 'bg-md-primary text-md-onPrimary hover:bg-md-primary/90'
-                                  : 'bg-dark-surfaceContainer hover:bg-dark-surfaceContainerHighest text-dark-onSurfaceVariant'
-                              }`}
+                              onClick={() => setDetailTarget({ kind: 'installed', skill })}
+                              className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium bg-dark-surfaceContainer hover:bg-dark-surfaceContainerHighest text-dark-onSurfaceVariant transition-all flex-shrink-0"
                             >
-                              {isActive ? <Check size={11} /> : <Zap size={11} />}
-                              {isActive ? t('skillstore.loaded') : t('skillstore.load')}
+                              <Info size={11} />
+                              {t('skillstore.details')}
                             </button>
                             {isRemovable && (
                               <button
@@ -1218,6 +1234,157 @@ export default function SkillStore() {
           </div>
         </div>
       )}
+
+      {/* ── 技能详情弹窗：完整介绍 + 元数据（安全提示收敛到此处，卡片不再展示）── */}
+      {detailTarget && (() => {
+        const mp = detailTarget.kind === 'online' ? detailTarget.skill : null
+        const inst = detailTarget.kind !== 'online' ? detailTarget.skill : null
+        const badge = inst ? SOURCE_BADGE[inst.source] : undefined
+        const bssBadge = mp?.bssLevel ? BSS_LEVEL_BADGE[mp.bssLevel] : undefined
+        return (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+            onClick={() => setDetailTarget(null)}
+          >
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="skill-detail-title"
+              className="w-full max-w-md max-h-[85dvh] overflow-y-auto rounded-xl bg-dark-surfaceContainerHigh border border-dark-onSurfaceVariant/10 shadow-2xl p-5 animate-fade-in"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="flex items-start justify-between gap-3 mb-4">
+                <div className="flex items-start gap-2.5 min-w-0">
+                  <div className="w-9 h-9 rounded-lg bg-dark-surfaceContainer flex items-center justify-center text-md-primary flex-shrink-0">
+                    {renderSkillIcon(mp ? mp.emoji : inst?.icon, 18)}
+                  </div>
+                  <div className="min-w-0">
+                    <h3 id="skill-detail-title" className="text-base font-semibold text-dark-onSurface truncate">
+                      {mp ? (mp.titleCn || mp.name) : inst?.name}
+                    </h3>
+                    {mp?.titleCn && mp.titleCn !== mp.name && (
+                      <p className="text-[11px] text-dark-onSurfaceVariant/40 truncate">{mp.name}</p>
+                    )}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setDetailTarget(null)}
+                  className="p-1 rounded-md3-sm hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant/60 transition-colors flex-shrink-0"
+                  aria-label={t('common.close')}
+                >
+                  <X size={16} />
+                </button>
+              </div>
+
+              {/* 元信息：作者 / 版本 / 来源 / 安全等级 */}
+              <div className="flex items-center gap-1.5 flex-wrap text-[11px] text-dark-onSurfaceVariant/50">
+                {(mp ? mp.author : inst?.author) && <span>by {mp ? mp.author : inst?.author}</span>}
+                {inst?.version && <span>v{inst.version}</span>}
+                {badge ? (
+                  <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-medium ${badge.className}`}>
+                    {t(badge.labelKey)}
+                  </span>
+                ) : (
+                  <span className="px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-md-info/15 text-md-info">
+                    {t('skillstore.sourceCocoLoop')}
+                  </span>
+                )}
+                {bssBadge && (
+                  <span
+                    className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-medium ${bssBadge.className}`}
+                  >
+                    <ShieldCheck size={9} /> {bssBadge.label}
+                  </span>
+                )}
+              </div>
+
+              {/* 完整介绍 */}
+              <p className="text-xs text-dark-onSurfaceVariant/70 leading-relaxed whitespace-pre-wrap break-words mt-3">
+                {mp ? mp.description : inst?.description}
+              </p>
+
+              {/* 在线技能统计 */}
+              {mp && (mp.downloads || mp.installs || mp.favorites || mp.updatedAt) && (
+                <div className="flex items-center gap-3 flex-wrap mt-3 text-[11px] text-dark-onSurfaceVariant/50">
+                  {mp.downloads && (
+                    <span className="flex items-center gap-1">
+                      <Download size={11} /> {t('skillstore.downloadsLabel')} {mp.downloads}
+                    </span>
+                  )}
+                  {mp.installs && (
+                    <span className="flex items-center gap-1">
+                      <Check size={11} /> {t('skillstore.installsLabel')} {mp.installs}
+                    </span>
+                  )}
+                  {mp.favorites && (
+                    <span className="flex items-center gap-1">
+                      <Star size={11} /> {t('skillstore.favoritesLabel')} {mp.favorites}
+                    </span>
+                  )}
+                  {mp.updatedAt && (
+                    <span>
+                      {t('skillstore.detailUpdated')} {mp.updatedAt}
+                    </span>
+                  )}
+                </div>
+              )}
+
+              {/* 已安装技能：触发关键词 */}
+              {inst && (inst.triggerKeywords?.length ?? 0) > 0 && (
+                <div className="mt-3">
+                  <p className="text-[11px] text-dark-onSurfaceVariant/40 mb-1">{t('skillstore.detailKeywords')}</p>
+                  <div className="flex items-center gap-1 flex-wrap">
+                    {inst.triggerKeywords.map((kw) => (
+                      <span
+                        key={kw}
+                        className="px-1.5 py-0.5 rounded-full bg-dark-surfaceContainer text-dark-onSurfaceVariant/60 text-[10px]"
+                      >
+                        {kw}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* 已安装技能：安全提示 */}
+              {inst && inst.warnings && inst.warnings.length > 0 && (
+                <div className="mt-3">
+                  <p className="flex items-center gap-1 text-[11px] font-medium text-md-warning mb-1">
+                    <AlertTriangle size={11} /> {t('skillstore.detailWarnings')}
+                  </p>
+                  <ul className="space-y-0.5 text-[11px] text-md-warning/80 list-disc pl-4">
+                    {inst.warnings.map((w, i) => (
+                      <li key={i} className="break-words">{w}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              <div className="flex justify-end gap-2 mt-5">
+                {mp && (
+                  <a
+                    href={mp.skillUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-1.5 px-4 py-2 rounded-md3-md text-sm text-md-primary hover:bg-md-primary/10 transition-colors"
+                  >
+                    <ExternalLink size={13} />
+                    {t('skillstore.viewOnSkillHub')}
+                  </a>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setDetailTarget(null)}
+                  className="px-4 py-2 rounded-md3-md text-sm text-dark-onSurfaceVariant hover:bg-dark-surfaceContainer transition-colors"
+                >
+                  {t('common.close')}
+                </button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
 
       {/* ── MCP 安装预览弹窗：先看配置 → 填密钥 → 测试连接 → 安装 ── */}
       {installTarget && (

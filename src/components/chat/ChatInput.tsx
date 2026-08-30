@@ -5,9 +5,10 @@ import { useSettingsStore } from '../../stores/settings-store'
 import { useChatStore } from '../../stores/chat-store'
 import { useSkillsStore } from '../../stores/skills-store'
 import { useMcpStore } from '../../stores/mcp-store'
+import { useGoalStore } from '../../stores/goal-store'
 import { useUIStore } from '../../stores/ui-store'
 import { ipc, isWebUIMode } from '../../lib/ipc-client'
-import type { MessageAttachment, TaskMode } from '../../types/agent'
+import type { MessageAttachment, MessageSkillSnapshot, TaskMode } from '../../types/agent'
 import type { FileEntry, WebUICapabilities } from '../../types/ipc'
 import ConfirmDialog from '../ui/ConfirmDialog'
 import { useIsMobile } from '../../hooks/use-mobile'
@@ -109,7 +110,7 @@ function parentFolderPath(value: string): string | null {
 }
 
 interface ChatInputProps {
-  onSend: (content: string, attachments?: MessageAttachment[], taskMode?: TaskMode) => void
+  onSend: (content: string, attachments?: MessageAttachment[], taskMode?: TaskMode, skills?: MessageSkillSnapshot[]) => void
   onManualCompact?: (instructions?: string) => void | Promise<void>
   isCompacting?: boolean
   onStop?: () => void
@@ -335,6 +336,23 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
   const handleSend = () => {
     const trimmed = content.trim()
     if (isStreaming || isCompacting) return
+    // /goal 子命令（对齐 Claude Code）：
+    //  - `/goal <条件>`：设定会话级目标并把条件作为首条消息发送（立即开始执行）
+    //  - `/goal clear|stop|off|reset|cancel`：清除当前目标
+    //  无参数的 /goal 不在此处理（走命令菜单的芯片流程，用户接着输入条件正文）
+    if (/^\/goal\s+\S/i.test(trimmed)) {
+      const goalArg = trimmed.replace(/^\/goal\s+/i, '').trim()
+      setContent('')
+      if (textareaRef.current) {
+        textareaRef.current.style.height = 'auto'
+      }
+      if (/^(clear|stop|off|reset|cancel)$/i.test(goalArg)) {
+        if (activeSessionId) useGoalStore.getState().clearGoal(activeSessionId)
+        return
+      }
+      onSend(goalArg, undefined, 'goal', undefined)
+      return
+    }
     // 压缩模式：回车执行手动压缩（输入文本作为可选自定义指令），不走普通消息发送
     if (compactMode) {
       void onManualCompact?.(trimmed || undefined)
@@ -346,6 +364,43 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
       }
       return
     }
+    // 显式 /<skill-slug> 激活：消息以已安装技能的 slug 开头 → 自动激活该技能并剥离前缀，
+    // 剩余文本作为正文发送（对齐提示词的 Slash Activation 规则；未命中技能的 "/" 前缀不拦截）
+    const slashSkillMatch = trimmed.match(/^\/([a-zA-Z0-9_-]+)(?:\s+([\s\S]*))?$/)
+    if (slashSkillMatch) {
+      const matchedSkill = skills.find((s) => s.slug.toLowerCase() === slashSkillMatch[1].toLowerCase())
+      if (matchedSkill) {
+        const rest = (slashSkillMatch[2] || '').trim()
+        // 仅激活、无正文无附件：清掉 "/slug" 留在输入态（芯片出现），等用户补充任务描述
+        if (!rest && attachments.length === 0) {
+          setContent('')
+          if (textareaRef.current) {
+            textareaRef.current.style.height = 'auto'
+          }
+          return
+        }
+        if (!sessionSkillIds.includes(matchedSkill.id)) {
+          void toggleSessionSkill(matchedSkill.id, effectiveWorkDir || undefined)
+        }
+        const skillSnapshots: MessageSkillSnapshot[] = [
+          ...activeSkills.filter((s) => s.id !== matchedSkill.id),
+          matchedSkill,
+        ].map(({ id, name, icon, slug }) => ({ id, name, icon, slug }))
+        onSend(
+          rest,
+          attachments.length ? attachments : undefined,
+          taskMode ?? undefined,
+          skillSnapshots
+        )
+        setContent('')
+        setTaskMode(null)
+        commitAttachments([])
+        if (textareaRef.current) {
+          textareaRef.current.style.height = 'auto'
+        }
+        return
+      }
+    }
     if (!trimmed && attachments.length === 0) return
     if (trimmed.length > 50000) {
       alert(t('chat.messageTooLong'))
@@ -356,7 +411,18 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
       alert(t('chat.imageBlocked'))
       return
     }
-    onSend(trimmed, attachments.length ? attachments : undefined, taskMode ?? undefined)
+    const skillSnapshots: MessageSkillSnapshot[] = activeSkills.map(({ id, name, icon, slug }) => ({
+      id,
+      name,
+      icon,
+      slug,
+    }))
+    onSend(
+      trimmed,
+      attachments.length ? attachments : undefined,
+      taskMode ?? undefined,
+      skillSnapshots.length ? skillSnapshots : undefined
+    )
     setContent('')
     setTaskMode(null)
     commitAttachments([])
@@ -539,6 +605,13 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
   }
 
   const handleKeyDown = (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    // /goal 带参快捷解析：`/goal <条件>` / `/goal clear` 直接回车发送（对齐 Claude Code 一行式输入），
+    // 绕过命令菜单（菜单 Enter 会把文本清成芯片模式）。无参数的 /goal 落回菜单选中 Goal 芯片。
+    if (e.key === 'Enter' && !e.nativeEvent.isComposing && showCommandMenu && /^\/goal\s+\S/i.test(content)) {
+      e.preventDefault()
+      handleSend()
+      return
+    }
     // 命令菜单打开时：↑↓ 导航、Enter 选中、Esc 关闭（优先于发送逻辑）
     if (showCommandMenu && commandFlatCount > 0) {
       if (e.key === 'ArrowDown') {

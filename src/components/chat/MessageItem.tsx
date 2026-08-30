@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo, memo } from 'react'
 import { createPortal } from 'react-dom'
-import { Copy, Check, Terminal, FileText, FolderOpen, AlertTriangle, ChevronDown, ChevronUp, Wrench, FilePen, Globe, Pencil, Archive, Loader2, BookOpen, GitBranch, Target } from 'lucide-react'
+import { Copy, Check, Terminal, FileText, FolderOpen, AlertTriangle, ChevronDown, ChevronUp, Wrench, FilePen, Globe, Pencil, Archive, Loader2, BookOpen, GitBranch, Target, CircleHelp, ListTodo, Sparkles } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { Message, StreamingToolCall } from '../../types/agent'
 import { useChatStore } from '../../stores/chat-store'
@@ -91,6 +91,8 @@ function extractFirstStringField(argsSoFar: string, keys: string[]): string {
 }
 
 function toolRowIcon(name: string) {
+  if (name === 'question') return <CircleHelp size={13} />
+  if (name === 'todowrite') return <ListTodo size={13} />
   if (name === 'search_replace' || name === 'edit_file') return <Pencil size={13} />
   if (name === 'write_file') return <FilePen size={13} />
   if (name.includes('read') || name.includes('file')) return <FileText size={13} />
@@ -109,6 +111,8 @@ function chipTextFor(name: string, args: Record<string, unknown>): string {
   if (name === 'search_files' || name === 'search_content') return String(args.pattern || '')
   if (name === 'web_search') return String(args.query || '')
   if (name === 'web_fetch') return String(args.url || '')
+  if (name === 'question') return `${Array.isArray(args.questions) ? args.questions.length : 0} 个问题`
+  if (name === 'todowrite') return `${Array.isArray(args.items) ? args.items.length : 0} 个任务`
   const json = JSON.stringify(args)
   return json === '{}' ? '' : json.slice(0, 80)
 }
@@ -791,6 +795,50 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false 
     )
   }
 
+  // /goal 目标评估判定卡（system 消息，UI 专用，不进入模型上下文）：
+  // in_progress=续跑中（含护栏暂停提示）/ achieved=已达成 / impossible=无法完成
+  if (message.goalEvent) {
+    const event = message.goalEvent
+    const meta = event.verdict === 'achieved'
+      ? {
+          icon: Check,
+          iconCls: vibe ? 'text-emerald-300' : 'text-md-success',
+          boxCls: vibe
+            ? 'border-emerald-300/25 bg-emerald-400/10 text-white'
+            : 'border-md-success/25 bg-md-success/10 text-dark-onSurface',
+          title: t('goal.checkAchieved'),
+        }
+      : event.verdict === 'impossible'
+        ? {
+            icon: AlertTriangle,
+            iconCls: vibe ? 'text-amber-300' : 'text-md-error',
+            boxCls: vibe
+              ? 'border-amber-300/25 bg-amber-400/10 text-white'
+              : 'border-md-error/25 bg-md-error/10 text-dark-onSurface',
+            title: t('goal.checkImpossible'),
+          }
+        : {
+            icon: Loader2,
+            iconCls: vibe ? 'text-white/70' : 'text-md-tertiary',
+            boxCls: vibe
+              ? 'border-white/20 bg-white/5 text-white/90'
+              : 'border-md-tertiary/25 bg-md-tertiary/10 text-dark-onSurface',
+            title: t('goal.checkInProgress', { n: event.evaluations }),
+          }
+    const EventIcon = meta.icon
+    return (
+      <div className="animate-slide-up flex justify-start">
+        <div className={`flex max-w-[90%] items-start gap-2.5 rounded-md3-md border px-3.5 py-2.5 text-sm ${meta.boxCls}`}>
+          <EventIcon size={15} className={`mt-0.5 flex-shrink-0 ${meta.iconCls} ${event.verdict === 'in_progress' ? 'animate-spin' : ''}`} />
+          <div className="min-w-0">
+            <div className="font-medium">{meta.title}</div>
+            {event.reason && <div className="mt-0.5 text-xs opacity-75 break-words">{event.reason}</div>}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   // 压缩后恢复的文件消息（isCompactAttachment）—— 折叠卡片渲染，而非用户气泡。
   // 它是压缩机制自动注入的文件内容恢复（role 为 user 仅为满足 API 结构），
   // 不是用户真实发送的消息，不能渲染成绿色用户气泡。
@@ -929,7 +977,7 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false 
   const userImages = isUser ? (message.attachments || []).filter((a) => a.kind === 'image' && a.dataUrl) : []
   const userFiles = isUser ? (message.attachments || []).filter((a) => a.kind === 'file') : []
 
-  // 发送时选中的任务工作流（/spec /plan /goal）→ 气泡上方的小标识
+  // 发送时选中的任务工作流与 Skill 快照都嵌入对应的用户消息气泡。
   const taskModeMeta = isUser && message.taskMode
     ? ({
         spec: { icon: BookOpen, name: 'Spec', cls: 'bg-md-info/15 text-md-info' },
@@ -937,10 +985,15 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false 
         goal: { icon: Target, name: 'Goal', cls: 'bg-md-tertiary/15 text-md-tertiary' },
       } as const)[message.taskMode]
     : null
+  const TaskModeIcon = taskModeMeta?.icon
+  const messageSkills = isUser ? (message.skills || []) : []
+  const hasUserMetadata = !!taskModeMeta || messageSkills.length > 0
+  // AI 自主加载的技能芯片（read_file 命中技能 SKILL.md 时由 agent 循环记录）
+  const loadedSkills = !isUser ? (message.loadedSkills || []) : []
 
   return (
     <div className={`animate-slide-up ${isUser ? 'flex justify-end' : 'flex justify-start'}`}>
-      <div className={`flex flex-col ${isUser ? 'items-end max-w-[85%]' : 'items-start max-w-[90%]'}`}>
+      <div className={`flex flex-col ${isUser ? 'items-end max-w-[85%] max-md:max-w-[92%]' : 'items-start max-w-[90%] max-md:max-w-[94%]'}`}>
 
         {/* User message attachments - above the content bubble */}
         {(userImages.length > 0 || userFiles.length > 0) && (
@@ -992,18 +1045,27 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false 
           />
         )}
 
-        {/* Task workflow badge (/spec /plan /goal) - above the content bubble */}
-        {taskModeMeta && (
-          <div className={`flex items-center gap-1 px-2 py-0.5 rounded-md3-sm text-[11px] font-medium mb-1 ${
-            vibe ? 'bg-white/15 text-white/90' : taskModeMeta.cls
-          }`}>
-            <taskModeMeta.icon size={11} className="flex-shrink-0" />
-            <span>{taskModeMeta.name}</span>
+        {/* AI 自主加载的技能芯片（助手消息，read_file 命中技能 SKILL.md 时展示） */}
+        {loadedSkills.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 mb-1.5">
+            {loadedSkills.map((skill) => (
+              <span
+                key={`${skill.id}-${skill.slug || skill.name}`}
+                title={t('chat.aiLoadedSkill')}
+                className={`inline-flex max-w-full flex-shrink-0 items-center gap-1 rounded-md3-sm px-2 py-0.5 text-[11px] font-medium ${
+                  vibe ? 'bg-white/15 text-white/90' : 'bg-md-tertiaryContainer text-md-onTertiaryContainer'
+                }`}
+              >
+                <Sparkles size={11} className="flex-shrink-0" aria-hidden="true" />
+                {skill.icon && <span aria-hidden="true">{skill.icon}</span>}
+                <span className="truncate max-w-[200px]">{skill.name}</span>
+              </span>
+            ))}
           </div>
         )}
 
         {/* Message content bubble */}
-        {message.content.trim() && (
+        {(message.content.trim() || (isUser && hasUserMetadata)) && (
           <div
             className={`relative group px-4 py-2.5 rounded-md3-md text-sm leading-relaxed ${
               isUser
@@ -1021,14 +1083,41 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false 
                 onClick={handleCopy}
                 aria-label={t('common.copy')}
                 title={t('common.copy')}
-                className={`absolute top-2 right-2 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity w-6 h-6 flex items-center justify-center rounded-md3-xs ${
+                className={`absolute top-2 right-2 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 max-md:opacity-100 transition-opacity w-6 h-6 max-md:w-8 max-md:h-8 flex items-center justify-center rounded-md3-xs ${
                   vibe ? 'hover:bg-white/15' : 'hover:bg-dark-surfaceContainer'
                 }`}
               >
                 {copied ? <Check size={12} className="text-md-success" /> : <Copy size={12} className={vibe ? 'text-white/70' : ''} />}
               </button>
             )}
-            {isUser ? message.content : <MarkdownContent content={message.content} vibe={vibe} />}
+            {isUser ? (
+              <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                {taskModeMeta && TaskModeIcon && (
+                  <span className={`inline-flex flex-shrink-0 items-center gap-1 rounded-md3-sm px-2 py-0.5 text-[11px] font-medium ${
+                    vibe ? 'bg-white/15 text-white/90' : taskModeMeta.cls
+                  }`}>
+                    <TaskModeIcon size={11} className="flex-shrink-0" />
+                    <span>{taskModeMeta.name}</span>
+                  </span>
+                )}
+                {messageSkills.map((skill) => (
+                  <span
+                    key={`${skill.id}-${skill.slug || skill.name}`}
+                    className={`inline-flex max-w-full flex-shrink-0 items-center gap-1 rounded-md3-sm px-2 py-0.5 text-[11px] font-medium ${
+                      vibe ? 'bg-white/15 text-white/90' : 'bg-dark-surface/10 text-md-onPrimaryContainer'
+                    }`}
+                  >
+                    {skill.icon && <span aria-hidden="true">{skill.icon}</span>}
+                    <span className="max-w-[180px] truncate">{skill.name}</span>
+                  </span>
+                ))}
+                {message.content.trim() && (
+                  <span className="min-w-0 whitespace-pre-wrap break-words">{message.content}</span>
+                )}
+              </div>
+            ) : (
+              <MarkdownContent content={message.content} vibe={vibe} />
+            )}
           </div>
         )}
 

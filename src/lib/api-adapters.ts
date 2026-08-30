@@ -104,6 +104,27 @@ export function headersFor(
   return h
 }
 
+/**
+ * 从错误响应头提取服务端的限流重试指示，格式化为 " (retry after Nms)" 附加段。
+ * 优先 retry-after-ms（毫秒），其次 retry-after（秒数或 HTTP 日期——日期形式忽略，交给指数退避）。
+ * 与主进程代理（electron/api-proxy.ts）使用同一格式，retry 逻辑按统一约定解析。
+ */
+export function formatRetryAfterHint(headers: Headers): string {
+  try {
+    const ms = headers.get('retry-after-ms')
+    if (ms) {
+      const v = Number(ms)
+      if (Number.isFinite(v) && v > 0) return ` (retry after ${Math.round(v)}ms)`
+    }
+    const sec = headers.get('retry-after')
+    if (sec && /^\d+(\.\d+)?$/.test(sec.trim())) {
+      const v = Number(sec)
+      if (v > 0) return ` (retry after ${Math.round(v * 1000)}ms)`
+    }
+  } catch { /* Headers 不可用等异常场景静默忽略 */ }
+  return ''
+}
+
 // ── 请求体构造 ──
 
 export function buildRequestBody(compat: ApiCompat, o: BuildBodyOptions): Record<string, unknown> {

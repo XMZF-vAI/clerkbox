@@ -63,16 +63,18 @@ contextBridge.exposeInMainWorld('clerkbox', {
   executeCommand: (
     command: string,
     cwd?: string,
-    sessionId?: string
-  ): Promise<{ stdout: string; stderr: string; exitCode: number }> =>
-    ipcRenderer.invoke('executeCommand', command, cwd, sessionId),
+    sessionId?: string,
+    timeoutMs?: number
+  ): Promise<{ stdout: string; stderr: string; exitCode: number; timedOut?: boolean }> =>
+    ipcRenderer.invoke('executeCommand', command, cwd, sessionId, timeoutMs),
   executeCommandWithShell: (
     command: string,
     cwd: string | undefined,
     shellType: string,
-    sessionId?: string
-  ): Promise<{ stdout: string; stderr: string; exitCode: number }> =>
-    ipcRenderer.invoke('executeCommandWithShell', command, cwd, shellType, sessionId),
+    sessionId?: string,
+    timeoutMs?: number
+  ): Promise<{ stdout: string; stderr: string; exitCode: number; timedOut?: boolean }> =>
+    ipcRenderer.invoke('executeCommandWithShell', command, cwd, shellType, sessionId, timeoutMs),
   cancelSessionCommands: (sessionId: string): Promise<{ killed: number }> =>
     ipcRenderer.invoke('cancelSessionCommands', sessionId),
 

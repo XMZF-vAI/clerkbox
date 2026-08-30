@@ -164,8 +164,9 @@ function LocalMusicPlayer() {
 
   if (!currentTrack) return null
 
+  // 根元素不再自带定位：由 VibeControls 的顶部右侧统一槽位容器负责摆放
   return (
-    <div className="fixed top-4 right-4 z-50 flex items-center gap-3 px-4 py-2 liquid-glass rounded-full text-white/90">
+    <div className="flex items-center gap-3 px-4 py-2 liquid-glass rounded-full text-white/90">
       <audio
         ref={audioRef}
         src={currentTrack.src}
@@ -334,18 +335,11 @@ function SystemMusicPlayer() {
   const isPlaying = state?.status === 'Playing'
   const displayMs = scrubMs ?? positionMs
 
-  // 无活跃会话：轻量提示胶囊
-  if (!state || !state.available) {
-    return (
-      <div className="fixed top-4 right-4 z-50 flex items-center gap-2 px-4 py-2 liquid-glass rounded-full text-white/90">
-        <Music size={14} className="text-white/60" />
-        <span className="text-xs text-white/70">{t('vibe.systemNoMedia')}</span>
-      </div>
-    )
-  }
+  // 无活跃会话：不渲染任何占位胶囊（无音频时保持右上角干净，布局由统一槽位容器负责）
+  if (!state || !state.available) return null
 
   return (
-    <div className="fixed top-4 right-4 z-50 flex items-center gap-3 px-4 py-2 liquid-glass rounded-full text-white/90 max-w-[min(92vw,520px)]">
+    <div className="flex items-center gap-3 px-4 py-2 liquid-glass rounded-full text-white/90 max-w-[min(92vw,520px)]">
       {/* 封面 */}
       {state.cover ? (
         <img

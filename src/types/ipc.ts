@@ -49,6 +49,8 @@ export interface MessageRow {
   sub_agent_id?: string | null  // associated sub-agent run id
   /** 发送时的任务工作流（'spec' | 'plan' | 'goal'），仅 user 消息携带 */
   task_mode?: string | null
+  /** 发送时选中的 Skill 快照 JSON，仅 user 消息携带 */
+  skills?: string | null
 }
 
 export interface WebSearchResult {
@@ -237,8 +239,8 @@ export interface ClerkBoxAPI {
   selectSkillFile: () => Promise<string | null>
   parseSkillFile: (filePath: string) => Promise<ParseSkillFileResult>
   listDir: (path: string) => Promise<FileEntry[]>
-  executeCommand: (command: string, cwd?: string, sessionId?: string) => Promise<{ stdout: string; stderr: string; exitCode: number; encodingFallback?: boolean }>
-  executeCommandWithShell: (command: string, cwd: string | undefined, shellType: string, sessionId?: string) => Promise<{ stdout: string; stderr: string; exitCode: number; encodingFallback?: boolean }>
+  executeCommand: (command: string, cwd?: string, sessionId?: string, timeoutMs?: number) => Promise<{ stdout: string; stderr: string; exitCode: number; encodingFallback?: boolean; timedOut?: boolean }>
+  executeCommandWithShell: (command: string, cwd: string | undefined, shellType: string, sessionId?: string, timeoutMs?: number) => Promise<{ stdout: string; stderr: string; exitCode: number; encodingFallback?: boolean; timedOut?: boolean }>
   cancelSessionCommands: (sessionId: string) => Promise<{ killed: number }>
   webSearch: (query: string, count?: number) => Promise<WebSearchResult[] | { error: string }>
   webFetch: (url: string, maxLength?: number) => Promise<{ content: string; url: string } | { error: string }>

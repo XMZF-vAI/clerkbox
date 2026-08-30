@@ -268,7 +268,7 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
   }
 
   return (
-    <div className="w-64 flex flex-col bg-dark-surfaceDim border-r border-dark-onSurfaceVariant/10">
+    <div className="w-64 max-md:w-full flex flex-col bg-dark-surfaceDim border-r border-dark-onSurfaceVariant/10">
       <div className="flex items-center justify-between px-4 py-3">
         <div className="flex items-center gap-2.5">
           <img src={APP_ICON} alt="ClerkBox" className="w-8 h-8 rounded" />
@@ -281,6 +281,15 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
             )}
           </div>
         </div>
+        {/* 移动端抽屉关闭按钮 */}
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-label={t('common.close')}
+          className="hidden max-md:flex w-10 h-10 -mr-1 items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-dark-onSurfaceVariant"
+        >
+          <X size={18} />
+        </button>
       </div>
 
       {/* New Chat + Skill Store buttons - vertical stack for better breathing room */}
@@ -289,6 +298,7 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
           onClick={() => { setShowSkillStore(false); createSession(); onNavigate?.() }}
           className="w-full flex items-center justify-center gap-1.5 px-3 py-2 max-md:py-3 rounded-md3-md bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer transition-colors text-sm max-md:text-base"
         >
+          <Plus size={16} />
           <span>{t('sidebar.newChat')}</span>
         </button>
         <button
@@ -316,7 +326,7 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
             const anyExpanded = groups.some((g) => !collapsedGroups.has(g.key))
             setCollapsedGroups(anyExpanded ? new Set(groups.map((g) => g.key)) : new Set())
           }}
-          className="w-6 h-6 flex items-center justify-center rounded-md3-xs text-dark-onSurfaceVariant/40 hover:bg-dark-surfaceContainer hover:text-dark-onSurfaceVariant/70 transition-colors"
+          className="w-6 h-6 max-md:w-9 max-md:h-9 flex items-center justify-center rounded-md3-xs text-dark-onSurfaceVariant/40 hover:bg-dark-surfaceContainer hover:text-dark-onSurfaceVariant/70 transition-colors"
           title={groups.some((g) => !collapsedGroups.has(g.key)) ? t('sidebar.collapseAll') : t('sidebar.expandAll')}
           aria-label={groups.some((g) => !collapsedGroups.has(g.key)) ? t('sidebar.collapseAll') : t('sidebar.expandAll')}
         >
@@ -339,7 +349,7 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
               <button
                 type="button"
                 onClick={() => toggleGroup(group.key)}
-                className={`w-full flex items-center gap-1.5 px-2 py-1.5 rounded-md3-xs text-xs transition-colors ${
+                className={`w-full flex items-center gap-1.5 px-2 py-1.5 max-md:py-2.5 max-md:text-sm rounded-md3-xs text-xs transition-colors ${
                   groupExpanded
                     ? 'text-dark-onSurfaceVariant/70 hover:bg-dark-surfaceContainer'
                     : 'text-dark-onSurfaceVariant/60 hover:bg-dark-surfaceContainer'
@@ -437,12 +447,12 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
         })}
       </div>
 
-      <div className="border-t border-dark-onSurfaceVariant/10 px-3 py-2 flex flex-col gap-0.5">
+      <div className="border-t border-dark-onSurfaceVariant/10 px-3 py-2 max-md:pb-[calc(0.5rem+env(safe-area-inset-bottom))] flex flex-col gap-0.5">
         {!isWebUIMode && (
           <button
             onClick={handleStartWebUI}
             disabled={webuiStarting}
-            className="w-full flex items-center gap-2 px-3 py-2 rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-sm text-dark-onSurfaceVariant disabled:opacity-50"
+            className="w-full flex items-center gap-2 px-3 py-2 max-md:py-3 rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-sm max-md:text-base text-dark-onSurfaceVariant disabled:opacity-50"
             aria-label={t('sidebar.webuiAria')}
           >
             {webuiStarting ? <Loader2 size={16} className="animate-spin" /> : <Globe size={16} />}
@@ -459,7 +469,7 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
         {/* 账户按钮（最底）：未登录=用户图标+"未登录" / 已登录=首字母圆头像+用户名 */}
         <button
           onClick={() => { handleOpenAccountSettings(); onNavigate?.() }}
-          className="w-full flex items-center gap-2 px-3 py-2 rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-sm text-dark-onSurfaceVariant"
+          className="w-full flex items-center gap-2 px-3 py-2 max-md:py-3 rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-sm max-md:text-base text-dark-onSurfaceVariant"
           aria-label={accountLoggedIn && accountUser ? accountUser.username : t('sidebar.notLoggedIn')}
           title={accountLoggedIn && accountUser ? accountUser.username : t('sidebar.account')}
         >
@@ -513,7 +523,7 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
               <button
                 type="button"
                 onClick={() => setWebuiInfo(null)}
-                className="w-7 h-7 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors"
+                className="w-7 h-7 max-md:w-9 max-md:h-9 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors"
                 aria-label={t('common.close')}
               >
                 <X size={16} />
@@ -529,7 +539,7 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
               <button
                 type="button"
                 onClick={handleCopyWebUIUrl}
-                className="flex-shrink-0 w-7 h-7 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainer transition-colors"
+                className="flex-shrink-0 w-7 h-7 max-md:w-9 max-md:h-9 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainer transition-colors"
                 aria-label={t('sidebar.webuiCopy')}
                 title={t('sidebar.webuiCopy')}
               >
