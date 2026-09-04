@@ -85,6 +85,15 @@ export default function App() {
   useEffect(() => window.clerkbox?.onWindowStateChange(setIsMaximized), [])
   useEffect(() => useSettingsStore.persist.onFinishHydration(() => setHydrated(true)), [])
 
+  // 启动后稍作空闲预取设置页 chunk，首次打开即点即开、不再闪白（延迟加载，不影响启动）
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void import('./components/settings/SettingsPage')
+      void import('./components/settings/MSettingsPage')
+    }, 2500)
+    return () => window.clearTimeout(timer)
+  }, [])
+
   // 老用户迁移：把扁平 customModels 归并成 providers（必须等水合完成再读 state）
   useEffect(() => {
     if (!hydrated) return
@@ -124,13 +133,16 @@ export default function App() {
           <WorkbenchPanel vibe />
         </main>
         <VibeControls />
-        {showSettings && (
-          isMobile ? (
-            <MSettingsPage onClose={() => useSettingsStore.getState().updateSettings({ showSettings: false })} />
-          ) : (
-            <SettingsPage onClose={() => useSettingsStore.getState().updateSettings({ showSettings: false })} />
-          )
-        )}
+        {/* 就近 Suspense：设置页懒加载挂起时只缺浮层，主界面不闪白 */}
+        <Suspense fallback={null}>
+          {showSettings && (
+            isMobile ? (
+              <MSettingsPage onClose={() => useSettingsStore.getState().updateSettings({ showSettings: false })} />
+            ) : (
+              <SettingsPage onClose={() => useSettingsStore.getState().updateSettings({ showSettings: false })} />
+            )
+          )}
+        </Suspense>
       </div>
     )
   } else {
@@ -167,20 +179,23 @@ export default function App() {
           <main className="flex-1 min-h-0 overflow-hidden">
             <div className="flex h-full">
               <div className="min-w-0 flex-1 overflow-hidden">
-                {showSkillStore ? <SkillStore /> : <ChatPage />}
+                {showSkillStore ? <Suspense fallback={null}><SkillStore /></Suspense> : <ChatPage />}
               </div>
               {/* 技能商店页为独立全屏页，工作台仅在聊天视图挂载 */}
               {!showSkillStore && <WorkbenchPanel />}
             </div>
           </main>
         </div>
-        {showSettings && (
-          isMobile ? (
-            <MSettingsPage onClose={() => useSettingsStore.getState().updateSettings({ showSettings: false })} />
-          ) : (
-            <SettingsPage onClose={() => useSettingsStore.getState().updateSettings({ showSettings: false })} />
-          )
-        )}
+        {/* 就近 Suspense：设置页懒加载挂起时只缺浮层，主界面不闪白 */}
+        <Suspense fallback={null}>
+          {showSettings && (
+            isMobile ? (
+              <MSettingsPage onClose={() => useSettingsStore.getState().updateSettings({ showSettings: false })} />
+            ) : (
+              <SettingsPage onClose={() => useSettingsStore.getState().updateSettings({ showSettings: false })} />
+            )
+          )}
+        </Suspense>
       </div>
     )
   }
