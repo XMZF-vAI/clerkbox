@@ -148,6 +148,9 @@ export default {
       fetchFailHint: '可以检查 Base URL 与 API Key，或直接在下方手动填写模型 id。',
       noMatch: '没有匹配的模型',
       selectedCount: '已选 {{count}} 个',
+      lunoraBadge: '官方模型合作伙伴',
+      lunoraDesc: '一个 Key 聚合 Claude、GPT、Gemini、DeepSeek 等主流模型',
+      lunoraVisit: '前往 Lunora 官网',
     },
     appearance: {
       languageTitle: '语言',

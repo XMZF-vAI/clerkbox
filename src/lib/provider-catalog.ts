@@ -48,7 +48,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     group: 'official',
     apiCompat: 'openai',
     baseUrl: 'https://api.uselunora.com/v1',
-    apiKeyUrl: 'https://console.uselunora.com/',
+    apiKeyUrl: 'https://www.uselunora.com/',
     thinking: {
       thinkingStyle: 'enable',
       // Lunora 聚合多厂商模型（Claude / OpenAI o 系 / DeepSeek / 通义 / Gemini / Grok 等）

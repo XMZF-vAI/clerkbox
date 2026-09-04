@@ -148,6 +148,9 @@ export default {
       fetchFailHint: 'Check the Base URL and API Key, or just enter a model id manually below.',
       noMatch: 'No matching models',
       selectedCount: '{{count}} selected',
+      lunoraBadge: 'Official model partner',
+      lunoraDesc: 'One key for Claude, GPT, Gemini, DeepSeek and more.',
+      lunoraVisit: 'Visit the Lunora website',
     },
     appearance: {
       languageTitle: 'Language',

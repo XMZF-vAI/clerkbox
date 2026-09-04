@@ -11,6 +11,7 @@ import {
   type ProviderPreset, type ProviderGroup,
 } from '../../lib/provider-catalog'
 import { ipc } from '../../lib/ipc-client'
+import lunoraLogo from '../../assets/lunora-logo.svg'
 import type { ApiCompat, ModelProvider, ProviderModel, ReasoningEffort } from '../../types/agent'
 import { REASONING_EFFORTS } from '../../types/agent'
 import type { FetchedModel } from '../../types/ipc'
@@ -131,6 +132,28 @@ export default function ProvidersSection() {
           <Plus size={14} /> {t('settings.providers.add')}
         </button>
       </div>
+
+      {/* Lunora 官方模型合作伙伴宣传卡：整卡可点，跳转官网 */}
+      <button
+        type="button"
+        onClick={() => ipc.openExternal('https://www.uselunora.com/')}
+        title={t('settings.providers.lunoraVisit')}
+        className="group w-full flex items-center gap-3 px-3.5 py-2.5 mb-2.5 rounded-md3-md border border-dark-onSurfaceVariant/10 bg-gradient-to-r from-md-primary/12 via-md-primary/5 to-transparent hover:border-md-primary/35 transition-colors text-left"
+      >
+        <img src={lunoraLogo} alt="Lunora API" className="w-9 h-9 rounded-md3-sm flex-shrink-0" />
+        <span className="flex-1 min-w-0">
+          <span className="flex items-center gap-1.5">
+            <span className="text-sm font-medium text-dark-onSurface">Lunora API</span>
+            <span className="text-[9px] leading-none px-1.5 py-1 rounded-full bg-md-primary/15 text-md-primary flex-shrink-0">
+              {t('settings.providers.lunoraBadge')}
+            </span>
+          </span>
+          <span className="block text-[11px] text-dark-onSurfaceVariant truncate mt-0.5">
+            {t('settings.providers.lunoraDesc')}
+          </span>
+        </span>
+        <ExternalLink size={13} className="text-dark-onSurfaceVariant/50 group-hover:text-md-primary transition-colors flex-shrink-0" />
+      </button>
 
       {settings.providers.length === 0 ? (
         <div className="px-4 py-6 text-center text-sm text-dark-onSurfaceVariant/60 border border-dashed border-dark-onSurfaceVariant/20 rounded-md3-md">
