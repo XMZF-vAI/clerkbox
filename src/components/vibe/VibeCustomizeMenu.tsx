@@ -17,6 +17,14 @@ interface VibeCustomizeMenuProps {
 
 type MenuTab = 'background' | 'audio'
 
+/** 玻璃模式实际生效轨道 → 提示文案 key（VibeBackground 检测后写入 store） */
+const GLASS_TRACK_LABEL_KEY: Record<string, string> = {
+  pending: 'vibe.glassTrackPending',
+  acrylic: 'vibe.glassTrackAcrylic',
+  transparent: 'vibe.glassTrackTransparent',
+  fallback: 'vibe.glassTrackFallback',
+}
+
 function formatInterval(sec: number): string {
   if (sec < 60) return `${sec}s`
   const m = Math.floor(sec / 60)
@@ -35,6 +43,7 @@ export default function VibeCustomizeMenu({ onClose }: VibeCustomizeMenuProps) {
   const slideshowFolder = useVibeStore((s) => s.slideshowFolder)
   const slideshowIntervalSec = useVibeStore((s) => s.slideshowIntervalSec)
   const glassLevel = useVibeStore((s) => s.glassLevel)
+  const glassTrack = useVibeStore((s) => s.glassTrack)
   const audioMode = useVibeStore((s) => s.audioMode)
   const setBackground = useVibeStore((s) => s.setBackground)
   const setMusic = useVibeStore((s) => s.setMusic)
@@ -329,6 +338,8 @@ export default function VibeCustomizeMenu({ onClose }: VibeCustomizeMenuProps) {
             {backgroundMode === 'glass' && (
               <div className="space-y-3 animate-fade-up">
                 <div className="text-[10px] text-white/60 leading-relaxed">{t('vibe.glassHint')}</div>
+                {/* 实际生效轨道：让用户看懂当前是系统亚克力还是壁纸模拟 */}
+                <div className="text-[10px] text-white/45 leading-relaxed">{t(GLASS_TRACK_LABEL_KEY[glassTrack])}</div>
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between text-[11px] text-white/70">
                     <span>{t('vibe.glassLevel')}</span>

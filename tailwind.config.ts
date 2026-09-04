@@ -69,9 +69,11 @@ const config: Config = {
         'vibe-cross': 'vibeCross 1.4s cubic-bezier(0.23, 1, 0.32, 1) both',
       },
       keyframes: {
+        // 全屏图层动画只走 opacity/transform（合成器友好）；
+        // blur 关键帧会让全屏图层每帧重算模糊，核显机器切图时掉帧
         vibeCross: {
-          '0%': { opacity: '0', transform: 'scale(1.06)', filter: 'blur(14px)' },
-          '100%': { opacity: '1', transform: 'scale(1)', filter: 'blur(0px)' },
+          '0%': { opacity: '0', transform: 'scale(1.06)' },
+          '100%': { opacity: '1', transform: 'scale(1)' },
         },
         fadeIn: {
           '0%': { opacity: '0' },

@@ -47,6 +47,11 @@ function LocalMusicPlayer() {
   const [progress, setProgress] = useState(0)
   const [duration, setDuration] = useState(0)
   const [needsUserInteraction, setNeedsUserInteraction] = useState(false)
+  const [trackError, setTrackError] = useState(false)
+  const [volume, setVolume] = useState(100)
+  // 拖动进度时本地暂存，松手才提交 seek（对齐系统播放器手感，避免逐帧 seek 卡顿）
+  const [scrub, setScrub] = useState<number | null>(null)
+  const scrubRef = useRef<number | null>(null)
   const currentTrack = tracks[trackIndex] || tracks[0]
 
   // Build track list
@@ -101,7 +106,13 @@ function LocalMusicPlayer() {
   useEffect(() => {
     setProgress(0)
     setDuration(0)
+    setTrackError(false)
   }, [currentTrack?.src])
+
+  // 音量滑块 → audio 元素（换轨后 src 重建同样生效）
+  useEffect(() => {
+    if (audioRef.current) audioRef.current.volume = volume / 100
+  }, [volume, currentTrack?.src])
 
   // Auto-play when track changes
   const tryPlay = useCallback(async () => {
@@ -151,22 +162,32 @@ function LocalMusicPlayer() {
   const handleTimeUpdate = () => {
     const audio = audioRef.current
     if (!audio) return
-    setProgress(audio.currentTime)
+    // 拖动中不回写进度，保持用户手感
+    if (scrubRef.current === null) setProgress(audio.currentTime)
     setDuration(Number.isFinite(audio.duration) ? audio.duration : 0)
   }
 
-  const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const beginScrub = (value: number) => {
+    scrubRef.current = value
+    setScrub(value)
+  }
+
+  const commitScrub = () => {
+    const value = scrubRef.current
+    if (value === null) return
+    scrubRef.current = null
+    setScrub(null)
     const audio = audioRef.current
     if (!audio) return
-    audio.currentTime = Number(e.target.value)
-    setProgress(audio.currentTime)
+    audio.currentTime = value
+    setProgress(value)
   }
 
   if (!currentTrack) return null
 
   // 根元素不再自带定位：由 VibeControls 的顶部右侧统一槽位容器负责摆放
   return (
-    <div className="flex items-center gap-3 px-4 py-2 liquid-glass rounded-full text-white/90">
+    <div className="flex items-center gap-3 px-4 py-2 liquid-glass rounded-full text-white/90 max-w-[min(92vw,560px)]">
       <audio
         ref={audioRef}
         src={currentTrack.src}
@@ -175,6 +196,7 @@ function LocalMusicPlayer() {
         onPlay={() => setIsPlaying(true)}
         onPause={() => setIsPlaying(false)}
         onEnded={handleNext}
+        onError={() => setTrackError(true)}
         loop={tracks.length === 1}
       />
 
@@ -187,13 +209,17 @@ function LocalMusicPlayer() {
             type="range"
             min={0}
             max={duration || 1}
-            value={progress}
-            onChange={handleSeek}
+            step={0.1}
+            value={scrub ?? progress}
+            onChange={(e) => beginScrub(Number(e.target.value))}
+            onPointerUp={commitScrub}
+            onKeyUp={commitScrub}
+            onBlur={commitScrub}
             aria-label={t('vibe.seek')}
             className="flex-1 h-1 bg-white/20 rounded-full appearance-none cursor-pointer accent-white"
           />
           <span className="text-[10px] text-white/60 tabular-nums">
-            {formatTime(progress * 1000)}/{formatTime(duration * 1000)}
+            {formatTime((scrub ?? progress) * 1000)}/{formatTime(duration * 1000)}
           </span>
         </div>
       </div>
@@ -227,11 +253,32 @@ function LocalMusicPlayer() {
         </button>
       </div>
 
+      {/* 本地音量（与系统播放器对称；窄屏隐藏防溢出） */}
+      <div className="flex items-center gap-1.5 shrink-0 max-md:hidden">
+        <Volume2 size={13} className="text-white/60" />
+        <input
+          type="range"
+          min={0}
+          max={100}
+          value={volume}
+          onChange={(e) => setVolume(Number(e.target.value))}
+          aria-label={t('vibe.localVolume')}
+          className="w-16 h-1 bg-white/20 rounded-full appearance-none cursor-pointer accent-white"
+        />
+      </div>
+
+      {/* 曲目加载失败（外链过期/文件被删）：轻量提示，不再静默无声 */}
+      {trackError && (
+        <span className="ml-1 text-[10px] px-2 py-0.5 rounded-full bg-white/15 text-white/80 shrink-0">
+          {t('vibe.audioLoadFailed')}
+        </span>
+      )}
+
       {needsUserInteraction && (
         <button
           type="button"
           onClick={handlePlayPause}
-          className="ml-1 text-[10px] px-2 py-0.5 rounded-full bg-white/20 hover:bg-white/30 transition-colors"
+          className="ml-1 text-[10px] px-2 py-0.5 rounded-full bg-white/20 hover:bg-white/30 transition-colors shrink-0"
         >
           {t('vibe.clickToPlay')}
         </button>

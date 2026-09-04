@@ -659,6 +659,12 @@ export default {
     systemNoMedia: 'No audio playing',
     unknownArtist: 'Unknown artist',
     volume: 'System volume',
+    localVolume: 'Volume',
+    audioLoadFailed: 'Audio failed to load',
+    glassTrackPending: 'Detecting…',
+    glassTrackAcrylic: 'System acrylic is active — the desktop shows through live.',
+    glassTrackTransparent: 'Fully transparent — the desktop shows through directly.',
+    glassTrackFallback: 'System acrylic is unavailable here; glass is simulated with a wallpaper snapshot.',
   },
 
   notify: {

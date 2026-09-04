@@ -659,6 +659,12 @@ export default {
     systemNoMedia: '当前无正在播放的音频',
     unknownArtist: '未知艺术家',
     volume: '系统音量',
+    localVolume: '音量',
+    audioLoadFailed: '音频加载失败',
+    glassTrackPending: '检测中…',
+    glassTrackAcrylic: '系统亚克力已生效，实时透出桌面。',
+    glassTrackTransparent: '纯透明模式，桌面直接透出。',
+    glassTrackFallback: '当前环境不支持系统亚克力，已用壁纸快照模拟玻璃效果。',
   },
 
   notify: {

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useVibeStore, DEFAULT_VIBE_BACKGROUND, type VibeGlassTrack } from '../../stores/vibe-store'
 import { ipc, isWebUIMode } from '../../lib/ipc-client'
 import { toFileUrl } from '../../lib/file-url'
@@ -6,6 +6,10 @@ import { toFileUrl } from '../../lib/file-url'
 const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'avif']
 // WebUI 走 base64（每张驻留内存），上限收紧；Electron 走 file:// 零拷贝
 const SLIDESHOW_MAX_IMAGES = isWebUIMode ? 24 : 60
+// 已解析 src 的 LRU 缓存上限：WebUI 的 base64 每张驻留内存，只保留当前与前后相邻几张
+const SRC_CACHE_LIMIT = isWebUIMode ? 4 : 16
+// 图片失效（含默认外链签名过期）时的内置渐变兜底，避免整屏死黑
+const GRADIENT_FALLBACK = 'bg-gradient-to-br from-[#1b1b2f] via-[#16243d] to-[#0f3460]'
 
 function ext(name: string): string {
   return name.split('.').pop()?.toLowerCase() || ''
@@ -73,6 +77,8 @@ function SingleBackground() {
 
   return (
     <div className="fixed inset-0 z-0">
+      {/* 兜底渐变：图片加载失败（含默认外链过期）时不至于死黑 */}
+      <div className={`absolute inset-0 ${GRADIENT_FALLBACK}`} />
       <div
         className="absolute inset-0 bg-cover bg-center bg-no-repeat transition-opacity duration-700"
         style={{
@@ -93,46 +99,67 @@ function SingleBackground() {
   )
 }
 
-/** 模式二：文件夹轮播 —— 双层交叉，新图以「缩放 + 模糊」动画淡入 */
+/**
+ * 模式二：文件夹轮播 —— 双层交叉，新图以「缩放」动画淡入。
+ * src 按需解析 + LRU 缓存：WebUI 不再把整个文件夹的 base64 全量驻留内存，
+ * 只保留当前与前后相邻几张；Electron 走 file:// 拼串，缓存几乎零成本。
+ */
 function SlideshowBackground() {
   const slideshowFolder = useVibeStore((s) => s.slideshowFolder)
   const slideshowIntervalSec = useVibeStore((s) => s.slideshowIntervalSec)
-  const [slides, setSlides] = useState<string[]>([])
+  const [files, setFiles] = useState<string[]>([])
   const [tick, setTick] = useState(0)
-  const topKeyRef = useRef(0)
   const [layers, setLayers] = useState<{ base: string; top: string | null; topKey: number }>({
     base: '',
     top: null,
     topKey: 0,
   })
+  const [nextSrc, setNextSrc] = useState<string | null>(null)
+  const topKeyRef = useRef(0)
+  const srcCacheRef = useRef<Map<string, string>>(new Map())
+  const initializedRef = useRef(false)
+
+  // 解析并缓存 src；命中即 LRU 提鲜，超限时淘汰最早条目
+  const resolveSrc = useCallback(async (path: string): Promise<string> => {
+    const cache = srcCacheRef.current
+    const hit = cache.get(path)
+    if (hit !== undefined) {
+      cache.delete(path)
+      cache.set(path, hit)
+      return hit
+    }
+    const src = await resolveImageSrc(path)
+    cache.set(path, src)
+    while (cache.size > SRC_CACHE_LIMIT) {
+      const oldest = cache.keys().next().value as string | undefined
+      if (oldest === undefined) break
+      cache.delete(oldest)
+    }
+    return src
+  }, [])
 
   useEffect(() => {
     let cancelled = false
     const load = async () => {
       if (!slideshowFolder) {
-        setSlides([])
+        setFiles([])
         return
       }
       try {
         const entries = await ipc.listDir(slideshowFolder)
-        const files = entries
+        const paths = entries
           .filter((e) => e.isFile && IMAGE_EXTENSIONS.includes(ext(e.name)))
-          .map((e) => e.name)
+          .map((e) => `${slideshowFolder}/${e.name}`)
           .sort()
         if (cancelled) return
-        if (files.length === 0) {
-          setSlides([])
-          return
-        }
-        const srcs = await Promise.all(
-          files.slice(0, SLIDESHOW_MAX_IMAGES).map((name) => resolveImageSrc(`${slideshowFolder}/${name}`)),
-        )
-        if (cancelled) return
-        setSlides(srcs)
+        srcCacheRef.current.clear()
+        initializedRef.current = false
+        setNextSrc(null)
+        setLayers({ base: '', top: null, topKey: topKeyRef.current })
+        setFiles(paths.slice(0, SLIDESHOW_MAX_IMAGES))
         setTick(0)
-        setLayers({ base: srcs[0], top: null, topKey: 0 })
       } catch {
-        if (!cancelled) setSlides([])
+        if (!cancelled) setFiles([])
       }
     }
     void load()
@@ -141,40 +168,58 @@ function SlideshowBackground() {
     }
   }, [slideshowFolder])
 
-  // 切换时：上层入场动画结束后即为最终画面，旧上层降级为新的底层
+  // 当前图变化：解析后交叉淡入（旧上层降级为新的底层），随后预热下一张，切换时零等待。
   // 用递增 tick 取模得到当前图，避免整轮回绕到 0 时跳过切换
   useEffect(() => {
-    if (slides.length === 0 || tick === 0) return
-    const current = slides[tick % slides.length]
-    setLayers((prev) => ({
-      base: prev.top ?? prev.base,
-      top: current,
-      topKey: ++topKeyRef.current,
-    }))
-  }, [tick, slides])
+    if (files.length === 0) return
+    let cancelled = false
+    const current = files[tick % files.length]
+    const next = files[(tick + 1) % files.length]
+    void (async () => {
+      const src = await resolveSrc(current)
+      if (cancelled) return
+      if (!initializedRef.current) {
+        initializedRef.current = true
+        setLayers({ base: src, top: null, topKey: topKeyRef.current })
+      } else {
+        setLayers((prev) => ({
+          base: prev.top ?? prev.base,
+          top: src,
+          topKey: ++topKeyRef.current,
+        }))
+      }
+      setNextSrc(null)
+      const pre = await resolveSrc(next)
+      if (!cancelled) setNextSrc(pre)
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [files, tick, resolveSrc])
 
   useEffect(() => {
-    if (slides.length <= 1) return
+    if (files.length <= 1) return
     const id = setInterval(() => {
       setTick((t) => t + 1)
     }, slideshowIntervalSec * 1000)
     return () => clearInterval(id)
-  }, [slides, slideshowIntervalSec])
+  }, [files.length, slideshowIntervalSec])
 
   // 文件夹未选 / 为空：回退单图模式
-  if (slides.length === 0) return <SingleBackground />
-
-  const index = tick % slides.length
-  const nextSrc = slides[(index + 1) % slides.length]
+  if (files.length === 0) return <SingleBackground />
 
   return (
     <div className="fixed inset-0 z-0">
-      {/* 预加载下一张，切换时零白屏 */}
-      <img src={nextSrc} alt="" className="hidden" aria-hidden />
-      <div
-        className="absolute inset-0 bg-cover bg-center bg-no-repeat animate-fade-in"
-        style={{ backgroundImage: `url(${JSON.stringify(layers.base)})` }}
-      />
+      {/* 兜底渐变：任何一层图片失效时不至于死黑 */}
+      <div className={`absolute inset-0 ${GRADIENT_FALLBACK}`} />
+      {/* 预加载下一张（WebUI 为已解析的 base64），切换时零白屏 */}
+      {nextSrc && <img src={nextSrc} alt="" className="hidden" aria-hidden />}
+      {layers.base && (
+        <div
+          className="absolute inset-0 bg-cover bg-center bg-no-repeat animate-fade-in"
+          style={{ backgroundImage: `url(${JSON.stringify(layers.base)})` }}
+        />
+      )}
       {layers.top && (
         <div
           key={layers.topKey}

@@ -124,7 +124,8 @@ export default function App() {
   } else if (isVibeMode) {
     content = (
       <div className={`app-window relative h-screen max-md:h-dvh w-screen max-md:w-full overflow-hidden text-white ${windowShape} ${isWebUIMode || isMaximized ? '' : 'border border-white/15'}`}>
-        <VibeBackground />
+        {/* 就近 Suspense：VIBE 背景首次挂起时只缺背景层，聊天界面立即呈现不闪白 */}
+        <Suspense fallback={null}><VibeBackground /></Suspense>
         <main className="relative z-10 flex h-full w-full">
           <div className="min-w-0 flex-1">
             <ChatPage vibe />
@@ -132,7 +133,8 @@ export default function App() {
           {/* VIBE 模式下工作台走玻璃拟态皮肤；面板自身控制显隐 */}
           <WorkbenchPanel vibe />
         </main>
-        <VibeControls />
+        {/* 就近 Suspense：控件浮层首次挂起不拖垮整屏 */}
+        <Suspense fallback={null}><VibeControls /></Suspense>
         {/* 就近 Suspense：设置页懒加载挂起时只缺浮层，主界面不闪白 */}
         <Suspense fallback={null}>
           {showSettings && (
