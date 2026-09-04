@@ -24,6 +24,11 @@ const THEME_LABEL_KEY: Record<string, string> = {
   system: 'settings.appearance.system',
 }
 
+const FONT_LABEL_KEY: Record<string, string> = {
+  default: 'settings.appearance.fontDefault',
+  serif: 'settings.appearance.fontSerif',
+}
+
 /**
  * 移动端 WebUI 设置页：仿 Android 设置的「列表 → 详情」双层结构。
  *
@@ -336,6 +341,26 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
                         }`}
                       >
                         {t(THEME_LABEL_KEY[theme])}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-sm font-medium mb-2 block">{t('settings.appearance.fontTitle')}</label>
+                  <div className="flex gap-2">
+                    {(['default', 'serif'] as const).map((font) => (
+                      <button
+                        key={font}
+                        type="button"
+                        onClick={() => settings.updateSettings({ appFont: font })}
+                        className={`flex-1 py-2 rounded-md3-sm text-sm border transition-colors ${
+                          settings.appFont === font
+                            ? 'border-md-primary/40 bg-md-primary/10 text-md-primary'
+                            : 'border-dark-onSurfaceVariant/10 hover:bg-dark-surfaceContainer'
+                        }`}
+                      >
+                        {t(FONT_LABEL_KEY[font])}
                       </button>
                     ))}
                   </div>

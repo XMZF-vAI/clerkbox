@@ -4,6 +4,8 @@
 
 /* Light theme (default) — RGB component variables for Tailwind opacity support */
 :root {
+  /* 全局字体栈（出厂黑体系）：applyAppFont('serif') 时在 documentElement 上内联覆盖 */
+  --app-font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
   --md-primary-rgb: 26 26 26;
   --md-onPrimary-rgb: 255 255 255;
   --md-primaryContainer-rgb: 227 227 227;
@@ -236,7 +238,7 @@
 
 @layer base {
   html {
-    font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    font-family: var(--app-font-family);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }

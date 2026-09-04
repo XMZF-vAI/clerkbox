@@ -32,6 +32,7 @@ const defaultSettings: AppSettings = {
   maxInputTokens: 184000,
   maxTokens: 16000,
   theme: 'dark',
+  appFont: 'default',
   colorScheme: 'classic',
   customSeedColor: '#F4A7B9',
   language: 'zh-CN',
@@ -232,6 +233,8 @@ export const useSettingsStore = create<SettingsState>()(
           // 迁移：旧版 permissionMode（craft/ask/plan）没有对应新审批档位时，
           // 一律回落到 manual（与旧 craft「危险操作需确认」行为最接近，不惊扰老用户）
           approvalMode: p.approvalMode ?? (_legacyMode ? 'manual' : current.approvalMode),
+          // 旧版本持久化数据没有 appFont 字段，回落出厂黑体系
+          appFont: p.appFont ?? defaultSettings.appFont,
         }
       },
     }

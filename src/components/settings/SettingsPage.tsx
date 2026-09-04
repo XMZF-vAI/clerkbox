@@ -22,6 +22,11 @@ const THEME_LABEL_KEY: Record<string, string> = {
   system: 'settings.appearance.system',
 }
 
+const FONT_LABEL_KEY: Record<string, string> = {
+  default: 'settings.appearance.fontDefault',
+  serif: 'settings.appearance.fontSerif',
+}
+
 export default function SettingsPage({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation()
   // 初始 tab 消费侧边栏账户入口留下的 transient 标记（useState 初始值只取一次）
@@ -321,6 +326,26 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                         }`}
                       >
                         {t(THEME_LABEL_KEY[theme])}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-sm font-medium mb-2 block">{t('settings.appearance.fontTitle')}</label>
+                  <div className="flex gap-2">
+                    {(['default', 'serif'] as const).map((font) => (
+                      <button
+                        key={font}
+                        type="button"
+                        onClick={() => settings.updateSettings({ appFont: font })}
+                        className={`flex-1 py-2 rounded-md3-sm text-sm border transition-colors ${
+                          settings.appFont === font
+                            ? 'border-md-primary/40 bg-md-primary/10 text-md-primary'
+                            : 'border-dark-onSurfaceVariant/10 hover:bg-dark-surfaceContainer'
+                        }`}
+                      >
+                        {t(FONT_LABEL_KEY[font])}
                       </button>
                     ))}
                   </div>

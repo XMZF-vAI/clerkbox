@@ -29,6 +29,13 @@ export const MACARON_PRESETS: MacaronPreset[] = [
 export const DEFAULT_COLOR_SCHEME = 'classic'
 export const DEFAULT_CUSTOM_SEED = '#F4A7B9'
 
+/** 全局字体档位（设置-外观）：default=出厂黑体系，serif=衬线（西文 Georgia、中文宋体系） */
+export type AppFont = 'default' | 'serif'
+export const APP_FONT_STACKS: Record<AppFont, string> = {
+  default: '"PingFang SC", "Microsoft YaHei", system-ui, sans-serif',
+  serif: 'Georgia, "Songti SC", "Source Han Serif SC", SimSun, serif',
+}
+
 /** 解析设置项为实际种子色 */
 export function resolveSeed(colorScheme: string, customSeedColor: string): string {
   if (colorScheme === 'custom') return customSeedColor || DEFAULT_CUSTOM_SEED
@@ -108,5 +115,18 @@ export function schemeSwatches(seedHex: string): { primary: string; secondary: s
     primary: hexFromArgb(c.primary.getArgb(scheme)),
     secondary: hexFromArgb(c.secondaryContainer.getArgb(scheme)),
     tertiary: hexFromArgb(c.tertiaryContainer.getArgb(scheme)),
+  }
+}
+
+/**
+ * 应用全局字体档位：serif 时在 documentElement 上写 --app-font-family 内联值，
+ * default 时移除内联值，回落 :root 里的出厂黑体系默认栈。
+ */
+export function applyAppFont(font: AppFont): void {
+  const root = document.documentElement
+  if (font === 'serif') {
+    root.style.setProperty('--app-font-family', APP_FONT_STACKS.serif)
+  } else {
+    root.style.removeProperty('--app-font-family')
   }
 }

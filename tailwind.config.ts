@@ -50,7 +50,7 @@ const config: Config = {
         },
       },
       fontFamily: {
-        sans: ['"PingFang SC"', '"Microsoft YaHei"', 'system-ui', 'sans-serif'],
+        sans: ['var(--app-font-family)'],
       },
       borderRadius: {
         'md3-xs': '4px',

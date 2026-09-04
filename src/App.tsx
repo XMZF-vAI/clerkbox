@@ -8,7 +8,7 @@ import { initMcp } from './stores/mcp-store'
 import { useAccountStore } from './stores/account-store'
 import { useUIStore } from './stores/ui-store'
 import { useVibeStore } from './stores/vibe-store'
-import { applyColorScheme, resolveSeed } from './lib/theme-engine'
+import { applyColorScheme, applyAppFont, resolveSeed } from './lib/theme-engine'
 import { I18nProvider } from './components/I18nProvider'
 import { isWebUIMode } from './lib/ipc-client'
 import { useIsMobile } from './hooks/use-mobile'
@@ -27,6 +27,7 @@ function ThemeProvider({ children }: { children: React.ReactNode }) {
   const theme = useSettingsStore((s) => s.theme)
   const colorScheme = useSettingsStore((s) => s.colorScheme)
   const customSeedColor = useSettingsStore((s) => s.customSeedColor)
+  const appFont = useSettingsStore((s) => s.appFont)
   const [hydrated, setHydrated] = useState(false)
 
   useEffect(() => {
@@ -57,6 +58,12 @@ function ThemeProvider({ children }: { children: React.ReactNode }) {
     mq.addEventListener('change', applyTheme)
     return () => mq.removeEventListener('change', applyTheme)
   }, [theme, colorScheme, customSeedColor, hydrated])
+
+  // 全局字体档位：水合前由 theme-init.js 预设防闪，水合后此处与设置保持一致
+  useEffect(() => {
+    if (!hydrated) return
+    applyAppFont(appFont)
+  }, [appFont, hydrated])
 
   return <>{children}</>
 }

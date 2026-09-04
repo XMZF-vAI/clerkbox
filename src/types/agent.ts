@@ -259,6 +259,8 @@ export interface AppSettings {
   /** 输出 max_tokens */
   maxTokens: number
   theme: 'light' | 'dark' | 'system'
+  /** 全局字体档位：default=出厂黑体系；serif=衬线（西文 Georgia、中文宋体系） */
+  appFont: 'default' | 'serif'
   /** 色系：马卡龙预设 id 或 'custom' */
   colorScheme: string
   /** 自定义种子色（colorScheme 为 'custom' 时生效） */
