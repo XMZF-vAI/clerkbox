@@ -605,7 +605,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
               <div className="flex flex-col items-center justify-center py-8">
                 <img src={APP_ICON} alt="ClerkBox" className="w-16 h-16 rounded-xl mb-4" />
                 <h3 className="text-xl font-semibold mb-1">ClerkBox</h3>
-                <p className="text-sm text-dark-onSurfaceVariant mb-1">{t('settings.about.version')}</p>
+                <p className="text-sm text-dark-onSurfaceVariant mb-1">{`v${__APP_VERSION__}`}</p>
                 <p className="text-xs text-dark-onSurfaceVariant/50 mb-6">{t('settings.about.tagline')}</p>
                 <div className="w-full max-w-[240px] space-y-3 text-sm">
                   <div className="flex justify-between py-2 border-b border-dark-onSurfaceVariant/10">

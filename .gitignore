@@ -4,6 +4,8 @@ node_modules/
 # Build outputs
 dist/
 dist-electron/
+# 由 scripts/sync-version.mjs 从 license.txt.tmpl 在构建前生成
+build/license.txt
 
 # Release / packaged app artifacts
 release/

@@ -1,6 +1,6 @@
 {
   "name": "clerkbox",
-  "version": "2.1.0",
+  "version": "2.5.0",
   "description": "XMZF vAI - ClerkBox: Single AI Agent Desktop Workbench",
   "main": "dist-electron/electron/main.js",
   "scripts": {
@@ -8,7 +8,7 @@
     "dev:alt": "concurrently \"npm run build:electron\" \"vite\" \"wait-on http://localhost:5176 && cross-env VITE_DEV_SERVER_URL=http://localhost:5176 electron .\"",
     "build:electron": "tsc -p tsconfig.electron.json && node -e \"require('fs').writeFileSync('dist-electron/package.json','{\\\"type\\\":\\\"commonjs\\\"}\\n')\"",
     "electron": "npm run build:electron && cross-env VITE_DEV_SERVER_URL=http://localhost:5175 electron .",
-    "build": "npm run build:electron && vite build && electron-builder --win",
+    "build": "node scripts/sync-version.mjs && npm run build:electron && vite build && electron-builder --win",
     "preview": "vite preview"
   },
   "keywords": [
@@ -78,6 +78,7 @@
       "dist/**/*",
       "dist-electron/**/*",
       "build/**/*",
+      "!build/license.txt.tmpl",
       "resources/preset-skills/**/*"
     ],
     "extraResources": [],

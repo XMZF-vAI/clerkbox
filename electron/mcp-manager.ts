@@ -5,7 +5,7 @@
  * - 对渲染进程提供：配置同步、状态查询、临时测试、聚合工具清单、工具调用
  * - 状态变化通过 'mcp:statusChanged' 事件推送给渲染进程
  */
-import { BrowserWindow } from 'electron'
+import { app, BrowserWindow } from 'electron'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
@@ -52,7 +52,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 
 /** 建立 Client 连接（stdio 或 HTTP，HTTP 自动回退 SSE） */
 async function createClient(config: McpServerConfig): Promise<Client> {
-  const client = new Client({ name: 'ClerkBox', version: '2.1.0' })
+  const client = new Client({ name: 'ClerkBox', version: app.getVersion() })
 
   if (config.transport === 'stdio') {
     if (!config.command?.trim()) throw new Error('缺少启动命令（command）')
@@ -87,7 +87,7 @@ async function createClient(config: McpServerConfig): Promise<Client> {
     await client.connect(new StreamableHTTPClientTransport(url, { requestInit }))
     return client
   } catch (httpError) {
-    const fallback = new Client({ name: 'ClerkBox', version: '2.1.0' })
+    const fallback = new Client({ name: 'ClerkBox', version: app.getVersion() })
     try {
       await fallback.connect(new SSEClientTransport(url, { requestInit }))
       return fallback

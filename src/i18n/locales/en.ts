@@ -202,7 +202,6 @@ export default {
       errorUrl: 'Server URL is required',
     },
     about: {
-      version: 'v2.1.0',
       tagline: 'Single AI Agent Desktop Workbench',
       developer: 'Developer',
       framework: 'Framework',

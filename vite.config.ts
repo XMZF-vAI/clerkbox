@@ -1,6 +1,21 @@
 import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
+import { readFileSync } from 'fs'
 import { resolve } from 'path'
+
+// 版本号唯一来源是 package.json：渲染层以 __APP_VERSION__ 常量注入（About 页显示用），
+// 其余位置一律运行时/构建期取值，避免发版时多处手动同步。
+// 注：vite:define 在 dev 下不替换（源码中 dev 非 SSR 直接跳过，仅 build 生效），
+// 故用 transform 插件统一覆盖 dev 与 build 两端。
+const pkg = JSON.parse(readFileSync(resolve(__dirname, 'package.json'), 'utf8')) as { version: string }
+
+const injectAppVersion = (): Plugin => ({
+  name: 'inject-app-version',
+  transform(code, id) {
+    if (!code.includes('__APP_VERSION__') || id.includes('node_modules')) return
+    return code.replace(/\b__APP_VERSION__\b/g, JSON.stringify(pkg.version))
+  },
+})
 
 /**
  * 仅构建时注入 CSP meta（dev 模式不注入：plugin-react 的内联 preamble 会被
@@ -26,7 +41,7 @@ const injectCsp = (): Plugin => ({
 })
 
 export default defineConfig({
-  plugins: [react(), injectCsp()],
+  plugins: [react(), injectCsp(), injectAppVersion()],
   base: './',
   root: '.',
   build: {
