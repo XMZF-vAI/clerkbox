@@ -1,6 +1,7 @@
 import { ipc } from './ipc-client'
 import { slugify } from './memory'
-import type { ToolDefinition, MemoryEntry, TodoItem, UserQuestion, ReadFileSnapshot } from '../types/agent'
+import { HARNESS_MODE_CONTENT } from './harness-modes'
+import type { ToolDefinition, MemoryEntry, TodoItem, UserQuestion, ReadFileSnapshot, HarnessMode } from '../types/agent'
 import type { McpToolInfo } from '../types/ipc'
 
 // ── Shared limits（与工具描述中的数值严格一致，改动时两处同步）──
@@ -688,6 +689,19 @@ class ToolRegistry {
   /** Get all tool definitions */
   get definitions(): ToolDefinition[] {
     return [...this.builtinDefinitions, ...this.mcpDefinitions]
+  }
+
+  /**
+   * 按会话锁定的 harness 模式取工具定义：兼容模式对内置工具做过滤/描述覆盖
+   * （见 harness-modes.ts，工具名与实现不变）。MCP 工具默认保留；仅
+   * dsh-minimal 例外——官方 minimal 组合不挂任何 MCP 插件，故一并裁剪。
+   */
+  getDefinitionsForMode(mode: HarnessMode): ToolDefinition[] {
+    if (mode === 'default') return this.definitions
+    const content = HARNESS_MODE_CONTENT[mode]
+    const transform = content.transformTools
+    const builtins = transform ? transform(this.builtinDefinitions) : this.builtinDefinitions
+    return content.includeMcpTools === false ? builtins : [...builtins, ...this.mcpDefinitions]
   }
 
   /** Execute a tool by name */

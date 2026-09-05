@@ -13,6 +13,7 @@ import { compactConversation, findKeepBoundaryIndex } from '../lib/compact'
 import { computeContextUsage, getApiVisibleMessages, type ContextUsageInfo } from '../lib/context-usage'
 import { isPathInside, isSystemPath, resolveToolPath, normalizePathForComparison } from '../lib/path-safety'
 import { SYSTEM_PROMPT, CLERKBOX_PROMPT, PLAN_MODE_PROMPT, SPEC_MODE_PROMPT, GOAL_MODE_PROMPT, GOAL_EVALUATOR_PROMPT } from '../lib/prompts'
+import { HARNESS_MODE_CONTENT, normalizeHarnessMode } from '../lib/harness-modes'
 import { renderSkillCatalog, type SkillCatalogEntry } from '../lib/skill-catalog'
 import { buildRelevantSkillReminder } from '../lib/skill-matcher'
 import i18n from '../i18n'
@@ -31,7 +32,7 @@ import {
   type AnthropicThinkingBlock,
   type NeutralMessage,
 } from '../lib/api-adapters'
-import type { ApiCompat, GoalVerdict, Message, MessageAttachment, MessageSkillSnapshot, TaskMode, ToolCall, ToolResult, StreamingToolCall, TokenUsage, ReadFileSnapshot } from '../types/agent'
+import type { ApiCompat, GoalVerdict, HarnessMode, Message, MessageAttachment, MessageSkillSnapshot, TaskMode, ToolCall, ToolResult, StreamingToolCall, TokenUsage, ReadFileSnapshot } from '../types/agent'
 import { useInteractiveStore, useTodoStore } from '../stores/interactive-store'
 import { useGoalStore } from '../stores/goal-store'
 
@@ -409,10 +410,13 @@ export function useAgent(sessionId: string) {
       opts: {
         modelOverride?: string
         thinkingBlocks?: Map<string, AnthropicThinkingBlock[]>
+        /** 本会话锁定的 harness 模式：决定传给模型的内置工具集/描述（子 agent 与评估器不传，走 default） */
+        harnessMode?: HarnessMode
       } = {}
     ): Promise<{ chunks: AsyncIterable<string>; compat: ApiCompat }> => {
       // Get all tool definitions (skills are prompt-only, no dynamic tools)
-      const tools = toolRegistry.definitions.map((t) => ({
+      // 兼容模式下按模式取内置工具定义（dsh-minimal 裁剪 + 描述覆盖），MCP 工具不受影响
+      const tools = toolRegistry.getDefinitionsForMode(opts.harnessMode ?? 'default').map((t) => ({
         name: t.name,
         description: t.description,
         parameters: t.parameters,
@@ -607,6 +611,8 @@ export function useAgent(sessionId: string) {
        *  追加到最后一条 user 消息，不进 system 前缀（保前缀缓存） */
       skillReminder?: string
       extraSystemPrompt?: string
+      /** 本会话锁定的 harness 兼容模式（reactLoop 从会话读出后传入） */
+      harnessMode?: HarnessMode
       agentsMdContent?: string
       /** 环境段用：当前工作目录是否为 git 仓库（reactLoop 探测后传入） */
       isGitRepo?: boolean
@@ -623,10 +629,14 @@ export function useAgent(sessionId: string) {
       skillCatalog = useSkillsStore.getState().getSkillCatalog(),
       skillReminder,
       extraSystemPrompt,
+      harnessMode: harnessModeOpt,
       agentsMdContent = '',
       isGitRepo,
       clearOldToolResults,
     } = opts
+    const harnessMode = harnessModeOpt ?? 'default'
+    // 兼容模式的静态段与动态段策略（default 模式为 undefined，走原有分支）
+    const modeContent = harnessMode !== 'default' ? HARNESS_MODE_CONTENT[harnessMode] : undefined
 
     // 当前生效模型是否支持图片输入；不支持时图片不进入 API 消息
     // （ChatInput 已在 UI 层拦截无路径图片，这里对漏网的无路径图片兜底丢弃）
@@ -639,6 +649,36 @@ export function useAgent(sessionId: string) {
     let dynamicSystemContent = `## Current Working Directory\n${workingDir || '(not set — treat all paths as relative)'}`
     if (extraSystemPrompt) {
       staticSystemContent = extraSystemPrompt
+    } else if (modeContent) {
+      // ── harness 兼容模式：静态段整体替换为对齐官方 harness 的 prompt；
+      // 动态段按模式策略注入（full 与默认一致，minimal 仅保留工作目录+环境）──
+      staticSystemContent = modeContent.staticPrompt
+      if (workingDir) {
+        dynamicSystemContent += `\n\nFile operations default to this directory. Do NOT write outside it unless the user explicitly provides an absolute path elsewhere.`
+        dynamicSystemContent += `\n\nThis section is authoritative: when asked about the current working directory, report the path above — NOT any directory path seen in earlier messages or tool outputs (those reflect a previous setting).`
+        const envLines = [
+          `- Platform: ${navigator.platform || 'unknown'}`,
+          `- OS: ${getOsDescription()} (shells available: cmd.exe, PowerShell)`,
+          `- Today's date: ${new Date().toDateString()}`,
+          `- Is a git repository: ${isGitRepo ? 'yes' : 'no'}`,
+        ]
+        dynamicSystemContent += `\n\n## Environment\n${envLines.join('\n')}`
+        if (modeContent.dynamicContext === 'full') {
+          dynamicSystemContent += CLERKBOX_PROMPT
+          if (agentsMdContent) dynamicSystemContent += agentsMdContent
+          if (memoryPrompt) dynamicSystemContent += '\n\n' + memoryPrompt
+          if (skillCatalog.length > 0) {
+            dynamicSystemContent += `\n\n### 🧩 Skill Catalog (every installed skill)\n${renderSkillCatalog(skillCatalog)}\n\n**Follow the Skill Router rules above — load matching skills autonomously via read_file. Do NOT read all skills, only those matching the current task.**`
+          }
+        }
+      }
+      // 任务工作流提示词：用户显式发起的工作流属会话层，兼容模式下照常注入
+      if (taskMode === 'plan') dynamicSystemContent += PLAN_MODE_PROMPT
+      else if (taskMode === 'spec') dynamicSystemContent += SPEC_MODE_PROMPT
+      else if (taskMode === 'goal') {
+        dynamicSystemContent += GOAL_MODE_PROMPT
+        if (goalCondition) dynamicSystemContent += `\n\n### 🎯 Active Goal Condition\n${goalCondition}`
+      }
     } else {
       staticSystemContent = SYSTEM_PROMPT
       if (workingDir) {
@@ -677,8 +717,9 @@ export function useAgent(sessionId: string) {
 
     // dev 校验：静态段在同来源下跨请求必须字节一致——若未来有人把易变内容
     // （时间戳/记忆/技能索引等）塞回静态段，这里立刻暴露，避免缓存命中率悄悄归零。
+    // 来源含 harness 模式：切换会话/模式导致的静态段变化属正常现象，不算泄漏。
     if (IS_DEV) {
-      const origin = extraSystemPrompt ? 'sub' : 'main'
+      const origin = extraSystemPrompt ? 'sub' : `main:${harnessMode}`
       const hash = hashString(staticSystemContent)
       const prev = staticSystemHashRef.current
       if (prev && prev.origin === origin && prev.hash !== hash) {
@@ -1073,11 +1114,19 @@ export function useAgent(sessionId: string) {
         ?? settings.maxInputTokens ?? 184000
       // API 实际发送的消息子集（摘要 + 边界之后的消息）
       const apiMessages = getApiVisibleMessages(messages)
-      const total = tokenTrackerRef.current.getTokenCount(apiMessages)
+      // 空会话（无可发送消息）强制为 0：tokenTracker 跨会话复用，残留 lastUsage
+      // 会让新会话的指示器凭空显示上一场对话的用量弧
+      const total = apiMessages.length === 0 ? 0 : tokenTrackerRef.current.getTokenCount(apiMessages)
       return computeContextUsage(apiMessages, total, budget, estimateTokensForText(SYSTEM_PROMPT))
     },
     [settings]
   )
+
+  // 切换会话时清空 token 追踪：tracker 跨会话复用，残留的 lastUsage 会让新会话
+  // 凭空继承上一场对话的用量（指示器蓝弧 / 首轮误判触发自动压缩）
+  useEffect(() => {
+    tokenTrackerRef.current.reset()
+  }, [sessionId])
 
   // 注册到模块级注册表（切换会话/卸载时清理），供 TitleBar 的上下文用量面板调用
   useEffect(() => {
@@ -1094,6 +1143,12 @@ export function useAgent(sessionId: string) {
     skillReminder?: string
   ) => {
     let conversationMessages = [...initialMessages]
+
+    // 本会话锁定的 harness 兼容模式（首条消息后不可变更，循环开始时读一次即可）。
+    // 子 agent 与 goal 评估器不继承：它们有独立的提示词与工具语境。
+    const harnessMode = normalizeHarnessMode(
+      useChatStore.getState().sessions.find((s) => s.id === sessionId)?.harnessMode
+    )
 
     // ── Goal 工作流：会话级目标跨消息持续生效 ──
     // 本次运行未显式选择工作流时，若目标处于 active，则继续按 goal 模式注入提示词
@@ -1321,7 +1376,7 @@ export function useAgent(sessionId: string) {
       if (currentTokenCount > Math.floor(autoCompactThreshold * 0.85)) microCompactEnabled = true
 
       // Build API messages from conversation history (with auto-truncation for long conversations)
-      const apiMessages = truncateMessages(buildAPIMessages(conversationMessages, { memoryPrompt, agentsMdContent, taskMode: effectiveTaskMode, goalCondition, isGitRepo, skillReminder, clearOldToolResults: microCompactEnabled }))
+      const apiMessages = truncateMessages(buildAPIMessages(conversationMessages, { memoryPrompt, agentsMdContent, taskMode: effectiveTaskMode, goalCondition, isGitRepo, skillReminder, harnessMode, clearOldToolResults: microCompactEnabled }))
 
       // Parse streaming response
       let content = ''
@@ -1336,7 +1391,7 @@ export function useAgent(sessionId: string) {
       // 429/502/超时/网络中断等瞬时错误用指数退避自动重试（最多 5 次）。
       // 占位消息只 add 一次，重试时复用同一 assistantId，避免残留多条空消息。
       const runModelTurn = async (): Promise<Awaited<ReturnType<typeof parseStream>>> => {
-        const response = await callAPI(apiMessages, controller, { thinkingBlocks })
+        const response = await callAPI(apiMessages, controller, { thinkingBlocks, harnessMode })
         if (!placeholderAdded) {
           // Create assistant message placeholder
           addMessage(sessionId, {

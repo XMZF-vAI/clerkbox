@@ -156,6 +156,13 @@ export interface CompactionResult {
   postCompactTokenCount: number
 }
 
+/**
+ * Harness 模式：会话级一次选定、开始后锁定。
+ * default = ClerkBox 内置 harness；其余为第三方官方 harness 兼容模式
+ * （定义与内容见 src/lib/harness-modes.ts）。
+ */
+export type HarnessMode = 'default' | 'codex' | 'grok-build' | 'dsh' | 'dsh-minimal'
+
 export interface Session {
   id: string
   title: string
@@ -164,6 +171,8 @@ export interface Session {
   messages: Message[]
   createdAt: number
   updatedAt: number
+  /** 本会话的 harness 模式；首条消息后锁定，旧数据缺省视为 default */
+  harnessMode?: HarnessMode
 }
 
 /** 用户自定义模型（旧结构，仅用于迁移到 ModelProvider；UI 不再读取） */

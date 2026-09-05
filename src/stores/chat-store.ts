@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { ipc } from '../lib/ipc-client'
-import type { Message, MessageAttachment, Session, ToolCall, ToolResult } from '../types/agent'
+import type { HarnessMode, Message, MessageAttachment, Session, ToolCall, ToolResult } from '../types/agent'
+import { normalizeHarnessMode } from '../lib/harness-modes'
 import type { SessionRow } from '../types/ipc'
 
 export type SessionStatus = 'working' | 'error' | 'confirm-danger'
@@ -203,6 +204,8 @@ interface ChatState {
   addMessage: (sessionId: string, message: Message) => void
   updateMessage: (sessionId: string, messageId: string, updates: Partial<Message>) => void
   updateSessionWorkingDir: (sessionId: string, dir: string) => void
+  /** 设定会话的 harness 模式：仅会话尚未开始（无消息）时允许，开始后锁定 */
+  setSessionHarnessMode: (sessionId: string, mode: HarnessMode) => void
   /** 添加一个 recent folder，置顶，去重，最多保留 8 个。同步持久化到 DB。 */
   pushRecentFolder: (dir: string) => Promise<void>
   setStreaming: (streaming: boolean, sessionId?: string) => void
@@ -267,6 +270,7 @@ const createEmptySession = (): Session => {
     messages: [],
     createdAt: now,
     updatedAt: now,
+    harnessMode: 'default',
   }
 }
 
@@ -295,6 +299,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           messages: mapMessageRows(msgRows),
           createdAt: row.created_at,
           updatedAt: row.updated_at,
+          harnessMode: normalizeHarnessMode(row.harness_mode),
           ...restoreWorkDirs(row),
         })
       }
@@ -358,6 +363,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             messages: mapMessageRows(msgRows),
             createdAt: row.created_at,
             updatedAt: row.updated_at,
+            harnessMode: normalizeHarnessMode(row.harness_mode),
             workingDir: restored.workingDir || local?.workingDir,
             defaultWorkDir: restored.defaultWorkDir || local?.defaultWorkDir,
           })
@@ -376,6 +382,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             messages: mapMessageRows(msgRows),
             createdAt: row.created_at,
             updatedAt: row.updated_at,
+            harnessMode: normalizeHarnessMode(row.harness_mode),
             workingDir: restored.workingDir || local?.workingDir,
             defaultWorkDir: restored.defaultWorkDir || local?.defaultWorkDir,
           })
@@ -464,6 +471,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         updated_at: now,
         working_dir: sessionBefore.workingDir ?? null,
         default_work_dir: sessionBefore.defaultWorkDir ?? null,
+        harness_mode: sessionBefore.harnessMode ?? 'default',
       }))
     }
     logPersistenceFailure('add message', ipc.dbAddMessage({
@@ -566,8 +574,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
         updated_at: now,
         working_dir: dir,
         default_work_dir: session.defaultWorkDir ?? null,
+        harness_mode: session.harnessMode ?? 'default',
       }))
     }
+  },
+
+  setSessionHarnessMode: (sessionId, mode) => {
+    // 模式锁定：会话已产出消息后不可变更（与 dsh 官方 preset 语义一致，
+    // 也保证静态 system 段跨请求字节稳定）。空会话纯内存态，不落库——
+    // 首条消息落库时 addMessage 会把 harnessMode 写入会话行。
+    set((state) => ({
+      sessions: state.sessions.map((s) =>
+        s.id === sessionId && s.messages.length === 0 ? { ...s, harnessMode: mode } : s
+      ),
+    }))
   },
 
   pushRecentFolder: async (dir) => {

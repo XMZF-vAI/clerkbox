@@ -1,5 +1,5 @@
-import { useState, useRef, type KeyboardEvent as ReactKeyboardEvent, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type ChangeEvent as ReactChangeEvent, useEffect } from 'react'
-import { Send, Brain, FolderOpen, ChevronDown, Square, Check, X, Store, Plus, FolderPlus, Paperclip, FileText, ShieldCheck, Hand, TriangleAlert, Slash, BookOpen, GitBranch, Target, Plug, Settings2, FoldVertical, Loader2, type LucideIcon } from 'lucide-react'
+import { useState, useRef, type KeyboardEvent as ReactKeyboardEvent, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type ChangeEvent as ReactChangeEvent, useEffect, useLayoutEffect } from 'react'
+import { Send, Brain, FolderOpen, ChevronDown, Square, Check, X, Store, Plus, FolderPlus, Paperclip, FileText, ShieldCheck, Hand, TriangleAlert, Slash, BookOpen, GitBranch, Target, Plug, Settings2, FoldVertical, Loader2, Layers, Lock, type LucideIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useSettingsStore } from '../../stores/settings-store'
 import { useChatStore } from '../../stores/chat-store'
@@ -8,7 +8,8 @@ import { useMcpStore } from '../../stores/mcp-store'
 import { useGoalStore } from '../../stores/goal-store'
 import { useUIStore } from '../../stores/ui-store'
 import { ipc, isWebUIMode } from '../../lib/ipc-client'
-import type { MessageAttachment, MessageSkillSnapshot, TaskMode } from '../../types/agent'
+import { HARNESS_MODE_METAS, normalizeHarnessMode } from '../../lib/harness-modes'
+import type { MessageAttachment, MessageSkillSnapshot, TaskMode, HarnessMode } from '../../types/agent'
 import type { FileEntry, WebUICapabilities } from '../../types/ipc'
 import ConfirmDialog from '../ui/ConfirmDialog'
 import { useIsMobile } from '../../hooks/use-mobile'
@@ -190,12 +191,13 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
     setProviderModels: s.setProviderModels,
     activateModel: s.activateModel,
   })))
-  const { sessions, activeSessionId, createSession, updateSessionWorkingDir, recentsFolders, pushRecentFolder } = useChatStore(
+  const { sessions, activeSessionId, createSession, updateSessionWorkingDir, setSessionHarnessMode, recentsFolders, pushRecentFolder } = useChatStore(
     useShallow((s) => ({
       sessions: s.sessions,
       activeSessionId: s.activeSessionId,
       createSession: s.createSession,
       updateSessionWorkingDir: s.updateSessionWorkingDir,
+      setSessionHarnessMode: s.setSessionHarnessMode,
       recentsFolders: s.recentsFolders,
       pushRecentFolder: s.pushRecentFolder,
     }))
@@ -238,6 +240,17 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
   const [collapsedProviders, setCollapsedProviders] = useState<Set<string>>(new Set())
   const modelMenuRef = useRef<HTMLDivElement>(null)
   const modelTriggerRef = useRef<HTMLButtonElement>(null)
+
+  // Harness 模式下拉（新对话可选一次，开始后锁定为标识）
+  const [showHarnessMenu, setShowHarnessMenu] = useState(false)
+  const harnessMenuRef = useRef<HTMLDivElement>(null)
+  const harnessTriggerRef = useRef<HTMLButtonElement>(null)
+  // 展开/收起动画：测量面板实际高度，max-height 0↔实高平滑过渡
+  const harnessPanelRef = useRef<HTMLDivElement>(null)
+  const [harnessPanelHeight, setHarnessPanelHeight] = useState(0)
+  useLayoutEffect(() => {
+    if (showHarnessMenu) setHarnessPanelHeight(harnessPanelRef.current?.offsetHeight ?? 0)
+  }, [showHarnessMenu])
 
   // 工作目录 popover 状态
   const [showFolderPopover, setShowFolderPopover] = useState(false)
@@ -830,6 +843,9 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
       if (approvalMenuRef.current && !approvalMenuRef.current.contains(e.target as Node)) {
         setShowApprovalMenu(false)
       }
+      if (harnessMenuRef.current && !harnessMenuRef.current.contains(e.target as Node)) {
+        setShowHarnessMenu(false)
+      }
       // 命令菜单锚定在整个输入框上：框内点击（输入过滤词等）不关闭，框外点击关闭
       if (inputBoxRef.current && !inputBoxRef.current.contains(e.target as Node)) {
         if (showCommandMenu) {
@@ -844,14 +860,14 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
         setShowFolderPopover(false)
       }
     }
-    if (showModelMenu || showApprovalMenu || showCommandMenu || showThinkingMenu || showFolderPopover) {
+    if (showModelMenu || showApprovalMenu || showCommandMenu || showThinkingMenu || showFolderPopover || showHarnessMenu) {
       document.addEventListener('mousedown', handleClickOutside)
       return () => document.removeEventListener('mousedown', handleClickOutside)
     }
-  }, [showModelMenu, showApprovalMenu, showCommandMenu, showThinkingMenu, showFolderPopover])
+  }, [showModelMenu, showApprovalMenu, showCommandMenu, showThinkingMenu, showFolderPopover, showHarnessMenu])
 
   useEffect(() => {
-    if (!showModelMenu && !showApprovalMenu && !showCommandMenu && !showThinkingMenu && !showFolderPopover) return
+    if (!showModelMenu && !showApprovalMenu && !showCommandMenu && !showThinkingMenu && !showFolderPopover && !showHarnessMenu) return
 
     const handleEscape = (event: globalThis.KeyboardEvent) => {
       if (event.key !== 'Escape') return
@@ -859,24 +875,32 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
         ? modelTriggerRef.current
         : showApprovalMenu
           ? approvalTriggerRef.current
-          : showCommandMenu
-            ? textareaRef.current
-            : showThinkingMenu
-              ? thinkingTriggerRef.current
-              : folderTriggerRef.current
+          : showHarnessMenu
+            ? harnessTriggerRef.current
+            : showCommandMenu
+              ? textareaRef.current
+              : showThinkingMenu
+                ? thinkingTriggerRef.current
+                : folderTriggerRef.current
       event.stopPropagation()
       setShowModelMenu(false)
       setShowApprovalMenu(false)
       setShowCommandMenu(false)
       setShowThinkingMenu(false)
       setShowFolderPopover(false)
+      setShowHarnessMenu(false)
       if (showCommandMenu) setContent((v) => (v.trim() === '/' ? '' : v))
       requestAnimationFrame(() => trigger?.focus())
     }
 
     document.addEventListener('keydown', handleEscape)
     return () => document.removeEventListener('keydown', handleEscape)
-  }, [showModelMenu, showApprovalMenu, showCommandMenu, showThinkingMenu, showFolderPopover])
+  }, [showModelMenu, showApprovalMenu, showCommandMenu, showThinkingMenu, showFolderPopover, showHarnessMenu])
+
+  // Harness 模式：会话未开始（无消息）时可改，开始后锁定为只读标识
+  const harnessMode = normalizeHarnessMode(currentSession?.harnessMode)
+  const harnessLocked = (currentSession?.messages.length ?? 0) > 0
+  const harnessMeta = HARNESS_MODE_METAS.find((m) => m.id === harnessMode) ?? HARNESS_MODE_METAS[0]
 
   // 审批档位元数据（图标 + 标签；完全访问用警告色，对齐 TRAE）
   const approvalMode = settings.approvalMode
@@ -930,6 +954,135 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
 
   return (
     <div className={outerClass} style={outerStyle}>
+      {/* Harness 模式行（对话框上方）：新对话可选一次并展示小字解析；开始后锁定为「模式名 + 小字」提醒。
+          选项为内联展开（参与文档流、把输入框下推），非浮层——不与顶栏/消息内容产生遮挡关系 */}
+      <div className={`mb-2 px-1 max-w-5xl mx-auto min-w-0 ${vibe ? 'text-white/70' : 'text-dark-onSurfaceVariant'}`} ref={harnessMenuRef}>
+        <div className="flex items-center gap-1.5 min-w-0">
+          {harnessLocked ? (
+            <>
+              <Layers size={12} className="flex-shrink-0 opacity-70" />
+              <span className="text-[11px] font-medium flex-shrink-0">{t(harnessMeta.nameKey)}</span>
+              <Lock size={10} className="flex-shrink-0 opacity-50" />
+              <span
+                className={`text-[11px] truncate min-w-0 ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/60'}`}
+                title={t(harnessMeta.descKey)}
+              >
+                · {t(harnessMeta.descKey)}
+              </span>
+            </>
+          ) : (
+            <>
+              <button
+                ref={harnessTriggerRef}
+                type="button"
+                onClick={() => setShowHarnessMenu((v) => !v)}
+                className={`flex items-center gap-1 h-6 px-1.5 -mx-1 flex-shrink-0 rounded-md3-sm transition-colors ${
+                  harnessMode !== 'default'
+                    ? vibe
+                      ? 'bg-md-tertiary/25 text-md-tertiary hover:bg-md-tertiary/35'
+                      : 'bg-md-tertiary/10 text-md-tertiary hover:bg-md-tertiary/20'
+                    : vibe
+                      ? 'hover:bg-white/10'
+                      : 'hover:bg-dark-surfaceContainer'
+                }`}
+                aria-label={t('chat.harnessAria')}
+                aria-controls="chat-harness-menu"
+                aria-expanded={showHarnessMenu}
+              >
+                <Layers size={12} />
+                <span className="text-[11px] font-medium">{t(harnessMeta.nameKey)}</span>
+                <ChevronDown size={10} className={`transition-transform ${showHarnessMenu ? 'rotate-180' : ''}`} />
+              </button>
+              <span
+                className={`text-[11px] truncate min-w-0 ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/60'}`}
+                title={t(harnessMeta.descKey)}
+              >
+                · {t(harnessMeta.descKey)}
+              </span>
+            </>
+          )}
+        </div>
+        {!harnessLocked && (
+          <div
+            aria-hidden={!showHarnessMenu}
+            className="overflow-hidden transition-[max-height,opacity,visibility] duration-200 ease-out motion-reduce:transition-none"
+            style={{
+              maxHeight: showHarnessMenu ? Math.max(harnessPanelHeight, 1) : 0,
+              opacity: showHarnessMenu ? 1 : 0,
+              visibility: showHarnessMenu ? 'visible' : 'hidden',
+            }}
+          >
+            <div ref={harnessPanelRef} className="pt-1.5 min-h-0">
+              <div id="chat-harness-menu" className={`w-80 max-w-full rounded-md3-md py-1 max-h-[45dvh] overflow-y-auto overscroll-contain ${
+                vibe
+                  ? 'bg-black/60 border border-white/15 backdrop-blur-2xl text-white shadow-lg'
+                  : 'bg-dark-surfaceContainerHighest border border-dark-onSurfaceVariant/10 shadow-lg'
+              }`}>
+                <div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wider opacity-50">
+                  {t('chat.harnessGroupDefault')}
+                </div>
+                {HARNESS_MODE_METAS.filter((m) => m.group === 'default').map((m) => {
+                  const active = harnessMode === m.id
+                  return (
+                    <button
+                      type="button"
+                      key={m.id}
+                      onClick={() => { if (activeSessionId) { setSessionHarnessMode(activeSessionId, m.id); setShowHarnessMenu(false) } }}
+                      className={`w-full flex items-start gap-2.5 px-3 py-2.5 max-md:py-3.5 text-left transition-colors ${
+                        active
+                          ? vibe ? 'bg-white/10' : 'bg-dark-surfaceContainerHigh'
+                          : vibe ? 'hover:bg-white/10' : 'hover:bg-dark-surfaceContainerHigh'
+                      }`}
+                    >
+                      <span className="flex-1 min-w-0">
+                        <span className={`block text-xs font-medium ${vibe ? 'text-white/90' : 'text-dark-onSurface'}`}>
+                          {t(m.nameKey)}
+                        </span>
+                        <span className={`block text-[10px] mt-0.5 ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/50'}`}>
+                          {t(m.descKey)}
+                        </span>
+                      </span>
+                      {active && <Check size={14} className="mt-1 flex-shrink-0 text-md-primary" />}
+                    </button>
+                  )
+                })}
+                <div className={`px-3 pt-2 pb-1 text-[10px] uppercase tracking-wider opacity-50 border-t ${vibe ? 'border-white/15' : 'border-dark-onSurfaceVariant/10'}`}>
+                  {t('chat.harnessGroupCompat')}
+                </div>
+                {HARNESS_MODE_METAS.filter((m) => m.group === 'compat').map((m) => {
+                  const active = harnessMode === m.id
+                  return (
+                    <button
+                      type="button"
+                      key={m.id}
+                      onClick={() => { if (activeSessionId) { setSessionHarnessMode(activeSessionId, m.id); setShowHarnessMenu(false) } }}
+                      className={`w-full flex items-start gap-2.5 px-3 py-2.5 max-md:py-3.5 text-left transition-colors ${
+                        active
+                          ? vibe ? 'bg-white/10' : 'bg-dark-surfaceContainerHigh'
+                          : vibe ? 'hover:bg-white/10' : 'hover:bg-dark-surfaceContainerHigh'
+                      }`}
+                    >
+                      <span className="flex-1 min-w-0">
+                        <span className={`block text-xs font-medium ${vibe ? 'text-white/90' : 'text-dark-onSurface'}`}>
+                          {t(m.nameKey)}
+                        </span>
+                        <span className={`block text-[10px] mt-0.5 ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/50'}`}>
+                          {t(m.descKey)}
+                        </span>
+                        <span className="block text-[10px] mt-0.5 text-md-primary/80">
+                          {t(m.hintKey)}
+                        </span>
+                      </span>
+                      {active && <Check size={14} className="mt-1 flex-shrink-0 text-md-primary" />}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* Working directory indicator - only in default mode */}
       {!isWelcome && effectiveWorkDir && (
         <div className={`flex items-center gap-1.5 mb-2 px-1 max-w-5xl mx-auto ${vibe ? 'text-white/50' : ''}`}>
