@@ -4,6 +4,8 @@ node_modules/
 # Build outputs
 dist/
 dist-electron/
+# Electron 运行时分发产物（本地调试用，不进版本库）
+/electron-dist/
 # 由 scripts/sync-version.mjs 从 license.txt.tmpl 在构建前生成
 build/license.txt
 
@@ -52,11 +54,19 @@ Thumbs.db
 # 临时素材与校验脚本
 /logo-animation/
 /tmp-adapters-check.mts
-# 一次性文件修补/拷贝脚本（指向外部构建目录的 scratch 工具）
+# 一次性脚本/外部工具与历史杂物（指向外部构建目录的 scratch 工具、无关脚本、旧构建日志）
 /fix-inverse.cjs
 /copy_vibe.cjs
+/copy2.cjs
+/copy3.cjs
+/sync-dist.cjs
+/auto-continue.ahk
+/build-log.txt
 /fix_vibe_import.cjs
 # 根目录遗留的组件草稿（正式实现在 src/ 下）
 /Vibe.tsx
+/Download.tsx
 # 发布说明草稿（每次发版重写）
 /.release-notes.md
+# 历史发版说明（不跟踪）
+/release-notes-*.md

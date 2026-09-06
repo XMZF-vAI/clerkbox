@@ -77,11 +77,9 @@
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
-      "build/**/*",
-      "!build/license.txt.tmpl",
+      "build/icon.ico",
       "resources/preset-skills/**/*"
     ],
-    "extraResources": [],
     "asarUnpack": [
       "node_modules/node-pty/**"
     ],
