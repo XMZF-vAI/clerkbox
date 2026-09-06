@@ -1,7 +1,0 @@
-  • electron-builder  version=26.15.2 os=10.0.20348
-  • loaded configuration  file=package.json ("build" field)
-  • executing @electron/rebuild  electronVersion=42.4.0 arch=x64 buildFromSource=false workspaceRoot=d:\ClerkBox - 副本 projectDir=./ appDir=./
-  • installing native dependencies  arch=x64
-  • completed installing native dependencies
-  • packaging       platform=win32 arch=x64 electron=42.4.0 appOutDir=release\win-unpacked
-  • downloaded      label=electron progress=100%
