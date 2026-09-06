@@ -172,10 +172,13 @@ const TurnPanel = memo(function TurnPanel({ turn, isLastTurn, isStreaming, vibe 
 }, areTurnPanelPropsEqual)
 
 export default function MessageList({ messages, isStreaming, vibe }: MessageListProps) {
+  const { t } = useTranslation()
   const scrollRef = useRef<HTMLDivElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const scrollRafRef = useRef<number | null>(null)
   const isNearBottomRef = useRef(true)
+  // 用户上翻后置 true：配合 isStreaming 控制悬浮「回到底部」按钮的显隐
+  const [awayFromBottom, setAwayFromBottom] = useState(false)
 
   // Only auto-scroll while the user is already near the latest message.
   useEffect(() => {
@@ -185,6 +188,7 @@ export default function MessageList({ messages, isStreaming, vibe }: MessageList
     const onScroll = () => {
       const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight
       isNearBottomRef.current = distanceToBottom < THRESHOLD
+      setAwayFromBottom(!isNearBottomRef.current)
     }
     el.addEventListener('scroll', onScroll, { passive: true })
     return () => el.removeEventListener('scroll', onScroll)
@@ -209,24 +213,49 @@ export default function MessageList({ messages, isStreaming, vibe }: MessageList
 
   const turns = useMemo(() => groupIntoTurns(messages), [messages])
 
+  /** 悬浮「回到底部」：滚到底并恢复粘底（随后的 scroll 事件会重新校准 isNearBottomRef） */
+  const scrollToBottom = () => {
+    isNearBottomRef.current = true
+    setAwayFromBottom(false)
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }
+
   if (messages.length === 0) {
     return null
   }
 
   return (
-    <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden px-4 py-6 space-y-6">
-      {turns.map((turn, index) => (
-        <TurnPanel
-          key={turn.turnId}
-          turn={turn}
-          isLastTurn={index === turns.length - 1}
-          isStreaming={isStreaming}
-          vibe={vibe}
-        />
-      ))}
-      {/* Agent 工作状态指示器：像素网格 + 阶段文案 + 耗时，固定在对话最底部 */}
-      {isStreaming && <AgentStatusIndicator messages={messages} vibe={vibe} />}
-      <div ref={bottomRef} />
+    <div className="relative flex-1 min-h-0 flex flex-col">
+      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-4 py-6 space-y-6">
+        {turns.map((turn, index) => (
+          <TurnPanel
+            key={turn.turnId}
+            turn={turn}
+            isLastTurn={index === turns.length - 1}
+            isStreaming={isStreaming}
+            vibe={vibe}
+          />
+        ))}
+        {/* Agent 工作状态指示器：像素网格 + 阶段文案 + 耗时，固定在对话最底部 */}
+        {isStreaming && <AgentStatusIndicator messages={messages} vibe={vibe} />}
+        <div ref={bottomRef} />
+      </div>
+      {/* 流式期间用户上翻：底部中央悬浮「回到底部」按钮 */}
+      {awayFromBottom && isStreaming && (
+        <button
+          type="button"
+          onClick={scrollToBottom}
+          aria-label={t('chat.scrollToBottom')}
+          title={t('chat.scrollToBottom')}
+          className={`absolute bottom-3 left-1/2 -translate-x-1/2 z-10 flex h-8 w-8 items-center justify-center rounded-full border shadow-lg transition-colors animate-fade-in ${
+            vibe
+              ? 'bg-black/60 border-white/15 text-white/80 hover:bg-black/80'
+              : 'bg-dark-surfaceContainerHigh border-dark-onSurfaceVariant/15 text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHighest'
+          }`}
+        >
+          <ChevronDown size={16} />
+        </button>
+      )}
     </div>
   )
 }

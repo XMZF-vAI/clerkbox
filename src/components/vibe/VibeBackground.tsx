@@ -212,8 +212,23 @@ function SlideshowBackground() {
     <div className="fixed inset-0 z-0">
       {/* 兜底渐变：任何一层图片失效时不至于死黑 */}
       <div className={`absolute inset-0 ${GRADIENT_FALLBACK}`} />
-      {/* 预加载下一张（WebUI 为已解析的 base64），切换时零白屏 */}
-      {nextSrc && <img src={nextSrc} alt="" className="hidden" aria-hidden />}
+      {/* 预加载下一张（WebUI 为已解析的 base64），切换时零白屏；
+          加载失败则把该图从轮播列表剔除并立即切下一张（对齐单图模式的失效兜底） */}
+      {nextSrc && (
+        <img
+          src={nextSrc}
+          alt=""
+          className="hidden"
+          aria-hidden
+          onError={() => {
+            const failedPath = files[(tick + 1) % files.length]
+            if (!failedPath) return
+            srcCacheRef.current.delete(failedPath)
+            setFiles((prev) => prev.filter((p) => p !== failedPath))
+            setTick((v) => v + 1)
+          }}
+        />
+      )}
       {layers.base && (
         <div
           className="absolute inset-0 bg-cover bg-center bg-no-repeat animate-fade-in"

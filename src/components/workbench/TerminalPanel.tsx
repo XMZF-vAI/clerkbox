@@ -131,6 +131,8 @@ export default function TerminalPanel({ termId, active, vibe, cwd }: TerminalPan
 
     return () => {
       disposed = true
+      offData()
+      offExit()
       resizeObserver?.disconnect()
       if (ptyKeyRef.current) void ipc.ptyKill(ptyKeyRef.current).catch(() => {})
       term.dispose()

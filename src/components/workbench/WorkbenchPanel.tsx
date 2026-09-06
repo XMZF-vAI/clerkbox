@@ -176,18 +176,21 @@ export default function WorkbenchPanel({ vibe }: { vibe?: boolean }) {
               >
                 <Icon size={12} className="shrink-0" />
                 <span className="max-w-[110px] truncate">{label}</span>
-                <span
-                  aria-hidden
+                {/* 真正的子按钮：可 Tab 聚焦、可 Enter 触发，避免嵌 span 只能鼠标点 */}
+                <button
+                  type="button"
+                  aria-label={t('common.close')}
+                  title={t('common.close')}
                   onClick={(e) => {
                     e.stopPropagation()
                     closeTab(tab.id)
                   }}
-                  className={`ml-0.5 rounded p-0.5 opacity-0 transition-opacity group-hover:opacity-100 hover:bg-black/20 ${
+                  className={`ml-0.5 rounded p-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 hover:bg-black/20 focus-visible:outline focus-visible:outline-md-primary/60 ${
                     isActive && 'opacity-60'
                   }`}
                 >
                   <X size={11} />
-                </span>
+                </button>
               </button>
             )
           })}

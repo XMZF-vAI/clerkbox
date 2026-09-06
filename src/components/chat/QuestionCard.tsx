@@ -23,15 +23,22 @@ export default function QuestionCard({ sessionId, vibe = false }: { sessionId: s
 
   const submit = () => resolveQuestion(sessionId, pending.id, answers)
   const answered = pending.questions.every((question) => (answers[question.id] || []).length > 0)
+  // 已答数 / 总数（进度展示真实作答进度，而不是恒等的 n/n）
+  const answeredCount = pending.questions.filter((question) => (answers[question.id] || []).length > 0).length
 
   return (
     <section className={`mx-4 mb-3 overflow-hidden rounded-md3-md border shadow-sm animate-slide-up ${
       vibe ? 'border-white/20 bg-white/10 text-white' : 'border-dark-onSurfaceVariant/15 bg-dark-surfaceContainerHigh text-dark-onSurface'
     }`} aria-label={t('question.title')}>
-      <button type="button" onClick={() => setExpanded((value) => !value)} className="flex min-h-11 w-full items-center gap-2 px-4 py-3 text-left">
+      <button
+        type="button"
+        onClick={() => setExpanded((value) => !value)}
+        aria-expanded={expanded}
+        className="flex min-h-11 w-full items-center gap-2 px-4 py-3 text-left"
+      >
         <CircleHelp size={17} className={vibe ? 'text-white/70' : 'text-md-primary'} />
         <span className="flex-1 text-sm font-medium">{t('question.title')}</span>
-        <span className="text-xs opacity-60">{pending.questions.length}/{pending.questions.length}</span>
+        <span className="text-xs opacity-60">{answeredCount}/{pending.questions.length}</span>
         <ChevronDown size={15} className={`transition-transform ${expanded ? '' : '-rotate-90'}`} />
       </button>
       {expanded && (

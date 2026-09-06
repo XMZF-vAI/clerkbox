@@ -102,7 +102,7 @@ function toolRowIcon(name: string) {
 }
 
 /** 行 chip 文本：读写类显示文件名，命令/搜索显示参数片段 */
-function chipTextFor(name: string, args: Record<string, unknown>): string {
+function chipTextFor(name: string, args: Record<string, unknown>, t: ReturnType<typeof useTranslation>['t']): string {
   if (name === 'write_file' || name === 'search_replace' || name === 'edit_file' ||
       name === 'read_file' || name === 'read_image' || name === 'list_dir') {
     return fileBase(String(args.path || ''))
@@ -111,8 +111,8 @@ function chipTextFor(name: string, args: Record<string, unknown>): string {
   if (name === 'search_files' || name === 'search_content') return String(args.pattern || '')
   if (name === 'web_search') return String(args.query || '')
   if (name === 'web_fetch') return String(args.url || '')
-  if (name === 'question') return `${Array.isArray(args.questions) ? args.questions.length : 0} 个问题`
-  if (name === 'todowrite') return `${Array.isArray(args.items) ? args.items.length : 0} 个任务`
+  if (name === 'question') return t('chat.chipQuestions', { count: Array.isArray(args.questions) ? args.questions.length : 0 })
+  if (name === 'todowrite') return t('chat.chipTodos', { count: Array.isArray(args.items) ? args.items.length : 0 })
   const json = JSON.stringify(args)
   return json === '{}' ? '' : json.slice(0, 80)
 }
@@ -140,7 +140,7 @@ function ToolRow({ toolCall, result, vibe }: {
   const label = toolCall.name === 'write_file'
     ? t('chat.toolRowWrite', { count: String(toolCall.arguments.content || '').split('\n').length })
     : t(`tools.${toolCall.name}`, { defaultValue: toolCall.name })
-  const chip = chipTextFor(toolCall.name, toolCall.arguments)
+  const chip = chipTextFor(toolCall.name, toolCall.arguments, t)
 
   return (
     <div className="animate-fade-up">

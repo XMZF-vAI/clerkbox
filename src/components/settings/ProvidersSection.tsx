@@ -11,6 +11,7 @@ import {
   type ProviderPreset, type ProviderGroup,
 } from '../../lib/provider-catalog'
 import { ipc } from '../../lib/ipc-client'
+import ConfirmDialog from '../ui/ConfirmDialog'
 import lunoraLogo from '../../assets/lunora-logo.svg'
 import type { ApiCompat, ModelProvider, ProviderModel, ReasoningEffort } from '../../types/agent'
 import { REASONING_EFFORTS } from '../../types/agent'
@@ -195,6 +196,8 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
   const [nameDraft, setNameDraft] = useState(provider.name)
   const [showKey, setShowKey] = useState(false)
   const [advancedModelId, setAdvancedModelId] = useState<string | null>(null)
+  // 删除供应商的二次确认
+  const [confirmRemove, setConfirmRemove] = useState(false)
 
   const preset = getPreset(provider.presetId)
   const isActiveProvider = settings.activeProviderId === provider.id
@@ -352,7 +355,7 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
         </button>
         <button
           type="button"
-          onClick={() => settings.removeProvider(provider.id)}
+          onClick={() => setConfirmRemove(true)}
           className="w-7 h-7 flex items-center justify-center rounded-md3-xs text-dark-onSurfaceVariant hover:text-md-error hover:bg-md-error/10 transition-colors flex-shrink-0"
           aria-label={t('settings.providers.remove')}
         >
@@ -708,6 +711,19 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
             </button>
           </div>
         </div>
+      )}
+
+      {/* 删除供应商二次确认：防止误删整个平台的模型配置 */}
+      {confirmRemove && (
+        <ConfirmDialog
+          title={t('settings.providers.remove')}
+          message={t('settings.providers.removeConfirmMsg', { name: provider.name })}
+          confirmText={t('common.delete')}
+          cancelText={t('common.cancel')}
+          variant="danger"
+          onConfirm={() => settings.removeProvider(provider.id)}
+          onCancel={() => setConfirmRemove(false)}
+        />
       )}
     </div>
   )

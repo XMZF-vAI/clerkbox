@@ -26,12 +26,14 @@ import {
   RefreshCw,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import { useShallow } from 'zustand/react/shallow'
 import { useSkillsStore } from '../../stores/skills-store'
 import { useChatStore } from '../../stores/chat-store'
 import { useUIStore } from '../../stores/ui-store'
 import { useSettingsStore } from '../../stores/settings-store'
 import { useMcpStore } from '../../stores/mcp-store'
 import { ipc } from '../../lib/ipc-client'
+import ConfirmDialog from '../ui/ConfirmDialog'
 import type { SkillsMPSkill, SkillDefinition } from '../../types/skills'
 import type { McpMarketServer, McpServerConfig } from '../../types/ipc'
 
@@ -81,6 +83,7 @@ function renderSkillIcon(_icon: string | undefined, size: number = 18, className
  */
 export default function SkillStore() {
   const { t } = useTranslation()
+  // 按字段订阅：避免商店内任何无关字段变化（如安装态）触发整页重渲染
   const {
     skills,
     sessionSkillIds,
@@ -97,9 +100,32 @@ export default function SkillStore() {
     uninstallOnlineSkill,
     loadRecommended,
     installCustomSkill,
-  } = useSkillsStore()
-  const { sessions, activeSessionId } = useChatStore()
+  } = useSkillsStore(useShallow((s) => ({
+    skills: s.skills,
+    sessionSkillIds: s.sessionSkillIds,
+    searchResults: s.searchResults,
+    searchLoading: s.searchLoading,
+    searchQuery: s.searchQuery,
+    searchPage: s.searchPage,
+    searchTotal: s.searchTotal,
+    searchHasNext: s.searchHasNext,
+    recommendedSkills: s.recommendedSkills,
+    recommendedLoading: s.recommendedLoading,
+    searchOnlineSkills: s.searchOnlineSkills,
+    installOnlineSkill: s.installOnlineSkill,
+    uninstallOnlineSkill: s.uninstallOnlineSkill,
+    loadRecommended: s.loadRecommended,
+    installCustomSkill: s.installCustomSkill,
+  })))
+  const { sessions, activeSessionId } = useChatStore(useShallow((s) => ({
+    sessions: s.sessions,
+    activeSessionId: s.activeSessionId,
+  })))
   const { setShowSkillStore } = useUIStore()
+
+  // 卸载技能 / 移除 MCP 服务器的二次确认弹窗目标
+  const [uninstallTarget, setUninstallTarget] = useState<string | null>(null)
+  const [removingMcpId, setRemovingMcpId] = useState<string | null>(null)
 
   const [query, setQuery] = useState('')
   const [installingIds, setInstallingIds] = useState<Set<string>>(new Set())
@@ -121,7 +147,10 @@ export default function SkillStore() {
   const [storeTab, setStoreTab] = useState<'skills' | 'mcp'>('skills')
 
   // ── MCP 插件市场 ──
-  const settings = useSettingsStore()
+  const settings = useSettingsStore(useShallow((s) => ({
+    mcpServers: s.mcpServers,
+    updateSettings: s.updateSettings,
+  })))
   const mcpStatuses = useMcpStore((s) => s.statuses)
   const [mcpMarket, setMcpMarket] = useState<McpMarketServer[]>([])
   const [mcpMarketLoading, setMcpMarketLoading] = useState(false)
@@ -781,7 +810,7 @@ export default function SkillStore() {
                           {isRemovable && (
                             <button
                               type="button"
-                              onClick={() => handleUninstall(skill.id)}
+                              onClick={() => setUninstallTarget(skill.id)}
                               className="p-1.5 rounded-lg hover:bg-md-error/10 text-dark-onSurfaceVariant/40 hover:text-md-error transition-all flex-shrink-0"
                               title={t('common.uninstall')}
                             >
@@ -880,7 +909,7 @@ export default function SkillStore() {
                             {isRemovable && (
                               <button
                                 type="button"
-                                onClick={() => handleUninstall(skill.id)}
+                                onClick={() => setUninstallTarget(skill.id)}
                                 className="p-1.5 rounded-lg hover:bg-md-error/10 text-dark-onSurfaceVariant/40 hover:text-md-error transition-all flex-shrink-0"
                                 title={t('common.uninstall')}
                               >
@@ -1022,7 +1051,7 @@ export default function SkillStore() {
                           </button>
                           <button
                             type="button"
-                            onClick={() => { if (window.confirm(t('mcpstore.removeConfirm'))) removeMcpServer(server.id) }}
+                            onClick={() => setRemovingMcpId(server.id)}
                             className="p-1.5 rounded-lg hover:bg-md-error/10 text-dark-onSurfaceVariant/40 hover:text-md-error transition-all"
                             title={t('common.uninstall')}
                           >
@@ -1559,6 +1588,38 @@ export default function SkillStore() {
             )}
           </div>
         </div>
+      )}
+
+      {/* ── 卸载技能二次确认（danger 样式，对齐侧栏删除会话）── */}
+      {uninstallTarget && (
+        <ConfirmDialog
+          title={t('skillstore.uninstallConfirmTitle')}
+          message={t('skillstore.uninstallConfirmMsg', { name: skills.find((s) => s.id === uninstallTarget)?.name ?? uninstallTarget })}
+          confirmText={t('common.uninstall')}
+          cancelText={t('common.cancel')}
+          variant="danger"
+          onConfirm={() => {
+            handleUninstall(uninstallTarget)
+            setUninstallTarget(null)
+          }}
+          onCancel={() => setUninstallTarget(null)}
+        />
+      )}
+
+      {/* ── 移除 MCP 服务器二次确认 ── */}
+      {removingMcpId && (
+        <ConfirmDialog
+          title={t('mcpstore.removeTitle')}
+          message={t('mcpstore.removeConfirm')}
+          confirmText={t('common.delete')}
+          cancelText={t('common.cancel')}
+          variant="danger"
+          onConfirm={() => {
+            removeMcpServer(removingMcpId)
+            setRemovingMcpId(null)
+          }}
+          onCancel={() => setRemovingMcpId(null)}
+        />
       )}
     </div>
   )

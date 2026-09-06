@@ -27,6 +27,8 @@ interface TreeNode {
   children?: TreeNode[]
   expanded?: boolean
   loading?: boolean
+  /** 目录读取失败（与空目录区分开；收起后重新展开可重试） */
+  loadFailed?: boolean
 }
 
 function appendPath(parent: string, name: string): string {
@@ -182,6 +184,11 @@ function FileTreeNode({ node, depth = 0, onToggle, onFileSelect }: { node: TreeN
           {t('fileTree.loading')}
         </div>
       )}
+      {node.expanded && node.loadFailed && (
+        <div role="alert" className="py-1 text-xs text-md-error" style={{ paddingLeft: paddingLeft + 20 }}>
+          {t('fileTree.loadFailed')}
+        </div>
+      )}
     </>
   )
 }
@@ -210,23 +217,27 @@ export default function FileTree({ onFileSelect, initialRoot }: FileTreeProps) {
     })
   }, [])
 
-  const loadDir = useCallback(async (dirPath: string): Promise<TreeNode[]> => {
+  const loadDir = useCallback(async (dirPath: string): Promise<{ children: TreeNode[]; failed: boolean }> => {
     try {
       const entries = await ipc.listDir(dirPath)
-      return entries
-        .sort((a: FileEntry, b: FileEntry) => {
-          if (a.isDirectory && !b.isDirectory) return -1
-          if (!a.isDirectory && b.isDirectory) return 1
-          return a.name.localeCompare(b.name)
-        })
-        .map((entry: FileEntry) => ({
-          name: entry.name,
-          path: appendPath(dirPath, entry.name),
-          isDirectory: entry.isDirectory,
-          expanded: false,
-        }))
+      return {
+        children: entries
+          .sort((a: FileEntry, b: FileEntry) => {
+            if (a.isDirectory && !b.isDirectory) return -1
+            if (!a.isDirectory && b.isDirectory) return 1
+            return a.name.localeCompare(b.name)
+          })
+          .map((entry: FileEntry) => ({
+            name: entry.name,
+            path: appendPath(dirPath, entry.name),
+            isDirectory: entry.isDirectory,
+            expanded: false,
+          })),
+        failed: false,
+      }
     } catch {
-      return []
+      // 读取失败：返回失败标记，让 UI 能提示（而不是和空目录混为一谈）
+      return { children: [], failed: true }
     }
   }, [])
 
@@ -254,9 +265,14 @@ export default function FileTree({ onFileSelect, initialRoot }: FileTreeProps) {
       children: [],
     }])
 
-    const children = await loadDir(selectedPath)
+    const { children, failed } = await loadDir(selectedPath)
     if (requestId !== rootRequestRef.current) return
-    updateTree((nodes) => updateNode(nodes, selectedPath, (node) => ({ ...node, children, loading: false })))
+    updateTree((nodes) => updateNode(nodes, selectedPath, (node) => ({
+      ...node,
+      children: failed ? undefined : children,
+      loading: false,
+      loadFailed: failed,
+    })))
   }
 
   const handleToggle = useCallback(async (targetPath: string) => {
@@ -274,9 +290,15 @@ export default function FileTree({ onFileSelect, initialRoot }: FileTreeProps) {
     })))
     if (!shouldLoad) return
 
-    const children = await loadDir(targetPath)
+    const { children, failed } = await loadDir(targetPath)
     pendingLoadsRef.current.delete(targetPath)
-    updateTree((nodes) => updateNode(nodes, targetPath, (node) => ({ ...node, children, loading: false })))
+    updateTree((nodes) => updateNode(nodes, targetPath, (node) => ({
+      ...node,
+      // 失败时不落空 children：收起后重新展开即可重试
+      children: failed ? undefined : children,
+      loading: false,
+      loadFailed: failed,
+    })))
   }, [loadDir, updateTree])
 
   // 工作台模式：跟随传入的会话工作目录自动挂根（目录变化/切换会话时重挂）

@@ -11,16 +11,16 @@ import type { McpServerConfig, McpTransportType } from '../../types/ipc'
 const inputCls =
   'w-full px-3 py-2 bg-dark-surfaceContainerHighest rounded-md3-sm text-sm border border-dark-onSurfaceVariant/10 outline-none focus:border-md-primary/40 transition-colors'
 
-/** 解析标准 MCP 配置 JSON（兼容 Claude Desktop / Cursor 的 mcpServers 格式） */
+/** 解析标准 MCP 配置 JSON（兼容 Claude Desktop / Cursor 的 mcpServers 格式）；error 返回 i18n key，由调用方翻译 */
 function parseMcpJson(text: string): { servers: Omit<McpServerConfig, 'id' | 'enabled'>[]; error?: string } {
   let data: unknown
   try {
     data = JSON.parse(text)
   } catch {
-    return { servers: [], error: 'JSON 解析失败，请检查格式' }
+    return { servers: [], error: 'settings.mcp.errorParseFailed' }
   }
   if (typeof data !== 'object' || data === null) {
-    return { servers: [], error: 'JSON 根节点必须是对象' }
+    return { servers: [], error: 'settings.mcp.errorRootObject' }
   }
 
   // {"mcpServers": {...}} 或直接的 {名称: 配置} 表；单条服务器对象也接受
@@ -75,7 +75,7 @@ function parseMcpJson(text: string): { servers: Omit<McpServerConfig, 'id' | 'en
   }
 
   if (servers.length === 0) {
-    return { servers: [], error: '未找到有效的 MCP 服务器配置（需要 command 或 url 字段）' }
+    return { servers: [], error: 'settings.mcp.errorNoValidServer' }
   }
   return { servers }
 }
@@ -337,7 +337,7 @@ function ImportDialog({
   const handleImport = () => {
     const { servers, error } = parseMcpJson(text)
     if (error) {
-      setError(error)
+      setError(t(error))
       return
     }
     onImport(servers)

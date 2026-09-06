@@ -26,21 +26,21 @@ function computeSessionTokenStats(messages: Message[]) {
   return { promptTokens, completionTokens, cacheRead, cacheCreation, apiCalls, cacheHitRate }
 }
 
-/** 各分类的可视化颜色（面板堆叠条 + 图例共用） */
+/** 各分类的可视化颜色（面板堆叠条 + 图例共用）：全部走 --md-* 主题 token，随明暗主题切换 */
 const CATEGORY_META: Record<ContextCategoryKey, { color: string; labelKey: string }> = {
-  system: { color: '#9ca3af', labelKey: 'chat.ctxSystemPrompt' },
-  summary: { color: '#c084fc', labelKey: 'chat.ctxCompactSummary' },
-  user: { color: '#60a5fa', labelKey: 'chat.ctxUserMessages' },
-  assistant: { color: '#4ade80', labelKey: 'chat.ctxAssistantMessages' },
-  tools: { color: '#fbbf24', labelKey: 'chat.ctxToolCalls' },
-  attachments: { color: '#22d3ee', labelKey: 'chat.ctxAttachments' },
+  system: { color: 'rgb(var(--md-onSurfaceVariant-rgb))', labelKey: 'chat.ctxSystemPrompt' },
+  summary: { color: 'rgb(var(--md-tertiary-rgb))', labelKey: 'chat.ctxCompactSummary' },
+  user: { color: 'rgb(var(--md-info-rgb))', labelKey: 'chat.ctxUserMessages' },
+  assistant: { color: 'rgb(var(--md-success-rgb))', labelKey: 'chat.ctxAssistantMessages' },
+  tools: { color: 'rgb(var(--md-warning-rgb))', labelKey: 'chat.ctxToolCalls' },
+  attachments: { color: 'rgb(var(--md-primary-rgb))', labelKey: 'chat.ctxAttachments' },
 }
 
-/** 用量弧线颜色：< 警戒线蓝色，≥ 警戒线琥珀，≥ 自动压缩阈值红色 */
-function arcColor(ratio: number, warningRatio: number): string {
-  if (ratio >= 1) return '#f87171'
-  if (ratio >= warningRatio) return '#fbbf24'
-  return '#89b4fa'
+/** 用量弧线颜色：< 警戒线蓝色，≥ 警戒线琥珀，≥ 自动压缩阈值红色（stroke token，随主题切换） */
+function arcStrokeCls(ratio: number, warningRatio: number): string {
+  if (ratio >= 1) return 'stroke-md-error'
+  if (ratio >= warningRatio) return 'stroke-md-warning'
+  return 'stroke-md-info'
 }
 
 /** 环形上下文用量指示器：细环 + 进度弧（顶部起点），点击展开统计面板 */
@@ -116,11 +116,11 @@ export default function ContextUsageIndicator() {
         className="w-8 h-8 max-md:w-10 max-md:h-10 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors"
       >
         <svg width="18" height="18" viewBox="0 0 18 18" className="-rotate-90">
-          <circle cx="9" cy="9" r={R} fill="none" strokeWidth="2" stroke="#ffffff" strokeOpacity={0.18} strokeDasharray={CIRC} />
+          <circle cx="9" cy="9" r={R} fill="none" strokeWidth="2" className="stroke-dark-onSurfaceVariant/25" strokeDasharray={CIRC} />
           {usage && clamped > 0 && (
             <circle
               cx="9" cy="9" r={R} fill="none" strokeWidth="2" strokeLinecap="round"
-              stroke={arcColor(ratio, warningRatio)}
+              className={arcStrokeCls(ratio, warningRatio)}
               strokeDasharray={`${clamped * CIRC} ${CIRC}`}
             />
           )}
