@@ -50,9 +50,12 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
   })
 }
 
-/** 建立 Client 连接（stdio 或 HTTP，HTTP 自动回退 SSE） */
-async function createClient(config: McpServerConfig): Promise<Client> {
+/** 建立 Client 连接（stdio 或 HTTP，HTTP 自动回退 SSE）。
+ *  onClient：client 一经创建立即回调，让调用方持有引用 —— 连接超时/失败时
+ *  可回收半成品连接（尤其是 stdio 已 spawn 的子进程），避免僵尸进程。 */
+async function createClient(config: McpServerConfig, onClient?: (client: Client) => void): Promise<Client> {
   const client = new Client({ name: 'ClerkBox', version: app.getVersion() })
+  onClient?.(client)
 
   if (config.transport === 'stdio') {
     if (!config.command?.trim()) throw new Error('缺少启动命令（command）')
@@ -88,6 +91,7 @@ async function createClient(config: McpServerConfig): Promise<Client> {
     return client
   } catch (httpError) {
     const fallback = new Client({ name: 'ClerkBox', version: app.getVersion() })
+    onClient?.(fallback)
     try {
       await fallback.connect(new SSEClientTransport(url, { requestInit }))
       return fallback
@@ -205,8 +209,19 @@ export class McpManager {
     this.broadcast()
 
     void (async () => {
+      // 持有半成品 client 引用：withTimeout 超时后 createClient 仍在后台进行，
+      // stdio 子进程可能已 spawn，必须在失败分支回收，否则沦为无人管理的僵尸进程
+      let pendingClient: Client | null = null
+      // 经函数读取规避 TS 窄化误判：TS 看不到回调内的赋值，会把 catch 分支的
+      // pendingClient 误窄化为 null
+      const getPendingClient = (): Client | null => pendingClient
       try {
-        const client = await withTimeout(createClient(config), CONNECT_TIMEOUT_MS, '连接 MCP 服务器')
+        const client = await withTimeout(
+          createClient(config, (c) => { pendingClient = c }),
+          CONNECT_TIMEOUT_MS,
+          '连接 MCP 服务器',
+        )
+        pendingClient = null
         if (this.disposed || this.connections.get(config.id) !== conn) {
           await client.close().catch(() => {})
           return
@@ -216,6 +231,8 @@ export class McpManager {
         conn.state = 'connected'
         conn.error = undefined
       } catch (error) {
+        // 超时/连接失败：关闭半成品连接回收子进程（close 可能再抛错，吞掉即可）
+        void getPendingClient()?.close().catch(() => {})
         conn.state = 'error'
         conn.error = error instanceof Error ? error.message : String(error)
       }
@@ -282,7 +299,13 @@ export class McpManager {
   async test(config: McpServerConfig): Promise<{ ok: true; toolCount: number; tools: Array<{ name: string; description: string }> } | { error: string }> {
     let client: Client | null = null
     try {
-      client = await withTimeout(createClient(config), CONNECT_TIMEOUT_MS, '连接 MCP 服务器')
+      // onClient 让 client 在创建后立即被引用：连接超时时 finally 也能关闭
+      // 已 spawn stdio 子进程的半成品连接，避免僵尸进程
+      client = await withTimeout(
+        createClient(config, (c) => { client = c }),
+        CONNECT_TIMEOUT_MS,
+        '连接 MCP 服务器',
+      )
       const tools = await fetchTools(client, config)
       return {
         ok: true,

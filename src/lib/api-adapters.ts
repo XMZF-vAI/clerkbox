@@ -658,11 +658,12 @@ function parseAnthropicEvent(json: unknown, state: ParserState): NormalizedEvent
     case 'message_start': {
       const u = ev.message?.usage
       if (u) {
+        // 只记 state，不发 usage 事件：最终 usage 统一由 message_delta 发一次。
+        // 旧实现 start/delta 各发一次 → 每轮 totalCalls/prompt_tokens 全局双计。
         state.inputTokens = u.input_tokens ?? 0
         state.outputTokens = u.output_tokens ?? 0
         state.cacheCreationInputTokens = u.cache_creation_input_tokens ?? 0
         state.cacheReadInputTokens = u.cache_read_input_tokens ?? 0
-        events.push({ kind: 'usage', usage: usageFrom(state) })
       }
       break
     }

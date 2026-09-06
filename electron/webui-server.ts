@@ -22,6 +22,39 @@ import { app } from 'electron'
 // WebUI 的 /api/invoke 路由通过此表调用同一份业务逻辑。
 export const handlerRegistry = new Map<string, (...args: unknown[]) => unknown>()
 
+// ── 远程能力黑名单 ──
+// 威胁模型：WebUI token 会出现在 URL / HTTP 请求中，可能被局域网嗅探、浏览器
+// 历史或代理日志泄漏。token 一旦泄漏，攻击者不应能借此直接获得 RCE 或窃取密钥。
+// 因此凡涉及「读取/写入凭据、执行命令、伪终端、按配置拉起子进程、整目录写删技能」
+// 的 handler 一律拒绝通过 /api/invoke 远程调用（403）。
+// 本地 Electron 渲染层不受影响：它走 ipcRenderer.invoke，不经过该注册表。
+// 说明：ptyWrite 实际不存在，输入通道叫 ptyInput，且 ptyInput / ptyResize 注册在
+// ipcMain.on 上（本就不在 handlerRegistry 中），这里一并列入以防实现变化；
+// executeCommandWithShell / cancelSessionCommands / mcpTest 与 executeCommand /
+// mcpSync 同属命令执行、进程控制与按配置拉起子进程的范畴，一并禁止。
+const REMOTE_INVOKE_BLOCKLIST: readonly string[] = [
+  // 凭据 / API Key
+  'loadApiKeys',
+  'saveApiKey',
+  'removeApiKey',
+  // 命令执行与进程控制
+  'executeCommand',
+  'executeCommandWithShell',
+  'cancelSessionCommands',
+  // 伪终端（node-pty）
+  'ptyCreate',
+  'ptyWrite',
+  'ptyInput',
+  'ptyResize',
+  'ptyKill',
+  // MCP：按用户配置连接 / 拉起子进程
+  'mcpSync',
+  'mcpTest',
+  // 技能目录整目录写入 / 删除
+  'writeSkillDir',
+  'removeSkillDir',
+]
+
 // ── 流式对话桥接 ──
 // api-proxy.ts 导出 startChatStream / abortChatStream，main.ts 启动时注入。
 export type StreamSendFn = (payload: Record<string, unknown>) => void
@@ -193,6 +226,13 @@ export async function startWebUI(options: { lanAccess?: boolean } = {}): Promise
 export function stopWebUI(): void {
   if (server) {
     server.close()
+    // 立即掐断所有 keep-alive 长连接：否则 server.close() 要等挂起连接自然结束，
+    // 端口释放被拖延（closeAllConnections 为 Node 18.2+ API，旧环境忽略）
+    try {
+      server.closeAllConnections()
+    } catch {
+      // 旧版 Node 无该方法时忽略
+    }
     server = null
     currentToken = ''
     currentPort = 0
@@ -205,7 +245,10 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
 
   // API 路由需要 token 认证
   if (url.pathname.startsWith('/api/')) {
-    const token = (req.headers['x-webui-token'] as string) || url.searchParams.get('token') || ''
+    // API 端点仅接受 x-webui-token header：前端从 URL ?token= 提取后已改用 header
+    // 发送，API 不再回退接受 query token，避免带 token 的完整 URL 进入访问日志 /
+    // 浏览器历史后被长期重放（静态页面首次加载仍可经 query 带入 token）
+    const token = (req.headers['x-webui-token'] as string) || ''
     if (token !== currentToken) {
       sendJson(res, 401, { error: 'Unauthorized' })
       return
@@ -355,6 +398,13 @@ async function handleInvoke(req: http.IncomingMessage, res: http.ServerResponse)
     const { method, args } = JSON.parse(body) as { method: string; args: unknown[] }
     if (typeof method !== 'string' || !Array.isArray(args)) {
       sendJson(res, 400, { error: 'Invalid request format' })
+      return
+    }
+
+    // 远程能力黑名单：涉密钥 / 命令 / 伪终端 / 进程配置的 handler 一律 403
+    //（见 REMOTE_INVOKE_BLOCKLIST 处的威胁模型说明）
+    if (REMOTE_INVOKE_BLOCKLIST.includes(method)) {
+      sendJson(res, 403, { error: 'Forbidden method' })
       return
     }
 

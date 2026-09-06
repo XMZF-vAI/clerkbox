@@ -199,7 +199,10 @@ async function webChatStream(cfg: ApiConnConfig, body: unknown): Promise<{ reque
   void (async () => {
     try {
       const reader = res.body?.getReader()
-      if (!reader) return
+      if (!reader) {
+        for (const cb of chunkListeners) cb({ requestId, error: 'WebUI: response body is empty' })
+        return
+      }
       const decoder = new TextDecoder()
       let buffer = ''
       while (true) {
@@ -219,8 +222,19 @@ async function webChatStream(cfg: ApiConnConfig, body: unknown): Promise<{ reque
           } catch { /* 忽略解析失败的分片 */ }
         }
       }
-    } catch {
-      // 连接中断等，静默处理
+      // 读到流末尾仍需兜底派发 done：服务端若未发 done 事件就提前关闭（网络断、
+      // 反向代理超时），消费端的 for-await 会永远等待，agent 循环挂死。
+      // 重复 done 无害：消费端收到第一个 done 即返回。
+      for (const cb of chunkListeners) cb({ requestId, done: true })
+    } catch (e) {
+      if (ac.signal.aborted) {
+        // 用户主动中断：派发 done 让迭代器静默退出
+        for (const cb of chunkListeners) cb({ requestId, done: true })
+      } else {
+        // 连接中断等异常：派发 error 让消费端抛出、reactLoop 走错误分支，而不是永久挂起
+        const msg = e instanceof Error ? e.message : String(e)
+        for (const cb of chunkListeners) cb({ requestId, error: `WebUI stream interrupted: ${msg}` })
+      }
     } finally {
       sseControllers.delete(requestId)
     }

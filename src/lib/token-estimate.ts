@@ -18,8 +18,10 @@ export function estimateTokensForText(text: string): number {
 
 /** Estimate tokens from an array of messages.
  *  Handles content, toolCalls, toolResults, and thinkingContent fields.
+ *  注意：tool 消息的 content 与 toolResults[0].content 是同一份文本（构造时复用），
+ *  重复计入会让工具密集会话的估算接近翻倍、提前触发昂贵的自动压缩 → 内容相同只计一次。
  */
-export function estimateTokensForMessages<T extends { content?: string; toolCalls?: unknown; toolResults?: unknown[]; thinkingContent?: string }>(
+export function estimateTokensForMessages<T extends { role?: string; content?: string; toolCalls?: unknown; toolResults?: unknown[]; thinkingContent?: string }>(
   messages: T[]
 ): number {
   let total = 0
@@ -33,6 +35,7 @@ export function estimateTokensForMessages<T extends { content?: string; toolCall
     }
     if (msg.toolResults) {
       for (const tr of msg.toolResults as { content?: string }[]) {
+        if (tr.content !== undefined && tr.content === msg.content) continue
         total += estimateTokensForText(tr.content || '')
       }
     }

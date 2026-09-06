@@ -5,6 +5,7 @@ import {
   dialog,
   shell,
   safeStorage,
+  session,
 } from 'electron'
 import * as path from 'path'
 import * as fs from 'fs'
@@ -445,6 +446,21 @@ function parseSkillMd(content: string): {
 
 let mainWindow: BrowserWindow | null = null
 
+// 单实例锁：防止多开导致 MCP / PTY 子进程、凭据与数据库文件等单例资源互相竞争。
+// 抢锁失败说明已有实例在运行，直接退出；成功则监听二次启动事件，聚焦已有主窗口
+// （最小化时先还原），把用户引导回正在运行的实例。
+const gotSingleInstanceLock = app.requestSingleInstanceLock()
+if (!gotSingleInstanceLock) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.focus()
+    }
+  })
+}
+
 /** Keep provider credentials encrypted by the OS instead of in renderer localStorage. */
 function credentialStorePath(): string {
   return path.join(app.getPath('userData'), 'clerkbox-credentials.json')
@@ -518,6 +534,16 @@ function createWindow() {
     },
   })
 
+  // ── webview 安全加固 ──
+  // 工作台浏览器面板的 <webview> 使用独立分区 persist:workbench-browser
+  // （见 src/components/workbench/BrowserPanel.tsx）。对该分区的权限请求默认
+  // 全部拒绝，仅放行全屏：内嵌页面不得索要摄像头、麦克风、地理位置、通知等敏感能力。
+  session.fromPartition('persist:workbench-browser').setPermissionRequestHandler(
+    (_webContents, permission, callback) => {
+      callback(permission === 'fullscreen')
+    }
+  )
+
   const normalizeHttpUrl = (url: string): string | null => {
     try {
       const parsed = new URL(url)
@@ -541,6 +567,14 @@ function createWindow() {
   // <webview> 使用独立的 guest WebContents，主窗口的 window-open handler 不会拦截它。
   // 将 guest 的 target="_blank" / window.open 请求转发给工作台，由渲染层新建标签。
   const hostWindow = mainWindow
+  // guest 附加前的兜底：剥掉 <webview> 标签声明的 preload 脚本并压平 webPreferences
+  // 中的提权项（nodeIntegration 等），即使页面恶意构造 webview 属性也无法借 guest 提权。
+  mainWindow.webContents.on('will-attach-webview', (_event, webPreferences) => {
+    delete webPreferences.preload
+    webPreferences.nodeIntegration = false
+    webPreferences.contextIsolation = true
+    webPreferences.sandbox = true
+  })
   mainWindow.webContents.on('did-attach-webview', (_event, guestContents) => {
     guestContents.setWindowOpenHandler(({ url }) => {
       const safeUrl = normalizeHttpUrl(url)
@@ -772,22 +806,24 @@ function registerIpcHandlers() {
     if (typeof filePath !== 'string' || !filePath) {
       throw new Error('readImageFileBase64: file path must be a non-empty string')
     }
+    // 与其他文件工具一致：入口先做路径安全校验（拒绝穿越 / UNC / 命名流 / 设备名）
+    const safe = assertSafePath(filePath)
     let size = 0
     try {
-      size = (await fs.promises.stat(filePath)).size
+      size = (await fs.promises.stat(safe)).size
     } catch {
-      throw new Error(`Cannot access image file: ${filePath}`)
+      throw new Error(`Cannot access image file: ${safe}`)
     }
     if (size > 32 * 1024 * 1024) {
       throw new Error('Image file too large (max 32MB)')
     }
     let buf: Buffer
     try {
-      buf = await fs.promises.readFile(filePath)
+      buf = await fs.promises.readFile(safe)
     } catch {
-      throw new Error(`Failed to read image file: ${filePath}`)
+      throw new Error(`Failed to read image file: ${safe}`)
     }
-    const ext = path.extname(filePath).toLowerCase()
+    const ext = path.extname(safe).toLowerCase()
     const mime =
       ext === '.png' ? 'image/png'
         : ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg'
@@ -1110,16 +1146,41 @@ function registerIpcHandlers() {
   const MAX_READ_BYTES = 10 * 1024 * 1024  // 10MB — 防止同步读大文件导致 OOM
   const MAX_WRITE_BYTES = 10 * 1024 * 1024 // 10MB — 防止填满磁盘
 
+  // Windows 保留设备名：即使带扩展名（如 CON.txt）也会命中设备而非普通文件，逐段拒绝
+  const WINDOWS_DEVICE_NAMES = new Set([
+    'CON', 'PRN', 'AUX', 'NUL',
+    'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
+    'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9',
+  ])
+
   /** Normalize a file-system path and reject traversal or null-byte input. */
   function assertSafePath(filePath: string): string {
     if (typeof filePath !== 'string' || !filePath || filePath.includes('\0')) {
       throw new Error('Invalid path')
+    }
+    // 绝对路径是文件工具的功能需要（保留），但 UNC 路径（\\server\share）可触达
+    // 网络共享，必须拒绝
+    if (/^[\\/]{2}/.test(filePath)) {
+      throw new Error(`UNC path blocked: ${filePath}`)
+    }
+    // win32 下盘符之外出现冒号即 NTFS 命名流（ADS）语义，如 C:\foo:bar、file.txt:stream
+    if (process.platform === 'win32' && filePath.indexOf(':', 2) !== -1) {
+      throw new Error(`Path ADS/colon blocked: ${filePath}`)
     }
     const normalized = path.normalize(filePath)
     // 规范化后若仍含 .. 段（作为独立路径段），说明试图跳出基目录
     // 用正则匹配路径分隔符之间的 .. 段，避免误判 foo..bar 这种文件名
     if (/(^|[/\\])\.\.([/\\]|$)/.test(normalized)) {
       throw new Error(`Path traversal blocked: ${filePath}`)
+    }
+    // Windows 设备名（含带扩展名形式，如 CON.txt）：对每段文件名的主名（首个点之前）判断
+    for (const segment of normalized.split(/[\\/]/)) {
+      if (!segment) continue
+      const dotIndex = segment.indexOf('.')
+      const baseName = dotIndex === -1 ? segment : segment.slice(0, dotIndex)
+      if (WINDOWS_DEVICE_NAMES.has(baseName.toUpperCase())) {
+        throw new Error(`Windows device name blocked: ${filePath}`)
+      }
     }
     return normalized
   }
@@ -2831,7 +2892,7 @@ async function extractSkillZip(zipPath: string): Promise<{
 
 /** 下载 CocoLoop skill zip 解压后只返回 SKILL.md 内容（兼容旧 fetchSkillMd 接口）。 */
 async function fetchCocoloopSkillMd(downloadUrl: string): Promise<string> {
-  if (!/^https?:\/\/dl\.cocoloop\.cn\//i.test(downloadUrl)) {
+  if (!/^https:\/\/dl\.cocoloop\.cn\//i.test(downloadUrl)) {
     return JSON.stringify({ error: 'Invalid CocoLoop download URL' })
   }
   try {
@@ -2856,7 +2917,7 @@ async function fetchCocoloopSkillMd(downloadUrl: string): Promise<string> {
 
 /** 下载 CocoLoop skill zip 并解压，返回完整文件列表（兼容旧 fetchSkillFromRepo 接口）。 */
 async function fetchCocoloopSkillDir(downloadUrl: string): Promise<string> {
-  if (!/^https?:\/\/dl\.cocoloop\.cn\//i.test(downloadUrl)) {
+  if (!/^https:\/\/dl\.cocoloop\.cn\//i.test(downloadUrl)) {
     return JSON.stringify({ error: 'Invalid CocoLoop download URL' })
   }
   try {
@@ -3604,10 +3665,24 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-// 退出前清理 MCP 子进程、终端 PTY 与 VIBE 助手进程，避免残留
-app.on('before-quit', () => {
-  void mcpManager.disposeAll()
+// 退出前清理 MCP 子进程、终端 PTY 与 VIBE 助手进程，避免残留。
+// MCP 连接关闭是异步的：先阻止默认退出，同步清理完 PTY / 特效 / 媒体后等待
+// MCP 回收（限时 3s 兜底，防个别连接 close 挂死卡住退出），最后 app.exit 保证一定退出。
+app.on('before-quit', (event) => {
+  event.preventDefault()
   winAcrylic.dispose()
   systemMedia.dispose()
   disposeAllTerminals()
+  void (async () => {
+    try {
+      await Promise.race([
+        mcpManager.disposeAll(),
+        new Promise<void>((resolve) => { setTimeout(resolve, 3_000).unref() }),
+      ])
+    } catch {
+      // 清理异常不阻塞退出流程
+    } finally {
+      app.exit(0)
+    }
+  })()
 })
