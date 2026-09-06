@@ -49,6 +49,7 @@ Thumbs.db
 /CABIN_SYSTEM_PLAN.md
 # 第三方工作目录
 /.workbuddy/
+/.freebuff/
 # IDE 本地配置与计划
 .claude/
 # 临时素材与校验脚本
