@@ -1,8 +1,9 @@
 import { create } from 'zustand'
 import { ipc } from '../lib/ipc-client'
-import type { HarnessMode, Message, MessageAttachment, Session, ToolCall, ToolResult } from '../types/agent'
+import type { HarnessMode, Message, MessageAttachment, MessageSkillSnapshot, Session, TaskMode, ToolCall, ToolResult } from '../types/agent'
 import { normalizeHarnessMode } from '../lib/harness-modes'
 import type { SessionRow } from '../types/ipc'
+import { useInteractiveStore } from './interactive-store'
 
 export type SessionStatus = 'working' | 'error' | 'confirm-danger'
 
@@ -196,6 +197,9 @@ interface ChatState {
   streamingSessionIds: Set<string>
   // per-session 工作状态：用于侧边栏 loading 圈显示与系统通知触发
   sessionStatus: Record<string, SessionStatus>
+  // per-session 排队消息：AI 运行中用户发送的消息，run 正常结束后 FIFO 逐条自动发出。
+  // 内存态不持久化：重启后无 ReAct 循环在跑，排队语义已失效。
+  queuedMessages: Record<string, QueuedMessageItem[]>
   // 用户曾选过的文件夹历史（全局、跨会话、唯一），按时间倒序，最多 8 个
   recentsFolders: string[]
   initialized: boolean
@@ -212,9 +216,23 @@ interface ChatState {
   setSessionStatus: (sessionId: string, status: SessionStatus | null) => void
   deleteSession: (id: string) => void
   compactSession: (sessionId: string, newMessages: Message[], deleteBeforeId: string) => void
+  enqueueQueuedMessage: (sessionId: string, item: QueuedMessageItem) => void
+  removeQueuedMessage: (sessionId: string, id: string) => void
+  dequeueQueuedMessage: (sessionId: string) => QueuedMessageItem | undefined
+  requeueQueuedMessage: (sessionId: string, item: QueuedMessageItem) => void
   loadFromDb: () => Promise<void>
   /** 增量同步：从 DB 拉取最新会话/消息，合并进内存状态（跳过正在流式的会话，避免覆盖本地流式内容） */
   syncFromDb: () => Promise<void>
+}
+
+/** 排队消息条目：字段与 sendMessage 入参对齐，自动发出时原样透传 */
+export interface QueuedMessageItem {
+  id: string
+  content: string
+  attachments?: MessageAttachment[]
+  taskMode?: TaskMode
+  skills?: MessageSkillSnapshot[]
+  queuedAt: number
 }
 
 /** Format timestamp as YYYYMMDD-HHmmss */
@@ -279,8 +297,34 @@ export const useChatStore = create<ChatState>((set, get) => ({
   activeSessionId: null,
   streamingSessionIds: new Set(),
   sessionStatus: {},
+  queuedMessages: {},
   recentsFolders: [],
   initialized: false,
+
+  enqueueQueuedMessage: (sessionId, item) =>
+    set((state) => ({
+      queuedMessages: { ...state.queuedMessages, [sessionId]: [...(state.queuedMessages[sessionId] ?? []), item] },
+    })),
+
+  removeQueuedMessage: (sessionId, id) =>
+    set((state) => {
+      const queue = state.queuedMessages[sessionId]
+      if (!queue?.some((q) => q.id === id)) return state
+      return { queuedMessages: { ...state.queuedMessages, [sessionId]: queue.filter((q) => q.id !== id) } }
+    }),
+
+  dequeueQueuedMessage: (sessionId) => {
+    const queue = get().queuedMessages[sessionId]
+    if (!queue || queue.length === 0) return undefined
+    const [head, ...rest] = queue
+    set((state) => ({ queuedMessages: { ...state.queuedMessages, [sessionId]: rest } }))
+    return head
+  },
+
+  requeueQueuedMessage: (sessionId, item) =>
+    set((state) => ({
+      queuedMessages: { ...state.queuedMessages, [sessionId]: [item, ...(state.queuedMessages[sessionId] ?? [])] },
+    })),
 
   loadFromDb: async () => {
     try {
@@ -612,6 +656,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       // 杀掉该会话在主进程里还在跑的 shell 子进程，避免点中断后命令继续执行
       logPersistenceFailure('cancel session commands', ipc.cancelSessionCommands(id))
+      // 该会话若还挂着未回答的 question：resolve 掉（空答案）。否则工具侧
+      // await requestQuestion 的 Promise 永不返回，ReAct 循环闭包与
+      // interactive-store 的 resolver 条目永久悬挂。
+      useInteractiveStore.getState().cancelQuestion(id)
       // Remove related subagent runs so persisted storage does not accumulate stale records.
       // clearSession 之前是 dead code，现在被接通了。
       import('./agent-runs-store').then(({ useAgentRunsStore }) => {
@@ -620,11 +668,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // 同步清理 per-session 工作状态与 streaming 标记
       const nextStatus = { ...state.sessionStatus }
       delete nextStatus[id]
+      // 清空该会话的排队消息（会话没了，排队语义随之失效）
+      const nextQueued = { ...state.queuedMessages }
+      delete nextQueued[id]
       const nextStreaming = new Set(state.streamingSessionIds)
       nextStreaming.delete(id)
       return {
         sessions: filtered,
         sessionStatus: nextStatus,
+        queuedMessages: nextQueued,
         streamingSessionIds: nextStreaming,
         activeSessionId:
           state.activeSessionId === id

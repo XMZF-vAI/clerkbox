@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useSettingsStore } from '../stores/settings-store'
-import { useChatStore, getSessionAbortController, setSessionAbortController } from '../stores/chat-store'
+import { useChatStore, getSessionAbortController, setSessionAbortController, type QueuedMessageItem } from '../stores/chat-store'
 import { useTokenUsageStore } from '../stores/token-usage-store'
 import { useSkillsStore } from '../stores/skills-store'
 import { toolRegistry } from '../lib/tool-registry'
@@ -290,8 +290,10 @@ export function useAgent(sessionId: string) {
   const setStreaming = useChatStore((s) => s.setStreaming)
   const compactSession = useChatStore((s) => s.compactSession)
   const setSessionStatus = useChatStore((s) => s.setSessionStatus)
-  const requestWorkingDirRef = useRef<string | null>(null)
-  const tokenTrackerRef = useRef<TokenTracker>(new TokenTracker())
+  // 以下「本次运行」状态按 sessionId 隔离（per-session 并发）：多会话同时跑 ReAct 循环时，
+  // 单例 ref 会被后发消息的会话覆盖，导致 A 循环读 B 的工作目录/任务模式/token 锚点。
+  const requestWorkingDirRef = useRef<Map<string, string>>(new Map())
+  const tokenTrackerRef = useRef<Map<string, TokenTracker>>(new Map())
   const sessionReadFilesRef = useRef<Map<string, ReadFileSnapshot>>(new Map())
   /** 会话级冻结的记忆快照：前缀缓存要求 system 段字节一致，
    *  而 save_memory 会在会话中途改写记忆文件 → memoryPrompt 变化 → 动态段之后全部缓存作废。
@@ -301,18 +303,32 @@ export function useAgent(sessionId: string) {
   const staticSystemHashRef = useRef<{ origin: string; hash: string } | null>(null)
   /** 当前运行中的任务工作流模式（/spec /plan /goal，随 sendMessage 传入，run 结束清空）。
    *  用 ref 而非参数透传：checkToolPermission 在工具执行深处读取，避免层层传参 */
-  const activeTaskModeRef = useRef<TaskMode | null>(null)
+  const activeTaskModeRef = useRef<Map<string, TaskMode | null>>(new Map())
   const [error, setError] = useState<string | null>(null)
   /** 手动压缩进行中（/压缩 命令）：输入栏即时反馈 + 锁定，防止压缩期间并发发送 */
   const [isCompacting, setIsCompacting] = useState(false)
   const isCompactingRef = useRef(false)
 
-  /** Get working directory for current session, with default fallback */
+  /** Get working directory for current session, with default fallback.
+   *  优先读本会话本次运行时登记的工作目录（sendMessage 设置，finally 清除）。 */
   const getWorkingDir = () => {
-    if (requestWorkingDirRef.current !== null) return requestWorkingDirRef.current
+    const pending = requestWorkingDirRef.current.get(sessionId)
+    if (pending !== undefined) return pending
     const session = useChatStore.getState().sessions.find((s) => s.id === sessionId)
     if (session?.workingDir) return session.workingDir
     return session?.defaultWorkDir || ''
+  }
+
+  /** Get (or lazily create) the per-session token tracker.
+   *  每个会话各自持有 lastUsage 锚点：切会话不再清空（旧实现切换即 reset，
+   *  会让后台仍在跑的会话丢失用量锚点、退化为纯估算）。 */
+  const getTokenTracker = () => {
+    let tracker = tokenTrackerRef.current.get(sessionId)
+    if (!tracker) {
+      tracker = new TokenTracker()
+      tokenTrackerRef.current.set(sessionId, tracker)
+    }
+    return tracker
   }
 
   const makeId = () => `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -915,24 +931,25 @@ export function useAgent(sessionId: string) {
     return cleaned
   }
 
-  /** Main send message function with full ReAct loop */
+  /** Main send message function with full ReAct loop.
+   *  返回 true 表示运行真正开始（排队消息 flush 据此决定是否放回队首）。 */
   const sendMessage = useCallback(
-    async (content: string, attachments?: MessageAttachment[], taskMode?: TaskMode, skills?: MessageSkillSnapshot[]) => {
+    async (content: string, attachments?: MessageAttachment[], taskMode?: TaskMode, skills?: MessageSkillSnapshot[]): Promise<boolean> => {
       // Prevent concurrent sends on the same session（per-session 粒度，不阻塞其他会话并发）
       if (getSessionAbortController(sessionId)) {
         setError(i18n.t('agent.busy'))
-        return
+        return false
       }
 
       if (!settings.baseUrl) {
         setError(i18n.t('agent.needBaseUrl'))
-        return
+        return false
       }
       // 本地部署（Ollama / LM Studio 等）无需 Key，不能在这里一刀切拦掉
       const activeProvider = settings.providers.find((p) => p.id === settings.activeProviderId)
       if (!settings.apiKey && requiresApiKey(settings.baseUrl, activeProvider?.presetId)) {
         setError(i18n.t('agent.needApiKey'))
-        return
+        return false
       }
 
       setError(null)
@@ -943,14 +960,14 @@ export function useAgent(sessionId: string) {
       const controller = new AbortController()
       setSessionAbortController(sessionId, controller)
       const currentSession = useChatStore.getState().sessions.find((s) => s.id === sessionId)
-      requestWorkingDirRef.current = currentSession?.workingDir || currentSession?.defaultWorkDir || ''
+      requestWorkingDirRef.current.set(sessionId, currentSession?.workingDir || currentSession?.defaultWorkDir || '')
       // 记录本次运行的任务工作流模式（/spec /plan /goal；工具权限检查与提示词注入都会读取）。
       // /goal 是会话级目标：设定后跨消息持续生效，后续普通消息也按 goal 模式注入语境。
       if (taskMode === 'goal' && content.trim()) {
         useGoalStore.getState().setGoal(sessionId, content.trim())
       }
       const goalActive = useGoalStore.getState().bySession[sessionId]?.status === 'active'
-      activeTaskModeRef.current = taskMode ?? (goalActive ? 'goal' : null)
+      activeTaskModeRef.current.set(sessionId, taskMode ?? (goalActive ? 'goal' : null))
       // 记录是否是用户主动 abort，用于决定是否发"异常停下"通知
       let abortedByUser = false
 
@@ -968,10 +985,12 @@ export function useAgent(sessionId: string) {
       }
       addMessage(sessionId, userMsg)
 
-      // Get all messages for context
+      // Get all messages for context.
+      // addMessage 已同步把 userMsg 追加进会话，session.messages 里已包含它；
+      // 旧实现再拼一次 userMsg，导致每次 API 请求体带两份重复用户消息（token 双花）。
       const chatStore = useChatStore.getState()
       const session = chatStore.sessions.find((s) => s.id === sessionId)
-      const contextMessages = session ? [...session.messages, userMsg] : [userMsg]
+      const contextMessages = session?.messages ?? [userMsg]
 
       // 相关技能提醒：按本条消息内容对全部已安装技能做词面匹配（命中才注入，
       // 未命中不注入任何内容）。与用户手动激活（skills 快照）互补。
@@ -982,7 +1001,7 @@ export function useAgent(sessionId: string) {
       } catch (err) {
         if (controller.signal.aborted) {
           abortedByUser = true
-          return
+          return false
         }
         const msg = err instanceof Error ? err.message : String(err)
         setError(msg)
@@ -995,9 +1014,10 @@ export function useAgent(sessionId: string) {
         // 标记 error 状态 + 系统通知（仅当用户不在此会话时）
         setSessionStatus(sessionId, 'error')
         notifyIfNotViewing(sessionId, 'error', msg.slice(0, 200))
+        return false
       } finally {
-        requestWorkingDirRef.current = null
-        activeTaskModeRef.current = null
+        requestWorkingDirRef.current.delete(sessionId)
+        activeTaskModeRef.current.delete(sessionId)
         // Do not clear a controller installed by a newer request for this session.
         if (getSessionAbortController(sessionId) === controller) {
           setSessionAbortController(sessionId, null)
@@ -1015,10 +1035,69 @@ export function useAgent(sessionId: string) {
             notifyIfNotViewing(sessionId, 'done')
           }
           // 若是 error，catch 块已发通知，这里不再重复
+          // 排队消息自动发送：仅正常完成时触发（用户中断/出错时队列保留，
+          // 避免停不下来或错误循环）；error 状态时上方 if 未命中，不会走到这里
+          if (useChatStore.getState().sessionStatus[sessionId] !== 'error') {
+            scheduleQueuedFlush()
+          }
         }
       }
+      return true
     },
     [sessionId, settings, addMessage, updateMessage, setStreaming, setSessionStatus]
+  )
+
+  // ── 排队消息：AI 运行中用户发送 → 输入框上方组件 → run 正常结束后 FIFO 逐条自动发出 ──
+  // flush 直接闭包引用 sendMessage（deps 含 sessionId）：闭包内 sessionId 与 sendMessage
+  // 的目标会话天然一致。不能用"最新渲染实例"的 ref——后台会话的 run 收尾触发 flush 时，
+  // hook 的 sessionId 可能已切走，ref 方案会把 A 会话的排队消息发进 B 会话。
+
+  /** 稍后尝试发出队首排队消息。守卫不满足时静默跳过，由对应的收尾点再次触发：
+   *  - run 进行中 → 该 run 正常结束的 finally 再触发
+   *  - 压缩进行中 → manualCompact 的 finally 再触发
+   *  - 会话已删除 / 队列已空 → 无事发生 */
+  const scheduleQueuedFlush = useCallback((delayMs = 150) => {
+    window.setTimeout(() => {
+      const state = useChatStore.getState()
+      if (!state.sessions.some((s) => s.id === sessionId)) return
+      if (state.streamingSessionIds.has(sessionId)) return
+      if (getSessionAbortController(sessionId)) return
+      if (isCompactingRef.current) return
+      const next = state.dequeueQueuedMessage(sessionId)
+      if (!next) return
+      void sendMessage(next.content, next.attachments, next.taskMode ?? undefined, next.skills).then((ok) => {
+        // 发送未真正开始（配置缺失等入口守卫拦截）：放回队首等下次触发，不丢消息
+        if (!ok) useChatStore.getState().requeueQueuedMessage(sessionId, next)
+      })
+    }, delayMs)
+  }, [sessionId, sendMessage])
+
+  /** 立即发送排队消息：中断当前运行 → 等待旧 run 收尾释放 → 移出队列 → 立即发送。
+   *  剩余排队消息由新 run 正常结束后的自动 flush 继续 FIFO 逐条发出。 */
+  const sendQueuedNow = useCallback(
+    async (item: QueuedMessageItem) => {
+      const ctrl = getSessionAbortController(sessionId)
+      if (ctrl) {
+        try {
+          ctrl.abort()
+        } catch {
+          /* ignore */
+        }
+        // 等旧 run 收尾释放 controller（abort 后流式立刻抛错，通常 <300ms；5s 兜底）
+        for (let i = 0; i < 100; i++) {
+          if (!getSessionAbortController(sessionId)) break
+          await new Promise((resolve) => setTimeout(resolve, 50))
+        }
+      }
+      // 手动压缩中：等压缩收尾（压缩不占 controller；30s 兜底防极端挂死）
+      for (let i = 0; i < 300; i++) {
+        if (!isCompactingRef.current) break
+        await new Promise((resolve) => setTimeout(resolve, 100))
+      }
+      useChatStore.getState().removeQueuedMessage(sessionId, item.id)
+      await sendMessage(item.content, item.attachments, item.taskMode ?? undefined, item.skills)
+    },
+    [sessionId, sendMessage]
   )
 
   /** 手动压缩上下文（/压缩 命令触发）：
@@ -1085,7 +1164,7 @@ export function useAgent(sessionId: string) {
         // Clear the read file state (it's now in file attachments)
         sessionReadFilesRef.current = new Map()
         // Reset the token tracker after compaction so stale usage cannot retrigger auto-compact.
-        tokenTrackerRef.current.reset()
+        getTokenTracker().reset()
 
         console.log(`[compact] Manually compacted: ${compactionResult.preCompactTokenCount} → ${compactionResult.postCompactTokenCount} tokens, ${compactionResult.boundaryMessage.compactMetadata?.messagesSummarized} messages summarized`)
       } catch (err) {
@@ -1098,6 +1177,8 @@ export function useAgent(sessionId: string) {
       } finally {
         isCompactingRef.current = false
         setIsCompacting(false)
+        // 压缩期间入队的排队消息：压缩完成后（无论成败）继续自动发送
+        scheduleQueuedFlush()
       }
     },
     [sessionId, settings, addMessage, updateMessage, compactSession]
@@ -1114,18 +1195,21 @@ export function useAgent(sessionId: string) {
         ?? settings.maxInputTokens ?? 184000
       // API 实际发送的消息子集（摘要 + 边界之后的消息）
       const apiMessages = getApiVisibleMessages(messages)
-      // 空会话（无可发送消息）强制为 0：tokenTracker 跨会话复用，残留 lastUsage
-      // 会让新会话的指示器凭空显示上一场对话的用量弧
-      const total = apiMessages.length === 0 ? 0 : tokenTrackerRef.current.getTokenCount(apiMessages)
+      // 空会话（无可发送消息）强制为 0：残留 lastUsage 会让空会话的指示器
+      // 凭空显示上一场对话的用量弧
+      const total = apiMessages.length === 0 ? 0 : getTokenTracker().getTokenCount(apiMessages)
       return computeContextUsage(apiMessages, total, budget, estimateTokensForText(SYSTEM_PROMPT))
     },
-    [settings]
+    [settings, sessionId] // getTokenTracker/getWorkingDir 闭包依赖 sessionId
   )
 
-  // 切换会话时清空 token 追踪：tracker 跨会话复用，残留的 lastUsage 会让新会话
-  // 凭空继承上一场对话的用量（指示器蓝弧 / 首轮误判触发自动压缩）
+  // per-session tracker：切换会话无需清空（各会话各自持有锚点）；
+  // 仅顺带清理已删除会话的残留 tracker，避免 Map 无限增长。
   useEffect(() => {
-    tokenTrackerRef.current.reset()
+    const { sessions } = useChatStore.getState()
+    for (const id of tokenTrackerRef.current.keys()) {
+      if (!sessions.some((s) => s.id === id)) tokenTrackerRef.current.delete(id)
+    }
   }, [sessionId])
 
   // 注册到模块级注册表（切换会话/卸载时清理），供 TitleBar 的上下文用量面板调用
@@ -1335,7 +1419,7 @@ export function useAgent(sessionId: string) {
         // Reset the token tracker after compaction so stale usage cannot retrigger it.
         // 下一轮 getTokenCount 会取 max(lastUsage, estimated)，导致继续误判超过阈值，
         // 反复进入 compactConversation 并抛 "Not enough messages to compact"。
-        tokenTrackerRef.current.reset()
+        getTokenTracker().reset()
 
         console.log(`[compact] Auto-compacted: ${compactionResult.preCompactTokenCount} → ${compactionResult.postCompactTokenCount} tokens, ${compactionResult.boundaryMessage.compactMetadata?.messagesSummarized} messages summarized`)
         return true
@@ -1366,7 +1450,7 @@ export function useAgent(sessionId: string) {
       // 旧实现对全量历史（含已被压缩的旧消息）估算，导致压缩后依然超阈值、
       // 每次发消息都误触发压缩（而用量指示器按子集统计显示 30%+，两边对不上）。
       const apiVisibleMessages = getApiVisibleMessages(conversationMessages)
-      const currentTokenCount = tokenTrackerRef.current.getTokenCount(apiVisibleMessages)
+      const currentTokenCount = getTokenTracker().getTokenCount(apiVisibleMessages)
       if (currentTokenCount > autoCompactThreshold && apiVisibleMessages.length > 12 && failedAutoCompacts < MAX_AUTO_COMPACT_FAILURES) {
         // 连续失败计数：成功归零，达到阈值后本轮运行内不再自动触发（防死亡螺旋）
         if (await performAutoCompact()) failedAutoCompacts = 0
@@ -1445,7 +1529,7 @@ export function useAgent(sessionId: string) {
           },
           onUsage: (usage: TokenUsage) => {
             turnUsage = usage
-            tokenTrackerRef.current.recordUsage(usage)
+            getTokenTracker().recordUsage(usage)
             // 累计到全局 token 用量统计（供设置页通用栏展示）
             try {
               useTokenUsageStore.getState().recordUsage({
@@ -1670,6 +1754,25 @@ export function useAgent(sessionId: string) {
         continue
       }
 
+      // ── 残缺参数保护：流静默中断（网络断/服务端提前关闭，无 finish_reason）时
+      // length 保护不生效，JSON 解析失败的调用会以 { _raw } 兜底混进列表，
+      // 执行可能写坏文件（如 write_file 缺 content → 写入 "undefined"）。
+      // 拒绝本轮全部工具调用，模型下一轮会带完整参数重发。 ──
+      if (toolCalls.some((tc) => tc.arguments && '_raw' in tc.arguments)) {
+        const refused: ToolResult[] = toolCalls.map((tc) => ({
+          toolCallId: tc.id,
+          content: toolCallRefusal(tc.name, TRUNCATED_TOOL_CALL_REASON),
+          isError: true,
+        }))
+        updateMessage(sessionId, assistantId, { toolResults: refused })
+        for (const r of refused) {
+          const toolMsg: Message = { id: makeId(), role: 'tool', content: r.content, timestamp: Date.now(), toolResults: [r] }
+          addMessage(sessionId, toolMsg)
+          conversationMessages.push(toolMsg)
+        }
+        continue
+      }
+
       // ── 轮次上限收尾：工具执行轮数用尽后不再执行工具，注入收尾指令让模型文字总结
       //（参考 opencode MAX_STEPS：硬停会丢掉整个 run 的总结）。
       // 收尾轮若仍坚持调用工具 → 全部拒绝并退出循环，走兜底提示。 ──
@@ -1864,7 +1967,8 @@ export function useAgent(sessionId: string) {
    *  Agent allowlists and denylists can further restrict access, never elevate it.
    *  审批档位（settings.approvalMode）控制确认策略：
    *  - manual：危险命令 / 工作目录外操作 / 系统目录写入 全部弹窗确认
-   *  - auto：AI 审核并自动批准（危险命令与目录外操作免确认；系统目录写入仍弹窗兜底）
+   *  - auto：目录外操作免确认（AI 自审）；危险命令与系统目录写入仍弹窗兜底，
+   *    避免 rm -rf 类命令在默认档位下零拦截静默执行
    *  - full：完全访问，无需询问直接执行
    *  任务工作流（taskMode）：plan 规划期只读；spec 规划期仅允许读取与写入对应文档目录 */
   const checkToolPermission = async (
@@ -1878,7 +1982,7 @@ export function useAgent(sessionId: string) {
     } = {}
   ): Promise<{ allowed: boolean; reason?: string }> => {
     const {
-      taskMode = activeTaskModeRef.current,
+      taskMode = activeTaskModeRef.current.get(sessionId),
       allowedTools,
       disallowedTools,
     } = opts
@@ -1937,7 +2041,8 @@ export function useAgent(sessionId: string) {
       const cmd = String(args.command || '')
       const workingDir = getWorkingDir()
       const commandCwd = workingDir ? resolveToolPath(workingDir, args.cwd || workingDir) : String(args.cwd || '')
-      if (approvalMode === 'manual' && isDangerousCommand(cmd)) {
+      // 危险命令确认：manual/auto 都弹窗（最后一道防线，仅 full 档放行）
+      if (isDangerousCommand(cmd)) {
         // 危险命令确认前：标记 confirm-danger + 通知（仅当用户不在此会话时）
         setSessionStatus(sessionId, 'confirm-danger')
         notifyIfNotViewing(sessionId, 'confirm-danger', i18n.t('agent.notifyDangerCommand', { command: cmd.slice(0, 100) }))
@@ -2415,5 +2520,5 @@ export function useAgent(sessionId: string) {
     }
   }
 
-  return { sendMessage, abort, manualCompact, isCompacting, error }
+  return { sendMessage, abort, manualCompact, isCompacting, error, sendQueuedNow, requestQueuedFlush: scheduleQueuedFlush }
 }

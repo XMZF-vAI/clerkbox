@@ -1,8 +1,8 @@
 import { useState, useRef, type KeyboardEvent as ReactKeyboardEvent, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type ChangeEvent as ReactChangeEvent, useEffect, useLayoutEffect } from 'react'
-import { Send, Brain, FolderOpen, ChevronDown, Square, Check, X, Store, Plus, FolderPlus, Paperclip, FileText, ShieldCheck, Hand, TriangleAlert, Slash, BookOpen, GitBranch, Target, Plug, Settings2, FoldVertical, Loader2, Layers, Lock, type LucideIcon } from 'lucide-react'
+import { Send, Brain, FolderOpen, ChevronDown, Square, Check, X, Store, Plus, FolderPlus, Paperclip, FileText, ShieldCheck, Hand, TriangleAlert, Slash, BookOpen, GitBranch, Target, Plug, Settings2, FoldVertical, Loader2, Layers, Lock, Clock3, Pencil, SendHorizontal, type LucideIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useSettingsStore } from '../../stores/settings-store'
-import { useChatStore } from '../../stores/chat-store'
+import { useChatStore, type QueuedMessageItem } from '../../stores/chat-store'
 import { useSkillsStore } from '../../stores/skills-store'
 import { useMcpStore } from '../../stores/mcp-store'
 import { useGoalStore } from '../../stores/goal-store'
@@ -17,11 +17,12 @@ import { useShallow } from 'zustand/react/shallow'
 
 // ── "/" 命令菜单里的命令（任务工作流 + 上下文压缩；工作流对齐 TRAE：Spec / Plan / Goal；Browser 模式不做） ──
 // 上下文压缩命令：选中后出现芯片，回车即手动压缩（输入文本作为可选的压缩重点指令）
-const COMPACT_COMMAND = { id: 'compact' as const, name: '压缩', icon: FoldVertical, descKey: 'chat.cmdCompactDesc' }
-const TASK_COMMANDS: Array<{ id: TaskMode | 'compact'; name: string; icon: LucideIcon; descKey: string }> = [
-  { id: 'spec', name: 'Spec', icon: BookOpen, descKey: 'chat.cmdSpecDesc' },
-  { id: 'plan', name: 'Plan', icon: GitBranch, descKey: 'chat.cmdPlanDesc' },
-  { id: 'goal', name: 'Goal', icon: Target, descKey: 'chat.cmdGoalDesc' },
+// name 为过滤用的拉丁别名，展示名统一走 nameKey（i18n）
+const COMPACT_COMMAND = { id: 'compact' as const, name: 'Compact', nameKey: 'chat.cmdCompactName', icon: FoldVertical, descKey: 'chat.cmdCompactDesc' }
+const TASK_COMMANDS: Array<{ id: TaskMode | 'compact'; name: string; nameKey: string; icon: LucideIcon; descKey: string }> = [
+  { id: 'spec', name: 'Spec', nameKey: 'chat.cmdSpecName', icon: BookOpen, descKey: 'chat.cmdSpecDesc' },
+  { id: 'plan', name: 'Plan', nameKey: 'chat.cmdPlanName', icon: GitBranch, descKey: 'chat.cmdPlanDesc' },
+  { id: 'goal', name: 'Goal', nameKey: 'chat.cmdGoalName', icon: Target, descKey: 'chat.cmdGoalDesc' },
   COMPACT_COMMAND,
 ]
 
@@ -110,17 +111,64 @@ function parentFolderPath(value: string): string | null {
   return parent || null
 }
 
+/** 排队条目的附件徽章：图片显示缩略图（最多 3 张叠放，多出计数），文件显示数量 */
+function QueuedAttachmentBadges({ item, vibe }: { item: QueuedMessageItem; vibe: boolean }) {
+  const images = (item.attachments ?? []).filter((a) => a.kind === 'image' && a.dataUrl)
+  const fileCount = (item.attachments?.length ?? 0) - images.length
+  if (images.length === 0 && fileCount === 0) return null
+  return (
+    <span className="flex items-center flex-shrink-0 gap-1">
+      {images.length > 0 && (
+        <span className="flex items-center -space-x-1.5">
+          {images.slice(0, 3).map((a) => (
+            <img
+              key={a.id}
+              src={a.dataUrl}
+              alt={a.name}
+              title={a.name}
+              className={`w-5 h-5 rounded-md3-sm object-cover border ${
+                vibe ? 'border-white/30' : 'border-dark-onSurfaceVariant/20'
+              }`}
+            />
+          ))}
+          {images.length > 3 && (
+            <span
+              className={`w-5 h-5 rounded-md3-sm border flex items-center justify-center text-[9px] ${
+                vibe
+                  ? 'border-white/30 text-white/70 bg-white/10'
+                  : 'border-dark-onSurfaceVariant/20 text-dark-onSurfaceVariant bg-dark-surfaceContainerHighest'
+              }`}
+            >
+              +{images.length - 3}
+            </span>
+          )}
+        </span>
+      )}
+      {fileCount > 0 && (
+        <span className={`flex items-center gap-0.5 text-[10px] ${vibe ? 'text-white/60' : 'text-dark-onSurfaceVariant/70'}`}>
+          <FileText size={10} />
+          {fileCount}
+        </span>
+      )}
+    </span>
+  )
+}
+
 interface ChatInputProps {
   onSend: (content: string, attachments?: MessageAttachment[], taskMode?: TaskMode, skills?: MessageSkillSnapshot[]) => void
   onManualCompact?: (instructions?: string) => void | Promise<void>
   isCompacting?: boolean
   onStop?: () => void
   isStreaming?: boolean
+  /** 立即发送排队消息：中断当前运行 → 等收尾 → 移出队列 → 立即发出（use-agent.sendQueuedNow） */
+  onSendNow?: (item: QueuedMessageItem) => void
+  /** 消息入队后通知触发一次 flush 检查（兜住"入队瞬间 run 恰好结束"的竞态窗口） */
+  onEnqueueQueued?: () => void
   variant?: 'default' | 'welcome'
   vibe?: boolean
 }
 
-export default function ChatInput({ onSend, onManualCompact, isCompacting, onStop, isStreaming, variant = 'default', vibe = false }: ChatInputProps) {
+export default function ChatInput({ onSend, onManualCompact, isCompacting, onStop, isStreaming, onSendNow, onEnqueueQueued, variant = 'default', vibe = false }: ChatInputProps) {
   const { t } = useTranslation()
   const [content, setContent] = useState('')
   // 任务工作流芯片（/ 命令菜单选择的 Spec/Plan/Goal，随下一条消息一次性生效）
@@ -206,6 +254,9 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
   const defaultWorkDir = currentSession?.defaultWorkDir
   const effectiveWorkDir = currentSession?.workingDir || defaultWorkDir
 
+  // 排队消息：仅订阅当前会话的队列（数组引用只在入队/移除时变化，流式高频 set 不经过它）
+  const queuedMessages = useChatStore((s) => (activeSessionId ? s.queuedMessages[activeSessionId] : undefined))
+
   useEffect(() => {
     if (!isWebUIMode) return
     void ipc.getWebUICapabilities()
@@ -290,7 +341,7 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
   // 过滤词 = 输入框中 "/" 之后的文本（菜单打开时输入框即搜索框，对齐 TRAE 交互）
   const commandQuery = showCommandMenu && content.startsWith('/') ? content.slice(1).trim().toLowerCase() : ''
   const filteredCommands = TASK_COMMANDS.filter((c) =>
-    !commandQuery || c.name.toLowerCase().includes(commandQuery) || t(c.descKey).toLowerCase().includes(commandQuery)
+    !commandQuery || c.name.toLowerCase().includes(commandQuery) || t(c.nameKey).toLowerCase().includes(commandQuery) || t(c.descKey).toLowerCase().includes(commandQuery)
   )
   const filteredSkills = skills.filter((s) =>
     !commandQuery || s.name.toLowerCase().includes(commandQuery) || (s.description || '').toLowerCase().includes(commandQuery)
@@ -346,9 +397,69 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
     toggleSessionSkill(id, effectiveWorkDir || undefined)
   }
 
+  /** 排队消息三个操作：编辑（回填输入框并移出队列）/ 立即发送（中断并立即发出）/ 删除 */
+  const handleQueuedEdit = (item: QueuedMessageItem) => {
+    if (!activeSessionId) return
+    useChatStore.getState().removeQueuedMessage(activeSessionId, item.id)
+    setContent(item.content)
+    setTaskMode(item.taskMode ?? null)
+    if (item.attachments?.length) commitAttachments(item.attachments)
+    requestAnimationFrame(() => {
+      if (textareaRef.current) {
+        textareaRef.current.style.height = 'auto'
+        textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 200)}px`
+        textareaRef.current.focus()
+      }
+    })
+  }
+
+  const handleQueuedSendNow = (item: QueuedMessageItem) => {
+    onSendNow?.(item)
+  }
+
+  const handleQueuedRemove = (item: QueuedMessageItem) => {
+    if (!activeSessionId) return
+    useChatStore.getState().removeQueuedMessage(activeSessionId, item.id)
+  }
+
   const handleSend = () => {
     const trimmed = content.trim()
-    if (isStreaming || isCompacting) return
+    // AI 运行/压缩中：消息进入排队组件（可编辑/立即发送/删除，运行结束后 FIFO 自动发出）。
+    // 排队条目按普通消息的完整语义入队（附件/任务芯片/技能快照原样保留，发出时透传）。
+    // 压缩芯片是即时动作无法排队，忙碌时选中会随消息一并清除。
+    if (isStreaming || isCompacting) {
+      if (!activeSessionId) return
+      if (!trimmed && attachments.length === 0) return
+      if (trimmed.length > 50000) {
+        alert(t('chat.messageTooLong'))
+        return
+      }
+      // 非视觉模型：无磁盘路径的图片无法降级为路径引用，排队时同样拦截
+      if (!imageSupported && attachments.some((a) => a.kind === 'image' && !a.path)) {
+        alert(t('chat.imageBlocked'))
+        return
+      }
+      useChatStore.getState().enqueueQueuedMessage(activeSessionId, {
+        id: `queued-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        content: trimmed,
+        ...(attachments.length ? { attachments } : {}),
+        ...(taskMode ? { taskMode } : {}),
+        ...(activeSkills.length
+          ? { skills: activeSkills.map(({ id, name, icon, slug }) => ({ id, name, icon, slug })) }
+          : {}),
+        queuedAt: Date.now(),
+      })
+      // 兜住"入队瞬间 run 恰好结束"的竞态：flush 自带空闲守卫，忙碌时跳过
+      onEnqueueQueued?.()
+      setContent('')
+      setTaskMode(null)
+      setCompactMode(false)
+      commitAttachments([])
+      if (textareaRef.current) {
+        textareaRef.current.style.height = 'auto'
+      }
+      return
+    }
     // /goal 子命令（对齐 Claude Code）：
     //  - `/goal <条件>`：设定会话级目标并把条件作为首条消息发送（立即开始执行）
     //  - `/goal clear|stop|off|reset|cancel`：清除当前目标
@@ -1093,6 +1204,56 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
         </div>
       )}
 
+      {/* 排队消息：AI 运行中发送的消息，运行结束后 FIFO 自动发出；单条可编辑/立即发送/删除 */}
+      {activeSessionId && queuedMessages && queuedMessages.length > 0 && (
+        <div className="mb-1.5 max-w-5xl mx-auto w-full flex flex-col gap-1">
+          <div className={`flex items-center gap-1.5 px-1 text-[11px] ${vibe ? 'text-white/60' : 'text-dark-onSurfaceVariant/70'}`}>
+            <Clock3 size={11} className="flex-shrink-0" />
+            <span>{t('chat.queuedHint', { count: queuedMessages.length })}</span>
+          </div>
+          {queuedMessages.map((item) => (
+            <div
+              key={item.id}
+              className={`flex items-center gap-2 px-2.5 py-1.5 rounded-md3-md text-sm ${
+                vibe ? 'liquid-glass-subtle text-white/90' : 'bg-dark-surfaceContainerHighest/70 text-dark-onSurface'
+              }`}
+            >
+              <span className="flex-1 min-w-0 truncate">
+                {item.content || (item.attachments?.some((a) => a.kind === 'image' && a.dataUrl) ? '' : t('chat.queuedAttachmentOnly'))}
+              </span>
+              <QueuedAttachmentBadges item={item} vibe={vibe} />
+              <button
+                type="button"
+                onClick={() => handleQueuedEdit(item)}
+                aria-label={t('chat.queuedEdit')}
+                title={t('chat.queuedEdit')}
+                className="opacity-60 hover:opacity-100 flex-shrink-0"
+              >
+                <Pencil size={13} />
+              </button>
+              <button
+                type="button"
+                onClick={() => handleQueuedSendNow(item)}
+                aria-label={t('chat.queuedSendNow')}
+                title={t('chat.queuedSendNow')}
+                className="opacity-60 hover:opacity-100 flex-shrink-0"
+              >
+                <SendHorizontal size={13} />
+              </button>
+              <button
+                type="button"
+                onClick={() => handleQueuedRemove(item)}
+                aria-label={t('chat.queuedRemove')}
+                title={t('chat.queuedRemove')}
+                className="opacity-60 hover:opacity-100 flex-shrink-0"
+              >
+                <X size={13} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div
         ref={inputBoxRef}
         className={`${boxClass} ${dragging ? 'ring-2 ring-md-primary/50' : ''}`}
@@ -1179,7 +1340,7 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
                 className={`flex items-center gap-1.5 mt-1 px-2 py-0.5 rounded-md3-sm text-sm font-medium flex-shrink-0 transition-colors ${taskChipClass}`}
               >
                 <ChipIcon size={14} />
-                <span>{chipMeta.name}</span>
+                <span>{t(chipMeta.nameKey)}</span>
                 <X size={11} className="opacity-50" />
               </button>
             )
@@ -1192,7 +1353,7 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
               className={`flex items-center gap-1.5 mt-1 px-2 py-0.5 rounded-md3-sm text-sm font-medium flex-shrink-0 transition-colors ${compactChipClass}`}
             >
               <COMPACT_COMMAND.icon size={14} />
-              <span>{COMPACT_COMMAND.name}</span>
+              <span>{t(COMPACT_COMMAND.nameKey)}</span>
               <X size={11} className="opacity-50" />
             </button>
           )}
@@ -1220,7 +1381,6 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
             onKeyDown={handleKeyDown}
             onInput={handleInput}
             onPaste={handlePaste}
-            disabled={isStreaming || isCompacting}
             aria-label={t('chat.messageInputAria')}
             placeholder={isCompacting
               ? t('chat.compactingContext')
@@ -1236,7 +1396,7 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
               vibe
                 ? 'text-white/90 placeholder-white/50'
                 : 'text-dark-onSurface placeholder-dark-onSurfaceVariant/40'
-            }`}
+            } ${(isStreaming || isCompacting) ? 'opacity-60 cursor-default' : ''}`}
           />
         </div>
 
@@ -1282,7 +1442,7 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
                         }`}
                       >
                         <CmdIcon size={16} className="flex-shrink-0 text-md-primary" />
-                        <span className={`text-sm font-medium flex-shrink-0 ${vibe ? 'text-white/90' : 'text-dark-onSurface'}`}>{c.name}</span>
+                        <span className={`text-sm font-medium flex-shrink-0 ${vibe ? 'text-white/90' : 'text-dark-onSurface'}`}>{t(c.nameKey)}</span>
                         <span className={`text-xs truncate flex-1 ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/60'}`}>{t(c.descKey)}</span>
                         {highlighted && <span className={`text-xs flex-shrink-0 ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/40'}`}>↵</span>}
                       </button>

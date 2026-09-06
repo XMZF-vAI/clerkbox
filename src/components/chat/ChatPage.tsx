@@ -28,7 +28,7 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
   const initialized = useChatStore((s) => s.initialized)
   const loadFromDb = useChatStore((s) => s.loadFromDb)
   const sessionId = activeSessionId || ''
-  const { sendMessage, abort, manualCompact, isCompacting, error } = useAgent(sessionId)
+  const { sendMessage, abort, manualCompact, isCompacting, error, sendQueuedNow, requestQueuedFlush } = useAgent(sessionId)
 
   useEffect(() => {
     if (!initialized) {
@@ -123,6 +123,8 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
                 onManualCompact={manualCompact}
                 isCompacting={isCompacting}
                 isStreaming={isCurrentSessionStreaming}
+                onSendNow={sendQueuedNow}
+                onEnqueueQueued={requestQueuedFlush}
                 variant={vibe ? 'default' : 'welcome'}
                 vibe={vibe}
               />
@@ -148,7 +150,8 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
   return (
     <div className={`relative flex h-full ${vibe ? 'bg-transparent' : 'bg-dark-surface'}`}>
       <div className="flex flex-1 flex-col min-h-0 min-w-0 overflow-x-hidden">
-        <MessageList messages={messages} isStreaming={isCurrentSessionStreaming} vibe={vibe} />
+        {/* key=会话 id：切会话强制重挂载，重置滚动粘底状态并回到最新消息 */}
+        <MessageList key={sessionId} messages={messages} isStreaming={isCurrentSessionStreaming} vibe={vibe} />
         <GoalBanner sessionId={sessionId} vibe={vibe} />
         <TodoListCard sessionId={sessionId} vibe={vibe} />
         <QuestionCard sessionId={sessionId} vibe={vibe} />
@@ -162,7 +165,7 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
             <span className="flex-1">{error}</span>
           </div>
         )}
-        <ChatInput onSend={handleSend} onStop={abort} onManualCompact={manualCompact} isCompacting={isCompacting} isStreaming={isCurrentSessionStreaming} vibe={vibe} />
+        <ChatInput onSend={handleSend} onStop={abort} onManualCompact={manualCompact} isCompacting={isCompacting} isStreaming={isCurrentSessionStreaming} onSendNow={sendQueuedNow} onEnqueueQueued={requestQueuedFlush} vibe={vibe} />
       </div>
     </div>
   )
