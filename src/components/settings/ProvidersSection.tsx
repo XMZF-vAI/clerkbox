@@ -136,7 +136,7 @@ export default function ProvidersSection() {
       {/* Lunora 官方模型合作伙伴宣传卡：整卡可点，跳转官网 */}
       <button
         type="button"
-        onClick={() => ipc.openExternal('https://www.uselunora.com/')}
+        onClick={() => ipc.openExternal('https://www.uselunora.com/register?aff=CGNEDZYS9KB7')}
         title={t('settings.providers.lunoraVisit')}
         className="group w-full flex items-center gap-3 px-3.5 py-2.5 mb-2.5 rounded-md3-md border border-dark-onSurfaceVariant/10 bg-gradient-to-r from-md-primary/12 via-md-primary/5 to-transparent hover:border-md-primary/35 transition-colors text-left"
       >
