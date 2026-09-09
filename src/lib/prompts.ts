@@ -7,6 +7,33 @@
  * 易变内容（时间戳/记忆/技能索引等属动态段，见 buildAPIMessages）。
  */
 
+/**
+ * 当前运行平台 —— 模块加载时确定一次（平台运行期不变，不破坏静态前缀缓存）。
+ * WebUI 模式跑在浏览器里 window.clerkbox 不存在，兜底 win32 文案。
+ */
+const PLATFORM: string =
+  typeof window !== 'undefined' && window.clerkbox?.platform
+    ? window.clerkbox.platform
+    : 'win32'
+
+/** 平台专属 shell 选择指引（超时行为是跨平台公共句，由 SYSTEM_PROMPT 尾接） */
+const SHELL_SELECTION: Record<string, string> = {
+  win32: `- Default to cmd: dir, copy, del, mkdir, running node/python/npm/git, curl.
+- Use powershell when you need cmdlets or object pipelines: Get-Content, Get-ChildItem, Select-String, ConvertFrom-Json, $env: variables, -match/-replace.
+- cmd notes: quote paths containing spaces; chain commands with &&; URLs with & work unquoted; use %% for a literal %.
+- PowerShell notes: & is the call operator (quote URLs containing it); single-quoted strings avoid $ expansion.`,
+  darwin: `- Default to zsh: ls, cp, mv, rm, mkdir, running node/python/npm/git, curl.
+- Use bash when a script explicitly requires it; everyday commands are identical.
+- zsh notes: quote paths containing spaces; chain commands with &&; single-quoted strings avoid $ expansion.
+- macOS notes: open files/folders/URLs with open; home is /Users/<name>; install tools via brew, not apt.`,
+  linux: `- Default to bash: ls, cp, mv, rm, mkdir, running node/python/npm/git, curl.
+- Use sh only when POSIX portability matters.
+- bash notes: quote paths containing spaces; chain commands with &&; single-quoted strings avoid $ expansion.
+- Linux notes: open files/URLs with xdg-open; home is /home/<name>; prefer the distro's package manager (apt/dnf/pacman).`,
+}
+
+const shellSelection = SHELL_SELECTION[PLATFORM] ?? SHELL_SELECTION.win32
+
 export const SYSTEM_PROMPT = `You are ClerkBox, a capable AI agent running on the user's desktop. You interact with the user's file system and terminal through tools, helping with software engineering, document work, and general desktop tasks.
 
 # Doing tasks
@@ -45,10 +72,7 @@ export const SYSTEM_PROMPT = `You are ClerkBox, a capable AI agent running on th
 - question asks the user 1-3 multiple-choice questions. Use it for genuine decision points, never to request permission to continue.
 
 # Shell selection (execute_command)
-- Default to cmd: dir, copy, del, mkdir, running node/python/npm/git, curl.
-- Use powershell when you need cmdlets or object pipelines: Get-Content, Get-ChildItem, Select-String, ConvertFrom-Json, $env: variables, -match/-replace.
-- cmd notes: quote paths containing spaces; chain commands with &&; URLs with & work unquoted; use %% for a literal %.
-- PowerShell notes: & is the call operator (quote URLs containing it); single-quoted strings avoid $ expansion.
+${shellSelection}
 - Commands time out and get killed after 120s by default — pass a larger timeout (ms, max 600000) for long-running operations.
 
 # Tone and output

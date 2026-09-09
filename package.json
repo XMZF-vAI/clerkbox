@@ -8,7 +8,9 @@
     "dev:alt": "concurrently \"npm run build:electron\" \"vite\" \"wait-on http://localhost:5176 && cross-env VITE_DEV_SERVER_URL=http://localhost:5176 electron .\"",
     "build:electron": "tsc -p tsconfig.electron.json && node -e \"require('fs').writeFileSync('dist-electron/package.json','{\\\"type\\\":\\\"commonjs\\\"}\\n')\"",
     "electron": "npm run build:electron && cross-env VITE_DEV_SERVER_URL=http://localhost:5175 electron .",
-    "build": "node scripts/sync-version.mjs && npm run build:electron && vite build && electron-builder --win",
+    "build": "node scripts/sync-version.mjs && npm run build:electron && vite build && electron-builder --win --publish never",
+    "build:mac": "node scripts/sync-version.mjs && npm run build:electron && vite build && electron-builder --mac --publish never",
+    "build:linux": "node scripts/sync-version.mjs && npm run build:electron && vite build && electron-builder --linux --publish never",
     "preview": "vite preview"
   },
   "keywords": [
@@ -88,6 +90,26 @@
         "nsis"
       ],
       "icon": "build/icon.ico"
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png",
+      "category": "public.app-category.developer-tools"
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "icon": "build/icon.png",
+      "category": "Utility"
     },
     "electronUpdaterCompatibility": ">=2.16.0",
     "publish": {

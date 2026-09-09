@@ -369,6 +369,8 @@ class SystemMediaManager {
   }
 
   async ensureStarted(): Promise<void> {
+    // 非 Windows 平台无 SMTC/PowerShell 助手：静默不启动，getState 恒为 null（渲染层按无媒体降级）
+    if (process.platform !== 'win32') return
     if (this.disposed) throw new Error('system media manager disposed')
     this.requestedActive = true
     if (this.stopTimer) {

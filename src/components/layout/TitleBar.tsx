@@ -19,6 +19,8 @@ export default function TitleBar({ onToggleSidebar, sidebarVisible }: TitleBarPr
   // 工作台面板显隐：激活态高亮按钮
   const workbenchVisible = useWorkbenchStore((s) => s.visible)
   const toggleWorkbench = useWorkbenchStore((s) => s.toggleVisible)
+  // mac：窗口控制走系统红绿灯（左上角），自绘三键隐藏，左侧为红绿灯留位
+  const isMac = window.clerkbox?.platform === 'darwin'
 
   // 监听窗口最大化状态，根据状态切换中间按钮的图标和 hover 提示
   const [isMaximized, setIsMaximized] = useState(false)
@@ -33,7 +35,10 @@ export default function TitleBar({ onToggleSidebar, sidebarVisible }: TitleBarPr
       className="relative z-30 h-11 max-md:h-14 flex items-center justify-between px-4 max-md:px-3 bg-dark-surface/80 backdrop-blur-md border-b border-dark-onSurfaceVariant/10 select-none"
       style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
     >
-      <div className="flex items-center gap-3" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+      <div
+        className={`flex items-center gap-3 ${isMac ? 'ml-16' : ''}`}
+        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+      >
         <button
           type="button"
           onClick={onToggleSidebar}
@@ -87,8 +92,8 @@ export default function TitleBar({ onToggleSidebar, sidebarVisible }: TitleBarPr
           <PanelRight size={16} />
         </button>
 
-        {/* Window controls：WebUI 模式下隐藏（浏览器无窗口控制） */}
-        {!isWebUIMode && (
+        {/* Window controls：WebUI 模式下隐藏（浏览器无窗口控制）；mac 走系统红绿灯 */}
+        {!isWebUIMode && !isMac && (
           <>
             <button
               type="button"

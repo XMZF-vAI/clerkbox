@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  # 手动触发：仅构建并归档 artifact，不发 Release（打 tag 前的验证通道）
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows
+            os: windows-latest
+            # Windows NSIS 安装包
+            build_cmd: npm run build
+          - name: macos
+            os: macos-latest
+            # dmg 双架构（Intel + Apple Silicon）
+            build_cmd: npm run build:mac
+          - name: linux
+            # ubuntu-22.04 平衡 glibc 兼容面（覆盖主流发行版）
+            os: ubuntu-22.04
+            build_cmd: npm run build:linux
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        # Linux 无 node-pty 预编译包，此处触发源码编译（runner 自带 gcc/build-essential）
+        run: npm ci
+
+      - name: Build installer
+        run: ${{ matrix.build_cmd }}
+        env:
+          # mac runner 无签名证书，禁止 electron-builder 自动发现签名身份（保持不签名构建）
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: clerkbox-${{ matrix.name }}
+          path: |
+            release-out/*.exe
+            release-out/*.dmg
+            release-out/*.AppImage
+            release-out/latest*.yml
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Create GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release and upload assets
+        # 用 gh CLI 集中上传，规避 electron-builder v26 并发上传产生多个草稿 Release 的 bug
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          gh release create "$TAG" --generate-notes --verify-tag dist/*

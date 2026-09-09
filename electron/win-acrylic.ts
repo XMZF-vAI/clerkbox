@@ -240,8 +240,10 @@ class WinAcrylicManager {
   /**
    * 设置玻璃程度。level 0 关闭特效（纯透明），1-100 映射为亚克力磨砂叠色 alpha。
    * 返回 ok=false 表示系统不支持（调用方降级到壁纸快照）。
+   * 非 Windows 平台无 DWM/PowerShell 助手，直接走降级轨。
    */
   async setAcrylic(hwnd: Buffer, level: number): Promise<{ ok: boolean }> {
+    if (process.platform !== 'win32') return { ok: false }
     const lvl = Math.min(100, Math.max(0, Math.round(level)))
     const hwndString = this.hwndToString(hwnd)
     this.lastHwnd = hwndString
@@ -264,8 +266,9 @@ class WinAcrylicManager {
     }
   }
 
-  /** 关闭特效（恢复普通透明窗口） */
+  /** 关闭特效（恢复普通透明窗口）；非 Windows 平台为空操作 */
   async clearAcrylic(hwnd?: Buffer): Promise<void> {
+    if (process.platform !== 'win32') return
     const hwndString = hwnd ? this.hwndToString(hwnd) : this.lastHwnd
     if (!hwndString) return
     if (!this.proc || this.proc.exitCode !== null || this.proc.killed) return

@@ -181,6 +181,14 @@ function getOsDescription(): string {
   return navigator.platform || 'unknown'
 }
 
+/** 平台感知的可用 shell 描述（与 prompts.ts 的 Shell selection 段口径一致） */
+function getShellDescription(): string {
+  const platform = window.clerkbox?.platform
+  if (platform === 'darwin') return 'zsh, bash'
+  if (platform === 'linux') return 'bash, sh'
+  return 'cmd.exe, PowerShell'
+}
+
 /** 可重试的 HTTP 状态码（瞬时故障，退避重试） */
 const RETRYABLE_CODES = [408, 429, 500, 502, 503, 504]
 
@@ -674,7 +682,7 @@ export function useAgent(sessionId: string) {
         dynamicSystemContent += `\n\nThis section is authoritative: when asked about the current working directory, report the path above — NOT any directory path seen in earlier messages or tool outputs (those reflect a previous setting).`
         const envLines = [
           `- Platform: ${navigator.platform || 'unknown'}`,
-          `- OS: ${getOsDescription()} (shells available: cmd.exe, PowerShell)`,
+          `- OS: ${getOsDescription()} (shells available: ${getShellDescription()})`,
           `- Today's date: ${new Date().toDateString()}`,
           `- Is a git repository: ${isGitRepo ? 'yes' : 'no'}`,
         ]
@@ -705,7 +713,7 @@ export function useAgent(sessionId: string) {
         // 环境信息段（参考 Claude Code/opencode 的 env 注入）：会话内稳定的运行环境事实
         const envLines = [
           `- Platform: ${navigator.platform || 'unknown'}`,
-          `- OS: ${getOsDescription()} (shells available: cmd.exe, PowerShell)`,
+          `- OS: ${getOsDescription()} (shells available: ${getShellDescription()})`,
           `- Today's date: ${new Date().toDateString()}`,
           `- Is a git repository: ${isGitRepo ? 'yes' : 'no'}`,
         ]

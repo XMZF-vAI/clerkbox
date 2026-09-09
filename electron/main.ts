@@ -512,16 +512,21 @@ function assertEncryptionAvailable(): void {
 function createWindow() {
   const preloadPath = projectRoot('dist-electron/electron/preload.js')
   const devUrl = process.env.VITE_DEV_SERVER_URL
+  // mac：保留系统红绿灯（titleBarStyle:'hidden' 不与 frame:false 同设，避免吞掉红绿灯），
+  // 且透明窗口在 mac 有全屏/闪烁兼容问题 → 降级为不透明背景；VIBE 壁纸在 mac 本就无来源。
+  const isMac = process.platform === 'darwin'
 
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
     minWidth: 800,
     minHeight: 600,
-    frame: false,
+    ...(isMac ? {} : { frame: false }),
     titleBarStyle: 'hidden',
-    transparent: true,
-    backgroundColor: '#00000000',
+    transparent: !isMac,
+    backgroundColor: isMac ? '#1e1e1e' : '#00000000',
+    // mac：红绿灯定位到自绘标题栏（h-11=44px）高度内，避免与左侧第一个按钮重叠
+    ...(isMac ? { trafficLightPosition: { x: 12, y: 14 } } : {}),
     icon: projectRoot('build/icon.ico'),
     webPreferences: {
       preload: preloadPath,
