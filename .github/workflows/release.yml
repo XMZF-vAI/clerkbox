@@ -73,8 +73,9 @@ jobs:
 
       - name: Create release and upload assets
         # 用 gh CLI 集中上传，规避 electron-builder v26 并发上传产生多个草稿 Release 的 bug
+        # -R 显式指定仓库：本 job 无 checkout，gh 无法从 git remote 推断
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
-          gh release create "$TAG" --generate-notes --verify-tag dist/*
+          gh release create "$TAG" -R XMZF-vAI/clerkbox --generate-notes --verify-tag dist/*
