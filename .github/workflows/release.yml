@@ -55,6 +55,7 @@ jobs:
             release-out/*.exe
             release-out/*.dmg
             release-out/*.AppImage
+            release-out/*.blockmap
             release-out/latest*.yml
           if-no-files-found: error
           retention-days: 14
