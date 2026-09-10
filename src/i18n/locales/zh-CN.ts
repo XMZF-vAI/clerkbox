@@ -311,6 +311,18 @@ export default {
     windowMaximize: '最大化',
     windowRestore: '还原',
     windowClose: '关闭窗口',
+    updateCurrentVersion: '当前版本 v{{version}}',
+    updateLastChecked: '上次检查：{{time}}',
+    updateNeverChecked: '尚未检查更新',
+    updateChecking: '正在检查更新...',
+    updateDownloading: '正在下载 v{{version}}',
+    updateDownloadProgress: '正在下载 v{{version}}（{{percent}}%）',
+    updateReady: 'v{{version}} 已就绪，点击重启更新',
+    updateReadyMac: 'v{{version}} 可用，点击前往下载',
+    updateNotesTitle: 'v{{version}} 更新内容',
+    updateConfirmTitle: '更新将中断正在执行的 AI',
+    updateConfirmMessage: '当前有 Agent 正在执行任务，重启更新会中断它。确定现在更新吗？',
+    updateCheckNow: '点击检查更新',
   },
 
   chat: {

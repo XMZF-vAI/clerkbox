@@ -4,8 +4,8 @@ import { useTranslation } from 'react-i18next'
 import { useVibeStore } from '../../stores/vibe-store'
 import { useWorkbenchStore } from '../../stores/workbench-store'
 import ContextUsageIndicator from '../chat/ContextUsageIndicator'
+import UpdateBadge from './UpdateBadge'
 import { isWebUIMode } from '../../lib/ipc-client'
-import pkg from '../../../package.json'
 
 interface TitleBarProps {
   onToggleSidebar: () => void
@@ -49,9 +49,8 @@ export default function TitleBar({ onToggleSidebar, sidebarVisible }: TitleBarPr
         >
           <PanelLeft size={16} />
         </button>
-        <span className="text-xs px-1.5 py-0.5 rounded-md3-xs bg-dark-surfaceContainerHigh text-dark-onSurfaceVariant max-md:hidden">
-          v{pkg.version}
-        </span>
+        {/* 版本号标签：自动更新入口（检测/下载进度/就绪重启，悬浮显示更新内容） */}
+        <UpdateBadge />
       </div>
 
       <div className="flex items-center gap-1" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>

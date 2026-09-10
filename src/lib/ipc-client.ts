@@ -15,6 +15,7 @@ import type {
   ParseSkillFileResult,
   SessionRow,
   SystemMediaState,
+  UpdaterState,
   VibeGlassTrack,
   VibeMediaCommand,
   WebUICapabilities,
@@ -516,6 +517,31 @@ export const ipc = {
     isElectron ? window.clerkbox.onPtyData(callback) : () => {},
   onPtyExit: (callback: (id: string, exitCode: number) => void): (() => void) =>
     isElectron ? window.clerkbox.onPtyExit(callback) : () => {},
+
+  // 自动更新：仅 Electron 桌面端（WebUI 浏览器端无本地安装能力，版本号标签保持静态）
+  updateCheck: (): Promise<UpdaterState> =>
+    isElectron ? window.clerkbox.updateCheck() : Promise.resolve(WEBUI_UPDATER_UNSUPPORTED),
+  updateInstall: (): Promise<{ started: boolean }> =>
+    isElectron ? window.clerkbox.updateInstall() : Promise.resolve({ started: false }),
+  updateAgentActivity: (active: boolean): void => {
+    if (isElectron) window.clerkbox.updateAgentActivity(active)
+  },
+  onUpdateState: (callback: (state: UpdaterState) => void): (() => void) =>
+    isElectron ? window.clerkbox.onUpdateState(callback) : () => {},
+}
+
+/** WebUI 模式下返回的「不支持更新」状态快照 */
+const WEBUI_UPDATER_UNSUPPORTED: UpdaterState = {
+  supported: false,
+  canAutoInstall: false,
+  phase: 'idle',
+  currentVersion: '',
+  newVersion: null,
+  releaseNotes: null,
+  releaseUrl: null,
+  progress: null,
+  lastCheckedAt: null,
+  agentBusy: false,
 }
 
 // ── WebUI 模式下异步预取 platform / homeDir ──

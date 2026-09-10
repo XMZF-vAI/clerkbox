@@ -219,6 +219,31 @@
   18%, 72% { opacity: 1; }
 }
 
+/* ── 版本号标签更新光晕：主题色缓慢呼吸（伪元素 opacity 动画，避免 box-shadow 重绘）── */
+@keyframes update-badge-glow {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 0.95; }
+}
+.update-glow {
+  position: relative;
+  isolation: isolate;
+}
+.update-glow::after {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: 6px;
+  background: rgb(var(--md-primary-rgb));
+  filter: blur(4px);
+  opacity: 0.3;
+  z-index: -1;
+  animation: update-badge-glow 2.6s ease-in-out infinite;
+  pointer-events: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .update-glow::after { animation-duration: 6s; }
+}
+
 .agent-status-label {
   --asl-base: rgb(var(--shimmer-base-rgb));
   --asl-peak: rgb(var(--shimmer-peak-rgb));

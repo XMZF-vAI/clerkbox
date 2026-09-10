@@ -5,6 +5,7 @@ import TitleBar from './components/layout/TitleBar'
 import WorkbenchPanel from './components/workbench/WorkbenchPanel'
 import { useSettingsStore, migrateProvidersIfNeeded, hydrateProviderApiKeys } from './stores/settings-store'
 import { initMcp } from './stores/mcp-store'
+import { useUpdaterStore } from './stores/updater-store'
 import { useAccountStore } from './stores/account-store'
 import { useUIStore } from './stores/ui-store'
 import { useVibeStore } from './stores/vibe-store'
@@ -102,7 +103,12 @@ export default function App() {
     void useAccountStore.getState().init()
     // MCP 服务器：首次同步 + 订阅配置变化与主进程状态推送
     const cleanupMcp = initMcp()
-    return cleanupMcp
+    // 自动更新：订阅主进程状态推送 + agent 活跃心跳上报（WebUI 模式内部自动跳过）
+    const cleanupUpdater = useUpdaterStore.getState().init()
+    return () => {
+      cleanupMcp()
+      cleanupUpdater()
+    }
   }, [hydrated])
 
   // 圆角 + transform 创建包含块，使内部 fixed 元素（弹窗、VIBE 控件）也被圆角裁剪

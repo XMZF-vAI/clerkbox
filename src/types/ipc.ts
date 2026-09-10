@@ -178,6 +178,27 @@ export interface AccountSyncDownloadResult {
 /** 玻璃模式实际生效的渲染轨道 */
 export type VibeGlassTrack = 'acrylic' | 'transparent' | 'fallback'
 
+// ── 自动更新（TitleBar 版本号标签） ──
+
+/** 主进程 updater 状态机的快照（任何变化全量推送到渲染端） */
+export interface UpdaterState {
+  /** 当前环境是否启用更新功能（dev 模式 / 不支持的平台为 false） */
+  supported: boolean
+  /** true = 可自动下载并重启安装；false = 仅提示新版本，点击跳转 Release 页 */
+  canAutoInstall: boolean
+  phase: 'idle' | 'checking' | 'downloading' | 'ready'
+  currentVersion: string
+  newVersion: string | null
+  /** GitHub Release 正文（已剥离 Markdown），悬浮提示用 */
+  releaseNotes: string | null
+  releaseUrl: string | null
+  /** 下载进度 0-100 */
+  progress: number | null
+  lastCheckedAt: number | null
+  /** agent 是否忙碌（ready 点击时用于决定是否弹中断确认） */
+  agentBusy: boolean
+}
+
 /** 系统媒体会话（SMTC）状态快照 */
 export interface SystemMediaState {
   /** 当前是否存在活跃的系统媒体会话 */
@@ -341,6 +362,15 @@ export interface ClerkBoxAPI {
   onPtyData: (callback: (id: string, data: string) => void) => () => void
   /** 订阅终端退出事件；返回退订函数 */
   onPtyExit: (callback: (id: string, exitCode: number) => void) => () => void
+  // ── 自动更新（版本号标签） ──
+  /** 触发一次检测并返回当前状态（checking 锁住时直接返回快照） */
+  updateCheck: () => Promise<UpdaterState>
+  /** 重启安装（win/linux）；mac 由渲染端直接 openExternal 跳转 Release 页 */
+  updateInstall: () => Promise<{ started: boolean }>
+  /** agent 活跃心跳上报（streaming 变化时 + 定时） */
+  updateAgentActivity: (active: boolean) => void
+  /** 订阅更新状态推送；返回退订函数 */
+  onUpdateState: (callback: (state: UpdaterState) => void) => () => void
 }
 
 /** 模型 API 连接配置（主进程代理入参） */

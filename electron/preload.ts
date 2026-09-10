@@ -10,6 +10,7 @@ import type {
   MessageRow,
   SessionRow,
   SystemMediaState,
+  UpdaterState,
   VibeGlassTrack,
   VibeMediaCommand,
   WebSearchResult,
@@ -53,6 +54,18 @@ contextBridge.exposeInMainWorld('clerkbox', {
     ipcRenderer.on('windowStateChanged', listener)
     return () => ipcRenderer.removeListener('windowStateChanged', listener)
   },
+
+  // Updater（版本号标签自动更新）
+  updateCheck: (): Promise<UpdaterState> => ipcRenderer.invoke('update:check'),
+  updateInstall: (): Promise<{ started: boolean }> => ipcRenderer.invoke('update:install'),
+  /** agent 活跃心跳上报（streaming 变化时 + 定时） */
+  updateAgentActivity: (active: boolean): void => ipcRenderer.send('update:agent-activity', active),
+  onUpdateState: (callback: (state: UpdaterState) => void): (() => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, state: UpdaterState) => callback(state)
+    ipcRenderer.on('update:state', listener)
+    return () => ipcRenderer.removeListener('update:state', listener)
+  },
+
   onBrowserNewTab: (callback: (url: string) => void): (() => void) => {
     const listener = (_e: Electron.IpcRendererEvent, url: string) => callback(url)
     ipcRenderer.on('browser:new-tab', listener)

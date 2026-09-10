@@ -311,6 +311,18 @@ export default {
     windowMaximize: 'Maximize',
     windowRestore: 'Restore',
     windowClose: 'Close window',
+    updateCurrentVersion: 'Current version v{{version}}',
+    updateLastChecked: 'Last checked: {{time}}',
+    updateNeverChecked: 'No update check yet',
+    updateChecking: 'Checking for updates...',
+    updateDownloading: 'Downloading v{{version}}',
+    updateDownloadProgress: 'Downloading v{{version}} ({{percent}}%)',
+    updateReady: 'v{{version}} ready — click to restart & update',
+    updateReadyMac: 'v{{version}} available — click to open download page',
+    updateNotesTitle: 'What\'s new in v{{version}}',
+    updateConfirmTitle: 'Update will interrupt running AI',
+    updateConfirmMessage: 'An agent is currently running. Restarting to update will interrupt it. Update now?',
+    updateCheckNow: 'Click to check for updates',
   },
 
   chat: {

@@ -25,6 +25,7 @@ import { mcpManager } from './mcp-manager'
 import { winAcrylic } from './win-acrylic'
 import { systemMedia } from './system-media'
 import { registerTerminalHandlers, disposeAllTerminals } from './terminal'
+import { initUpdater } from './updater'
 import type { AccountSyncKind, McpMarketConnection, McpServerConfig, SystemMediaState, VibeGlassTrack } from '../src/types/ipc'
 
 const SKILL_REQUEST_TIMEOUT_MS = 15_000
@@ -736,6 +737,16 @@ function registerIpcHandlers() {
 
   // 工作台终端（node-pty 真 TTY）
   registerTerminalHandlers()
+
+  // 自动更新：检测/下载/安装状态机 + agent 忙碌双保险（工具子进程探测在此注入）
+  initUpdater({
+    getMainWindow: () => mainWindow,
+    hasToolChildProcesses: () => {
+      let count = 0
+      sessionChildProcesses.forEach((set) => { count += set.size })
+      return count > 0
+    },
+  })
 
   // The sandboxed preload cannot access OS APIs directly.
   ipcMain.on('getPlatform', (event) => {
