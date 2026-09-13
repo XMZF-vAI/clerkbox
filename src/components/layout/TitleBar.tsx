@@ -36,7 +36,7 @@ export default function TitleBar({ onToggleSidebar, sidebarVisible }: TitleBarPr
       style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
     >
       <div
-        className={`flex items-center gap-3 ${isMac ? 'ml-16' : ''}`}
+        className={`flex items-center gap-3 ${isMac ? 'ml-[84px]' : ''}`}
         style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
       >
         <button

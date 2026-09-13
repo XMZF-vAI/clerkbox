@@ -527,7 +527,7 @@ function createWindow() {
     transparent: !isMac,
     backgroundColor: isMac ? '#1e1e1e' : '#00000000',
     // mac：红绿灯定位到自绘标题栏（h-11=44px）高度内，避免与左侧第一个按钮重叠
-    ...(isMac ? { trafficLightPosition: { x: 12, y: 14 } } : {}),
+    ...(isMac ? { trafficLightPosition: { x: 12, y: 15 } } : {}),
     icon: projectRoot('build/icon.ico'),
     webPreferences: {
       preload: preloadPath,
@@ -2394,10 +2394,10 @@ function registerIpcHandlers() {
 
   // ── 热土引擎（REngine）账号系统：登录 / 登出 / 状态 / 数据段云同步 ──
 
-  /** 校验同步 kinds 入参：必须是 'memory' | 'models' 数组 */
+  /** 校验同步 kinds 入参：必须是 'memory' | 'models' | 'mcp' 数组 */
   function parseSyncKinds(value: unknown): AccountSyncKind[] | null {
     if (!Array.isArray(value)) return null
-    if (!value.every((item): item is AccountSyncKind => item === 'memory' || item === 'models')) return null
+    if (!value.every((item): item is AccountSyncKind => item === 'memory' || item === 'models' || item === 'mcp')) return null
     return [...new Set(value)]
   }
 
@@ -2420,6 +2420,14 @@ function registerIpcHandlers() {
     if (!parsed) throw new Error('Invalid sync kinds')
     return rtAccount.rtSyncDownload(parsed, force === true)
   })
+
+  // 同步加密密码：设置/修改（仅存本地）与状态查询
+  ipcMain.handle('accountSyncSetPassphrase', (_event, passphrase: unknown) => {
+    if (typeof passphrase !== 'string') return { error: 'Invalid passphrase' }
+    return rtAccount.rtSyncSetPassphrase(passphrase)
+  })
+
+  ipcMain.handle('accountSyncGetPassphraseStatus', () => rtAccount.rtSyncGetPassphraseStatus())
 
   // ── MCP（Model Context Protocol）服务器管理 ──
   // 配置由渲染进程 settings-store 持久化，主进程只负责连接与工具调用
