@@ -19,6 +19,7 @@ import {
   ChevronDown,
   ChevronsDownUp,
   ChevronsUpDown,
+  CalendarClock,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useChatStore } from '../../stores/chat-store'
@@ -53,7 +54,7 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
   )
   // 订阅 sessionStatus 变化以触发 loading 圈重渲染
   const sessionStatus = useChatStore((s) => s.sessionStatus)
-  const { showSkillStore, setShowSkillStore } = useUIStore()
+  const { showSkillStore, setShowSkillStore, showScheduledTasks, setShowScheduledTasks } = useUIStore()
   // 账户入口：登录态与用户信息（用于头像/文案切换）
   const accountLoggedIn = useAccountStore((s) => s.loggedIn)
   const accountUser = useAccountStore((s) => s.user)
@@ -208,7 +209,7 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
           title="ClerkBox"
         />
         <button
-          onClick={() => { setShowSkillStore(false); createSession() }}
+          onClick={() => { setShowSkillStore(false); setShowScheduledTasks(false); createSession() }}
           className="w-8 h-8 flex items-center justify-center rounded-md3-sm bg-dark-surfaceContainerHigh mb-2"
           title={t('sidebar.newChatAria')}
           aria-label={t('sidebar.newChatAria')}
@@ -216,7 +217,7 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
           <Plus size={18} />
         </button>
         <button
-          onClick={() => setShowSkillStore(!showSkillStore)}
+          onClick={() => { setShowScheduledTasks(false); setShowSkillStore(!showSkillStore) }}
           className={`w-8 h-8 flex items-center justify-center rounded-md3-sm transition-colors mb-2 ${
             showSkillStore ? 'bg-md-primary/15 text-md-primary' : 'hover:bg-dark-surfaceContainerHigh'
           }`}
@@ -225,6 +226,18 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
           aria-expanded={showSkillStore}
         >
           <Store size={18} />
+        </button>
+        <button
+          type="button"
+          onClick={() => { setShowSkillStore(false); setShowScheduledTasks(!showScheduledTasks) }}
+          className={`w-8 h-8 flex items-center justify-center rounded-md3-sm transition-colors mb-2 ${
+            showScheduledTasks ? 'bg-md-primary/15 text-md-primary' : 'hover:bg-dark-surfaceContainerHigh'
+          }`}
+          title={t('scheduledTasks.title')}
+          aria-label={t('scheduledTasks.title')}
+          aria-expanded={showScheduledTasks}
+        >
+          <CalendarClock size={18} />
         </button>
         <div className="flex-1" />
         {!isWebUIMode && (
@@ -303,15 +316,15 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
       {/* New Chat + Skill Store buttons - vertical stack for better breathing room */}
       <div className="px-3 pb-2 flex flex-col gap-1.5">
         <button
-          onClick={() => { setShowSkillStore(false); createSession(); onNavigate?.() }}
-          className="w-full flex items-center justify-center gap-1.5 px-3 py-2 max-md:py-3 rounded-md3-md bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer transition-colors text-sm max-md:text-base"
+          onClick={() => { setShowSkillStore(false); setShowScheduledTasks(false); createSession(); onNavigate?.() }}
+          className="md-focus w-full flex items-center justify-center gap-1.5 px-3 py-2 max-md:py-3 rounded-md3-md bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer transition-colors text-sm max-md:text-base"
         >
           <Plus size={16} />
           <span>{t('sidebar.newChat')}</span>
         </button>
         <button
-          onClick={() => { setShowSkillStore(!showSkillStore); onNavigate?.() }}
-          className={`w-full flex items-center justify-center gap-1.5 px-3 py-2 max-md:py-3 rounded-md3-md transition-colors text-sm max-md:text-base ${
+          onClick={() => { setShowScheduledTasks(false); setShowSkillStore(!showSkillStore); onNavigate?.() }}
+          className={`md-focus w-full flex items-center justify-center gap-1.5 px-3 py-2 max-md:py-3 rounded-md3-md transition-colors text-sm max-md:text-base ${
             showSkillStore
               ? 'bg-md-primary/15 text-md-primary hover:bg-md-primary/25'
               : 'bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant'
@@ -319,6 +332,18 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
         >
           <Store size={16} />
           <span>{t('sidebar.skills')}</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => { setShowSkillStore(false); setShowScheduledTasks(!showScheduledTasks); onNavigate?.() }}
+          className={`md-focus w-full flex items-center justify-center gap-1.5 px-3 py-2 max-md:py-3 rounded-md3-md transition-colors text-sm max-md:text-base ${
+            showScheduledTasks
+              ? 'bg-md-primary/15 text-md-primary hover:bg-md-primary/25'
+              : 'bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant'
+          }`}
+        >
+          <CalendarClock size={16} />
+          <span>{t('scheduledTasks.title')}</span>
         </button>
       </div>
 
@@ -398,8 +423,8 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
                         }`}
                       >
                         <button
-                          onClick={() => { setShowSkillStore(false); setActiveSession(s.id); onNavigate?.() }}
-                          className="flex-1 flex items-center gap-2 text-left min-w-0"
+                          onClick={() => { setShowSkillStore(false); setShowScheduledTasks(false); setActiveSession(s.id); onNavigate?.() }}
+                          className="md-focus flex-1 flex items-center gap-2 text-left min-w-0 rounded-md3-xs"
                         >
                           <MessageSquare size={13} className="flex-shrink-0 opacity-70" />
                           <span className="truncate">{s.title}</span>
@@ -435,7 +460,7 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
                             e.stopPropagation()
                             setConfirmDeleteId(s.id)
                           }}
-                          className={`w-6 h-6 max-md:w-9 max-md:h-9 flex items-center justify-center rounded-md3-xs hover:bg-md-error/20 hover:text-md-error transition-opacity flex-shrink-0 ${
+                          className={`md-focus w-6 h-6 max-md:w-9 max-md:h-9 flex items-center justify-center rounded-md3-xs hover:bg-md-error/20 hover:text-md-error transition-opacity flex-shrink-0 ${
                             hoveredSessionId === s.id || activeSessionId === s.id
                               ? 'opacity-100'
                               : 'opacity-0 group-focus-within:opacity-100 max-md:opacity-60'
@@ -460,7 +485,7 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
           <button
             onClick={handleStartWebUI}
             disabled={webuiStarting}
-            className="w-full flex items-center gap-2 px-3 py-2 max-md:py-3 rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-sm max-md:text-base text-dark-onSurfaceVariant disabled:opacity-50"
+            className="md-focus w-full flex items-center gap-2 px-3 py-2 max-md:py-3 rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-sm max-md:text-base text-dark-onSurfaceVariant disabled:opacity-50"
             aria-label={t('sidebar.webuiAria')}
           >
             {webuiStarting ? <Loader2 size={16} className="animate-spin" /> : <Globe size={16} />}

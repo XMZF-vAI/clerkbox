@@ -1070,6 +1070,7 @@ class ToolRegistry {
           await ipc.writeMemoryFile(targetDir, slug, frontmatter, memContent)
           const entryLine = `- [${memName}](${slug}.md) — ${memDesc}`
           await ipc.updateMemoryIndex(targetDir, entryLine, slug)
+          void ipc.agentMemorySave(scope as 'user' | 'project', slug, memContent, targetDir).catch(() => {})
           const scopeLabel = scope === 'project' ? 'project' : 'global'
           return `✅ Memory saved: ${slug}.md\nType: ${memType}\nScope: ${scopeLabel}\nIndex updated`
         } catch (e) {
@@ -1096,6 +1097,12 @@ class ToolRegistry {
             const projectEntries = await ipc.searchMemoryFiles(ctx.workingDir, query, memType)
             for (const entry of projectEntries) {
               results.push({ entry, scope: '📁 project' })
+            }
+          }
+          if (query) {
+            const cloudResults = await ipc.agentMemorySearch(query, ctx.workingDir, ctx.sessionId).catch(() => [])
+            for (const item of cloudResults) {
+              results.push({ entry: { filename: 'tencentdb', name: 'TencentDB Agent Memory', description: item.type || null, type: undefined, content: item.content, mtime: 0 }, scope: '☁️ TencentDB' })
             }
           }
           if (results.length === 0) {

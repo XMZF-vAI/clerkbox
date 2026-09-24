@@ -230,6 +230,11 @@ function installUpdate(): void {
   autoUpdater.quitAndInstall(true, true)
 }
 
+/** 供系统托盘等模块复用 agent 忙碌判定（渲染心跳 + 工具子进程双保险） */
+export function isAgentBusyNow(): boolean {
+  return isAgentBusy()
+}
+
 export function initUpdater(updaterDeps: UpdaterDeps): void {
   deps = updaterDeps
 

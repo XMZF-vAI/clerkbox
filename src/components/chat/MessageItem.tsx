@@ -290,7 +290,7 @@ function DiffChips({ metas, vibe }: { metas: EditDiffMetaView[]; vibe?: boolean 
       ))}
       {preview && typeof document !== 'undefined' && createPortal(
         <div
-          className={`fixed z-50 w-80 overflow-hidden rounded-md3-md border shadow-2xl ${
+          className={`fixed z-50 w-80 overflow-hidden rounded-md3-md border shadow-elevation-3 ${
             vibe ? 'border-white/10 bg-white/10 backdrop-blur-xl' : 'border-dark-onSurfaceVariant/10 bg-dark-surfaceContainerHighest'
           }`}
           style={{

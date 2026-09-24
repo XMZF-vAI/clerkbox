@@ -53,6 +53,8 @@ export default function OnboardingFlow() {
   const customSeedColor = useSettingsStore((s) => s.customSeedColor)
   const language = useSettingsStore((s) => s.language)
   const updateSettings = useSettingsStore((s) => s.updateSettings)
+  // mac：窗口控制走系统红绿灯（左上角），欢迎页不再自绘窗口键，避免与红绿灯冲突
+  const isMac = window.clerkbox?.platform === 'darwin'
 
   const finish = () => {
     if (leaving) return
@@ -69,11 +71,12 @@ export default function OnboardingFlow() {
     <div
       className={`relative h-full w-full overflow-y-auto transition-opacity duration-300 ${leaving ? 'opacity-0' : 'opacity-100'}`}
     >
-      {/* 顶部拖拽区 + 窗口控制（欢迎页不渲染 TitleBar，需自带） */}
+      {/* 顶部拖拽区 + 窗口控制（欢迎页不渲染 TitleBar，需自带）；mac 由左上角系统红绿灯负责窗口控制 */}
       <div
         className="absolute inset-x-0 top-0 z-20 flex h-11 items-center justify-end pr-2"
         style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
       >
+        {!isMac && (
         <div className="flex items-center gap-1" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
           <button
             type="button"
@@ -92,6 +95,7 @@ export default function OnboardingFlow() {
             <X size={15} />
           </button>
         </div>
+        )}
       </div>
 
       {/* 步骤内容（key 驱动重挂载，实现切换动画） */}

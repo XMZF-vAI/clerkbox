@@ -749,7 +749,7 @@ function CatalogModal({ onClose, onPick }: { onClose: () => void; onPick: (p: Pr
         aria-modal="true"
         aria-labelledby={titleId}
         tabIndex={-1}
-        className="w-[420px] max-w-[90vw] max-h-[70vh] bg-dark-surfaceDim rounded-md3-lg border border-dark-onSurfaceVariant/10 flex flex-col shadow-2xl"
+        className="w-[420px] max-w-[90vw] max-h-[70vh] bg-dark-surfaceDim rounded-md3-lg border border-dark-onSurfaceVariant/10 flex flex-col shadow-elevation-3"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-4 py-3 border-b border-dark-onSurfaceVariant/10">
@@ -906,7 +906,7 @@ function ModelPickerModal({ provider, onClose }: { provider: ModelProvider; onCl
         aria-modal="true"
         aria-labelledby={titleId}
         tabIndex={-1}
-        className="w-[440px] max-w-[90vw] max-h-[70vh] bg-dark-surfaceDim rounded-md3-lg border border-dark-onSurfaceVariant/10 flex flex-col shadow-2xl"
+        className="w-[440px] max-w-[90vw] max-h-[70vh] bg-dark-surfaceDim rounded-md3-lg border border-dark-onSurfaceVariant/10 flex flex-col shadow-elevation-3"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-4 py-3 border-b border-dark-onSurfaceVariant/10">

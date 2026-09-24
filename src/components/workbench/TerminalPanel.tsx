@@ -191,7 +191,7 @@ export default function TerminalPanel({ termId, active, vibe, cwd }: TerminalPan
           <button
             type="button"
             onClick={handleRestart}
-            className={`flex items-center gap-1.5 rounded-md3-md px-2.5 py-1.5 text-xs shadow-lg transition-colors ${
+            className={`flex items-center gap-1.5 rounded-md3-md px-2.5 py-1.5 text-xs shadow-elevation-2 transition-colors ${
               vibe
                 ? 'liquid-glass-subtle text-white/90 hover:bg-white/15'
                 : 'bg-dark-surfaceContainerHigh text-dark-onSurfaceVariant hover:bg-dark-surfaceContainer'

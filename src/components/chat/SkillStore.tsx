@@ -1194,7 +1194,7 @@ export default function SkillStore() {
             aria-modal="true"
             aria-labelledby="skill-upload-title"
             aria-describedby="skill-upload-requirements"
-            className="w-full max-w-md rounded-xl bg-dark-surfaceContainerHigh border border-dark-onSurfaceVariant/10 shadow-2xl p-5 animate-fade-in"
+            className="w-full max-w-md rounded-xl bg-dark-surfaceContainerHigh border border-dark-onSurfaceVariant/10 shadow-elevation-3 p-5 animate-fade-in"
             onClick={(event) => event.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-4">
@@ -1279,7 +1279,7 @@ export default function SkillStore() {
               role="dialog"
               aria-modal="true"
               aria-labelledby="skill-detail-title"
-              className="w-full max-w-md max-h-[85dvh] overflow-y-auto rounded-xl bg-dark-surfaceContainerHigh border border-dark-onSurfaceVariant/10 shadow-2xl p-5 animate-fade-in"
+              className="w-full max-w-md max-h-[85dvh] overflow-y-auto rounded-xl bg-dark-surfaceContainerHigh border border-dark-onSurfaceVariant/10 shadow-elevation-3 p-5 animate-fade-in"
               onClick={(event) => event.stopPropagation()}
             >
               <div className="flex items-start justify-between gap-3 mb-4">
@@ -1426,7 +1426,7 @@ export default function SkillStore() {
             role="dialog"
             aria-modal="true"
             aria-labelledby="mcp-install-title"
-            className="w-full max-w-lg max-h-[85dvh] overflow-y-auto rounded-xl bg-dark-surfaceContainerHigh border border-dark-onSurfaceVariant/10 shadow-2xl p-5 animate-fade-in"
+            className="w-full max-w-lg max-h-[85dvh] overflow-y-auto rounded-xl bg-dark-surfaceContainerHigh border border-dark-onSurfaceVariant/10 shadow-elevation-3 p-5 animate-fade-in"
             onClick={(event) => event.stopPropagation()}
           >
             <div className="flex items-start justify-between gap-3 mb-4">

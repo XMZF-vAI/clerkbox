@@ -15,9 +15,9 @@
  */
 
 import type { HarnessMode, ToolDefinition } from '../types/agent'
-import { CODEX_SYSTEM_PROMPT } from './harness-prompts/codex'
-import { GROK_BUILD_SYSTEM_PROMPT } from './harness-prompts/grok-build'
-import { DSH_SYSTEM_PROMPT } from './harness-prompts/dsh'
+import { CODEX_SYSTEM_PROMPT, codexTransformTools } from './harness-prompts/codex'
+import { GROK_BUILD_SYSTEM_PROMPT, grokBuildTransformTools } from './harness-prompts/grok-build'
+import { DSH_SYSTEM_PROMPT, dshTransformTools } from './harness-prompts/dsh'
 import { DSH_MINIMAL_SYSTEM_PROMPT, dshMinimalTransformTools } from './harness-prompts/dsh-minimal'
 
 /** 动态 system 段的注入策略 */
@@ -70,14 +70,17 @@ export const HARNESS_MODE_CONTENT: Record<Exclude<HarnessMode, 'default'>, Harne
   codex: {
     staticPrompt: CODEX_SYSTEM_PROMPT,
     dynamicContext: 'full',
+    transformTools: codexTransformTools,
   },
   'grok-build': {
     staticPrompt: GROK_BUILD_SYSTEM_PROMPT,
     dynamicContext: 'full',
+    transformTools: grokBuildTransformTools,
   },
   dsh: {
     staticPrompt: DSH_SYSTEM_PROMPT,
     dynamicContext: 'full',
+    transformTools: dshTransformTools,
   },
   'dsh-minimal': {
     staticPrompt: DSH_MINIMAL_SYSTEM_PROMPT,

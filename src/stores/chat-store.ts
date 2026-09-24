@@ -203,7 +203,7 @@ interface ChatState {
   // 用户曾选过的文件夹历史（全局、跨会话、唯一），按时间倒序，最多 8 个
   recentsFolders: string[]
   initialized: boolean
-  createSession: () => string
+  createSession: (opts?: { activate?: boolean; title?: string; workingDir?: string }) => string
   setActiveSession: (id: string) => void
   addMessage: (sessionId: string, message: Message) => void
   updateMessage: (sessionId: string, messageId: string, updates: Partial<Message>) => void
@@ -291,6 +291,10 @@ const createEmptySession = (): Session => {
     harnessMode: 'default',
   }
 }
+
+/** 是否为「刚建的内存会话」（尚未写过消息）：可安全替换标题/目录，不污染历史 */
+const isPristineSession = (s: Session): boolean =>
+  s.messages.length === 0 && s.title === '新会话'
 
 export const useChatStore = create<ChatState>((set, get) => ({
   sessions: [],
@@ -453,7 +457,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  createSession: () => {
+  createSession: (opts) => {
+    const activate = opts?.activate !== false
     const session = createEmptySession()
     set((state) => {
       // 空会话不落库：没发过消息的新会话刷新/关闭即消失，不再堆积在历史记录里。
@@ -468,9 +473,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       return {
         sessions: [session, ...cleanedSessions],
-        activeSessionId: session.id,
+        // activate=false（定时任务后台会话）：不抢占用户当前视图
+        ...(activate ? { activeSessionId: session.id } : {}),
       }
     })
+    // 任务会话携带标题/工作目录：还没说过话的会话可直接塑形（不写入空标题行）
+    if (opts?.title || opts?.workingDir) {
+      set((state) => ({
+        sessions: state.sessions.map((s) => {
+          if (s.id !== session.id || !isPristineSession(s)) return s
+          return {
+            ...s,
+            title: opts.title || s.title,
+            ...(opts.workingDir ? { workingDir: opts.workingDir } : {}),
+          }
+        }),
+      }))
+    }
     return session.id
   },
 

@@ -129,7 +129,7 @@ export default function ContextUsageIndicator() {
 
       {open && (
         <div
-          className="absolute right-0 top-full mt-2 w-72 max-md:fixed max-md:top-[60px] max-md:left-1/2 max-md:right-auto max-md:-translate-x-1/2 max-md:w-[min(92vw,288px)] z-50 rounded-md3-lg border border-dark-onSurfaceVariant/15 bg-dark-surfaceContainer shadow-2xl p-4 animate-fade-in"
+          className="absolute right-0 top-full mt-2 w-72 max-md:fixed max-md:top-[60px] max-md:left-1/2 max-md:right-auto max-md:-translate-x-1/2 max-md:w-[min(92vw,288px)] z-50 rounded-md3-lg border border-dark-onSurfaceVariant/15 bg-dark-surfaceContainer shadow-elevation-3 p-4 animate-fade-in"
           role="dialog"
           aria-label={t('chat.contextUsageTitle')}
         >

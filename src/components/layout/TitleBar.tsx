@@ -45,7 +45,7 @@ export default function TitleBar({ onToggleSidebar, sidebarVisible }: TitleBarPr
           aria-label={t('titlebar.toggleSidebar')}
           title={t('titlebar.toggleSidebar')}
           aria-pressed={sidebarVisible}
-          className="w-8 h-8 max-md:w-11 max-md:h-11 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh text-dark-onSurfaceVariant transition-colors"
+          className="md-focus w-8 h-8 max-md:w-11 max-md:h-11 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh text-dark-onSurfaceVariant transition-colors"
         >
           <PanelLeft size={16} />
         </button>
@@ -58,7 +58,7 @@ export default function TitleBar({ onToggleSidebar, sidebarVisible }: TitleBarPr
         <button
           type="button"
           onClick={() => toggleVibeMode()}
-          className="group h-7 max-md:h-10 max-md:px-3 flex items-center px-2 mr-2 rounded-md3-sm bg-md-tertiary/15 text-md-tertiary hover:bg-md-tertiary/25 transition-colors"
+          className="md-focus group h-7 max-md:h-10 max-md:px-3 flex items-center px-2 mr-2 rounded-md3-sm bg-md-tertiary/15 text-md-tertiary hover:bg-md-tertiary/25 transition-colors"
           title={t('titlebar.vibeEnter')}
           aria-label={t('titlebar.vibeToggleAria')}
           aria-pressed={vibeMode}
@@ -82,7 +82,7 @@ export default function TitleBar({ onToggleSidebar, sidebarVisible }: TitleBarPr
           aria-label={t('titlebar.toggleWorkbench')}
           title={t('titlebar.toggleWorkbench')}
           aria-pressed={workbenchVisible}
-          className={`w-8 h-8 max-md:w-11 max-md:h-11 flex items-center justify-center rounded-md3-sm transition-colors ${
+          className={`md-focus w-8 h-8 max-md:w-11 max-md:h-11 flex items-center justify-center rounded-md3-sm transition-colors ${
             workbenchVisible
               ? 'bg-md-primary/15 text-md-primary'
               : 'hover:bg-dark-surfaceContainerHigh text-dark-onSurfaceVariant'
@@ -99,7 +99,7 @@ export default function TitleBar({ onToggleSidebar, sidebarVisible }: TitleBarPr
               onClick={() => window.clerkbox?.windowAction('minimize')}
               aria-label={t('titlebar.windowMinimize')}
               title={t('titlebar.windowMinimize')}
-              className="w-8 h-8 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors"
+              className="md-focus w-8 h-8 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors"
             >
               <Minus size={16} />
             </button>
@@ -108,7 +108,7 @@ export default function TitleBar({ onToggleSidebar, sidebarVisible }: TitleBarPr
               onClick={() => window.clerkbox?.windowAction('maximize')}
               title={isMaximized ? t('titlebar.windowRestore') : t('titlebar.windowMaximize')}
               aria-label={isMaximized ? t('titlebar.windowRestore') : t('titlebar.windowMaximize')}
-              className="w-8 h-8 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors"
+              className="md-focus w-8 h-8 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors"
             >
               {isMaximized ? <Copy size={14} /> : <Square size={14} />}
             </button>
@@ -117,7 +117,7 @@ export default function TitleBar({ onToggleSidebar, sidebarVisible }: TitleBarPr
               onClick={() => window.clerkbox?.windowAction('close')}
               aria-label={t('titlebar.windowClose')}
               title={t('titlebar.windowClose')}
-              className="w-8 h-8 flex items-center justify-center rounded-md3-sm hover:bg-md-error/20 hover:text-md-error transition-colors"
+              className="md-focus w-8 h-8 flex items-center justify-center rounded-md3-sm hover:bg-md-error/20 hover:text-md-error transition-colors"
             >
               <X size={16} />
             </button>

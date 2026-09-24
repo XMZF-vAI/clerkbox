@@ -59,6 +59,18 @@ const config: Config = {
         'md3-lg': '16px',
         'md3-xl': '28px',
       },
+      // MD3 高程阴影：令牌定义在 index.css :root（shadow-elevation-1/2/3）
+      boxShadow: {
+        'elevation-1': 'var(--md-shadow-1)',
+        'elevation-2': 'var(--md-shadow-2)',
+        'elevation-3': 'var(--md-shadow-3)',
+      },
+      // MD3 标准缓动曲线（ease-md-standard / ease-md-emphasized-decelerate / ease-md-emphasized-accelerate）
+      transitionTimingFunction: {
+        'md-standard': 'cubic-bezier(0.2, 0, 0, 1)',
+        'md-emphasized-decelerate': 'cubic-bezier(0.05, 0.7, 0.1, 1)',
+        'md-emphasized-accelerate': 'cubic-bezier(0.3, 0, 0.8, 0.15)',
+      },
       animation: {
         'fade-in': 'fadeIn 0.3s ease-out',
         'slide-up': 'slideUp 0.3s ease-out',

@@ -44,15 +44,24 @@ export async function searchMemory(
   return ipc.searchMemoryFiles(workingDir, query, type)
 }
 
+export async function searchAgentMemory(query: string, workingDir?: string, sessionId?: string): Promise<Array<{ content: string; type?: string; score?: number }>> {
+  try {
+    return await ipc.agentMemorySearch(query, workingDir, sessionId)
+  } catch {
+    return []
+  }
+}
+
 // 构建注入 system prompt 的记忆指令字符串
 // 全局记忆：完整内容直接注入（无需查工具即可知道用户身份/偏好/反馈）
 // 项目级记忆：仅注入 MEMORY.md 索引（内容需用 search_memory 查询，避免 prompt 过大）
 export async function buildMemoryPrompt(workingDir: string, homeDir: string): Promise<string> {
   const readProject = workingDir && workingDir !== homeDir
   // 并行：全局记忆条目列表（含完整内容）+ 项目级 MEMORY.md 索引
-  const [globalEntries, projectRes] = await Promise.all([
+  const [globalEntries, projectRes, agentContext] = await Promise.all([
     ipc.scanMemory(homeDir),
     readProject ? ipc.readMemoryIndex(workingDir) : Promise.resolve<{ content: string; wasTruncated: boolean; reason?: string }>({ content: '', wasTruncated: false }),
+    ipc.agentMemoryContext(workingDir).catch(() => ({ configured: false, core: '', scenarios: [] })),
   ])
 
   // ── 全局记忆：全量内容注入 ──
@@ -83,6 +92,8 @@ export async function buildMemoryPrompt(workingDir: string, homeDir: string): Pr
 
   // ── 项目级记忆：仅注入索引 ──
   const projectContent = projectRes.content.trim()
+  const agentCore = agentContext.core.trim()
+  const agentScenarios = agentContext.scenarios.map((item) => '#### ' + item.path + (item.summary ? ' — ' + item.summary : '') + '\n' + item.content).join('\n\n')
 
   // 合并展示
   let memorySection: string
@@ -94,6 +105,10 @@ export async function buildMemoryPrompt(workingDir: string, homeDir: string): Pr
     memorySection = projectContent
   } else {
     memorySection = '你的 MEMORY.md 当前为空。保存新记忆后，索引会出现在这里。'
+  }
+  if (agentCore || agentScenarios) {
+    const agentSection = [agentCore ? '### 🧠 TencentDB 核心记忆\n' + agentCore : '', agentScenarios ? '### 🗂️ TencentDB 场景记忆\n' + agentScenarios : ''].filter(Boolean).join('\n\n')
+    memorySection += '\n\n' + agentSection
   }
 
   const sections: string[] = [

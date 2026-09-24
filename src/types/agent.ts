@@ -304,6 +304,10 @@ export interface AppSettings {
   claudeMdCompat: boolean
   /** WebUI 是否绑定 0.0.0.0 允许局域网访问（默认 false 仅本机 127.0.0.1） */
   webuiLanAccess: boolean
+  /** 窗口关闭按钮行为：tray=收进系统托盘继续后台运行（默认，AI/定时任务不中断）；quit=直接退出 */
+  closeBehavior: 'tray' | 'quit'
+  /** 托盘菜单"对话记录"最多展示几条（3~8） */
+  recentSessionsLimit: number
   /** MCP 服务器列表（配置随设置持久化，连接由主进程 McpManager 管理） */
   mcpServers: McpServerConfig[]
 }

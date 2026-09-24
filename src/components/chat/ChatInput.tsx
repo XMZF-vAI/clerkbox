@@ -1061,7 +1061,7 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
   // Box class: vibe uses liquid glass（relative 供 "/" 命令菜单 absolute 锚定）
   const boxClass = vibe
     ? `chat-input-box relative flex flex-col ${boxMaxWidth} mx-auto liquid-glass rounded-[28px] px-5 py-3.5 gap-2 focus-within:border-white/40 transition-colors`
-    : `chat-input-box relative flex flex-col ${boxMaxWidth} mx-auto bg-dark-surfaceContainerHigh rounded-[28px] px-5 py-3.5 gap-2 border border-dark-onSurfaceVariant/8 focus-within:border-md-primary/30 transition-colors`
+    : `chat-input-box relative flex flex-col ${boxMaxWidth} mx-auto bg-dark-surfaceContainerHigh rounded-[28px] px-5 py-3.5 gap-2 border border-dark-onSurfaceVariant/8 focus-within:border-md-primary/30 focus-within:shadow-elevation-1 transition-[border-color,box-shadow]`
 
   return (
     <div className={outerClass} style={outerStyle}>
@@ -1126,8 +1126,8 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
             <div ref={harnessPanelRef} className="pt-1.5 min-h-0">
               <div id="chat-harness-menu" className={`w-80 max-w-full rounded-md3-md py-1 max-h-[45dvh] overflow-y-auto overscroll-contain ${
                 vibe
-                  ? 'bg-black/60 border border-white/15 backdrop-blur-2xl text-white shadow-lg'
-                  : 'bg-dark-surfaceContainerHighest border border-dark-onSurfaceVariant/10 shadow-lg'
+                  ? 'bg-black/60 border border-white/15 backdrop-blur-2xl text-white shadow-elevation-3'
+                  : 'bg-dark-surfaceContainerHighest border border-dark-onSurfaceVariant/10 shadow-elevation-3'
               }`}>
                 <div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wider opacity-50">
                   {t('chat.harnessGroupDefault')}
@@ -1410,7 +1410,7 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
             />
             <div
               ref={commandMenuRef}
-              className={`absolute bottom-full left-0 right-0 mb-1 rounded-md3-md border shadow-2xl z-50 overflow-y-auto overscroll-contain max-h-[min(50dvh,300px)]
+              className={`absolute bottom-full left-0 right-0 mb-1 rounded-md3-md border shadow-elevation-3 z-50 overflow-y-auto overscroll-contain max-h-[min(50dvh,300px)]
                 max-md:fixed max-md:inset-x-0 max-md:bottom-0 max-md:left-auto max-md:right-auto max-md:mb-0 max-md:w-full max-md:max-h-[60dvh]
                 max-md:rounded-t-2xl max-md:rounded-b-none max-md:z-[66]
                 max-md:pb-[calc(env(safe-area-inset-bottom)+8px)] ${
@@ -1627,7 +1627,7 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
                   onClick={() => setShowFolderPopover(false)}
                   aria-hidden
                 />
-                <div id="chat-folder-menu" className={`absolute bottom-full left-0 mb-1 w-72 rounded-md3-md border shadow-2xl z-40 overflow-hidden animate-fade-in
+                <div id="chat-folder-menu" className={`absolute bottom-full left-0 mb-1 w-72 rounded-md3-md border shadow-elevation-3 z-40 overflow-hidden animate-fade-in
                   max-md:fixed max-md:inset-x-0 max-md:bottom-0 max-md:left-auto max-md:mb-0 max-md:w-full max-md:max-h-[72dvh] max-md:overflow-y-auto max-md:overscroll-contain
                   max-md:rounded-t-2xl max-md:rounded-b-none max-md:z-[66]
                   max-md:pb-[calc(env(safe-area-inset-bottom)+8px)] ${
@@ -1743,7 +1743,7 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
                   max-md:z-[66] max-md:pb-[calc(env(safe-area-inset-bottom)+8px)] ${
                   vibe
                     ? 'bg-black/60 border-white/15 backdrop-blur-2xl text-white'
-                    : 'bg-dark-surfaceContainerHighest border border-dark-onSurfaceVariant/10 shadow-lg'
+                    : 'bg-dark-surfaceContainerHighest border border-dark-onSurfaceVariant/10 shadow-elevation-3'
                 }`}>
                   <div className="hidden max-md:flex justify-center pt-2 pb-1 flex-shrink-0" aria-hidden>
                     <div className={`w-10 h-1 rounded-full ${vibe ? 'bg-white/25' : 'bg-dark-onSurfaceVariant/25'}`} />
@@ -1854,7 +1854,7 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
                   max-md:fixed max-md:inset-x-0 max-md:bottom-0 max-md:left-auto max-md:mb-0 max-md:w-full max-md:p-4
                   max-md:rounded-t-2xl max-md:rounded-b-none max-md:border-t max-md:border-dark-onSurfaceVariant/15
                   max-md:z-[66] max-md:pb-[calc(env(safe-area-inset-bottom)+16px)] ${
-                  vibe ? 'liquid-glass-strong' : 'bg-dark-surfaceContainerHighest border border-dark-onSurfaceVariant/10 shadow-lg'
+                  vibe ? 'liquid-glass-strong' : 'bg-dark-surfaceContainerHighest border border-dark-onSurfaceVariant/10 shadow-elevation-3'
                 }`}>
                   <div className="hidden max-md:flex justify-center pt-0 pb-3 -mt-1 flex-shrink-0" aria-hidden>
                     <div className={`w-10 h-1 rounded-full ${vibe ? 'bg-white/25' : 'bg-dark-onSurfaceVariant/25'}`} />
@@ -1918,7 +1918,7 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
                   max-md:z-[66] max-md:pb-[calc(env(safe-area-inset-bottom)+8px)] ${
                   vibe
                     ? 'liquid-glass-strong'
-                    : 'bg-dark-surfaceContainerHighest border border-dark-onSurfaceVariant/10 shadow-lg'
+                    : 'bg-dark-surfaceContainerHighest border border-dark-onSurfaceVariant/10 shadow-elevation-3'
                 }`}>
                   {/* 移动端拖动指示条 */}
                   <div className="hidden max-md:flex justify-center pt-2 pb-1 flex-shrink-0" aria-hidden>
@@ -2029,7 +2029,7 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
       {remoteFolderPickerOpen && (
         <>
           <div className="fixed inset-0 z-[70] bg-black/55 animate-fade-in" onClick={() => setRemoteFolderPickerOpen(false)} aria-hidden />
-          <div className={`fixed z-[71] inset-x-4 top-1/2 -translate-y-1/2 max-w-lg mx-auto rounded-md3-md border shadow-2xl overflow-hidden animate-fade-in ${
+          <div className={`fixed z-[71] inset-x-4 top-1/2 -translate-y-1/2 max-w-lg mx-auto rounded-md3-md border shadow-elevation-3 overflow-hidden animate-fade-in ${
             vibe ? 'bg-white/10 border-white/15 backdrop-blur-2xl text-white' : 'bg-dark-surfaceContainer border-dark-onSurfaceVariant/15 text-dark-onSurface'
           }`} role="dialog" aria-modal="true" aria-label={t('chat.folderBrowseHost')}>
             <div className="flex items-center gap-2 px-3 py-2 border-b border-dark-onSurfaceVariant/10">

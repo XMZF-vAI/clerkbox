@@ -51,6 +51,9 @@ const defaultSettings: AppSettings = {
   agentsMdEnabled: true,
   claudeMdCompat: true,
   webuiLanAccess: false,
+  // 默认"关闭到托盘"：agent loop 与定时任务调度都在渲染进程，收进托盘才能继续后台工作
+  closeBehavior: 'tray',
+  recentSessionsLimit: 5,
   mcpServers: [],
 }
 

@@ -24,7 +24,7 @@ export const GROK_BUILD_SYSTEM_PROMPT = `You are ClerkBox, an interactive deskto
 </work_policy>
 
 <tool_calling>
-- Use specialized tools instead of shell commands when possible, as this provides a better user experience. For file operations, prefer dedicated file tools (e.g., \`read_file\` for reading files instead of cat/head/tail, \`search_replace\` for editing existing files and \`write_file\` for creating files instead of sed/awk/echo redirection). Reserve shell commands (execute_command) exclusively for actual system commands and terminal operations that require shell execution. NEVER use shell echo or other command-line tools to communicate thoughts, explanations, or instructions to the user. Output all communication directly in your response text instead.
+- Use specialized tools instead of bash commands when possible, as this provides a better user experience. For file operations, prefer dedicated file tools (e.g., \`read_file\` for reading files instead of cat/head/tail, \`search_replace\` for editing existing files and \`write_file\` for creating files instead of sed/awk/echo redirection). Reserve shell commands (execute_command) exclusively for actual system commands and terminal operations that require shell execution. NEVER use shell echo or other command-line tools to communicate thoughts, explanations, or instructions to the user. Output all communication directly in your response text instead.
 </tool_calling>
 
 <communication>
@@ -56,4 +56,70 @@ Beyond the core file and shell tools, these capabilities are available when the 
 - \`question\` asks the user 1-3 multiple-choice questions; reserve it for genuine decision points, never to request permission to continue.
 - \`spawn_agent\` delegates independent subtasks (research, broad exploration) to sub-agents that run in isolated contexts; put the goal, relevant context, and expected output entirely in the prompt.
 - \`save_memory\` persists durable facts (user preferences, feedback, project decisions); \`search_memory\` retrieves them.
-</additional_tools>`
+
+> Tool-availability note (vs. upstream Grok Build): this harness does NOT expose \`skill\` as a callable tool, nor a \`background_task_action\` /\`monitor\` pair. Skills are loaded via the system prompt when the user (or the Skill Router) decides they are relevant — read the skill name from the prompt if you want to load its body explicitly. Long-running commands are not detachable: \`execute_command\` runs synchronously and blocks until exit or timeout. Do not invent calls to \`skill\`, \`get_command_or_subagent_output\`, or \`kill_command_or_subagent\`.`
+
+/**
+ * Grok Build 兼容模式的工具集变换：对齐 xAI Grok Build
+ * （crates/codegen/xai-grok-agent/templates/prompt.md + ToolKind 映射）：
+ * - Grok Build 训练下模型认知的核心工具是 read / edit / bash / grep / list_dir /
+ *   todo_write / skill / web_search / background_task_action；ClerkBox 等价物
+ *   为 read_file / write_file / search_replace / execute_command / search_files /
+ *   list_dir / todowrite / web_search；skill 与 background_task 无对应工具（已
+ *   在 <additional_tools> 段说明）；
+ * - Grok Build 训练不认知 save_memory / search_memory / read_image（持久化靠
+ *   user-scope 项目记忆与 thread context，非结构化记忆文件）；隐藏以避免模型
+ *   误调用产生副作用；
+ * - spawn_agent 与 Grok Build 的 task delegation 等价（命名映射见模板的
+ *   \${ tools.by_kind.task }），保留。
+ * 工具名与执行实现保持 ClerkBox 内部不变。
+ */
+export function grokBuildTransformTools<T extends { name: string; description: string }>(defs: T[]): T[] {
+  const HIDDEN = new Set(['save_memory', 'search_memory', 'read_image'])
+  return defs
+    .filter((d) => !HIDDEN.has(d.name))
+    .map((d) => {
+      if (d.name === 'execute_command') {
+        return {
+          ...d,
+          description:
+            'Upstream Grok Build "bash" equivalent. Run a shell command (cmd / PowerShell on Windows, bash on POSIX). Output is synchronous — long-running commands block until exit or timeout. There is no separate background-process tool here.',
+        }
+      }
+      if (d.name === 'read_file') {
+        return { ...d, description: 'Upstream Grok Build "read" equivalent. Read a text file. Output includes line numbers.' }
+      }
+      if (d.name === 'write_file') {
+        return { ...d, description: 'Upstream Grok Build "create_file" equivalent. Create a file or fully replace its contents.' }
+      }
+      if (d.name === 'search_replace') {
+        return { ...d, description: 'Upstream Grok Build "edit" / "str_replace" equivalent. Targeted literal string replacement on an existing file.' }
+      }
+      if (d.name === 'list_dir') {
+        return { ...d, description: 'Upstream Grok Build "ls" equivalent. List directory entries.' }
+      }
+      if (d.name === 'search_files') {
+        return { ...d, description: 'Upstream Grok Build "glob" equivalent. Discover files by path pattern.' }
+      }
+      if (d.name === 'search_content') {
+        return { ...d, description: 'Upstream Grok Build "grep" equivalent. Search file contents with a regex.' }
+      }
+      if (d.name === 'todowrite') {
+        return {
+          ...d,
+          description:
+            'Upstream Grok Build "todo_write" equivalent. Keep a short list of 1-sentence imperative steps with a status per step (pending / in_progress / completed). ' +
+            'Exactly one item in_progress at a time; mark items completed immediately when done.',
+        }
+      }
+      if (d.name === 'spawn_agent') {
+        return {
+          ...d,
+          description:
+            'Upstream Grok Build task delegation equivalent. Delegate an independent subtask to a sub-agent in an isolated context. ' +
+            'When the user asks for delegation, call this near the start of the work — saying you will delegate but never calling does NOT satisfy the request.',
+        }
+      }
+      return d
+    })
+}

@@ -9,6 +9,9 @@ import { useUpdaterStore } from './stores/updater-store'
 import { useAccountStore } from './stores/account-store'
 import { useUIStore } from './stores/ui-store'
 import { useVibeStore } from './stores/vibe-store'
+import { initScheduledTasks, useScheduledTasksStore } from './stores/scheduled-tasks-store'
+import TaskRunHost from './components/scheduled/TaskRunHost'
+import TrayBridge from './components/system/TrayBridge'
 import { applyColorScheme, applyAppFont, resolveSeed } from './lib/theme-engine'
 import { I18nProvider } from './components/I18nProvider'
 import { isWebUIMode } from './lib/ipc-client'
@@ -16,6 +19,7 @@ import { useIsMobile } from './hooks/use-mobile'
 
 // 非首屏模块按需加载，避免普通聊天启动时加载设置、技能商店和 VIBE 资源。
 const SkillStore = lazy(() => import('./components/chat/SkillStore'))
+const ScheduledTasksPage = lazy(() => import('./components/scheduled/ScheduledTasksPage'))
 const SettingsPage = lazy(() => import('./components/settings/SettingsPage'))
 // 移动端 WebUI：仿 Android 设置的列表/详情页（手机/窄屏使用，电脑仍走 SettingsPage）
 const MSettingsPage = lazy(() => import('./components/settings/MSettingsPage'))
@@ -73,6 +77,9 @@ export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const showSettings = useSettingsStore((s) => s.showSettings)
   const showSkillStore = useUIStore((s) => s.showSkillStore)
+  const showScheduledTasks = useUIStore((s) => s.showScheduledTasks)
+  // 定时任务执行队列：队首任务由不可见的 TaskRunHost 承载
+  const headTaskRun = useScheduledTasksStore((s) => s.queue[0])
   const isVibeMode = useVibeStore((s) => s.isVibeMode)
   const hasCompletedOnboarding = useSettingsStore((s) => s.hasCompletedOnboarding)
   // 等待 zustand persist 水合，避免老配置闪烁成欢迎页
@@ -105,9 +112,12 @@ export default function App() {
     const cleanupMcp = initMcp()
     // 自动更新：订阅主进程状态推送 + agent 活跃心跳上报（WebUI 模式内部自动跳过）
     const cleanupUpdater = useUpdaterStore.getState().init()
+    // 定时任务：启动 20s 心跳调度 + 恢复「保持系统唤醒」
+    const cleanupScheduledTasks = initScheduledTasks()
     return () => {
       cleanupMcp()
       cleanupUpdater()
+      cleanupScheduledTasks()
     }
   }, [hydrated])
 
@@ -166,7 +176,7 @@ export default function App() {
                   onClick={() => setMobileSidebarOpen(false)}
                   aria-hidden
                 />
-                <div className="absolute inset-y-0 left-0 w-[85vw] max-w-xs shadow-2xl animate-slide-in-left">
+                <div className="absolute inset-y-0 left-0 w-[85vw] max-w-xs shadow-elevation-3 animate-slide-in-left">
                   <Sidebar
                     collapsed={false}
                     onToggle={() => setMobileSidebarOpen(false)}
@@ -187,10 +197,16 @@ export default function App() {
           <main className="flex-1 min-h-0 overflow-hidden">
             <div className="flex h-full">
               <div className="min-w-0 flex-1 overflow-hidden">
-                {showSkillStore ? <Suspense fallback={null}><SkillStore /></Suspense> : <ChatPage />}
+                {showScheduledTasks ? (
+                  <Suspense fallback={null}><ScheduledTasksPage /></Suspense>
+                ) : showSkillStore ? (
+                  <Suspense fallback={null}><SkillStore /></Suspense>
+                ) : (
+                  <ChatPage />
+                )}
               </div>
-              {/* 技能商店页为独立全屏页，工作台仅在聊天视图挂载 */}
-              {!showSkillStore && <WorkbenchPanel />}
+              {/* 技能商店/定时任务页为独立全屏页，工作台仅在聊天视图挂载 */}
+              {!showSkillStore && !showScheduledTasks && <WorkbenchPanel />}
             </div>
           </main>
         </div>
@@ -208,6 +224,25 @@ export default function App() {
     )
   }
 
-  return <ThemeProvider><I18nProvider><Suspense fallback={null}>{content}</Suspense></I18nProvider></ThemeProvider>
+  return (
+    <ThemeProvider>
+      <I18nProvider>
+        {/* 系统托盘桥接：下发文案/配置 + 接收托盘点选对话（WebUI 模式内部 no-op） */}
+        <TrayBridge />
+        <Suspense fallback={null}>{content}</Suspense>
+        {/* 定时任务执行宿主：全局唯一实例，队首任务到点即在此运行（onboarding 完成后） */}
+        {hasCompletedOnboarding && headTaskRun && (
+          <TaskRunHost
+            key={headTaskRun.runId}
+            runId={headTaskRun.runId}
+            sessionId={headTaskRun.sessionId}
+            prompt={headTaskRun.prompt}
+            workingDir={headTaskRun.workingDir}
+            model={headTaskRun.model}
+          />
+        )}
+      </I18nProvider>
+    </ThemeProvider>
+  )
 }
 //别蹦别蹦别蹦

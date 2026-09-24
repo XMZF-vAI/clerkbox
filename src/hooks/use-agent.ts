@@ -1635,6 +1635,21 @@ export function useAgent(sessionId: string) {
 
       // No tool calls → we're done
       if (toolCalls.length === 0) {
+        // TencentDB Agent Memory：保留本地会话为事实来源，同时异步捕获 L0。
+        // Gateway 不可用时静默回退，不阻塞当前回复。
+        void ipc.agentMemoryCapture({
+          sessionId,
+          workingDir,
+          messages: conversationMessages
+            .filter((message) => message.role === 'user' || message.role === 'assistant' || message.role === 'system')
+            .map((message) => ({
+              id: message.id,
+              role: message.role as 'user' | 'assistant' | 'system',
+              content: message.content,
+              timestamp: new Date(message.timestamp).toISOString(),
+            })),
+        }).catch(() => {})
+
         // 工作流标记处理（/spec /goal）：
         // - spec：检测到完成标记 → 仅从显示中剥离并结束本轮（停下等用户确认，
         //   用户确认后的下一条消息以普通模式运行，模型会重读文档开始执行）

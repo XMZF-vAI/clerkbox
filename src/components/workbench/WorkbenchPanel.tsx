@@ -127,7 +127,7 @@ export default function WorkbenchPanel({ vibe }: { vibe?: boolean }) {
         aria-hidden
       />
       <aside
-      className={`flex max-md:fixed max-md:inset-y-0 max-md:right-0 max-md:z-40 max-md:w-[min(92vw,430px)] max-md:flex-col max-md:shadow-2xl md:relative md:h-full md:max-h-full md:w-[var(--wb-width)] md:min-w-[300px] md:shrink-0 flex-col ${
+      className={`flex max-md:fixed max-md:inset-y-0 max-md:right-0 max-md:z-40 max-md:w-[min(92vw,430px)] max-md:flex-col max-md:shadow-elevation-3 md:relative md:h-full md:max-h-full md:w-[var(--wb-width)] md:min-w-[300px] md:shrink-0 flex-col ${
         vibe
           ? 'liquid-glass-strong border-white/15 max-md:rounded-l-xl text-white'
           : 'border-l border-dark-onSurfaceVariant/10 bg-dark-surfaceContainer'

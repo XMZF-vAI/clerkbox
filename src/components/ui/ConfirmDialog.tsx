@@ -76,7 +76,7 @@ export default function ConfirmDialog({
         aria-modal="true"
         aria-labelledby="confirm-dialog-title"
         aria-describedby="confirm-dialog-message"
-        className="w-[400px] max-w-[calc(100vw-2rem)] bg-dark-surfaceDim rounded-md3-xl border border-dark-onSurfaceVariant/10 flex flex-col shadow-2xl"
+        className="w-[400px] max-w-[calc(100vw-2rem)] bg-dark-surfaceDim rounded-md3-xl border border-dark-onSurfaceVariant/10 flex flex-col shadow-elevation-3 animate-pop-in"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -92,7 +92,7 @@ export default function ConfirmDialog({
             type="button"
             onClick={onCancel}
             aria-label={t('common.close')}
-            className="w-7 h-7 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-dark-onSurfaceVariant"
+            className="md-focus w-7 h-7 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-dark-onSurfaceVariant"
           >
             <X size={14} />
           </button>
@@ -108,7 +108,7 @@ export default function ConfirmDialog({
           <button
             type="button"
             onClick={onCancel}
-            className="px-4 py-2 rounded-md3-sm text-sm text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh transition-colors"
+            className="md-focus px-4 py-2 rounded-md3-sm text-sm text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh transition-colors"
           >
             {finalCancelText}
           </button>
@@ -116,7 +116,7 @@ export default function ConfirmDialog({
             ref={confirmButtonRef}
             type="button"
             onClick={onConfirm}
-            className={`px-4 py-2 rounded-md3-sm text-sm font-medium transition-colors ${
+            className={`md-focus px-4 py-2 rounded-md3-sm text-sm font-medium transition-colors ${
               variant === 'danger'
                 ? 'bg-md-error text-white hover:bg-md-error/90'
                 : 'bg-md-primary text-md-onPrimary hover:bg-md-primary/90'

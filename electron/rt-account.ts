@@ -7,6 +7,8 @@
  * 3. 数据段云同步：
  *    - clerkbox-memory：全局记忆（~/.clerkbox/memory/ 全量快照）
  *    - clerkbox-models：模型配置（providers + apiKey + 激活项）
+ *    - clerkbox-mcp：MCP 配置（settings.mcpServers 全量，含 env/headers）
+ *    - models / mcp 段支持端到端加密（sync-crypto.ts：设置同步密码后上传密文信封）
  * 4. 全局记忆写入后的自动上传钩子（debounce 5s；需用户开启 autoSync + syncMemory 才触发）
  *
  * 约束：
@@ -28,9 +30,20 @@ import type {
   AccountSyncDownloadResult,
   AccountSyncKind,
   AccountSyncResultItem,
+  DownloadedMcpConfig,
   DownloadedModelConfig,
+  McpServerConfig,
   RtUser,
+  SyncPassphraseStatus,
 } from '../src/types/ipc'
+import {
+  decryptSyncPayload,
+  encryptSyncPayload,
+  getSyncPassphrase,
+  isEncryptedEnvelope,
+  isSyncPassphraseSet,
+  setSyncPassphrase,
+} from './sync-crypto'
 
 // ── 常量（热土引擎接入参数）──
 
@@ -44,6 +57,8 @@ const RT_SOFTWARE_TOKEN = 'ca7768aa8ee47b8f5d28f1083b5f444b2b53168c1de292fc48398
 const SEGMENT_MEMORY = 'clerkbox-memory'
 /** 数据段名：模型配置 */
 const SEGMENT_MODELS = 'clerkbox-models'
+/** 数据段名：MCP 配置 */
+const SEGMENT_MCP = 'clerkbox-mcp'
 /** 单段容量上限：1MB（热土限制） */
 const MAX_SEGMENT_BYTES = 1024 * 1024
 /** 登录回调等待超时：5 分钟 */
@@ -68,9 +83,10 @@ interface RtAccountState {
   /** true = tokenEnc 为明文（safeStorage 不可用时的降级标记） */
   tokenPlain?: boolean
   user: RtUser
-  lastSyncAt: { memory?: number; models?: number }
+  lastSyncAt: { memory?: number; models?: number; mcp?: number }
   memoryDirty?: boolean
   modelsDirty?: boolean
+  mcpDirty?: boolean
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -134,9 +150,10 @@ function readState(): RtAccountState | null {
     if (typeof parsed.tokenEnc !== 'string' || !parsed.tokenEnc) return null
     if (!isRecord(parsed.user)) return null
     const lastSyncRaw = isRecord(parsed.lastSyncAt) ? parsed.lastSyncAt : {}
-    const lastSyncAt: { memory?: number; models?: number } = {}
+    const lastSyncAt: { memory?: number; models?: number; mcp?: number } = {}
     if (typeof lastSyncRaw.memory === 'number') lastSyncAt.memory = lastSyncRaw.memory
     if (typeof lastSyncRaw.models === 'number') lastSyncAt.models = lastSyncRaw.models
+    if (typeof lastSyncRaw.mcp === 'number') lastSyncAt.mcp = lastSyncRaw.mcp
     return {
       tokenEnc: parsed.tokenEnc,
       tokenPlain: parsed.tokenPlain === true,
@@ -144,6 +161,7 @@ function readState(): RtAccountState | null {
       lastSyncAt,
       memoryDirty: parsed.memoryDirty === true,
       modelsDirty: parsed.modelsDirty === true,
+      mcpDirty: parsed.mcpDirty === true,
     }
   } catch {
     return null
@@ -180,6 +198,15 @@ function decryptToken(state: RtAccountState): string {
   } catch {
     return ''
   }
+}
+
+/** [临时·Token稳定性验证] 打印 Token 的 SHA-256 前 16 位（单向哈希，不暴露本体）；同进程去重 */
+const loggedTokenHashes = new Set<string>()
+function logTokenHashForTest(token: string): void {
+  const h = crypto.createHash('sha256').update(token, 'utf-8').digest('hex').slice(0, 16)
+  if (loggedTokenHashes.has(h)) return
+  loggedTokenHashes.add(h)
+  console.log(`[rt-account][token-test] token-hash=${h}`)
 }
 
 // ── 热土 API 请求封装 ──
@@ -410,6 +437,13 @@ interface ModelsPayload {
   activeModelId?: string
 }
 
+/** MCP 配置快照 payload（servers 含 env/headers 敏感字段，建议配合加密密码上传） */
+interface McpPayload {
+  version: 1
+  updatedAt: number
+  servers: McpServerConfig[]
+}
+
 /** 扫描全局记忆目录全部可同步文件（含 MEMORY.md 索引），打包为快照 JSON */
 function packMemoryPayload(): MemoryPayload {
   const files: MemoryPayload['files'] = []
@@ -465,6 +499,29 @@ function buildModelsPayload(): ModelsPayload {
     providers,
     activeProviderId: typeof stateObj?.activeProviderId === 'string' ? stateObj.activeProviderId : undefined,
     activeModelId: typeof stateObj?.activeModelId === 'string' ? stateObj.activeModelId : undefined,
+  }
+}
+
+/**
+ * 组装 MCP 配置快照：从共享 KV clerkbox-settings 读 settings-store 持久化的
+ * mcpServers（stdio 的 command/args/env 与 http 的 url/headers 全量）。
+ */
+function buildMcpPayload(): McpPayload {
+  const raw = readKvValue(SETTINGS_KV_KEY)
+  if (raw == null) return { version: 1, updatedAt: Date.now(), servers: [] }
+  let persisted: unknown
+  try {
+    persisted = JSON.parse(raw)
+  } catch {
+    throw new Error('本地 MCP 配置数据解析失败')
+  }
+  const stateObj = isRecord(persisted) && isRecord(persisted.state) ? persisted.state : null
+  const serversRaw = stateObj?.mcpServers
+  if (!Array.isArray(serversRaw)) throw new Error('本地 MCP 配置数据无效')
+  return {
+    version: 1,
+    updatedAt: Date.now(),
+    servers: serversRaw.filter(isRecord) as unknown as McpServerConfig[],
   }
 }
 
@@ -526,6 +583,13 @@ function parseModelsPayload(payload: Record<string, unknown>): DownloadedModelCo
     activeProviderId: typeof payload.activeProviderId === 'string' ? payload.activeProviderId : undefined,
     activeModelId: typeof payload.activeModelId === 'string' ? payload.activeModelId : undefined,
   }
+}
+
+/** 解析云端 MCP 配置 payload 为 DownloadedMcpConfig（servers 含 env/headers） */
+function parseMcpPayload(payload: Record<string, unknown>): DownloadedMcpConfig {
+  const serversRaw = payload.servers
+  if (!Array.isArray(serversRaw)) throw new Error('云端 MCP 配置格式无效')
+  return { servers: serversRaw.filter(isRecord) as unknown as McpServerConfig[] }
 }
 
 /** 把下载到的各 provider apiKey 写入加密凭据存储（等价于逐个 saveApiKey） */
@@ -660,6 +724,7 @@ export async function rtLogin(): Promise<{ ok: true; status: AccountStatus } | {
     const user = await fetchUserByToken(result.token)
 
     // 7. 持久化登录态
+    logTokenHashForTest(result.token) // [临时·Token稳定性验证] 记录新登录 Token 指纹
     const encrypted = encryptToken(result.token)
     const newState: RtAccountState = {
       tokenEnc: encrypted.tokenEnc,
@@ -697,7 +762,39 @@ export function rtLogout(): void {
 export function rtGetStatus(): AccountStatus {
   const state = readState()
   if (!state) return { loggedIn: false, lastSyncAt: {} }
+  // [临时·Token稳定性验证] 应用启动必经此处，记录当前 Token 指纹
+  const t = decryptToken(state)
+  if (t) logTokenHashForTest(t)
   return statusFromState(state)
+}
+
+/** 设置/修改同步加密密码（仅本地 safeStorage 保存，绝不上传云端） */
+export function rtSyncSetPassphrase(passphrase: string): { ok: true } | { error: string } {
+  return setSyncPassphrase(passphrase)
+}
+
+/** 同步加密密码是否已设置 */
+export function rtSyncGetPassphraseStatus(): SyncPassphraseStatus {
+  return { set: isSyncPassphraseSet() }
+}
+
+/** 只读读取旧版云端全局记忆快照，供新 SDK 迁移使用；不修改本地文件。 */
+export async function rtReadLegacyMemoryFiles(): Promise<Array<{ filename: string; content: string }> | null> {
+  const state = readState()
+  if (!state) return null
+  const token = decryptToken(state)
+  if (!token) return null
+  try {
+    const segment = await readSegment(token, state.user.email ?? '', SEGMENT_MEMORY)
+    if (!segment) return null
+    const parsed: unknown = JSON.parse(segment.content)
+    if (!isRecord(parsed) || !Array.isArray(parsed.files)) return null
+    return parsed.files.filter((file): file is { filename: string; content: string } =>
+      isRecord(file) && typeof file.filename === 'string' && typeof file.content === 'string'
+    )
+  } catch {
+    return null
+  }
 }
 
 function statusFromState(state: RtAccountState): AccountStatus {
@@ -726,6 +823,7 @@ export async function rtVerifyStartupToken(): Promise<void> {
 
 /**
  * 上传同步：逐 kind 打包本地数据 → 写入热土数据段（先读后建/改）。
+ * models / mcp 段在已设置同步密码时先做端到端加密（云端只存密文信封）。
  * 成功后更新 lastSyncAt 并清除对应 dirty 标记。
  */
 export async function rtSyncUpload(kinds: AccountSyncKind[]): Promise<{ results: AccountSyncResultItem[] }> {
@@ -754,15 +852,20 @@ export async function rtSyncUpload(kinds: AccountSyncKind[]): Promise<{ results:
           }
           await uploadSegment(token, email, SEGMENT_MEMORY, payloadJson)
         } else {
-          payloadJson = JSON.stringify(buildModelsPayload())
+          // models / mcp：含密钥的敏感段，已设置同步密码时端到端加密后上传
+          const payload = kind === 'models' ? buildModelsPayload() : buildMcpPayload()
+          const what = kind === 'models' ? '模型配置' : 'MCP 配置'
+          const passphrase = getSyncPassphrase()
+          payloadJson = passphrase ? encryptSyncPayload(passphrase, payload) : JSON.stringify(payload)
           if (Buffer.byteLength(payloadJson, 'utf-8') > MAX_SEGMENT_BYTES) {
-            throw new Error('内容过大：模型配置超过 1MB 上限')
+            throw new Error(`内容过大：${what}超过 1MB 上限`)
           }
-          await uploadSegment(token, email, SEGMENT_MODELS, payloadJson)
+          await uploadSegment(token, email, kind === 'models' ? SEGMENT_MODELS : SEGMENT_MCP, payloadJson)
         }
         state.lastSyncAt[kind] = now
         if (kind === 'memory') state.memoryDirty = false
-        else state.modelsDirty = false
+        else if (kind === 'models') state.modelsDirty = false
+        else state.mcpDirty = false
         changed = true
         results.push({ kind, ok: true })
       } catch (error) {
@@ -785,6 +888,8 @@ export async function rtSyncUpload(kinds: AccountSyncKind[]): Promise<{ results:
  * 下载同步：逐 kind 读热土数据段并应用。
  * - memory：全量镜像写回全局记忆目录
  * - models：配置放进返回值 models 字段交渲染进程应用；主进程同时把 apiKey 写入凭据存储
+ * - mcp：配置放进返回值 mcp 字段交渲染进程应用（写入 settings store 后自动重连）
+ * - models / mcp 云端为加密信封时需本地已设置同步密码才能解密
  * - force=false（自动场景）仅当云端较新且本地无 dirty 时下载，否则标 skipped
  * 成功后更新 lastSyncAt 并清除对应 dirty 标记。
  */
@@ -806,50 +911,66 @@ export async function rtSyncDownload(
 
     const results: AccountSyncResultItem[] = []
     let models: DownloadedModelConfig | undefined
+    let mcp: DownloadedMcpConfig | undefined
     const now = Date.now()
     let changed = false
     for (const kind of uniqueKinds) {
       try {
-        const segment = await readSegment(token, email, kind === 'memory' ? SEGMENT_MEMORY : SEGMENT_MODELS)
+        const segment = await readSegment(token, email, kind === 'memory' ? SEGMENT_MEMORY : kind === 'models' ? SEGMENT_MODELS : SEGMENT_MCP)
         if (!segment) throw new Error('云端暂无数据')
-        let payload: unknown
+        let parsed: unknown
         try {
-          payload = JSON.parse(segment.content)
+          parsed = JSON.parse(segment.content)
         } catch {
           throw new Error('云端数据解析失败')
         }
-        if (!isRecord(payload)) throw new Error('云端数据格式无效')
+        if (!isRecord(parsed)) throw new Error('云端数据格式无效')
 
-        // 云端更新时间：优先用快照内 updatedAt（本应用写入，毫秒），兜底段 updated_at
+        // 云端更新时间：优先用 payload 顶层 updatedAt（明文层，信封与明文格式都有），兜底段 updated_at
         const cloudUpdatedAt =
-          typeof payload.updatedAt === 'number' && payload.updatedAt > 0
-            ? payload.updatedAt
+          typeof parsed.updatedAt === 'number' && parsed.updatedAt > 0
+            ? parsed.updatedAt
             : normalizeCloudTimestamp(segment.updatedAt)
 
         // 自动场景（force=false）：云端不比本地新、或本地有未上传改动时跳过
+        // （先比较再解密：无密码也能正确跳过无需下载的加密段）
         if (!force) {
           const last = state.lastSyncAt[kind] ?? 0
-          const dirty = kind === 'memory' ? !!state.memoryDirty : !!state.modelsDirty
+          const dirty = kind === 'memory' ? !!state.memoryDirty : kind === 'models' ? !!state.modelsDirty : !!state.mcpDirty
           if (dirty || cloudUpdatedAt <= last) {
             results.push({ kind, ok: true, skipped: true })
             continue
           }
         }
 
+        // 加密信封 → 解密为明文 payload（memory 段始终为明文，不会进此分支）
+        let payload: Record<string, unknown>
+        if (isEncryptedEnvelope(parsed)) {
+          const passphrase = getSyncPassphrase()
+          if (!passphrase) throw new Error('云端数据已加密，请先在设置中设置同步密码')
+          payload = decryptSyncPayload(passphrase, parsed)
+        } else {
+          payload = parsed
+        }
+
         if (kind === 'memory') {
           if (!Array.isArray(payload.files)) throw new Error('云端数据格式无效')
           applyMemoryPayload(payload.files as Array<{ filename: string; content: string }>)
-        } else {
+        } else if (kind === 'models') {
           if (!Array.isArray(payload.providers)) throw new Error('云端数据格式无效')
           const config = parseModelsPayload(payload)
           // 主进程侧恢复各 provider 的加密凭据
           applyModelCredentials(config)
           models = config
+        } else {
+          if (!Array.isArray(payload.servers)) throw new Error('云端数据格式无效')
+          mcp = parseMcpPayload(payload)
         }
 
         state.lastSyncAt[kind] = now
         if (kind === 'memory') state.memoryDirty = false
-        else state.modelsDirty = false
+        else if (kind === 'models') state.modelsDirty = false
+        else state.mcpDirty = false
         changed = true
         results.push({ kind, ok: true })
       } catch (error) {
@@ -864,7 +985,7 @@ export async function rtSyncDownload(
         console.error('[rt-account] 持久化同步状态失败:', error)
       }
     }
-    return models ? { results, models } : { results }
+    return models || mcp ? { results, models, mcp } : { results }
   })
 }
 

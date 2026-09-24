@@ -4,7 +4,7 @@ import { ipc } from '../lib/ipc-client'
 import { sharedStorage } from '../lib/shared-storage'
 import { useSettingsStore } from './settings-store'
 // 账号系统 IPC 契约类型统一从 types/ipc 引入（主进程 / preload / ipc-client 同源）
-import type { AccountSyncKind, DownloadedModelConfig, RtUser } from '../types/ipc'
+import type { AccountSyncKind, DownloadedMcpConfig, DownloadedModelConfig, RtUser } from '../types/ipc'
 
 interface AccountState {
   loggedIn: boolean
@@ -13,18 +13,24 @@ interface AccountState {
   syncMemory: boolean
   /** 同步模型配置开关（默认开） */
   syncModels: boolean
+  /** 同步 MCP 配置开关（默认开） */
+  syncMcp: boolean
   /** 自动同步开关（默认关：启动时下载 + 本地变更后 debounce 上传） */
   autoSync: boolean
-  lastSyncAt: { memory?: number; models?: number }
+  /** 同步加密密码是否已设置（瞬时态：每次 init 从主进程查询；密码本体只存主进程） */
+  passphraseSet: boolean
+  lastSyncAt: { memory?: number; models?: number; mcp?: number }
   /** 同步进行态（瞬时，不持久化） */
   syncing: 'idle' | 'uploading' | 'downloading'
   /** 登录进行中（瞬时，不持久化） */
   loggingIn: boolean
+  /** 同步密码保存中（瞬时，不持久化） */
+  passphraseSaving: boolean
   lastError?: string
   /** init 幂等标志：防 React StrictMode 双调用（瞬时，不持久化） */
   initialized: boolean
 
-  /** 启动初始化：恢复登录态 + lastSyncAt，挂 providers 自动上传订阅，按需自动下载 */
+  /** 启动初始化：恢复登录态 + lastSyncAt，挂 providers/mcpServers 自动上传订阅，按需自动下载 */
   init: () => Promise<void>
   /** 发起登录（浏览器授权流程），成功后刷新登录态 */
   login: () => Promise<void>
@@ -32,8 +38,11 @@ interface AccountState {
   logout: () => Promise<void>
   setSyncMemory: (v: boolean) => void
   setSyncModels: (v: boolean) => void
+  setSyncMcp: (v: boolean) => void
   setAutoSync: (v: boolean) => void
-  /** 上传开启的同步项（内部供自动上传时仅传 ['models']） */
+  /** 设置/修改同步加密密码；成功后自动以新密码重新上传 models/mcp 段 */
+  setPassphrase: (passphrase: string) => Promise<void>
+  /** 上传开启的同步项（内部供自动上传时仅传 ['models'] / ['mcp']） */
   upload: (kinds?: AccountSyncKind[]) => Promise<void>
   /** 下载；force=true 跳过新者比较直接覆盖本地 */
   download: (force: boolean) => Promise<void>
@@ -49,6 +58,7 @@ function enabledKinds(s: AccountState): AccountSyncKind[] {
   const kinds: AccountSyncKind[] = []
   if (s.syncMemory) kinds.push('memory')
   if (s.syncModels) kinds.push('models')
+  if (s.syncMcp) kinds.push('mcp')
   return kinds
 }
 
@@ -105,6 +115,39 @@ function mountProvidersAutoUpload(): void {
   })
 }
 
+// ── mcpServers 变化 → 自动上传（debounce 8s，仅 mcp）──
+let mcpWatchMounted = false
+let mcpAutoUploadTimer: ReturnType<typeof setTimeout> | null = null
+/** mcpServers 内容快照（JSON 串浅比较），也用于下载应用配置后抑制一次误触发 */
+let lastMcpSnapshot = ''
+
+function scheduleMcpAutoUpload(delayMs = 8000): void {
+  if (mcpAutoUploadTimer) clearTimeout(mcpAutoUploadTimer)
+  mcpAutoUploadTimer = setTimeout(() => {
+    mcpAutoUploadTimer = null
+    // 触发时再校验一次条件（期间可能已登出/关开关）
+    const a = useAccountStore.getState()
+    if (!(a.autoSync && a.syncMcp && a.loggedIn)) return
+    void a.upload(['mcp'])
+  }, delayMs)
+}
+
+/** 挂订阅：settings-store 的 mcpServers 变化时按条件自动上传 MCP 段 */
+function mountMcpAutoUpload(): void {
+  if (mcpWatchMounted) return
+  mcpWatchMounted = true
+  lastMcpSnapshot = JSON.stringify(useSettingsStore.getState().mcpServers ?? [])
+  useSettingsStore.subscribe((state, prevState) => {
+    if (state.mcpServers === prevState.mcpServers) return
+    const snapshot = JSON.stringify(state.mcpServers)
+    if (snapshot === lastMcpSnapshot) return
+    lastMcpSnapshot = snapshot
+    const account = useAccountStore.getState()
+    if (!(account.autoSync && account.syncMcp && account.loggedIn)) return
+    scheduleMcpAutoUpload()
+  })
+}
+
 /**
  * 应用云端下载的模型配置：
  * providers 写入 settings store → 各 apiKey 写回加密凭据存储 → 激活模型派生字段刷新
@@ -126,6 +169,16 @@ export async function applyModelConfig(cfg: DownloadedModelConfig): Promise<void
   }
 }
 
+/**
+ * 应用云端下载的 MCP 配置：
+ * servers 写入 settings store → mcp-store 订阅变化后自动全量同步主进程重连。
+ * 先刷新快照，避免本次 setState 触发"mcpServers 变化 → 自动上传"回环。
+ */
+export function applyMcpConfig(cfg: DownloadedMcpConfig): void {
+  lastMcpSnapshot = JSON.stringify(cfg.servers)
+  useSettingsStore.setState({ mcpServers: cfg.servers })
+}
+
 export const useAccountStore = create<AccountState>()(
   persist(
     (set, get) => ({
@@ -133,10 +186,13 @@ export const useAccountStore = create<AccountState>()(
       user: undefined,
       syncMemory: true,
       syncModels: true,
+      syncMcp: true,
       autoSync: false,
+      passphraseSet: false,
       lastSyncAt: {},
       syncing: 'idle',
       loggingIn: false,
+      passphraseSaving: false,
       lastError: undefined,
       initialized: false,
 
@@ -164,7 +220,15 @@ export const useAccountStore = create<AccountState>()(
           // 主进程账户模块尚未就绪时静默降级为未登录态
           console.error('[account-store] get status failed:', error)
         }
+        // 同步加密密码状态：主进程本地文件为唯一事实来源
+        try {
+          const ps = await ipc.accountSyncGetPassphraseStatus()
+          set({ passphraseSet: ps.set })
+        } catch {
+          // 查询失败按未设置处理（不影响同步，仅明文/密文差异）
+        }
         mountProvidersAutoUpload()
+        mountMcpAutoUpload()
         // 自动同步：启动后静默下载一次（新者比较在主进程，被 skip 的项静默）
         const s = get()
         if (s.autoSync && s.loggedIn) void s.autoDownload()
@@ -204,7 +268,35 @@ export const useAccountStore = create<AccountState>()(
 
       setSyncMemory: (v) => set({ syncMemory: v }),
       setSyncModels: (v) => set({ syncModels: v }),
+      setSyncMcp: (v) => set({ syncMcp: v }),
       setAutoSync: (v) => set({ autoSync: v }),
+
+      setPassphrase: async (passphrase) => {
+        if (get().passphraseSaving) return
+        set({ passphraseSaving: true, lastError: undefined })
+        try {
+          const res = await ipc.accountSyncSetPassphrase(passphrase)
+          if ('error' in res) {
+            set({ lastError: res.error })
+            return
+          }
+          set({ passphraseSet: true })
+          // 用新密码立即重传 models/mcp 段（仅同步开关开启的项），云端密文随之轮换
+          const s = get()
+          if (s.loggedIn) {
+            const kinds: AccountSyncKind[] = []
+            if (s.syncModels) kinds.push('models')
+            if (s.syncMcp) kinds.push('mcp')
+            if (kinds.length > 0 && s.syncing === 'idle') {
+              await get().upload(kinds)
+            }
+          }
+        } catch (error) {
+          set({ lastError: errMsg(error) })
+        } finally {
+          set({ passphraseSaving: false })
+        }
+      },
 
       upload: async (kinds) => {
         const s = get()
@@ -236,8 +328,9 @@ export const useAccountStore = create<AccountState>()(
         if (kinds.length === 0) return
         set({ syncing: 'downloading', lastError: undefined })
         try {
-          const { results, models } = await ipc.accountSyncDownload(kinds, force)
+          const { results, models, mcp } = await ipc.accountSyncDownload(kinds, force)
           if (models && kinds.includes('models')) await applyModelConfig(models)
+          if (mcp && kinds.includes('mcp')) applyMcpConfig(mcp)
           const lastSyncAt = { ...get().lastSyncAt }
           let lastError: string | undefined
           for (const r of results) {
@@ -262,8 +355,11 @@ export const useAccountStore = create<AccountState>()(
       name: 'clerkbox-account',
       storage: sharedStorage,
       partialize: (state) => {
-        // 瞬时态不持久化：同步中 / 登录中 / 错误 / 初始化标志
-        const { syncing: _s, loggingIn: _l, lastError: _e, initialized: _i, ...rest } = state
+        // 瞬时态不持久化：同步中 / 登录中 / 密码保存中 / 密码状态 / 错误 / 初始化标志
+        const {
+          syncing: _s, loggingIn: _l, passphraseSaving: _ps, passphraseSet: _pp,
+          lastError: _e, initialized: _i, ...rest
+        } = state
         return rest
       },
     },

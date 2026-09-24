@@ -27,6 +27,9 @@ export const DSH_MINIMAL_SYSTEM_PROMPT = 'You are a helpful software engineer as
  * dsh 极简模式的内置工具描述覆盖：官方 minimal 只有 shell + 编辑工具，
  * 默认描述里「优先用 read_file/search_files 等专用工具」的指引在该模式下
  * 不成立（这些工具不存在），故按本模式实际能力重写这两条描述。
+ * 描述对齐官方 persistent-bash / persistent-pwsh / str-replace-editor 的核心
+ * 用法（timeoutMs 300000、persistent state across calls、maxOutputChars 16000、
+ * $env:NAME / sed 行范围检视 / Start-Job 长任务）。
  * 其余内置工具被过滤，MCP 工具由 registry 侧原样保留。
  */
 export function dshMinimalTransformTools<T extends { name: string; description: string }>(defs: T[]): T[] {
@@ -37,10 +40,13 @@ export function dshMinimalTransformTools<T extends { name: string; description: 
         return {
           ...d,
           description:
-            'Execute a command in the terminal. This is the only way to read files (cat/type), create files (echo/Set-Content redirection), list directories (dir/ls), and run programs. Windows defaults to cmd.exe (use shell=powershell for PowerShell cmdlets).\n' +
+            'Persistent shell — the only way to read files (cat/type), create files (echo/Set-Content redirection), list directories (dir/ls), search content (findstr/Select-String/rg), and run programs. ' +
+            'State persists across calls in the same session (cwd, env vars, exported variables). Windows defaults to cmd.exe (use shell=powershell for PowerShell cmdlets, $env:NAME variables, and Start-Job for long-lived tasks).\n' +
             'Usage:\n' +
             '- Commands time out after 120000 ms by default; pass timeout (ms, max 600000) for long-running commands. On timeout the process tree is killed and the captured output is returned.\n' +
-            '- Output over 50000 chars is truncated and the full output is saved to a file whose path is returned.\n' +
+            '- Output over 16000 chars is truncated (matches upstream str-replace-editor maxOutputChars) and the full output is saved to a file whose path is returned.\n' +
+            '- Avoid commands that produce very large outputs in one shot. For a specific line range, use `sed -n 10,25p path` (POSIX) or `Get-Content path | Select-Object -Skip 9 -First 16` (PowerShell).\n' +
+            '- Long-lived commands should run in the background: `sleep 10 &` (POSIX) or `Start-Job { ... }` (PowerShell). This harness does NOT have a separate background-task tool — use shell job control.\n' +
             '- cmd notes: quote paths containing spaces with double quotes; chain commands with &&; %% for a literal %. PowerShell notes: URLs containing & must be quoted; use single-quoted strings to avoid $ expansion.',
         }
       }
@@ -48,12 +54,12 @@ export function dshMinimalTransformTools<T extends { name: string; description: 
         return {
           ...d,
           description:
-            'Perform exact string replacement in a file. Supports a single edit (old_str/new_str) or a batch of edits in one call via edits[] (all matched against the same file content and applied atomically — if any edit fails, nothing is written).\n' +
+            'Upstream str-replace_editor equivalent. Perform exact string replacement in a file. Supports a single edit (old_str/new_str) or a batch of edits in one call via edits[] (all matched against the same file content and applied atomically — if any edit fails, nothing is written).\n' +
             'Usage:\n' +
-            '- There is no dedicated read tool in this mode: inspect a file with a shell command (e.g. cat) before editing, and copy old_str character-for-character from the actual file content, never paraphrased.\n' +
+            '- There is no dedicated read tool in this mode: inspect a file with a shell command (e.g. cat, sed -n 10,25p) before editing, and copy old_str character-for-character from the actual file content, never paraphrased.\n' +
             '- old_str must appear exactly once in the file unless replace_all is true. If it matches multiple locations the tool errors — extend old_str with 2-3 surrounding lines to make it unique.\n' +
             '- new_str replaces old_str (empty string deletes the matched text). new_str must differ from old_str.\n' +
-            '- Create new files via shell redirection (e.g. echo > file or Set-Content); this tool cannot create files.',
+            '- maxOutputChars for diff display is 16000 (matches upstream str-replace-editor). Create new files via shell redirection (e.g. echo > file or Set-Content); this tool cannot create files.',
         }
       }
       return d

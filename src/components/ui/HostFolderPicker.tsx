@@ -105,7 +105,7 @@ export default function HostFolderPicker({
     <>
       <div className="fixed inset-0 z-[80] bg-black/55 animate-fade-in" onClick={onClose} aria-hidden />
       <div
-        className={`fixed z-[81] inset-x-4 top-1/2 -translate-y-1/2 max-w-lg mx-auto rounded-md3-md border shadow-2xl overflow-hidden animate-fade-in ${panelClass}`}
+        className={`fixed z-[81] inset-x-4 top-1/2 -translate-y-1/2 max-w-lg mx-auto rounded-md3-md border shadow-elevation-3 overflow-hidden animate-fade-in ${panelClass}`}
         role="dialog"
         aria-modal="true"
         aria-label={t('chat.folderBrowseHost')}

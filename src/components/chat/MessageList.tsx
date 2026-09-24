@@ -247,7 +247,7 @@ export default function MessageList({ messages, isStreaming, vibe }: MessageList
           onClick={scrollToBottom}
           aria-label={t('chat.scrollToBottom')}
           title={t('chat.scrollToBottom')}
-          className={`absolute bottom-3 left-1/2 -translate-x-1/2 z-10 flex h-8 w-8 items-center justify-center rounded-full border shadow-lg transition-colors animate-fade-in ${
+          className={`absolute bottom-3 left-1/2 -translate-x-1/2 z-10 flex h-8 w-8 items-center justify-center rounded-full border shadow-elevation-2 transition-colors animate-fade-in ${
             vibe
               ? 'bg-black/60 border-white/15 text-white/80 hover:bg-black/80'
               : 'bg-dark-surfaceContainerHigh border-dark-onSurfaceVariant/15 text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHighest'

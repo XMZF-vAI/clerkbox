@@ -15,6 +15,8 @@ export default function VibeControls() {
   const workbenchWidth = useWorkbenchStore((s) => s.width)
   const toggleWorkbench = useWorkbenchStore((s) => s.toggleVisible)
   const isMobile = useIsMobile()
+  // mac：系统红绿灯固定在窗口左上角（trafficLightPosition x:12,y:15，宽约 52px），浮控件需右移避让
+  const isMac = window.clerkbox?.platform === 'darwin'
 
   // 面板打开（桌面端）时，右上控制组与退出按钮整体移到面板左侧，避免压住面板
   const dodgeWorkbench = workbenchVisible && !isMobile
@@ -55,11 +57,11 @@ export default function VibeControls() {
 
   return (
     <>
-      {/* Fullscreen toggle - top left */}
+      {/* Fullscreen toggle - top left（mac 下右移避让系统红绿灯） */}
       <button
         type="button"
         onClick={handleToggleFullscreen}
-        className="fixed top-4 left-4 z-50 flex items-center gap-2 px-3 py-2 liquid-glass-btn rounded-full text-white/90"
+        className={`fixed top-4 ${isMac ? 'left-[84px]' : 'left-4'} z-50 flex items-center gap-2 px-3 py-2 liquid-glass-btn rounded-full text-white/90`}
       >
         {isFullscreen ? <Minimize size={14} /> : <Maximize size={14} />}
         <span className="text-xs font-medium">{isFullscreen ? t('vibe.exitFullscreen') : t('vibe.fullscreen')}</span>

@@ -1,7 +1,7 @@
 import { useState, useEffect, useId, useRef } from 'react'
 import {
   Cpu, Palette, RotateCcw, Check, AlertCircle, Info, ChevronRight, Settings as SettingsIcon,
-  User, Languages, FileText, Plug, ArrowLeft, Smartphone,
+  User, Languages, FileText, Plug, ArrowLeft, Smartphone, Monitor,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useSettingsStore } from '../../stores/settings-store'
@@ -45,6 +45,11 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
   const [tabStack, setTabStack] = useState<Tab[]>([]) // history for back button
   const settings = useSettingsStore()
   const isVibeMode = useVibeStore((s) => s.isVibeMode)
+  // 托盘是桌面端专属：本页可能同时服务窄屏桌面窗口（有托盘）与 WebUI 浏览器（无托盘）
+  const isElectronMode = typeof window !== 'undefined' && !!window.clerkbox
+  // mac 走系统原生"关窗不退出"，不提供关闭行为选择（见 trayMacNote）
+  const isMacPlatform = window.clerkbox?.platform === 'darwin'
+  const sessionLimitOptions = [3, 5, 8]
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle')
   const [testError, setTestError] = useState('')
   const [showResetConfirmation, setShowResetConfirmation] = useState(false)
@@ -319,6 +324,71 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
                     </label>
                   )}
                 </div>
+
+                {/* 窗口与托盘（窄屏桌面窗口可见；WebUI 浏览器模式隐藏） */}
+                {isElectronMode && (
+                  <div className="space-y-3 p-4 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10">
+                    <div className="flex items-center gap-2">
+                      <Monitor size={14} className="text-md-primary flex-shrink-0" />
+                      <span className="text-sm font-medium text-dark-onSurface">{t('settings.general.trayTitle')}</span>
+                    </div>
+                    <p className="text-xs text-dark-onSurfaceVariant/70 leading-relaxed">
+                      {t('settings.general.trayDesc')}
+                    </p>
+                    {isMacPlatform ? (
+                      <p className="text-xs text-dark-onSurfaceVariant/60 leading-relaxed">
+                        {t('settings.general.trayMacNote')}
+                      </p>
+                    ) : (
+                      <>
+                        <div>
+                          <label className="text-xs text-dark-onSurfaceVariant mb-2 block">
+                            {t('settings.general.trayCloseToTray')} / {t('settings.general.trayCloseToQuit')}
+                          </label>
+                          <div className="flex gap-2">
+                            {(['tray', 'quit'] as const).map((behavior) => (
+                              <button
+                                key={behavior}
+                                type="button"
+                                onClick={() => settings.updateSettings({ closeBehavior: behavior })}
+                                className={`flex-1 px-3 py-2.5 rounded-md3-sm text-sm transition-colors border ${
+                                  settings.closeBehavior === behavior
+                                    ? 'border-md-primary/40 bg-md-primary/10 text-md-primary'
+                                    : 'border-dark-onSurfaceVariant/10 hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant'
+                                }`}
+                                aria-pressed={settings.closeBehavior === behavior}
+                              >
+                                {t(`settings.general.trayCloseTo${behavior === 'tray' ? 'Tray' : 'Quit'}`)}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        <div>
+                          <label className="text-xs text-dark-onSurfaceVariant mb-2 block">
+                            {t('settings.general.traySessionsLimit')}
+                          </label>
+                          <div className="flex gap-2">
+                            {sessionLimitOptions.map((limit) => (
+                              <button
+                                key={limit}
+                                type="button"
+                                onClick={() => settings.updateSettings({ recentSessionsLimit: limit })}
+                                className={`flex-1 px-3 py-2.5 rounded-md3-sm text-sm transition-colors border ${
+                                  settings.recentSessionsLimit === limit
+                                    ? 'border-md-primary/40 bg-md-primary/10 text-md-primary'
+                                    : 'border-dark-onSurfaceVariant/10 hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant'
+                                }`}
+                                aria-pressed={settings.recentSessionsLimit === limit}
+                              >
+                                {limit}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
 
                 <TokenUsageStats />
               </div>
