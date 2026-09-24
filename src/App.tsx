@@ -12,10 +12,12 @@ import { useVibeStore } from './stores/vibe-store'
 import { initScheduledTasks, useScheduledTasksStore } from './stores/scheduled-tasks-store'
 import TaskRunHost from './components/scheduled/TaskRunHost'
 import TrayBridge from './components/system/TrayBridge'
+import CommandPalette from './components/ui/CommandPalette'
 import { applyColorScheme, applyAppFont, resolveSeed } from './lib/theme-engine'
 import { I18nProvider } from './components/I18nProvider'
 import { isWebUIMode } from './lib/ipc-client'
 import { useIsMobile } from './hooks/use-mobile'
+import { useGlobalShortcuts } from './hooks/use-global-shortcuts'
 
 // 非首屏模块按需加载，避免普通聊天启动时加载设置、技能商店和 VIBE 资源。
 const SkillStore = lazy(() => import('./components/chat/SkillStore'))
@@ -74,7 +76,10 @@ function ThemeProvider({ children }: { children: React.ReactNode }) {
 }
 
 export default function App() {
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  // 侧边栏折叠态在 ui-store（命令面板/快捷键可驱动）；移动端抽屉仍为本地状态
+  const sidebarCollapsed = useUIStore((s) => s.sidebarCollapsed)
+  const toggleSidebar = useUIStore((s) => s.toggleSidebar)
+  useGlobalShortcuts()
   const showSettings = useSettingsStore((s) => s.showSettings)
   const showSkillStore = useUIStore((s) => s.showSkillStore)
   const showScheduledTasks = useUIStore((s) => s.showScheduledTasks)
@@ -189,11 +194,11 @@ export default function App() {
         ) : (
           <Sidebar
             collapsed={sidebarCollapsed}
-            onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
+            onToggle={toggleSidebar}
           />
         )}
         <div className="flex flex-col flex-1 min-w-0">
-          <TitleBar sidebarVisible={isMobile ? mobileSidebarOpen : !sidebarCollapsed} onToggleSidebar={isMobile ? () => setMobileSidebarOpen(true) : () => setSidebarCollapsed(!sidebarCollapsed)} />
+          <TitleBar sidebarVisible={isMobile ? mobileSidebarOpen : !sidebarCollapsed} onToggleSidebar={isMobile ? () => setMobileSidebarOpen(true) : toggleSidebar} />
           <main className="flex-1 min-h-0 overflow-hidden">
             <div className="flex h-full">
               <div className="min-w-0 flex-1 overflow-hidden">
@@ -229,6 +234,8 @@ export default function App() {
       <I18nProvider>
         {/* 系统托盘桥接：下发文案/配置 + 接收托盘点选对话（WebUI 模式内部 no-op） */}
         <TrayBridge />
+        {/* 命令面板（Ctrl/Cmd+K）：全局可用，WebUI 模式同样生效 */}
+        <CommandPalette />
         <Suspense fallback={null}>{content}</Suspense>
         {/* 定时任务执行宿主：全局唯一实例，队首任务到点即在此运行（onboarding 完成后） */}
         {hasCompletedOnboarding && headTaskRun && (

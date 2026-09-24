@@ -27,6 +27,26 @@ export default {
     lines: '行',
   },
 
+  // 命令面板（Ctrl/Cmd+K）
+  commandPalette: {
+    placeholder: '输入命令或搜索会话…',
+    noResults: '无匹配结果',
+    commands: '命令',
+    sessions: '会话',
+    untitled: '未命名会话',
+  },
+
+  // 命令名称（唯一事实源：src/lib/commands.ts）
+  commands: {
+    palette: '命令面板',
+    newSession: '新建会话',
+    openSettings: '打开设置',
+    toggleSidebar: '切换侧边栏',
+    toggleTheme: '切换明暗主题',
+    openSkillStore: '打开技能商店',
+    openScheduledTasks: '打开定时任务',
+  },
+
   onboarding: {
     welcome: {
       title: 'ClerkBox',

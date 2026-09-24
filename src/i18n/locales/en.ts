@@ -27,6 +27,26 @@ export default {
     lines: 'lines',
   },
 
+  // Command palette (Ctrl/Cmd+K)
+  commandPalette: {
+    placeholder: 'Type a command or search sessions…',
+    noResults: 'No matching results',
+    commands: 'Commands',
+    sessions: 'Sessions',
+    untitled: 'Untitled session',
+  },
+
+  // Command names (single source of truth: src/lib/commands.ts)
+  commands: {
+    palette: 'Command Palette',
+    newSession: 'New Session',
+    openSettings: 'Open Settings',
+    toggleSidebar: 'Toggle Sidebar',
+    toggleTheme: 'Toggle Light/Dark Theme',
+    openSkillStore: 'Open Skill Store',
+    openScheduledTasks: 'Open Scheduled Tasks',
+  },
+
   onboarding: {
     welcome: {
       title: 'ClerkBox',
