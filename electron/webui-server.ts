@@ -53,6 +53,8 @@ const REMOTE_INVOKE_BLOCKLIST: readonly string[] = [
   // 技能目录整目录写入 / 删除
   'writeSkillDir',
   'removeSkillDir',
+  // 诊断导出（弹保存对话框属桌面端交互，远程调用无意义）
+  'diagExport',
 ]
 
 // ── 流式对话桥接 ──

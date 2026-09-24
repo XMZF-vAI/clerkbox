@@ -6,6 +6,7 @@ import {
   shell,
   safeStorage,
   session,
+  powerSaveBlocker,
 } from 'electron'
 import * as path from 'path'
 import * as fs from 'fs'
@@ -21,12 +22,31 @@ import * as yaml from 'js-yaml'
 import { registerApiProxyHandlers, bindApiProxyCleanup, startChatStream, abortChatStream, type ApiConnConfig } from './api-proxy'
 import { handlerRegistry, setStreamHandlers, startWebUI, stopWebUI, getWebUIStatus, getLanAddresses } from './webui-server'
 import * as rtAccount from './rt-account'
+import * as agentMemory from './agent-memory'
 import { mcpManager } from './mcp-manager'
 import { winAcrylic } from './win-acrylic'
 import { systemMedia } from './system-media'
 import { registerTerminalHandlers, disposeAllTerminals } from './terminal'
-import { initUpdater } from './updater'
+import { initUpdater, isAgentBusyNow } from './updater'
+import { initMainLogger, registerLogIpcHandlers } from './logger'
+import {
+  initTray,
+  isTrayAvailable,
+  getCloseBehavior,
+  setTrayConfig,
+  setTrayLabels,
+  notifyRendererReady,
+  notifyFirstHide,
+  refreshTray,
+  destroyTray,
+  type TrayConfig,
+  type TrayLabels,
+  type TraySessionItem,
+} from './tray'
 import type { AccountSyncKind, McpMarketConnection, McpServerConfig, SystemMediaState, VibeGlassTrack } from '../src/types/ipc'
+
+// 日志初始化必须最先执行：此后主进程所有 console.* 同步落盘（见 electron/logger.ts）
+initMainLogger()
 
 const SKILL_REQUEST_TIMEOUT_MS = 15_000
 const MAX_SKILL_FILE_BYTES = 512 * 1024
@@ -447,6 +467,13 @@ function parseSkillMd(content: string): {
 
 let mainWindow: BrowserWindow | null = null
 
+/** 真退出标志：区分"关闭到托盘"与"退出应用"（托盘退出/更新安装/系统退出都会置位） */
+let isQuitting = false
+/** 渲染层 TrayBridge 是否已挂载：就绪前点击托盘里的会话须暂存待发（否则"首点无效"） */
+let trayRendererReady = false
+/** 最近会话读取器：由 registerIpcHandlers 内的 DB 闭包注入（自带 mtime+size 缓存） */
+let recentSessionsProvider: (() => Promise<TraySessionItem[]>) | null = null
+
 // 单实例锁：防止多开导致 MCP / PTY 子进程、凭据与数据库文件等单例资源互相竞争。
 // 抢锁失败说明已有实例在运行，直接退出；成功则监听二次启动事件，聚焦已有主窗口
 // （最小化时先还原），把用户引导回正在运行的实例。
@@ -457,6 +484,9 @@ if (!gotSingleInstanceLock) {
   app.on('second-instance', () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       if (mainWindow.isMinimized()) mainWindow.restore()
+      // 关闭到托盘后窗口处于隐藏态（isMinimized() 为 false），必须补 show()，
+      // 否则用户从开始菜单再次启动会"毫无反应"。
+      if (!mainWindow.isVisible()) mainWindow.show()
       mainWindow.focus()
     }
   })
@@ -618,7 +648,27 @@ function createWindow() {
     // 窗口销毁：玻璃特效随窗口消失，系统媒体轮询随之停止（管理器保持可复用）
     winAcrylic.terminate()
     systemMedia.terminate()
+    // 渲染层桥接随窗口一起消失：下次窗口建好后需要重新收到 tray:renderer-ready
+    trayRendererReady = false
+    refreshTray()
   })
+
+  // ── 关闭到托盘（非 macOS）──
+  // 关闭按钮只隐藏窗口而非销毁：agent loop 与定时任务调度都跑在渲染进程里，销毁窗口会直接
+  // 中断它们（见 .trae/specs/system-tray/spec.md）。macOS 保持系统原生语义（关窗不退出、
+  // 应用驻留 Dock/菜单栏），故不拦截。
+  if (process.platform !== 'darwin') {
+    const windowRef = mainWindow
+    mainWindow.on('close', (event) => {
+      if (isQuitting || !isTrayAvailable() || getCloseBehavior() !== 'tray') return
+      event.preventDefault()
+      if (!windowRef.isDestroyed()) windowRef.hide()
+      notifyFirstHide()
+      refreshTray()
+    })
+    mainWindow.on('show', () => refreshTray())
+    mainWindow.on('hide', () => refreshTray())
+  }
 
   // MCP 状态变化通过该窗口推送给渲染进程
   mcpManager.setMainWindow(mainWindow)
@@ -636,6 +686,20 @@ function createWindow() {
   mainWindow.on('maximize', sendWindowState)
   mainWindow.on('unmaximize', sendWindowState)
   mainWindow.webContents.on('did-finish-load', sendWindowState)
+}
+
+/**
+ * 唤出主窗口（托盘菜单"显示窗口"、托盘左键单击、点会话项共用）。
+ * 幂等：窗口不存在则重建（macOS 关闭窗口会销毁窗口），最小化则还原，最后显示并聚焦。
+ */
+function showMainWindow(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow()
+    return
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
 }
 
 // 记忆条目结构（与 src/types/agent.ts 中的 MemoryEntry 保持一致）
@@ -707,6 +771,8 @@ function enqueueMemWrite<T>(op: () => Promise<T> | T): Promise<T> {
 }
 
 function registerIpcHandlers() {
+  // 日志转发与诊断导出（log:write / diagExport，见 electron/logger.ts）
+  registerLogIpcHandlers()
   // Dialogs remain usable while the main window is closing or has not been created.
   const showOpenDialogSafe = (options: Electron.OpenDialogOptions) =>
     mainWindow && !mainWindow.isDestroyed()
@@ -1969,6 +2035,34 @@ function registerIpcHandlers() {
     return readDb().revision || 0
   })
 
+  // ── 托盘菜单的最近会话（供 electron/tray.ts 注入使用）──
+  // 直读 DB（不依赖渲染进程：macOS 关窗销毁窗口、WebUI 端新建会话都能覆盖），按 updated_at
+  // 降序（与 Sidebar / chat-store 同口径）。readDb() 会解析整个 DB 文件（含全部消息体），
+  // 而菜单 5s 刷新一次，故用 mtime+size 做缓存键：写库走「临时文件 + rename」，mtime 必变。
+  let cachedTraySessions: TraySessionItem[] = []
+  let cachedTraySessionsKey = ''
+  recentSessionsProvider = async () => {
+    await dbWriteQueue
+    try {
+      const stat = fs.statSync(dbPath)
+      const key = `${stat.mtimeMs}:${stat.size}`
+      if (key === cachedTraySessionsKey) return cachedTraySessions
+      cachedTraySessions = readDb().sessions
+        .map((row) => ({
+          id: typeof row.id === 'string' ? row.id : '',
+          title: typeof row.title === 'string' ? row.title : '',
+          updatedAt: typeof row.updated_at === 'number' ? row.updated_at : 0,
+        }))
+        .filter((row) => row.id !== '')
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+      cachedTraySessionsKey = key
+      return cachedTraySessions
+    } catch {
+      // 读失败（文件被占用/损坏）时退回上一次结果，菜单不因异常而空
+      return cachedTraySessions
+    }
+  }
+
   ipcMain.handle('dbSetRecents', async (_event, recents: string[]) => {
     await enqueueDbWrite(() => {
       const db = readDb()
@@ -2323,6 +2417,26 @@ function registerIpcHandlers() {
     return process.platform
   })
 
+  // ── 定时任务：保持系统唤醒（阻止系统休眠，仅阻止睡眠、不强制亮屏） ──
+  let powerSaveBlockerId: number | null = null
+  ipcMain.handle('setKeepAwake', (_event, enable: unknown): void => {
+    const want = enable === true
+    if (want && powerSaveBlockerId === null) {
+      try {
+        powerSaveBlockerId = powerSaveBlocker.start('prevent-app-suspension')
+      } catch (err) {
+        console.error('[keep-awake] start failed:', err)
+      }
+    } else if (!want && powerSaveBlockerId !== null) {
+      try {
+        powerSaveBlocker.stop(powerSaveBlockerId)
+      } catch (err) {
+        console.error('[keep-awake] stop failed:', err)
+      }
+      powerSaveBlockerId = null
+    }
+  })
+
   // ── 共享 KV 存储：Electron 与 WebUI 双模式读写同一份持久化数据 ──
   // 渲染进程的 zustand persist（设置/技能/Vibe/token 统计）桥接到这里，
   // 避免 WebUI（不同 origin）读不到 localStorage 导致"未配置模型"。
@@ -2428,6 +2542,70 @@ function registerIpcHandlers() {
   })
 
   ipcMain.handle('accountSyncGetPassphraseStatus', () => rtAccount.rtSyncGetPassphraseStatus())
+
+  ipcMain.handle('agentMemoryStatus', () => agentMemory.status())
+  ipcMain.handle('agentMemoryMigrate', async (_event, workingDir: unknown) => {
+    if (typeof workingDir !== 'string' || !workingDir.trim()) {
+      return { ok: false, imported: 0, skipped: 0, failed: 0, source: 'none', error: 'Invalid working directory' }
+    }
+    const localFiles = await agentMemory.readLocalMemoryFiles(workingDir)
+    const cloudFiles = path.resolve(workingDir) === path.resolve(os.homedir())
+      ? await rtAccount.rtReadLegacyMemoryFiles()
+      : null
+    const merged = new Map<string, { filename: string; content: string }>()
+    for (const file of cloudFiles ?? []) merged.set(file.filename, file)
+    for (const file of localFiles) merged.set(file.filename, file)
+    const result = await agentMemory.migrate(workingDir, [...merged.values()])
+    return { ...result, source: cloudFiles ? 'local+legacy-cloud' : 'local' }
+  })
+
+  ipcMain.handle('agentMemoryCapture', async (_event, input: unknown) => {
+    if (!input || typeof input !== 'object') return { ok: false, error: 'Invalid capture input' }
+    const value = input as { sessionId?: unknown; workingDir?: unknown; messages?: unknown }
+    if (typeof value.sessionId !== 'string' || !Array.isArray(value.messages)) return { ok: false, error: 'Invalid capture input' }
+    try {
+      await agentMemory.capture(
+        value.sessionId,
+        value.messages as agentMemory.AgentMemoryCaptureMessage[],
+        typeof value.workingDir === 'string' ? value.workingDir : undefined,
+      )
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
+  ipcMain.handle('agentMemorySearch', async (_event, query: unknown, workingDir: unknown, sessionId: unknown) => {
+    if (typeof query !== 'string') return []
+    try {
+      const items = await agentMemory.search(
+        query,
+        typeof workingDir === 'string' ? workingDir : undefined,
+        typeof sessionId === 'string' ? sessionId : undefined,
+      )
+      return items.map((item) => ({ ...item, source: 'tencentdb' as const }))
+    } catch {
+      return []
+    }
+  })
+  ipcMain.handle('agentMemoryContext', async (_event, workingDir: unknown) => {
+    if (!agentMemory.isConfigured()) return { configured: false, core: '', scenarios: [] }
+    try {
+      return { configured: true, ...(await agentMemory.context(typeof workingDir === 'string' ? workingDir : undefined)) }
+    } catch {
+      return { configured: true, core: '', scenarios: [] }
+    }
+  })
+  ipcMain.handle('agentMemorySave', async (_event, scope: unknown, slug: unknown, content: unknown, workingDir: unknown) => {
+    if ((scope !== 'user' && scope !== 'project') || typeof slug !== 'string' || typeof content !== 'string') {
+      return { ok: false, error: 'Invalid memory input' }
+    }
+    try {
+      await agentMemory.saveMemory(scope, slug, content, typeof workingDir === 'string' ? workingDir : undefined)
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
 
   // ── MCP（Model Context Protocol）服务器管理 ──
   // 配置由渲染进程 settings-store 持久化，主进程只负责连接与工具调用
@@ -3665,8 +3843,75 @@ app.whenReady().then(() => {
   registerIpcHandlers()
   createWindow()
 
+  // ── 系统托盘（三段式菜单：显示窗口 / 对话记录 / 退出）──
+  // 托盘通道一律用 ipcMain.on：ipcMain.handle 已被 patchedHandle 劫持并注册进 WebUI 的
+  // handlerRegistry，托盘是桌面端概念，不应暴露给浏览器端 /api/invoke。
+  ipcMain.on('tray:labels', (_event, next: unknown) => {
+    if (next && typeof next === 'object') setTrayLabels(next as Partial<TrayLabels>)
+  })
+  ipcMain.on('tray:config', (_event, next: unknown) => {
+    if (next && typeof next === 'object') setTrayConfig(next as TrayConfig)
+  })
+  ipcMain.on('tray:renderer-ready', () => {
+    trayRendererReady = true
+    notifyRendererReady()
+  })
+
+  const trayCreated = initTray({
+    showWindow: showMainWindow,
+    isRendererReady: () => trayRendererReady,
+    sendOpenSession: (sessionId) => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('tray:open-session', sessionId)
+    },
+    getRecentSessions: () => (recentSessionsProvider ? recentSessionsProvider() : Promise.resolve([])),
+    isAgentBusy: isAgentBusyNow,
+    requestQuit: () => {
+      isQuitting = true
+      app.quit()
+    },
+    confirmQuit: async (title, message) => {
+      const options: Electron.MessageBoxOptions = {
+        type: 'question',
+        buttons: ['Cancel', 'OK'],
+        defaultId: 1,
+        cancelId: 0,
+        title,
+        message,
+      }
+      try {
+        const result = mainWindow && !mainWindow.isDestroyed()
+          ? await dialog.showMessageBox(mainWindow, options)
+          : await dialog.showMessageBox(options)
+        return result.response === 1
+      } catch {
+        return false
+      }
+    },
+  })
+  // 托盘创建失败（如 Linux 无 StatusNotifierItem 宿主）：关闭行为自动降级为"直接退出"，
+  // 因为 close 拦截里已用 isTrayAvailable() 短路，不会把用户关进看不见的窗口。
+  if (!trayCreated) console.warn('[tray] unavailable on this desktop environment; close will quit the app')
+
   // 启动时校验热土账号 Token：失效则清理登录态（网络异常时保留，避免误登出）
   void rtAccount.rtVerifyStartupToken()
+
+  // 配置了统一 MemoryCore Gateway 时，后台执行一次非破坏性迁移：
+  // 本地 Markdown 与旧云快照只读合并，旧源不会被删除或覆盖。
+  if (agentMemory.isConfigured()) {
+    void (async () => {
+      try {
+        const homeDir = os.homedir()
+        const localFiles = await agentMemory.readLocalMemoryFiles(homeDir)
+        const cloudFiles = await rtAccount.rtReadLegacyMemoryFiles()
+        const merged = new Map<string, { filename: string; content: string }>()
+        for (const file of cloudFiles ?? []) merged.set(file.filename, file)
+        for (const file of localFiles) merged.set(file.filename, file)
+        if (merged.size > 0) await agentMemory.migrate(homeDir, [...merged.values()])
+      } catch (error) {
+        console.warn('[agent-memory] startup migration deferred:', error instanceof Error ? error.message : String(error))
+      }
+    })()
+  }
 
   // 服务器部署场景：设置 CLERKBOX_WEBUI_AUTO=1 时自动启动 WebUI 并打印访问地址，
   // 无需手动点击界面按钮即可远程访问。
@@ -3694,6 +3939,9 @@ app.on('window-all-closed', () => {
 // MCP 回收（限时 3s 兜底，防个别连接 close 挂死卡住退出），最后 app.exit 保证一定退出。
 app.on('before-quit', (event) => {
   event.preventDefault()
+  // 真退出：置位后 close 拦截不再把窗口藏进托盘，并回收托盘图标与定时器
+  isQuitting = true
+  destroyTray()
   winAcrylic.dispose()
   systemMedia.dispose()
   disposeAllTerminals()

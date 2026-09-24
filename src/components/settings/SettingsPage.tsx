@@ -1,12 +1,12 @@
 import { useState, useEffect, useId, useRef } from 'react'
-import { Cpu, Palette, RotateCcw, Check, AlertCircle, Info, X, Plus, Pencil, Trash2, Sparkles, Languages, FileText, Settings, User, LogOut, Upload, Download, Loader2, RefreshCw, Plug } from 'lucide-react'
+import { Cpu, Palette, RotateCcw, Check, AlertCircle, Info, X, Plus, Pencil, Trash2, Sparkles, Languages, FileText, Settings, User, LogOut, Upload, Download, Loader2, RefreshCw, Plug, KeyRound, Monitor } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useSettingsStore } from '../../stores/settings-store'
 import { useAccountStore, avatarColorFor, initialOf } from '../../stores/account-store'
 import { useVibeStore } from '../../stores/vibe-store'
 import { MACARON_PRESETS, schemeSwatches } from '../../lib/theme-engine'
 import { SUPPORTED_LANGUAGES } from '../../i18n'
-import { ipc } from '../../lib/ipc-client'
+import { ipc, isWebUIMode } from '../../lib/ipc-client'
 import ProvidersSection from './ProvidersSection'
 import McpSection from './McpSection'
 import TokenUsageStats from './TokenUsageStats'
@@ -34,10 +34,20 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
   const settings = useSettingsStore()
   const account = useAccountStore()
   const isVibeMode = useVibeStore((s) => s.isVibeMode)
+  // mac 走系统原生"关窗不退出"，不提供关闭行为选择（见 trayMacNote）
+  const isMacPlatform = window.clerkbox?.platform === 'darwin'
+  const sessionLimitOptions = [3, 5, 8]
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle')
   const [testError, setTestError] = useState('')
   const [showResetConfirmation, setShowResetConfirmation] = useState(false)
   const [confirmDownload, setConfirmDownload] = useState(false)
+  // 诊断日志导出状态（关于页，仅桌面端展示入口）
+  const [diagExportState, setDiagExportState] = useState<'idle' | 'busy' | 'done' | 'error'>('idle')
+  // 同步加密密码编辑区（设置/修改共用）
+  const [encEditing, setEncEditing] = useState(false)
+  const [encPass, setEncPass] = useState('')
+  const [encPass2, setEncPass2] = useState('')
+  const [encError, setEncError] = useState('')
   const titleId = useId()
   const dialogRef = useRef<HTMLDivElement>(null)
   const closeButtonRef = useRef<HTMLButtonElement>(null)
@@ -153,7 +163,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
         aria-modal="true"
         aria-labelledby={titleId}
         tabIndex={-1}
-        className="w-[720px] max-w-[92vw] h-[560px] max-h-[82vh] bg-dark-surfaceDim rounded-md3-xl border border-dark-onSurfaceVariant/10 flex flex-col shadow-2xl
+        className="w-[720px] max-w-[92vw] h-[560px] max-h-[82vh] bg-dark-surfaceDim rounded-md3-xl border border-dark-onSurfaceVariant/10 flex flex-col shadow-elevation-3
           max-md:w-screen max-md:h-full max-md:max-w-none max-md:max-h-none max-md:rounded-none max-md:border-0"
       >
         <div className="flex items-center justify-between px-6 py-4 border-b border-dark-onSurfaceVariant/10">
@@ -303,6 +313,71 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                     </label>
                   )}
                 </div>
+
+                {/* 窗口与托盘（桌面端专属；WebUI 浏览器模式无托盘概念） */}
+                {!isWebUIMode && (
+                  <div className="space-y-3 p-4 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10">
+                    <div className="flex items-center gap-2">
+                      <Monitor size={14} className="text-md-primary flex-shrink-0" />
+                      <span className="text-sm font-medium text-dark-onSurface">{t('settings.general.trayTitle')}</span>
+                    </div>
+                    <p className="text-xs text-dark-onSurfaceVariant/70 leading-relaxed">
+                      {t('settings.general.trayDesc')}
+                    </p>
+                    {isMacPlatform ? (
+                      <p className="text-xs text-dark-onSurfaceVariant/60 leading-relaxed">
+                        {t('settings.general.trayMacNote')}
+                      </p>
+                    ) : (
+                      <>
+                        <div>
+                          <label className="text-xs text-dark-onSurfaceVariant mb-2 block">
+                            {t('settings.general.trayCloseToTray')} / {t('settings.general.trayCloseToQuit')}
+                          </label>
+                          <div className="flex gap-2">
+                            {(['tray', 'quit'] as const).map((behavior) => (
+                              <button
+                                key={behavior}
+                                type="button"
+                                onClick={() => settings.updateSettings({ closeBehavior: behavior })}
+                                className={`flex-1 px-3 py-2 rounded-md3-sm text-sm transition-colors border ${
+                                  settings.closeBehavior === behavior
+                                    ? 'border-md-primary/40 bg-md-primary/10 text-md-primary'
+                                    : 'border-dark-onSurfaceVariant/10 hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant'
+                                }`}
+                                aria-pressed={settings.closeBehavior === behavior}
+                              >
+                                {t(`settings.general.trayCloseTo${behavior === 'tray' ? 'Tray' : 'Quit'}`)}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        <div>
+                          <label className="text-xs text-dark-onSurfaceVariant mb-2 block">
+                            {t('settings.general.traySessionsLimit')}
+                          </label>
+                          <div className="flex gap-2">
+                            {sessionLimitOptions.map((limit) => (
+                              <button
+                                key={limit}
+                                type="button"
+                                onClick={() => settings.updateSettings({ recentSessionsLimit: limit })}
+                                className={`flex-1 px-3 py-2 rounded-md3-sm text-sm transition-colors border ${
+                                  settings.recentSessionsLimit === limit
+                                    ? 'border-md-primary/40 bg-md-primary/10 text-md-primary'
+                                    : 'border-dark-onSurfaceVariant/10 hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant'
+                                }`}
+                                aria-pressed={settings.recentSessionsLimit === limit}
+                              >
+                                {limit}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
 
                 {/* Token 用量统计 */}
                 <TokenUsageStats />
@@ -528,6 +603,15 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                       <label className="flex items-center gap-2 cursor-pointer">
                         <input
                           type="checkbox"
+                          checked={account.syncMcp}
+                          onChange={(e) => account.setSyncMcp(e.target.checked)}
+                          className="accent-md-primary"
+                        />
+                        <span className="text-xs text-dark-onSurfaceVariant">{t('account.sync.mcp')}</span>
+                      </label>
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
                           checked={account.autoSync}
                           onChange={(e) => account.setAutoSync(e.target.checked)}
                           className="accent-md-primary"
@@ -536,6 +620,103 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                       </label>
                       <p className="text-xs text-dark-onSurfaceVariant/60 leading-relaxed">
                         {t('account.sync.autoDesc')}
+                      </p>
+                    </div>
+
+                    {/* 同步加密卡：models/mcp 段端到端加密 */}
+                    <div className="space-y-3 p-4 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10">
+                      <div className="flex items-center gap-2">
+                        <KeyRound size={14} className="text-md-primary flex-shrink-0" />
+                        <span className="text-sm font-medium text-dark-onSurface">
+                          {t('account.enc.title')}
+                        </span>
+                        {account.passphraseSet && (
+                          <span className="px-1.5 py-0.5 rounded-md3-xs bg-md-tertiary/15 text-md-tertiary text-[10px] font-medium whitespace-nowrap">
+                            {t('account.enc.enabled')}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs text-dark-onSurfaceVariant/60 leading-relaxed">
+                        {t('account.enc.desc')}
+                      </p>
+                      {!account.passphraseSet && (
+                        <p className="text-xs text-md-error/80 leading-relaxed">
+                          {t('account.enc.notSetWarn')}
+                        </p>
+                      )}
+                      {encEditing ? (
+                        <div className="space-y-2">
+                          <input
+                            type="password"
+                            value={encPass}
+                            onChange={(e) => { setEncPass(e.target.value); setEncError('') }}
+                            placeholder={t('account.enc.passPlaceholder')}
+                            autoComplete="new-password"
+                            className="w-full px-3 py-1.5 rounded-md3-sm bg-dark-surfaceContainerHigh text-xs text-dark-onSurface border border-dark-onSurfaceVariant/15 focus:outline-none focus:border-md-primary/60"
+                          />
+                          <input
+                            type="password"
+                            value={encPass2}
+                            onChange={(e) => { setEncPass2(e.target.value); setEncError('') }}
+                            placeholder={t('account.enc.passConfirmPlaceholder')}
+                            autoComplete="new-password"
+                            className="w-full px-3 py-1.5 rounded-md3-sm bg-dark-surfaceContainerHigh text-xs text-dark-onSurface border border-dark-onSurfaceVariant/15 focus:outline-none focus:border-md-primary/60"
+                          />
+                          {encError && (
+                            <p role="alert" className="text-xs text-md-error">{encError}</p>
+                          )}
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              disabled={account.passphraseSaving}
+                              onClick={() => {
+                                if (encPass.length < 8) { setEncError(t('account.enc.tooShort')); return }
+                                if (encPass !== encPass2) { setEncError(t('account.enc.mismatch')); return }
+                                void account.setPassphrase(encPass).then(() => {
+                                  // 保存成功（密码已生效）才收起编辑区；失败保留输入，错误显示在底部
+                                  if (useAccountStore.getState().passphraseSet) {
+                                    setEncEditing(false)
+                                    setEncPass('')
+                                    setEncPass2('')
+                                  }
+                                })
+                              }}
+                              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md3-sm bg-md-primary text-md-onPrimary hover:bg-md-primary/90 transition-colors text-xs font-medium disabled:opacity-50"
+                            >
+                              {account.passphraseSaving && <Loader2 size={12} className="animate-spin" />}
+                              <span>{t('account.enc.save')}</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEncEditing(false)
+                                setEncPass('')
+                                setEncPass2('')
+                                setEncError('')
+                              }}
+                              className="px-3 py-1.5 rounded-md3-sm bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer transition-colors text-xs font-medium text-dark-onSurfaceVariant"
+                            >
+                              {t('account.enc.cancel')}
+                            </button>
+                          </div>
+                          {account.passphraseSet && (
+                            <p className="text-xs text-dark-onSurfaceVariant/50 leading-relaxed">
+                              {t('account.enc.changeNote')}
+                            </p>
+                          )}
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setEncEditing(true)}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-md3-sm bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer transition-colors text-xs font-medium text-dark-onSurfaceVariant"
+                        >
+                          <KeyRound size={12} />
+                          <span>{account.passphraseSet ? t('account.enc.change') : t('account.enc.set')}</span>
+                        </button>
+                      )}
+                      <p className="text-xs text-dark-onSurfaceVariant/50 leading-relaxed">
+                        {t('account.enc.warn')}
                       </p>
                     </div>
 
@@ -588,6 +769,14 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                             : t('account.sync.never')}
                         </span>
                       </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-dark-onSurfaceVariant">{t('account.sync.mcp')}</span>
+                        <span className="text-dark-onSurfaceVariant/70">
+                          {account.lastSyncAt?.mcp
+                            ? new Date(account.lastSyncAt.mcp).toLocaleString()
+                            : t('account.sync.never')}
+                        </span>
+                      </div>
                     </div>
 
                     {account.lastError && (
@@ -632,6 +821,29 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                   <Sparkles size={13} />
                   {t('settings.about.reshowOnboarding')}
                 </button>
+                {!isWebUIMode && (
+                  <button
+                    type="button"
+                    disabled={diagExportState === 'busy'}
+                    onClick={() => {
+                      if (diagExportState === 'busy') return
+                      setDiagExportState('busy')
+                      ipc.diagExport()
+                        .then((res) => {
+                          setDiagExportState('error' in res ? 'error' : 'ok' in res ? 'done' : 'idle')
+                        })
+                        .catch(() => setDiagExportState('error'))
+                    }}
+                    className="mt-2 flex items-center gap-1.5 text-xs text-md-primary/80 hover:text-md-primary transition-colors disabled:opacity-50"
+                  >
+                    {diagExportState === 'busy' ? <Loader2 size={13} className="animate-spin" /> : <FileText size={13} />}
+                    {diagExportState === 'done'
+                      ? t('settings.about.exportDiagnosticsDone')
+                      : diagExportState === 'error'
+                        ? t('settings.about.exportDiagnosticsFailed')
+                        : t('settings.about.exportDiagnostics')}
+                  </button>
+                )}
               </div>
             )}
 

@@ -146,11 +146,47 @@ export interface RtUser {
 export interface AccountStatus {
   loggedIn: boolean
   user?: RtUser
-  lastSyncAt: { memory?: number; models?: number }
+  lastSyncAt: { memory?: number; models?: number; mcp?: number }
+}
+
+/** TencentDB Agent Memory Gateway 连接状态 */
+export interface AgentMemoryStatus {
+  configured: boolean
+  reachable: boolean
+  endpoint?: string
+  error?: string
+}
+
+export interface AgentMemoryMigrationResult {
+  ok: boolean
+  imported: number
+  skipped: number
+  failed: number
+  source: 'local' | 'local+legacy-cloud' | 'none'
+  error?: string
+}
+
+export interface AgentMemoryCaptureInput {
+  sessionId: string
+  workingDir?: string
+  messages: Array<{ id?: string; role: 'user' | 'assistant' | 'system'; content: string; timestamp?: string }>
+}
+
+export interface AgentMemorySearchResult {
+  content: string
+  type?: string
+  score?: number
+  source: 'tencentdb' | 'legacy'
+}
+
+export interface AgentMemoryContext {
+  configured: boolean
+  core: string
+  scenarios: Array<{ path: string; summary?: string; content: string }>
 }
 
 /** 可同步的数据种类 */
-export type AccountSyncKind = 'memory' | 'models'
+export type AccountSyncKind = 'memory' | 'models' | 'mcp'
 
 /** 单项同步结果 */
 export interface AccountSyncResultItem {
@@ -167,10 +203,21 @@ export interface DownloadedModelConfig {
   activeModelId?: string
 }
 
-/** 下载同步结果（models 仅当请求包含 'models' 且成功时返回） */
+/** 从云端下载的 MCP 配置（servers 含 env/headers 敏感字段） */
+export interface DownloadedMcpConfig {
+  servers: McpServerConfig[]
+}
+
+/** 下载同步结果（models/mcp 仅当请求包含对应 kind 且成功时返回） */
 export interface AccountSyncDownloadResult {
   results: AccountSyncResultItem[]
   models?: DownloadedModelConfig
+  mcp?: DownloadedMcpConfig
+}
+
+/** 同步加密密码状态（密码本体只存本地，绝不上传） */
+export interface SyncPassphraseStatus {
+  set: boolean
 }
 
 // ── VIBE 氛围模式 ──
@@ -237,6 +284,27 @@ export interface PtyCreateInfo {
   rows?: number
 }
 
+/** 托盘菜单与系统通知文案（主进程没有 i18n 机制，由渲染层下发） */
+export interface TrayLabels {
+  tooltip: string
+  tooltipBusy: string
+  showWindow: string
+  recentSessions: string
+  noRecentSessions: string
+  quit: string
+  quitConfirmTitle: string
+  quitConfirmMessage: string
+  firstHideNoticeTitle: string
+  firstHideNoticeBody: string
+  untitledSession: string
+}
+
+/** 托盘配置：关闭按钮行为 + 菜单里最多展示几条最近会话（3~8） */
+export interface TrayConfig {
+  closeBehavior: 'tray' | 'quit'
+  recentSessionsLimit?: number
+}
+
 export interface ClerkBoxAPI {
   selectFolder: () => Promise<string | null>
   selectImageFile: () => Promise<string | null>
@@ -255,6 +323,14 @@ export interface ClerkBoxAPI {
   windowAction: (action: 'minimize' | 'maximize' | 'close') => void
   isWindowMaximized: boolean
   onWindowStateChange: (callback: (isMaximized: boolean) => void) => () => void
+  /** 订阅托盘菜单"点击某个对话"（主进程 → 渲染层）；返回退订函数 */
+  onTrayOpenSession: (callback: (sessionId: string) => void) => () => void
+  /** 下发托盘菜单/通知文案（语言切换时重新下发） */
+  setTrayLabels: (labels: TrayLabels) => void
+  /** 下发托盘配置（关闭按钮行为等） */
+  setTrayConfig: (config: TrayConfig) => void
+  /** 告知主进程渲染层桥接已就绪（用于消费暂存的会话点击） */
+  notifyTrayReady: () => void
   /** 订阅内嵌浏览器的 target="_blank" / window.open 请求 */
   onBrowserNewTab: (callback: (url: string) => void) => () => void
   readFile: (path: string) => Promise<string>
@@ -317,6 +393,8 @@ export interface ClerkBoxAPI {
   kvGet: (key: string) => Promise<string | null>
   kvSet: (key: string, value: string) => Promise<void>
   kvRemove: (key: string) => Promise<void>
+  /** 定时任务：保持系统唤醒（true=阻止系统休眠；false=恢复默认） */
+  setKeepAwake: (enable: boolean) => Promise<void>
   // MCP 服务器（Model Context Protocol）
   /** 全量同步服务器配置（主进程按需建立/断开连接），返回最新状态 */
   mcpSync: (servers: McpServerConfig[]) => Promise<McpServerStatus[]>
@@ -353,6 +431,16 @@ export interface ClerkBoxAPI {
   accountGetStatus: () => Promise<AccountStatus>
   accountSyncUpload: (kinds: AccountSyncKind[]) => Promise<{ results: AccountSyncResultItem[] }>
   accountSyncDownload: (kinds: AccountSyncKind[], force: boolean) => Promise<AccountSyncDownloadResult>
+  /** 设置/修改同步加密密码（仅存本地 safeStorage；用于 models/mcp 段端到端加密） */
+  accountSyncSetPassphrase: (passphrase: string) => Promise<{ ok: true } | { error: string }>
+  /** 查询同步加密密码是否已设置 */
+  accountSyncGetPassphraseStatus: () => Promise<SyncPassphraseStatus>
+  agentMemoryStatus: () => Promise<AgentMemoryStatus>
+  agentMemoryMigrate: (workingDir: string) => Promise<AgentMemoryMigrationResult>
+  agentMemoryCapture: (input: AgentMemoryCaptureInput) => Promise<{ ok: boolean; error?: string }>
+  agentMemorySearch: (query: string, workingDir?: string, sessionId?: string) => Promise<AgentMemorySearchResult[]>
+  agentMemoryContext: (workingDir?: string) => Promise<AgentMemoryContext>
+  agentMemorySave: (scope: 'user' | 'project', slug: string, content: string, workingDir?: string) => Promise<{ ok: boolean; error?: string }>
   // ── 内置终端（node-pty 真 TTY，仅桌面端） ──
   ptyCreate: (info: PtyCreateInfo) => Promise<{ ok: boolean }>
   ptyInput: (id: string, data: string) => void
@@ -371,6 +459,11 @@ export interface ClerkBoxAPI {
   updateAgentActivity: (active: boolean) => void
   /** 订阅更新状态推送；返回退订函数 */
   onUpdateState: (callback: (state: UpdaterState) => void) => () => void
+  // ── 日志与诊断 ──
+  /** 渲染进程日志转发到主进程落盘（fire-and-forget，不等回执） */
+  logWrite: (level: 'debug' | 'info' | 'warn' | 'error', scope: string, message: string) => void
+  /** 导出诊断日志（系统信息 + 近期日志尾部）到用户选择的位置；仅桌面端 */
+  diagExport: () => Promise<{ ok: true; path: string } | { canceled: true } | { error: string }>
 }
 
 /** 模型 API 连接配置（主进程代理入参） */

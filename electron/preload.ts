@@ -4,12 +4,20 @@ import type {
   AccountSyncDownloadResult,
   AccountSyncKind,
   AccountSyncResultItem,
+  AgentMemoryCaptureInput,
+  AgentMemoryContext,
+  AgentMemoryMigrationResult,
+  AgentMemorySearchResult,
+  AgentMemoryStatus,
   ApiChunkPayload,
   ApiConnConfig,
   FetchedModel,
   MessageRow,
   SessionRow,
+  SyncPassphraseStatus,
   SystemMediaState,
+  TrayConfig,
+  TrayLabels,
   UpdaterState,
   VibeGlassTrack,
   VibeMediaCommand,
@@ -54,6 +62,16 @@ contextBridge.exposeInMainWorld('clerkbox', {
     ipcRenderer.on('windowStateChanged', listener)
     return () => ipcRenderer.removeListener('windowStateChanged', listener)
   },
+
+  // 系统托盘（桌面端专属）：文案与配置由渲染层下发，托盘点选对话反向推送
+  onTrayOpenSession: (callback: (sessionId: string) => void): (() => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, sessionId: string) => callback(sessionId)
+    ipcRenderer.on('tray:open-session', listener)
+    return () => ipcRenderer.removeListener('tray:open-session', listener)
+  },
+  setTrayLabels: (labels: TrayLabels): void => { ipcRenderer.send('tray:labels', labels) },
+  setTrayConfig: (config: TrayConfig): void => { ipcRenderer.send('tray:config', config) },
+  notifyTrayReady: (): void => { ipcRenderer.send('tray:renderer-ready') },
 
   // Updater（版本号标签自动更新）
   updateCheck: (): Promise<UpdaterState> => ipcRenderer.invoke('update:check'),
@@ -211,6 +229,8 @@ contextBridge.exposeInMainWorld('clerkbox', {
   kvGet: (key: string): Promise<string | null> => ipcRenderer.invoke('kvGet', key),
   kvSet: (key: string, value: string): Promise<void> => ipcRenderer.invoke('kvSet', key, value),
   kvRemove: (key: string): Promise<void> => ipcRenderer.invoke('kvRemove', key),
+  // 定时任务：保持系统唤醒（阻止系统休眠）
+  setKeepAwake: (enable: boolean): Promise<void> => ipcRenderer.invoke('setKeepAwake', enable),
 
   // VIBE 氛围模式（玻璃特效 / 壁纸 / 系统媒体）
   vibeGlassSet: (level: number): Promise<{ track: VibeGlassTrack }> =>
@@ -235,6 +255,21 @@ contextBridge.exposeInMainWorld('clerkbox', {
     ipcRenderer.invoke('accountSyncUpload', kinds),
   accountSyncDownload: (kinds: AccountSyncKind[], force: boolean): Promise<AccountSyncDownloadResult> =>
     ipcRenderer.invoke('accountSyncDownload', kinds, force),
+  accountSyncSetPassphrase: (passphrase: string): Promise<{ ok: true } | { error: string }> =>
+    ipcRenderer.invoke('accountSyncSetPassphrase', passphrase),
+  accountSyncGetPassphraseStatus: (): Promise<SyncPassphraseStatus> =>
+    ipcRenderer.invoke('accountSyncGetPassphraseStatus'),
+  agentMemoryStatus: (): Promise<AgentMemoryStatus> => ipcRenderer.invoke('agentMemoryStatus'),
+  agentMemoryMigrate: (workingDir: string): Promise<AgentMemoryMigrationResult> =>
+    ipcRenderer.invoke('agentMemoryMigrate', workingDir),
+  agentMemoryCapture: (input: AgentMemoryCaptureInput): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('agentMemoryCapture', input),
+  agentMemorySearch: (query: string, workingDir?: string, sessionId?: string): Promise<AgentMemorySearchResult[]> =>
+    ipcRenderer.invoke('agentMemorySearch', query, workingDir, sessionId),
+  agentMemoryContext: (workingDir?: string): Promise<AgentMemoryContext> =>
+    ipcRenderer.invoke('agentMemoryContext', workingDir),
+  agentMemorySave: (scope: 'user' | 'project', slug: string, content: string, workingDir?: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('agentMemorySave', scope, slug, content, workingDir),
 
   // 工作台内置终端（node-pty 真 TTY）
   ptyCreate: (info: { id: string; cwd?: string; cols?: number; rows?: number }): Promise<{ ok: boolean }> =>
@@ -256,4 +291,11 @@ contextBridge.exposeInMainWorld('clerkbox', {
     ipcRenderer.on('pty:exit', listener)
     return () => ipcRenderer.removeListener('pty:exit', listener)
   },
+
+  // 日志与诊断：渲染进程日志转发主进程落盘（fire-and-forget）；导出诊断包（桌面端）
+  logWrite: (level: 'debug' | 'info' | 'warn' | 'error', scope: string, message: string): void => {
+    ipcRenderer.send('log:write', level, scope, message)
+  },
+  diagExport: (): Promise<{ ok: true; path: string } | { canceled: true } | { error: string }> =>
+    ipcRenderer.invoke('diagExport'),
 })

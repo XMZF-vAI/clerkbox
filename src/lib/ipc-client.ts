@@ -3,6 +3,11 @@ import type {
   AccountSyncDownloadResult,
   AccountSyncKind,
   AccountSyncResultItem,
+  AgentMemoryCaptureInput,
+  AgentMemoryContext,
+  AgentMemoryMigrationResult,
+  AgentMemorySearchResult,
+  AgentMemoryStatus,
   ApiChunkPayload,
   ApiConnConfig,
   FetchedModel,
@@ -14,7 +19,10 @@ import type {
   MessageRow,
   ParseSkillFileResult,
   SessionRow,
+  SyncPassphraseStatus,
   SystemMediaState,
+  TrayConfig,
+  TrayLabels,
   UpdaterState,
   VibeGlassTrack,
   VibeMediaCommand,
@@ -433,6 +441,19 @@ export const ipc = {
     if (isElectron) window.clerkbox.windowAction(action)
   },
 
+  // 系统托盘：浏览器端没有托盘概念，全部 no-op（界面侧也不展示相关设置）
+  onTrayOpenSession: (callback: (sessionId: string) => void): (() => void) =>
+    isElectron ? window.clerkbox.onTrayOpenSession(callback) : () => {},
+  setTrayLabels: (labels: TrayLabels): void => {
+    if (isElectron) window.clerkbox.setTrayLabels(labels)
+  },
+  setTrayConfig: (config: TrayConfig): void => {
+    if (isElectron) window.clerkbox.setTrayConfig(config)
+  },
+  notifyTrayReady: (): void => {
+    if (isElectron) window.clerkbox.notifyTrayReady()
+  },
+
   // 平台信息：Electron 同步返回；WebUI 需异步获取，但接口签名是同步的，
   // 所以 WebUI 模式用缓存值（首次访问时异步拉取并缓存）
   platform: (): string => {
@@ -467,6 +488,9 @@ export const ipc = {
     isElectron ? window.clerkbox.kvSet(key, value) : webInvoke('kvSet', [key, value]),
   kvRemove: (key: string): Promise<void> =>
     isElectron ? window.clerkbox.kvRemove(key) : webInvoke('kvRemove', [key]),
+  // 定时任务：保持系统唤醒（WebUI 模式同样落到桌面主进程，由桌面端代为阻止休眠）
+  setKeepAwake: (enable: boolean): Promise<void> =>
+    isElectron ? window.clerkbox.setKeepAwake(enable) : webInvoke('setKeepAwake', [enable]),
 
   // VIBE 氛围模式
   // 玻璃特效只作用于 Electron 本机窗口：WebUI 远程模式直接走降级轨（壁纸快照）
@@ -501,6 +525,22 @@ export const ipc = {
     isElectron ? window.clerkbox.accountSyncUpload(kinds) : webInvoke('accountSyncUpload', [kinds]),
   accountSyncDownload: (kinds: AccountSyncKind[], force: boolean): Promise<AccountSyncDownloadResult> =>
     isElectron ? window.clerkbox.accountSyncDownload(kinds, force) : webInvoke('accountSyncDownload', [kinds, force]),
+  accountSyncSetPassphrase: (passphrase: string): Promise<{ ok: true } | { error: string }> =>
+    isElectron ? window.clerkbox.accountSyncSetPassphrase(passphrase) : webInvoke('accountSyncSetPassphrase', [passphrase]),
+  accountSyncGetPassphraseStatus: (): Promise<SyncPassphraseStatus> =>
+    isElectron ? window.clerkbox.accountSyncGetPassphraseStatus() : webInvoke('accountSyncGetPassphraseStatus'),
+  agentMemoryStatus: (): Promise<AgentMemoryStatus> =>
+    isElectron ? window.clerkbox.agentMemoryStatus() : webInvoke('agentMemoryStatus'),
+  agentMemoryMigrate: (workingDir: string): Promise<AgentMemoryMigrationResult> =>
+    isElectron ? window.clerkbox.agentMemoryMigrate(workingDir) : webInvoke('agentMemoryMigrate', [workingDir]),
+  agentMemoryCapture: (input: AgentMemoryCaptureInput): Promise<{ ok: boolean; error?: string }> =>
+    isElectron ? window.clerkbox.agentMemoryCapture(input) : webInvoke('agentMemoryCapture', [input]),
+  agentMemorySearch: (query: string, workingDir?: string, sessionId?: string): Promise<AgentMemorySearchResult[]> =>
+    isElectron ? window.clerkbox.agentMemorySearch(query, workingDir, sessionId) : webInvoke('agentMemorySearch', [query, workingDir, sessionId]),
+  agentMemoryContext: (workingDir?: string): Promise<AgentMemoryContext> =>
+    isElectron ? window.clerkbox.agentMemoryContext(workingDir) : webInvoke('agentMemoryContext', [workingDir]),
+  agentMemorySave: (scope: 'user' | 'project', slug: string, content: string, workingDir?: string): Promise<{ ok: boolean; error?: string }> =>
+    isElectron ? window.clerkbox.agentMemorySave(scope, slug, content, workingDir) : webInvoke('agentMemorySave', [scope, slug, content, workingDir]),
 
   // 工作台内置终端（node-pty）：仅 Electron 桌面端可用，WebUI 一律拒绝
   ptyCreate: (info: { id: string; cwd?: string; cols?: number; rows?: number }): Promise<{ ok: boolean }> =>
@@ -528,6 +568,15 @@ export const ipc = {
   },
   onUpdateState: (callback: (state: UpdaterState) => void): (() => void) =>
     isElectron ? window.clerkbox.onUpdateState(callback) : () => {},
+
+  // 日志与诊断（A1）：logWrite 仅桌面端转发落盘；WebUI 无本地日志文件可导出
+  logWrite: (level: 'debug' | 'info' | 'warn' | 'error', scope: string, message: string): void => {
+    if (isElectron) window.clerkbox.logWrite(level, scope, message)
+  },
+  diagExport: (): Promise<{ ok: true; path: string } | { canceled: true } | { error: string }> =>
+    isElectron
+      ? window.clerkbox.diagExport()
+      : Promise.resolve({ error: 'Diagnostics export is desktop-only' }),
 }
 
 /** WebUI 模式下返回的「不支持更新」状态快照 */
