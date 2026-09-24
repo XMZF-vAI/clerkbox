@@ -21,6 +21,6 @@
       "@electron/*": ["electron/*"]
     }
   },
-  "include": ["src", "electron"],
+  "include": ["src", "electron", "tests", "vitest.config.ts"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

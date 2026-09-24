@@ -12,7 +12,9 @@
     "build:mac": "node scripts/sync-version.mjs && npm run build:electron && vite build && electron-builder --mac --publish never",
     "build:linux": "node scripts/sync-version.mjs && npm run build:electron && vite build && electron-builder --linux --publish never",
     "gen:tray-icons": "node scripts/gen-tray-icons.mjs",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "keywords": [
     "ai",

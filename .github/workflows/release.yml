@@ -41,6 +41,10 @@ jobs:
         # Linux 无 node-pty 预编译包，此处触发源码编译（runner 自带 gcc/build-essential）
         run: npm ci
 
+      - name: Run unit tests
+        # 测试不过则不出包：防止带病构建流向 Release
+        run: npm run test
+
       - name: Build installer
         run: ${{ matrix.build_cmd }}
         env:
