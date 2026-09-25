@@ -1,9 +1,14 @@
-import { useState, useEffect, useRef, useMemo, memo } from 'react'
+import { useState, useEffect, useRef, useMemo, memo, Suspense } from 'react'
 import { createPortal } from 'react-dom'
 import { Copy, Check, Terminal, FileText, FolderOpen, AlertTriangle, ChevronDown, ChevronUp, Wrench, FilePen, Globe, Pencil, Archive, Loader2, BookOpen, GitBranch, Target, CircleHelp, ListTodo, Sparkles } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { Message, StreamingToolCall } from '../../types/agent'
 import { useChatStore } from '../../stores/chat-store'
+import { parsePermissionAudit } from '../../lib/permission-preview'
+import { PermissionAuditRow } from './PermissionCard'
+import { isRenderedByUnifiedEntry, resolveRenderer } from './tool-renderers/resolveRenderer'
+import { ToolDetailLines, ToolShell, ToolSkeleton, noteToolRunning } from './tool-renderers/ToolShell'
+import { parseEditDiff, stripEditDiff, type EditDiffMetaView } from './tool-renderers/shared'
 import { SubAgentCard } from './SubAgentCard'
 
 interface MessageItemProps {
@@ -53,29 +58,7 @@ function extractWriteFileData(argsSoFar: string): { path: string; content: strin
 }
 
 // ── 工具行渲染（紧凑行样式，参考 Tool Chips 设计）──
-
-/** 工具结果尾部的 __EDIT_DIFF__ 元数据（write_file / search_replace 附加，供 UI 展示差异） */
-interface EditDiffMetaView {
-  path: string
-  added: number
-  removed: number
-  lines: Array<{ text: string; tone: 'add' | 'del' | 'ctx' }>
-}
-
-function parseEditDiff(content: string): EditDiffMetaView | null {
-  const idx = content.indexOf('\n__EDIT_DIFF__:')
-  if (idx === -1) return null
-  try {
-    const raw = JSON.parse(content.slice(idx + '\n__EDIT_DIFF__:'.length)) as EditDiffMetaView
-    if (typeof raw.path !== 'string' || !Array.isArray(raw.lines)) return null
-    return { path: raw.path, added: raw.added || 0, removed: raw.removed || 0, lines: raw.lines.slice(0, 16) }
-  } catch { return null }
-}
-
-function stripEditDiff(content: string): string {
-  const idx = content.indexOf('\n__EDIT_DIFF__:')
-  return idx === -1 ? content : content.slice(0, idx)
-}
+// 差异元数据解析（__EDIT_DIFF__）与折叠壳统一取自 tool-renderers，避免两处实现漂移
 
 const fileBase = (p: string) => p.split(/[\\/]/).pop() || p
 
@@ -128,6 +111,7 @@ function ToolRow({ toolCall, result, vibe }: {
   const toolResult = result?.find((r) => r.toolCallId === toolCall.id)
   const isError = toolResult?.isError ?? false
   const running = !toolResult
+  const Renderer = resolveRenderer(toolCall.name)
   const meta = toolResult && !isError ? parseEditDiff(toolResult.content) : null
   const detailLines = useMemo<Array<{ text: string; tone: 'add' | 'del' | 'ctx' }>>(() => {
     if (!toolResult) return []
@@ -136,6 +120,11 @@ function ToolRow({ toolCall, result, vibe }: {
       .filter((l) => l.trim()).slice(0, 5)
       .map((text) => ({ text, tone: 'ctx' as const }))
   }, [toolResult, meta])
+
+  // 耗时在常驻的工具行侧记录，展开后的专属渲染器按 callId 读取
+  useEffect(() => {
+    noteToolRunning(toolCall.id, running)
+  }, [toolCall.id, running])
 
   const label = toolCall.name === 'write_file'
     ? t('chat.toolRowWrite', { count: String(toolCall.arguments.content || '').split('\n').length })
@@ -181,31 +170,25 @@ function ToolRow({ toolCall, result, vibe }: {
         )}
         {isError && <span className="shrink-0 text-[10px] text-md-error">{t('toolPreview.executionFailed')}</span>}
       </button>
-      {/* 展开明细：grid-rows 折叠过渡 + 左边框缩进 */}
-      <div
-        className="grid transition-[grid-template-rows,opacity] duration-300"
-        style={{ gridTemplateRows: open ? '1fr' : '0fr', opacity: open ? 1 : 0, transitionTimingFunction: 'cubic-bezier(0.23, 1, 0.32, 1)' }}
-      >
-        <div className="min-h-0 overflow-hidden">
-          {detailLines.length > 0 && (
-            <div className={`mt-0.5 mb-1 ml-2 flex flex-col gap-0.5 border-l py-0.5 pl-3.5 ${
-              vibe ? 'border-white/15' : 'border-dark-onSurfaceVariant/10'
-            }`}>
-              {detailLines.map((line, i) => (
-                <span
-                  key={i}
-                  title={line.text}
-                  className={`truncate font-mono text-[11px] leading-[1.6] ${
-                    line.tone === 'add' ? 'text-md-success' : line.tone === 'del' ? 'text-md-error' : vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/60'
-                  }`}
-                >
-                  {line.text}
-                </span>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
+      {/* 展开明细：专属渲染器优先，未注册工具走通用回退（与现状同一份折叠动效与样式） */}
+      <ToolShell open={open}>
+        {Renderer ? (
+          /* 仅在展开时挂载：lazy 分片按首次展开拉取，未展开不下载渲染器 */
+          open ? (
+            <Suspense fallback={<ToolSkeleton vibe={vibe} />}>
+              <Renderer
+                call={toolCall}
+                result={toolResult}
+                isError={isError}
+                args={toolCall.arguments}
+                vibe={vibe}
+              />
+            </Suspense>
+          ) : null
+        ) : detailLines.length > 0 ? (
+          <ToolDetailLines lines={detailLines} vibe={vibe} />
+        ) : null}
+      </ToolShell>
     </div>
   )
 }
@@ -350,7 +333,7 @@ function ToolRunGroup({ toolCalls, toolResults, vibe, defaultOpen = false, finis
       setOpen(false)
     }
   }, [finishReason, defaultOpen])
-  const visible = toolCalls.filter((tc) => tc.name !== 'spawn_agent')
+  const visible = toolCalls.filter((tc) => !isRenderedByUnifiedEntry(tc.name))
   const running = visible.some((tc) => !toolResults?.some((r) => r.toolCallId === tc.id))
   const diffMetas = useMemo(() => {
     const byPath = new Map<string, EditDiffMetaView>()
@@ -724,7 +707,7 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false 
   const isToolResult = message.role === 'tool'
   const isTruncated = message.finishReason === 'length'
   const hasThinking = !!message.thinkingContent && message.thinkingContent.length > 0
-  const hasVisibleToolCalls = message.toolCalls?.some((tc) => tc.name !== 'spawn_agent') ?? false
+  const hasVisibleToolCalls = message.toolCalls?.some((tc) => !isRenderedByUnifiedEntry(tc.name)) ?? false
   const cacheReadTokens = message.usage?.cache_read_input_tokens ?? 0
   const cacheCreatedTokens = message.usage?.cache_creation_input_tokens ?? 0
   const cacheEligibleTokens = cacheReadTokens + cacheCreatedTokens
@@ -762,6 +745,12 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false 
         </div>
       </div>
     )
+  }
+
+  // 权限审批留痕（system 消息，UI 专用，不进入模型上下文）——可折叠单行
+  const permissionAudit = message.role === 'system' ? parsePermissionAudit(message.content) : null
+  if (permissionAudit) {
+    return <PermissionAuditRow record={permissionAudit} timestamp={message.timestamp} vibe={vibe} />
   }
 
   // Compact summary message — render as collapsible card with "摘要" label
@@ -1131,7 +1120,7 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false 
           isIntermediate ? (
             <div className="w-full mt-1 flex flex-col gap-0.5">
               {message.toolCalls
-                .filter((tc) => tc.name !== 'spawn_agent')
+                .filter((tc) => !isRenderedByUnifiedEntry(tc.name))
                 .map((tc) => (
                   <ToolRow key={tc.id} toolCall={tc} result={message.toolResults} vibe={vibe} />
                 ))}

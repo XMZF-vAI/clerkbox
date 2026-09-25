@@ -1,11 +1,10 @@
-import { useEffect } from 'react'
+import { useCallback, useEffect, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useChatStore } from '../../stores/chat-store'
+import { useChatStore, getSessionAbortController } from '../../stores/chat-store'
 import { useAgent } from '../../hooks/use-agent'
 import { useSkillsStore } from '../../stores/skills-store'
-import { AlertCircle } from 'lucide-react'
 import { ipc } from '../../lib/ipc-client'
-import type { MessageAttachment, MessageSkillSnapshot, TaskMode } from '../../types/agent'
+import type { Message, MessageAttachment, MessageSkillSnapshot, TaskMode } from '../../types/agent'
 import MessageList from './MessageList'
 import ChatInput from './ChatInput'
 import ThemeWaves from './ThemeWaves'
@@ -13,6 +12,8 @@ import NEW_CHAT_ICON from '../../assets/new-chat-icon.png'
 import QuestionCard from './QuestionCard'
 import TodoListCard from './TodoListCard'
 import GoalBanner from './GoalBanner'
+import ChatErrorBanner from './ChatErrorBanner'
+import { PermissionApprovalCard } from './PermissionCard'
 
 interface ChatPageProps {
   vibe?: boolean
@@ -94,6 +95,39 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
     await sendMessage(content, attachments, taskMode, skills)
   }
 
+  // 重试：走 sendMessage 现有导出面重发最后一条用户消息（不新增 useAgent 接口）
+  const lastUserMessage = useMemo<Message | undefined>(
+    () => [...messages].reverse().find((m) => m.role === 'user'),
+    [messages]
+  )
+  // 会话仍在运行 / 正在压缩 / 无用户消息时不提供重发，避免重复入队与并发发送
+  const canRetry =
+    !!lastUserMessage &&
+    !isCurrentSessionStreaming &&
+    !isCompacting &&
+    !getSessionAbortController(sessionId)
+  const handleRetry = useCallback(() => {
+    if (!sessionId || !lastUserMessage || !canRetry) return
+    void sendMessage(
+      lastUserMessage.content,
+      lastUserMessage.attachments,
+      lastUserMessage.taskMode,
+      lastUserMessage.skills
+    )
+  }, [sessionId, lastUserMessage, canRetry, sendMessage])
+
+  const errorBanner = error ? (
+    <ChatErrorBanner
+      error={error}
+      sessionId={sessionId}
+      vibe={vibe}
+      isCompacting={isCompacting}
+      canRetry={canRetry}
+      onCompact={() => void manualCompact()}
+      onRetry={handleRetry}
+    />
+  ) : null
+
   // Welcome screen: centered layout with icon + greeting + skill loader + input
   if (isEmpty) {
     return (
@@ -131,16 +165,7 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
             </div>
           </div>
         </div>
-        {error && (
-          <div role="alert" className={`flex items-center gap-2 px-4 py-2 mx-4 mb-2 rounded-md3-sm text-sm ${
-            vibe
-              ? 'liquid-glass-subtle text-white/90'
-              : 'bg-md-error/10 border border-md-error/20 text-md-error'
-          }`}>
-            <AlertCircle size={14} className="flex-shrink-0" />
-            <span className="flex-1">{error}</span>
-          </div>
-        )}
+        {errorBanner}
         {!vibe && <ThemeWaves />}
       </div>
     )
@@ -155,16 +180,8 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
         <GoalBanner sessionId={sessionId} vibe={vibe} />
         <TodoListCard sessionId={sessionId} vibe={vibe} />
         <QuestionCard sessionId={sessionId} vibe={vibe} />
-        {error && (
-          <div role="alert" className={`flex items-center gap-2 px-4 py-2 mx-4 rounded-md3-sm text-sm ${
-            vibe
-              ? 'liquid-glass-subtle text-white/90'
-              : 'bg-md-error/10 border border-md-error/20 text-md-error'
-          }`}>
-            <AlertCircle size={14} className="flex-shrink-0" />
-            <span className="flex-1">{error}</span>
-          </div>
-        )}
+        <PermissionApprovalCard sessionId={sessionId} vibe={vibe} />
+        {errorBanner}
         <ChatInput onSend={handleSend} onStop={abort} onManualCompact={manualCompact} isCompacting={isCompacting} isStreaming={isCurrentSessionStreaming} onSendNow={sendQueuedNow} onEnqueueQueued={requestQueuedFlush} vibe={vibe} />
       </div>
     </div>
