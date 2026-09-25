@@ -64,8 +64,36 @@ if (!isElectron && typeof window !== 'undefined') {
 /** WebUI 模式下判断当前是否为 WebUI 环境（供 UI 层隐藏窗口控制按钮等） */
 export const isWebUIMode = !isElectron
 
+// ── 宿主模式（批次 B P3）：运行在 Electron 主进程内，复用同一套调用面 ──
+// agent-host 启动时注入实现，使 tool-registry / compact 等既有代码无需改动即可在
+// 主进程执行：invoke 直调 handlerRegistry（WebUI 的 /api/invoke 已验证该路径可行），
+// 流式直调 api-proxy.startChatStream（零 IPC 往返）。
+// 注意：宿主内 isElectron 恒为 false，故 isWebUIMode 亦为 true——其消费方全部是渲染层
+// 组件，主进程不会求值；本模块内的分支一律先判 hostBridge。
+export interface IpcHostBridge {
+  invoke<T>(method: string, args: unknown[]): Promise<T>
+  /** 由宿主调用 api-proxy.startChatStream，分片经 emit 回灌 chunkListeners */
+  startChatStream(
+    cfg: ApiConnConfig,
+    body: unknown,
+    requestId: string,
+    emit: (payload: ApiChunkPayload) => void
+  ): void
+  abortChatStream(requestId: string): void
+}
+
+let hostBridge: IpcHostBridge | null = null
+
+export function setIpcHostBridge(bridge: IpcHostBridge | null): void {
+  hostBridge = bridge
+}
+
+/** 当前是否运行在宿主（主进程 agent-host）内 */
+export const isHostMode = (): boolean => hostBridge !== null
+
 // ── WebUI HTTP 调用封装 ──
 async function webInvoke<T>(method: string, args: unknown[] = []): Promise<T> {
+  if (hostBridge) return hostBridge.invoke<T>(method, args)
   const res = await fetch('/api/invoke', {
     method: 'POST',
     headers: {
@@ -184,6 +212,20 @@ const chunkListeners = new Set<ChunkCallback>()
 
 /** 在途 SSE 请求：requestId → AbortController（用于 apiAbort） */
 const sseControllers = new Map<string, AbortController>()
+
+/**
+ * 宿主内流式：与 webChatStream 共用 chunkListeners 派发面，但既不经 IPC 也不经 HTTP。
+ * 消费端（api-transport / compact）看到的 requestId + apiChunk 语义与 Electron 模式一致。
+ */
+async function hostChatStream(cfg: ApiConnConfig, body: unknown): Promise<{ requestId: string }> {
+  const bridge = hostBridge
+  if (!bridge) throw new Error('ipc: host bridge not installed')
+  const requestId = `host-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  bridge.startChatStream(cfg, body, requestId, (payload) => {
+    for (const cb of chunkListeners) cb(payload)
+  })
+  return { requestId }
+}
 
 async function webChatStream(cfg: ApiConnConfig, body: unknown): Promise<{ requestId: string }> {
   const res = await fetch('/api/chat-stream', {
@@ -338,10 +380,14 @@ export const ipc = {
   // 探测模型图片输入支持（双模式均走主进程代理，靠回复内容判定而非仅 HTTP 状态）
   apiTestVision: (cfg: ApiConnConfig, modelId: string): Promise<{ ok: true; supported: boolean | null; reply?: string } | { ok: false; status?: number; error: string }> =>
     isElectron ? window.clerkbox.apiTestVision(cfg, modelId) : webInvoke('apiTestVision', [cfg, modelId]),
-  apiChatStream: (cfg: ApiConnConfig, body: unknown): Promise<{ requestId: string }> =>
-    isElectron ? window.clerkbox.apiChatStream(cfg, body) : webChatStream(cfg, body),
-  apiAbort: (requestId: string): Promise<void> =>
-    isElectron ? window.clerkbox.apiAbort(requestId) : (webAbort(requestId), Promise.resolve()),
+  apiChatStream: (cfg: ApiConnConfig, body: unknown): Promise<{ requestId: string }> => {
+    if (hostBridge) return hostChatStream(cfg, body)
+    return isElectron ? window.clerkbox.apiChatStream(cfg, body) : webChatStream(cfg, body)
+  },
+  apiAbort: (requestId: string): Promise<void> => {
+    if (hostBridge) return (hostBridge.abortChatStream(requestId), Promise.resolve())
+    return isElectron ? window.clerkbox.apiAbort(requestId) : (webAbort(requestId), Promise.resolve())
+  },
   onApiChunk: (callback: (payload: ApiChunkPayload) => void): (() => void) => {
     if (isElectron) return window.clerkbox.onApiChunk(callback)
     chunkListeners.add(callback)
