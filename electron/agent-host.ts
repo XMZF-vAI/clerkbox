@@ -499,13 +499,9 @@ export class AgentSessionManager {
 
     try {
       await runReactLoop(ports, ctx, initialMessages, controller, cmd.taskMode, cmd.skillReminder)
-      this.emit(s, { type: 'run.completed', sessionId, runId })
       return { ok: true }
     } catch (err) {
-      if (controller.signal.aborted) {
-        this.emit(s, { type: 'run.aborted', sessionId, runId, byUser: true })
-        return { ok: true }
-      }
+      if (controller.signal.aborted) return { ok: true }
       const msg = err instanceof Error ? err.message : String(err)
       s.error = msg
       console.error('[agent-host] run failed:', msg)
@@ -522,6 +518,13 @@ export class AgentSessionManager {
       ctx.activeTaskMode = null
       s.run = undefined
       s.status = 'idle'
+      // 终态单点决定：abort 落在等流窗口时循环是优雅收尾的（与渲染层现状一致），
+      // 只凭 catch 会漏报中断——UI 会显示"完成"而用户明明按了停止。
+      if (controller.signal.aborted) {
+        this.emit(s, { type: 'run.aborted', sessionId, runId, byUser: true })
+      } else {
+        this.emit(s, { type: 'run.completed', sessionId, runId })
+      }
       // 错误串随本轮收尾一并广播，下一轮 startRun 清空（渲染层错误横幅靠它显示与消失）
       this.emit(s, { type: 'run.status', sessionId, status: s.status, error: s.error })
       void this.flushQueue(s)
