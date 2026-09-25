@@ -136,6 +136,7 @@ contextBridge.exposeInMainWorld('clerkbox', {
 
   // ── Agent 宿主通道（批次 B · P3）：指令下发 / 事件订阅 / 重连快照 ──
   agentCommand: (cmd: unknown): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('agent:command', cmd),
+  agentHostMode: (): Promise<'main' | 'renderer'> => ipcRenderer.invoke('agent:host-mode'),
   agentSnapshot: (sessionId: string | undefined, sinceSeq: number): Promise<unknown> =>
     ipcRenderer.invoke('agent:snapshot', sessionId, sinceSeq),
   /** 订阅宿主事件流；返回退订函数。payload 带单调 seq，缺口即需重连补发 */

@@ -1,4 +1,5 @@
 import type { ApiCompat, MemoryEntry, MemoryType } from './agent'
+import type { AgentCommand, AgentEvent, AgentSnapshot } from '../agent-core/protocol'
 
 export interface FileEntry {
   name: string
@@ -351,6 +352,15 @@ export interface ClerkBoxAPI {
   apiChatStream: (cfg: ApiConnConfig, body: unknown) => Promise<{ requestId: string }>
   apiAbort: (requestId: string) => Promise<void>
   onApiChunk: (callback: (payload: ApiChunkPayload) => void) => () => void
+  // ── Agent 宿主通道（批次 B · P3 注册，P4 渲染层薄客户端使用）──
+  /** 渲染层 → 主进程 AgentHost 的指令下发；返回值只表示是否受理，运行结果走事件 */
+  agentCommand: (cmd: AgentCommand) => Promise<{ ok: boolean; error?: string }>
+  /** 当前运行模式：main = 编排在宿主，renderer = 仍由渲染层自跑（P6 前默认后者） */
+  agentHostMode: () => Promise<'main' | 'renderer'>
+  /** 重连取回运行态并按 sinceSeq 补发缺口事件 */
+  agentSnapshot: (sessionId: string | undefined, sinceSeq: number) => Promise<AgentSnapshot>
+  /** 订阅宿主事件流；返回退订函数。payload 带单调 seq */
+  onAgentEvent: (callback: (payload: { seq: number; event: AgentEvent }) => void) => () => void
   loadApiKeys: () => Promise<Record<string, string>>
   saveApiKey: (id: string, apiKey: string) => Promise<void>
   removeApiKey: (id: string) => Promise<void>

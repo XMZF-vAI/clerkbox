@@ -679,6 +679,8 @@ export function registerAgentHostIpc(store: ChatStore): void {
   // event 为 null 即来自 WebUI 的 /api/invoke（那边用 handler(null, ...) 直调），据此区分远程与本地
   ipcMain.handle('agent:command', (event, cmd: AgentCommand) => m.handleCommand(cmd, { remote: event === null }))
   ipcMain.handle('agent:snapshot', (_event, sessionId: string | undefined, sinceSeq?: number) => m.snapshot(sessionId, sinceSeq ?? 0))
+  // 渲染层靠它决定"自己跑循环"还是"下发指令当薄客户端"；P6 默认切 main 后此通道随之退役
+  ipcMain.handle('agent:host-mode', () => resolveAgentHostMode())
   ipcMain.on('agent:drop-session', (_event, sessionId: string) => m.dropSession(sessionId))
   console.log(`[agent-host] ready, mode=${resolveAgentHostMode()}`)
 }

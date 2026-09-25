@@ -30,6 +30,7 @@ import type {
   WebUIUploadResult,
 } from '../types/ipc'
 import type { MemoryEntry } from '../types/agent'
+import type { AgentCommand, AgentEvent, AgentSnapshot } from '../agent-core/protocol'
 
 /**
  * 统一 IPC 客户端：双模式运行。
@@ -392,6 +393,24 @@ export const ipc = {
     if (isElectron) return window.clerkbox.onApiChunk(callback)
     chunkListeners.add(callback)
     return () => { chunkListeners.delete(callback) }
+  },
+
+  // ── Agent 宿主通道（批次 B · P3 主进程注册，P4 渲染层薄客户端消费）──
+  agentCommand: (cmd: AgentCommand): Promise<{ ok: boolean; error?: string }> =>
+    isElectron ? window.clerkbox.agentCommand(cmd) : webInvoke('agent:command', [cmd]),
+  agentHostMode: (): Promise<'main' | 'renderer'> =>
+    isElectron ? window.clerkbox.agentHostMode() : webInvoke('agent:host-mode'),
+  agentSnapshot: (sessionId: string | undefined, sinceSeq: number): Promise<AgentSnapshot> =>
+    isElectron ? window.clerkbox.agentSnapshot(sessionId, sinceSeq) : webInvoke('agent:snapshot', [sessionId, sinceSeq]),
+  /**
+   * 订阅宿主事件流。WebUI 模式需要 SSE 通道 GET /api/agent/events，那是 P5 的活；
+   * 在此之前浏览器端明确退订为 no-op——静默丢失比假装连上更安全（渲染层靠 seq 缺口判定断线）。
+   */
+  onAgentEvent: (callback: (payload: { seq: number; event: AgentEvent }) => void): (() => void) => {
+    if (isElectron) return window.clerkbox.onAgentEvent(callback)
+    console.warn('[ipc] WebUI 模式下宿主事件通道尚未接入（P5），本轮运行状态不会实时回流')
+    void callback
+    return () => {}
   },
   onBrowserNewTab: (callback: (url: string) => void): (() => void) =>
     isElectron ? window.clerkbox.onBrowserNewTab(callback) : () => {},
