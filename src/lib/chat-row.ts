@@ -147,6 +147,12 @@ export function deriveSessionTitle(content: string): string {
   return content.slice(0, 30) + (content.length > 30 ? '...' : '')
 }
 
+/**
+ * 「尚未命名」的哨兵值：新建会话的初始标题，同时也是空会话判定与首条消息改名的依据。
+ * 曾经是散在 chat-store / agent-host / db 三处的字面量，任一处 i18n 化都会让其余两处静默失效。
+ */
+export const NEW_SESSION_TITLE = '新会话'
+
 /** dbUpdateMessage 的位置参数（增量回落同一条编码规则） */
 export function messageUpdateArgs(message: Message): [
   id: string,

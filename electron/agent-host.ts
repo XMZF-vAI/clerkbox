@@ -33,7 +33,7 @@ import { createSeqCounter } from '../src/agent-core/protocol'
 import type { AgentCommand, AgentEvent, AgentSnapshot } from '../src/agent-core/protocol'
 import type { AgentPorts, AgentSettings } from '../src/agent-core/ports'
 import type { MessageRow, SessionRow } from '../src/types/ipc'
-import { deriveSessionTitle, mapMessageRows, messageToRow } from '../src/lib/chat-row'
+import { deriveSessionTitle, mapMessageRows, messageToRow, messageUpdateArgs, NEW_SESSION_TITLE } from '../src/lib/chat-row'
 import type { Message, Session, SubAgentRun, TodoItem, TokenUsage } from '../src/types/agent'
 import type { QueuedMessageItem } from '../src/stores/chat-store'
 
@@ -208,7 +208,7 @@ export class AgentSessionManager {
     // 否则无人看管跑完的后台会话会全留成「新会话」。标题规则与渲染层共用一个函数。
     if (message.role === 'user') {
       const cached = sessionCache.get(s.sessionId)
-      if (cached && cached.title === '新会话') {
+      if (cached && cached.title === NEW_SESSION_TITLE) {
         cached.title = deriveSessionTitle(message.content)
         void this.store.updateSessionTitle(s.sessionId, cached.title, Date.now()).catch((err) => {
           console.error('[agent-host] updateSessionTitle failed:', err)
@@ -250,14 +250,10 @@ export class AgentSessionManager {
           if (base) {
             const next = { ...base, ...updates }
             s.messages.set(msgId, next)
-            void this.store.updateMessage(
-              next.id,
-              next.content,
-              next.toolCalls ? JSON.stringify(next.toolCalls) : undefined,
-              next.toolResults ? JSON.stringify(next.toolResults) : undefined,
-              next.thinkingContent || null,
-              next.finishReason || null
-            ).catch((err) => console.error('[agent-host] updateMessage failed:', err))
+            // 落库参数走 chat-row 的同一份编码：手抄一份列顺序正是这个模块要避免的漂移
+            void this.store
+              .updateMessage(...messageUpdateArgs(next))
+              .catch((err) => console.error('[agent-host] updateMessage failed:', err))
           }
           this.emit(s, { type: 'message.updated', sessionId, messageId: msgId, updates })
         },

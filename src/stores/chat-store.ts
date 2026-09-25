@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { ipc } from '../lib/ipc-client'
 import type { HarnessMode, Message, MessageAttachment, MessageSkillSnapshot, Session, TaskMode, ToolCall, ToolResult } from '../types/agent'
 import { normalizeHarnessMode } from '../lib/harness-modes'
-import { deriveSessionTitle, mapMessageRows, messageToRow, messageUpdateArgs } from '../lib/chat-row'
+import { deriveSessionTitle, mapMessageRows, messageToRow, messageUpdateArgs, NEW_SESSION_TITLE } from '../lib/chat-row'
 import type { SessionRow } from '../types/ipc'
 import { useInteractiveStore } from './interactive-store'
 
@@ -67,7 +67,7 @@ let lastSyncedRevision = -1
  * 任何时点都可安全删除；内存中非 active 的空会话同样是垃圾。
  */
 const isEmptySession = (s: Session): boolean =>
-  s.messages.length === 0 && s.title === '新会话'
+  s.messages.length === 0 && s.title === NEW_SESSION_TITLE
 
 /** 写入指定会话的 AbortController；若传入 null 则清除 */
 export function setSessionAbortController(sessionId: string, controller: AbortController | null): void {
@@ -182,7 +182,7 @@ const createEmptySession = (): Session => {
   const { base, sep } = getDefaultWorkDirBase()
   return {
     id: `sess-${now}-${Math.random().toString(36).slice(2, 8)}`,
-    title: '新会话',
+    title: NEW_SESSION_TITLE,
     defaultWorkDir: `${base}${sep}${formatTimestamp(now)}`,
     messages: [],
     createdAt: now,
@@ -193,7 +193,7 @@ const createEmptySession = (): Session => {
 
 /** 是否为「刚建的内存会话」（尚未写过消息）：可安全替换标题/目录，不污染历史 */
 const isPristineSession = (s: Session): boolean =>
-  s.messages.length === 0 && s.title === '新会话'
+  s.messages.length === 0 && s.title === NEW_SESSION_TITLE
 
 export const useChatStore = create<ChatState>((set, get) => ({
   sessions: [],
@@ -237,7 +237,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       for (const row of rows) {
         const msgRows = await ipc.dbGetMessages(row.id)
         // 空会话不再落库，DB 里的空壳全是遗留垃圾，启动时直接清掉
-        if (msgRows.length === 0 && row.title === '新会话') {
+        if (msgRows.length === 0 && row.title === NEW_SESSION_TITLE) {
           logPersistenceFailure('delete empty session', ipc.dbDeleteSession(row.id))
           continue
         }
@@ -298,7 +298,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
         // title 仍为'新会话'的 DB 会话：空会话不再落库，这些是遗留垃圾，
         // 拉消息确认后直接删除（有消息的'新会话'正常保留）
-        if (row.title === '新会话') {
+        if (row.title === NEW_SESSION_TITLE) {
           const msgRows = await ipc.dbGetMessages(row.id)
           if (msgRows.length === 0) {
             logPersistenceFailure('delete empty session', ipc.dbDeleteSession(row.id))
@@ -440,7 +440,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     logPersistenceFailure('add message', ipc.dbAddMessage(messageToRow(message, sessionId)))
     // Auto-update session title from first user message
     const session = get().sessions.find((s) => s.id === sessionId)
-    if (session && session.title === '新会话' && message.role === 'user') {
+    if (session && session.title === NEW_SESSION_TITLE && message.role === 'user') {
       const newTitle = deriveSessionTitle(message.content)
       set((state) => ({
         sessions: state.sessions.map((s) =>
@@ -480,7 +480,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const messages =
           index === -1 ? [...s.messages, message] : s.messages.map((m, i) => (i === index ? { ...m, ...message } : m))
         const renamed =
-          index === -1 && message.role === 'user' && s.title === '新会话' ? deriveSessionTitle(message.content) : s.title
+          index === -1 && message.role === 'user' && s.title === NEW_SESSION_TITLE ? deriveSessionTitle(message.content) : s.title
         return { ...s, messages, title: renamed, updatedAt: now }
       }),
     }))
