@@ -7,6 +7,7 @@ import * as path from 'path'
 vi.mock('electron', () => ({ ipcMain: { handle: () => {} } }))
 
 import { createChatStore } from '../electron/db'
+import { deriveSessionTitle } from '../src/lib/chat-row'
 
 const WASM_PATH = path.join(process.cwd(), 'node_modules', 'sql.js', 'dist', 'sql-wasm.wasm')
 const loadWasm = (): Buffer => fs.readFileSync(WASM_PATH)
@@ -152,6 +153,33 @@ describe('createChatStore 降级（wasm 不可用）', () => {
     await store.addMessage({ id: 'm9', session_id: 's1', role: 'user', content: 'x', timestamp: 10 })
     expect((await store.getMessages('s1')).map((m) => m.id)).toEqual(['m1', 'm2', 'm9'])
   })
+
+  it('已迁移用户遇到 wasm 缺失：绝不删库，并还原 JSON 副本使历史可见', async () => {
+    writeLegacy(workDir, legacyFixture())
+    const first = await createChatStore({ userDataDir: workDir, wasmBinary: loadWasm() })
+    first.flush()
+    // 迁移成功那一刻，旧 JSON 已被改名移走
+    expect(fs.existsSync(path.join(workDir, 'clerkbox-db.json'))).toBe(false)
+
+    const store = await createChatStore({ userDataDir: workDir }) // 无 wasm → 降级
+    expect(store.kind).toBe('json')
+    // 回归点：降级分支曾无条件 rmSync 掉 clerkbox.db，而那一刻唯一的数据源就是这个文件，
+    // 结果是「一次 wasm 读取失败 = 历史全空」，且第一次写入会重建空 JSON 让回退永久胜出。
+    expect(fs.existsSync(path.join(workDir, 'clerkbox.db'))).toBe(true)
+    expect((await store.getAllSessions()).map((s) => s.id)).toEqual(['s1', 's2'])
+  })
+
+  it('降级引擎打开空路径前先还原 .migrated-*.bak（不覆盖已存在的 JSON）', async () => {
+    writeLegacy(workDir, legacyFixture())
+    const first = await createChatStore({ userDataDir: workDir, wasmBinary: loadWasm() })
+    first.flush()
+    const stillThere = path.join(workDir, 'clerkbox-db.json')
+    writeLegacy(workDir, legacyFixture()) // 模拟外部又写回了一份 JSON
+    const rawBefore = fs.readFileSync(stillThere, 'utf-8')
+    const store = await createChatStore({ userDataDir: workDir })
+    expect(store.kind).toBe('json')
+    expect(fs.readFileSync(stillThere, 'utf-8')).toBe(rawBefore) // 有就用现成的，不拿备份去盖
+  })
 })
 
 describe('SQLite 引擎语义（与旧 JSON 引擎对齐）', () => {
@@ -159,6 +187,24 @@ describe('SQLite 引擎语义（与旧 JSON 引擎对齐）', () => {
 
   beforeEach(async () => {
     store = await createChatStore({ userDataDir: workDir, wasmBinary: loadWasm() })
+  })
+
+  it('持续写入不得把落盘无限推后：防抖有上限，流式期间也会写盘', async () => {
+    vi.useFakeTimers()
+    try {
+      const file = path.join(workDir, 'clerkbox.db')
+      fs.rmSync(file, { force: true })
+      let persisted = false
+      // 每 50ms 一次写（agent-core 的流式节流口径）：纯 300ms 防抖会被不断重置而永不落地
+      for (let i = 0; i < 60 && !persisted; i++) {
+        await store.addMessage({ id: `cap-${i}`, session_id: 's', role: 'user', content: 'x', timestamp: i })
+        vi.advanceTimersByTime(50)
+        persisted = fs.existsSync(file)
+      }
+      expect(persisted).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('addMessage 对已存在消息原位替换，保持插入序', async () => {
@@ -170,18 +216,15 @@ describe('SQLite 引擎语义（与旧 JSON 引擎对齐）', () => {
     expect(messages[0]!.content).toBe('1-更新')
   })
 
-  it('addMessage 自愈重建缺失的会话行（标题取内容前 20 字）并触碰 updated_at', async () => {
-    await store.addMessage({
-      id: 'x',
-      session_id: 'ghost',
-      role: 'user',
-      content: '这是一条用于派生标题的长内容超过二十个字符测试',
-      timestamp: 5000,
-    })
+  it('addMessage 自愈重建缺失的会话行（标题规则与渲染层/宿主同源）并触碰 updated_at', async () => {
+    const content = '这是一条用于派生标题的长内容超过二十个字符测试并且长到应当被截断'
+    await store.addMessage({ id: 'x', session_id: 'ghost', role: 'user', content, timestamp: 5000 })
     const sessions = await store.getAllSessions()
     expect(sessions).toHaveLength(1)
     expect(sessions[0]!.id).toBe('ghost')
-    expect(String(sessions[0]!.title)).toHaveLength(21) // 20 字 + 省略号
+    // 过去这里自有一套「20 字 + …」的规则，与 chat-row 的 30 字并存：自愈建行的会话
+    // 与渲染层/宿主改名的会话会长出两种标题。现在断言同源，规则改动会同时暴露。
+    expect(String(sessions[0]!.title)).toBe(deriveSessionTitle(content))
     expect(sessions[0]!.updated_at).toBe(5000)
   })
 

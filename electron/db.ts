@@ -5,9 +5,10 @@
  * 1. IPC 契约不变：db* handler 的名称/参数/返回结构与 JSON 时代完全一致，渲染层零改动。
  * 2. 迁移：首次启动检测到 clerkbox-db.json 且 SQLite 库为空时，在单事务内整体导入；
  *    成功后旧 JSON 重命名为 clerkbox-db.json.migrated-<ts>.bak 永久保留（绝不删除用户数据）。
- * 3. 降级：SQLite 初始化/迁移任何一步失败 → 删除半成品 clerkbox.db，回退到原 JSON 引擎，
- *    功能完全不受影响（错误写入日志便于诊断）。
- * 4. 写入：内存库即时生效 + 300ms 防抖落盘（tmp+rename 原子写）+ 退出前 flush；
+ * 3. 降级：SQLite 初始化/迁移任何一步失败 → 原地保留 clerkbox.db，并把迁移时改名走的
+ *    旧 JSON 副本还原回来，回退到原 JSON 引擎继续可用（绝不删任何一份既有数据）。
+ * 4. 写入：内存库即时生效 + 300ms 防抖落盘（自首次未落盘写入起最长 2s 强制落盘，
+ *    避免流式高频写把落盘无限推迟）+ tmp fsync 后 rename 的原子写 + 退出前 flush；
  *    不再有「每次写消息都 JSON.stringify 全库」的写放大。
  * 5. 整行 JSON 入 data 列：保留行的全部字段（含未来新增字段），语义与 JSON 引擎逐一对齐
  *    （upsert 原位替换、消息插入序、自愈重建会话行、updated_at 触碰规则）。
@@ -15,6 +16,7 @@
 import { ipcMain } from 'electron'
 import * as fs from 'fs'
 import * as path from 'path'
+import { NEW_SESSION_TITLE, deriveSessionTitle as truncateSessionTitle } from '../src/lib/chat-row'
 
 type Row = Record<string, unknown>
 
@@ -80,21 +82,35 @@ const LEGACY_JSON_NAME = 'clerkbox-db.json'
 const SQLITE_NAME = 'clerkbox.db'
 /** 内存库防抖落盘间隔：流式期间高频写合并成一次 export */
 const PERSIST_DEBOUNCE_MS = 300
+/** 防抖上限：流式写入每 50ms 就来一次（agent-core 的节流），只讲防抖会让落盘无限推迟，
+ *  一整轮 run 都不落盘；崩溃/退出兜底失效时丢的是整段对话。超过此时点立即写。 */
+const PERSIST_MAX_PENDING_MS = 2000
+/** 磁盘忙（EBUSY/EACCES/写入失败）后的单次重试间隔 */
+const PERSIST_RETRY_MS = 1000
 
 function isRecord(value: unknown): value is Row {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-/** 会话自愈行的标题派生（与旧 JSON 引擎同规则：首条消息前 20 字） */
+/** 会话自愈行的标题派生：切割规则取自 chat-row 的唯一实现（此处曾自有一套 20 字规则，
+ *  与渲染层/宿主的 30 字规则并存，导致自愈建行的会话与正常改名的会话标题长度不一致） */
 function deriveSessionTitle(content: unknown): string {
   const text = typeof content === 'string' ? content.trim().replace(/\s+/g, ' ') : ''
-  return text ? (text.length > 20 ? text.slice(0, 20) + '…' : text) : '新会话'
+  return text ? truncateSessionTitle(text) : NEW_SESSION_TITLE
 }
 
-/** 原子写文件：tmp + rename，rename 失败降级 copy（与 rt-account 同模式） */
+/** 原子写文件：tmp + fsync + rename，rename 失败降级 copy（与 rt-account 同模式） */
 function writeFileAtomic(filePath: string, data: Buffer | string): void {
   const tmp = `${filePath}.tmp-${process.pid}`
-  fs.writeFileSync(tmp, data)
+  // 先写 tmp 再 rename：rename 是原子替换，但缓冲区里的字节不是。
+  // 不 fsync 就改名，掉电后可能把「路径已替换、内容为空」的文件留下来当真库。
+  const fd = fs.openSync(tmp, 'w')
+  try {
+    fs.writeFileSync(fd, data)
+    fs.fsyncSync(fd)
+  } finally {
+    fs.closeSync(fd)
+  }
   try {
     fs.renameSync(tmp, filePath)
   } catch (err) {
@@ -104,6 +120,42 @@ function writeFileAtomic(filePath: string, data: Buffer | string): void {
       fs.rmSync(tmp, { force: true })
     }
     if (!fs.existsSync(filePath)) throw err
+  }
+}
+
+/** kv 里的 recents 可能是空串/非 JSON（外来写入或半截状态）：宽容解析。
+ *  这一步抛错会把整个 SQLite 引擎打回 JSON 降级分支，代价与数据丢失同量级。 */
+function parseRecentsValue(value: unknown): string[] {
+  if (typeof value !== 'string' || !value) return []
+  try {
+    const parsed: unknown = JSON.parse(value)
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * 降级到 JSON 引擎前的自愈：迁移成功那一刻旧 JSON 被改名成 `*.migrated-<ts>.bak`，
+ * 若此时直接去开不存在的 legacyPath，用户看到的就是「历史全空」。
+ * 只复制一份回来，绝不删除任何一份既有文件。
+ */
+function restoreLegacyJson(legacyPath: string): void {
+  if (fs.existsSync(legacyPath)) return
+  const dir = path.dirname(legacyPath)
+  const prefix = `${path.basename(legacyPath)}.migrated-`
+  try {
+    const backups = fs
+      .readdirSync(dir)
+      .filter((name) => name.startsWith(prefix) && name.endsWith('.bak'))
+      .map((name) => ({ name, stamp: Number(name.slice(prefix.length, -4)) || 0 }))
+      .sort((a, b) => b.stamp - a.stamp)
+    const newest = backups[0]
+    if (!newest) return
+    fs.copyFileSync(path.join(dir, newest.name), legacyPath)
+    console.warn(`[db] 降级到 JSON 引擎：已从 ${newest.name} 还原旧库副本`)
+  } catch (error) {
+    console.error('[db] 还原旧库副本失败，只能按空库继续：', error)
   }
 }
 
@@ -168,6 +220,9 @@ function asString(value: unknown, fallback = ''): string {
 class SqliteChatStore implements ChatStore {
   readonly kind = 'sqlite' as const
   private persistTimer: ReturnType<typeof setTimeout> | null = null
+  /** 首次未落盘写入的时刻（0 = 无待落盘内容）；用于给防抖设上限 */
+  private pendingSince = 0
+  private retryTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor(
     private readonly db: SqlJsDatabase,
@@ -180,21 +235,40 @@ class SqliteChatStore implements ChatStore {
   private afterMutation(): void {
     this.revision += 1
     this.db.run(`INSERT OR REPLACE INTO kv (key, value) VALUES ('revision', ?)`, [String(this.revision)])
+    const now = Date.now()
+    if (!this.pendingSince) this.pendingSince = now
     if (this.persistTimer) clearTimeout(this.persistTimer)
-    this.persistTimer = setTimeout(() => this.flush(), PERSIST_DEBOUNCE_MS)
+    // 常规 300ms 防抖，但自第一次未落盘写入起最多再等 PERSIST_MAX_PENDING_MS：
+    // 持续写入（流式）只能推迟落盘，不能无限期取消它
+    const deadline = this.pendingSince + PERSIST_MAX_PENDING_MS - now
+    if (deadline <= 0) {
+      this.persistTimer = null
+      this.flush()
+      return
+    }
+    this.persistTimer = setTimeout(() => this.flush(), Math.min(PERSIST_DEBOUNCE_MS, deadline))
     this.persistTimer.unref?.()
   }
 
-  /** 强制落盘（同步）：退出路径与防抖回调共用；失败只记日志不影响内存态 */
+  /** 强制落盘（同步）：退出路径与防抖回调共用；失败记日志并择机重试一次 */
   flush(): void {
     if (this.persistTimer) {
       clearTimeout(this.persistTimer)
       this.persistTimer = null
     }
+    this.pendingSince = 0
     try {
       writeFileAtomic(this.filePath, Buffer.from(this.db.export()))
     } catch (error) {
       console.error('[db] sqlite persist failed:', error)
+      // 磁盘忙/临时锁定多是瞬时的：静默失败等于此后整段对话只活在内存里
+      if (!this.retryTimer) {
+        this.retryTimer = setTimeout(() => {
+          this.retryTimer = null
+          this.flush()
+        }, PERSIST_RETRY_MS)
+        this.retryTimer.unref?.()
+      }
     }
   }
 
@@ -776,17 +850,17 @@ export async function createChatStore(options: CreateChatStoreOptions): Promise<
       db,
       sqlitePath,
       Number(revisionRow[0]?.values[0]?.[0] ?? 0) || 0,
-      JSON.parse(String(recentsRow[0]?.values[0]?.[0] ?? '[]')) as string[],
+      parseRecentsValue(recentsRow[0]?.values[0]?.[0]),
     )
     store.flush() // 迁移/建库后立即落盘，确保崩溃不丢迁移成果
     return store
   } catch (error) {
-    // 降级：删除半成品库文件（如有），回退旧 JSON 引擎，功能与数据完全不受影响
-    console.error('[db] SQLite init/migrate failed, falling back to legacy JSON store:', error)
-    try {
-      if (fs.existsSync(sqlitePath)) fs.copyFileSync(sqlitePath, `${sqlitePath}.failed-${Date.now()}.bak`)
-      if (fs.existsSync(sqlitePath)) fs.rmSync(sqlitePath, { force: true })
-    } catch { /* 清理失败不阻塞降级 */ }
+    // 降级必须非破坏：这里曾经删掉过 clerkbox.db，而那一刻旧 JSON 早已在迁移时改名移走，
+    // 结果一次 wasm 读取失败（杀软占用 / asarUnpack 漂移）就把已迁移用户打成「历史全空」，
+    // 且第一次写入会重建空 JSON，下次启动按「空库 + 旧 JSON 存在」再迁移，回退分支永久胜出。
+    // 现在：库文件原地保留，只还原一份 JSON 副本继续干活。
+    console.error('[db] SQLite init/migrate failed, falling back to legacy JSON store (sqlite file kept):', error)
+    restoreLegacyJson(legacyPath)
     return new JsonChatStore(legacyPath)
   }
 }
