@@ -29,6 +29,7 @@ import { systemMedia } from './system-media'
 import { registerTerminalHandlers, disposeAllTerminals } from './terminal'
 import { initUpdater, isAgentBusyNow } from './updater'
 import { initMainLogger, registerLogIpcHandlers } from './logger'
+import { createChatStore, registerDbIpcHandlers, type ChatStore } from './db'
 import {
   initTray,
   isTrayAvailable,
@@ -47,6 +48,16 @@ import type { AccountSyncKind, McpMarketConnection, McpServerConfig, SystemMedia
 
 // 日志初始化必须最先执行：此后主进程所有 console.* 同步落盘（见 electron/logger.ts）
 initMainLogger()
+
+/** 加载 sql.js 的 wasm 二进制（dev：项目根 node_modules；打包：app.asar 内路径，fs 自动重定向 unpacked） */
+function loadSqlWasmBinary(): Buffer | undefined {
+  try {
+    return fs.readFileSync(path.join(app.getAppPath(), 'node_modules', 'sql.js', 'dist', 'sql-wasm.wasm'))
+  } catch (error) {
+    console.error('[db] failed to load sql-wasm.wasm, chat store will use legacy JSON engine:', error)
+    return undefined
+  }
+}
 
 const SKILL_REQUEST_TIMEOUT_MS = 15_000
 const MAX_SKILL_FILE_BYTES = 512 * 1024
@@ -471,8 +482,10 @@ let mainWindow: BrowserWindow | null = null
 let isQuitting = false
 /** 渲染层 TrayBridge 是否已挂载：就绪前点击托盘里的会话须暂存待发（否则"首点无效"） */
 let trayRendererReady = false
-/** 最近会话读取器：由 registerIpcHandlers 内的 DB 闭包注入（自带 mtime+size 缓存） */
+/** 最近会话读取器：由 registerIpcHandlers 注入存储层查询（A3 起直读 SQLite，无需 mtime 缓存） */
 let recentSessionsProvider: (() => Promise<TraySessionItem[]>) | null = null
+/** 会话存储引擎引用（A3）：供 before-quit 强制落盘 */
+let chatStoreRef: ChatStore | null = null
 
 // 单实例锁：防止多开导致 MCP / PTY 子进程、凭据与数据库文件等单例资源互相竞争。
 // 抢锁失败说明已有实例在运行，直接退出；成功则监听二次启动事件，聚焦已有主窗口
@@ -770,7 +783,7 @@ function enqueueMemWrite<T>(op: () => Promise<T> | T): Promise<T> {
   return promise
 }
 
-function registerIpcHandlers() {
+function registerIpcHandlers(chatStore: ChatStore) {
   // 日志转发与诊断导出（log:write / diagExport，见 electron/logger.ts）
   registerLogIpcHandlers()
   // Dialogs remain usable while the main window is closing or has not been created.
@@ -1905,307 +1918,11 @@ function registerIpcHandlers() {
     }
   )
 
-  // Database operations (JSON file with serialized, durable writes)
-  const dbPath = path.join(app.getPath('userData'), 'clerkbox-db.json')
-  let dbWriteQueue: Promise<void> = Promise.resolve()
-
-  /** Serialize writes while allowing callers to observe failures. */
-  function enqueueDbWrite(fn: () => void): Promise<void> {
-    const write = dbWriteQueue.then(fn)
-    dbWriteQueue = write.catch((err) => {
-      console.error('DB write failed:', err)
-    })
-    return write
-  }
-
-  interface Database {
-    sessions: Record<string, unknown>[]
-    messages: Record<string, Record<string, unknown>[]>
-    recentsFolders?: string[]
-    /** 全局修订号：任何写入都会自增，供另一端检测数据变化 */
-    revision?: number
-  }
-
-  function readDb(): Database {
-    try {
-      if (fs.existsSync(dbPath)) {
-        const parsed: unknown = JSON.parse(fs.readFileSync(dbPath, 'utf-8'))
-        if (parsed && typeof parsed === 'object') {
-          const data = parsed as Record<string, unknown>
-          return {
-            sessions: Array.isArray(data.sessions) ? data.sessions.filter(isRecord) : [],
-            messages: isRecord(data.messages)
-              ? Object.fromEntries(
-                  Object.entries(data.messages).map(([id, rows]) => [
-                    id,
-                    Array.isArray(rows) ? rows.filter(isRecord) : [],
-                  ])
-                )
-              : {},
-            recentsFolders: Array.isArray(data.recentsFolders)
-              ? data.recentsFolders.filter((folder): folder is string => typeof folder === 'string')
-              : [],
-            revision: typeof data.revision === 'number' ? data.revision : 0,
-          }
-        }
-        throw new Error('Database root must be an object')
-      }
-    } catch {
-      try {
-        const backupPath = dbPath + '.backup.' + Date.now()
-        if (fs.existsSync(dbPath)) {
-          fs.copyFileSync(dbPath, backupPath)
-          console.error('DB corrupt, backed up to:', backupPath)
-        }
-      } catch { /* Preserve the original corruption error if backup creation also fails. */ }
-    }
-    return { sessions: [], messages: {}, recentsFolders: [], revision: 0 }
-  }
-
-  /** Write through a sibling temporary file to avoid corrupting the database on interruption. */
-  function writeDb(db: Database) {
-    // 任何写入都自增全局修订号，供另一端的 syncFromDb 廉价检测变化
-    db.revision = (db.revision || 0) + 1
-    const tempPath = `${dbPath}.tmp-${process.pid}`
-    fs.writeFileSync(tempPath, JSON.stringify(db, null, 2), 'utf-8')
-    try {
-      fs.renameSync(tempPath, dbPath)
-    } catch (err) {
-      try {
-        fs.copyFileSync(tempPath, dbPath)
-      } finally {
-        fs.rmSync(tempPath, { force: true })
-      }
-      if (!fs.existsSync(dbPath)) throw err
-    }
-  }
-
-  /** 消息变更时同步刷新会话 updated_at，让另一端的 syncFromDb 能检测到变化 */
-  function touchSessionUpdatedAt(db: Database, sessionId: string, ts: number): void {
-    const session = db.sessions.find((s) => s.id === sessionId)
-    if (session) session.updated_at = ts
-  }
-
-  ipcMain.handle('dbCreateSession', async (_event, row: Record<string, unknown>) => {
-    await enqueueDbWrite(() => {
-      if (typeof row?.id !== 'string' || !row.id) throw new Error('Invalid session row')
-      const db = readDb()
-      const existingIndex = db.sessions.findIndex((session) => session.id === row.id)
-      if (existingIndex === -1) db.sessions.push(row)
-      else db.sessions[existingIndex] = { ...db.sessions[existingIndex], ...row }
-      if (!db.messages[row.id]) db.messages[row.id] = []
-      writeDb(db)
-    })
-  })
-
-  ipcMain.handle('dbUpdateSessionTitle', async (_event, id: string, title: string, updatedAt: number) => {
-    await enqueueDbWrite(() => {
-      const db = readDb()
-      const session = db.sessions.find((s) => s.id === id)
-      if (session) {
-        session.title = title
-        session.updated_at = updatedAt
-      }
-      writeDb(db)
-    })
-  })
-
-  ipcMain.handle('dbDeleteSession', async (_event, id: string) => {
-    await enqueueDbWrite(() => {
-      const db = readDb()
-      db.sessions = db.sessions.filter((s) => s.id !== id)
-      delete db.messages[id]
-      writeDb(db)
-    })
-  })
-
-  ipcMain.handle('dbGetAllSessions', async () => {
-    // Read-only — no write serialization needed, but must wait for pending writes
-    await dbWriteQueue
-    return readDb().sessions
-  })
-
-  ipcMain.handle('dbGetRecents', async () => {
-    await dbWriteQueue
-    return readDb().recentsFolders || []
-  })
-
-  ipcMain.handle('dbGetRevision', async () => {
-    await dbWriteQueue
-    return readDb().revision || 0
-  })
-
-  // ── 托盘菜单的最近会话（供 electron/tray.ts 注入使用）──
-  // 直读 DB（不依赖渲染进程：macOS 关窗销毁窗口、WebUI 端新建会话都能覆盖），按 updated_at
-  // 降序（与 Sidebar / chat-store 同口径）。readDb() 会解析整个 DB 文件（含全部消息体），
-  // 而菜单 5s 刷新一次，故用 mtime+size 做缓存键：写库走「临时文件 + rename」，mtime 必变。
-  let cachedTraySessions: TraySessionItem[] = []
-  let cachedTraySessionsKey = ''
-  recentSessionsProvider = async () => {
-    await dbWriteQueue
-    try {
-      const stat = fs.statSync(dbPath)
-      const key = `${stat.mtimeMs}:${stat.size}`
-      if (key === cachedTraySessionsKey) return cachedTraySessions
-      cachedTraySessions = readDb().sessions
-        .map((row) => ({
-          id: typeof row.id === 'string' ? row.id : '',
-          title: typeof row.title === 'string' ? row.title : '',
-          updatedAt: typeof row.updated_at === 'number' ? row.updated_at : 0,
-        }))
-        .filter((row) => row.id !== '')
-        .sort((a, b) => b.updatedAt - a.updatedAt)
-      cachedTraySessionsKey = key
-      return cachedTraySessions
-    } catch {
-      // 读失败（文件被占用/损坏）时退回上一次结果，菜单不因异常而空
-      return cachedTraySessions
-    }
-  }
-
-  ipcMain.handle('dbSetRecents', async (_event, recents: string[]) => {
-    await enqueueDbWrite(() => {
-      const db = readDb()
-      db.recentsFolders = Array.isArray(recents)
-        ? recents.filter((folder) => typeof folder === 'string').slice(0, 8)
-        : []
-      writeDb(db)
-    })
-  })
-
-  ipcMain.handle('dbAddMessage', async (_event, row: Record<string, unknown>) => {
-    await enqueueDbWrite(() => {
-      if (typeof row?.id !== 'string' || !row.id || typeof row.session_id !== 'string' || !row.session_id) {
-        throw new Error('Invalid message row')
-      }
-      const db = readDb()
-      if (!db.messages[row.session_id]) {
-        db.messages[row.session_id] = []
-      }
-      const msgs = db.messages[row.session_id]
-      // Upsert by message id so repeated stream writes do not duplicate history.
-      const existingIdx = msgs.findIndex((m) => m.id === row.id)
-      if (existingIdx !== -1) {
-        msgs[existingIdx] = { ...msgs[existingIdx], ...row }
-      } else {
-        msgs.push(row)
-      }
-      const ts = typeof row.timestamp === 'number' ? row.timestamp : Date.now()
-      // 会话行可能被另一端的空会话清理误删 → 消息成孤儿，另一端永远看不到。
-      // 这里自愈：行缺失时用首条消息内容派生标题重建。
-      if (!db.sessions.some((s) => s.id === row.session_id)) {
-        const text = typeof row.content === 'string' ? row.content.trim().replace(/\s+/g, ' ') : ''
-        db.sessions.push({
-          id: row.session_id,
-          title: text ? (text.length > 20 ? text.slice(0, 20) + '…' : text) : '新会话',
-          created_at: ts,
-          updated_at: ts,
-        })
-      }
-      // 同步刷新会话 updated_at，让另一端的 syncFromDb 能检测到消息变化
-      touchSessionUpdatedAt(db, row.session_id, ts)
-      writeDb(db)
-    })
-  })
-
-  ipcMain.handle(
-    'dbUpdateMessage',
-    async (
-      _event,
-      id: string,
-      content: string,
-      toolCalls?: string,
-      toolResults?: string,
-      thinkingContent?: string | null,
-      finishReason?: string | null
-    ) => {
-      await enqueueDbWrite(() => {
-        const db = readDb()
-        let found = false
-        for (const [sessionId, msgs] of Object.entries(db.messages)) {
-          const msg = msgs.find((m) => m.id === id)
-          if (msg) {
-            msg.content = content
-            if (toolCalls !== undefined) msg.tool_calls = toolCalls
-            if (toolResults !== undefined) msg.tool_results = toolResults
-            if (thinkingContent !== undefined) msg.thinking_content = thinkingContent
-            if (finishReason !== undefined) msg.finish_reason = finishReason
-            // 同步刷新会话 updated_at，让另一端的 syncFromDb 能检测到消息变化
-            touchSessionUpdatedAt(db, sessionId, Date.now())
-            found = true
-            break
-          }
-        }
-        if (found) writeDb(db)
-      })
-    }
-  )
-
-  ipcMain.handle('dbGetMessages', async (_event, sessionId: string) => {
-    await dbWriteQueue
-    const db = readDb()
-    return db.messages[sessionId] || []
-  })
-
-  ipcMain.handle('dbDeleteMessagesBefore', async (_event, sessionId: string, beforeId: string) => {
-    await enqueueDbWrite(() => {
-      const db = readDb()
-      const msgs = db.messages[sessionId]
-      if (!msgs) return
-
-      // Find the index of the message with beforeId
-      const idx = msgs.findIndex((m) => m.id === beforeId)
-      if (idx === -1) return
-
-      // deleteBeforeId means "delete everything that came before this message"
-      // So we keep from idx onwards (the message with beforeId and everything after it),
-      // and delete everything before idx
-      db.messages[sessionId] = msgs.slice(idx)
-      writeDb(db)
-    })
-  })
-
-  // 清空指定 session 的所有消息（用于 compactSession 的「清空再重写」策略）
-  ipcMain.handle('dbClearMessages', async (_event, sessionId: string) => {
-    await enqueueDbWrite(() => {
-      const db = readDb()
-      db.messages[sessionId] = []
-      writeDb(db)
-    })
-  })
-
-  // 原子压缩：单次写入内整体替换该 session 的消息列表。
-  // 旧「清空再逐条重写」两步间崩溃会丢失全会话历史；这里借助 writeDb 的
-  // tmp+rename 原子性一次落盘完成替换，不存在清空后未写回的中间态。
-  // 最坏情况（写入失败）旧数据完好，仅压缩未生效。
-  ipcMain.handle('dbCompactMessages', async (_event, sessionId: string, rows: Record<string, unknown>[]) => {
-    await enqueueDbWrite(() => {
-      if (typeof sessionId !== 'string' || !sessionId || !Array.isArray(rows)) {
-        throw new Error('Invalid compact payload')
-      }
-      for (const row of rows) {
-        if (!isRecord(row) || typeof row.id !== 'string' || !row.id) {
-          throw new Error('Invalid message row in compact payload')
-        }
-      }
-      const db = readDb()
-      db.messages[sessionId] = [...rows]
-      // 会话行可能缺失（如被另一端清理）→ 与 dbAddMessage 同策略自愈重建
-      if (rows.length > 0 && !db.sessions.some((s) => s.id === sessionId)) {
-        const last = rows[rows.length - 1]
-        const ts = typeof last.timestamp === 'number' ? last.timestamp : Date.now()
-        const text = typeof last.content === 'string' ? last.content.trim().replace(/\s+/g, ' ') : ''
-        db.sessions.push({
-          id: sessionId,
-          title: text ? (text.length > 20 ? text.slice(0, 20) + '…' : text) : '新会话',
-          created_at: ts,
-          updated_at: ts,
-        })
-      }
-      touchSessionUpdatedAt(db, sessionId, Date.now())
-      writeDb(db)
-    })
-  })
+  // ── 会话存储（A3：SQLite 主引擎 + 旧 JSON 降级兜底，实现见 electron/db.ts）──
+  // IPC 契约（db* handler 名称/参数/返回）与 JSON 时代完全一致，渲染层零感知。
+  registerDbIpcHandlers(chatStore)
+  // 托盘菜单的最近会话：直读存储层（SQLite 下是廉价索引查询，不再需要 mtime 缓存）
+  recentSessionsProvider = () => chatStore.getRecentSessions()
 
   // A restricted slug prevents skill-directory traversal.
   function assertSafeSlug(slug: string): string {
@@ -3832,7 +3549,7 @@ function cleanupOldSpillFiles(): void {
   } catch { /* 清理失败静默忽略 */ }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   // 播种内置预装技能到 ~/.clerkbox/skills/（幂等：已存在且版本不旧则跳过）
   seedPresetSkills()
 
@@ -3840,7 +3557,15 @@ app.whenReady().then(() => {
   cleanupOldSpillFiles()
   setInterval(cleanupOldSpillFiles, 60 * 60 * 1000).unref()
 
-  registerIpcHandlers()
+  // 会话存储引擎（A3）：SQLite 主引擎（含旧 JSON 自动迁移），失败自动降级旧 JSON 引擎
+  const chatStore = await createChatStore({
+    userDataDir: app.getPath('userData'),
+    wasmBinary: loadSqlWasmBinary(),
+  })
+  chatStoreRef = chatStore
+  console.log(`[db] chat store engine: ${chatStore.kind}`)
+
+  registerIpcHandlers(chatStore)
   createWindow()
 
   // ── 系统托盘（三段式菜单：显示窗口 / 对话记录 / 退出）──
@@ -3945,6 +3670,8 @@ app.on('before-quit', (event) => {
   winAcrylic.dispose()
   systemMedia.dispose()
   disposeAllTerminals()
+  // A3：退出前强制落盘会话存储（SQLite 防抖未落的变更在此收口）
+  chatStoreRef?.flush()
   void (async () => {
     try {
       await Promise.race([

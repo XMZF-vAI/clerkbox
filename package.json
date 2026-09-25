@@ -96,7 +96,8 @@
       "resources/preset-skills/**/*"
     ],
     "asarUnpack": [
-      "node_modules/node-pty/**"
+      "node_modules/node-pty/**",
+      "node_modules/sql.js/dist/*.wasm"
     ],
     "win": {
       "target": [
