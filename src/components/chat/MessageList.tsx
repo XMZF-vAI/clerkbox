@@ -25,6 +25,7 @@ import {
   peekSessionScroll,
   rememberSessionScroll,
   resolveScrollRestore,
+  type ScrollRestoreDecision,
   type SessionScrollMemory,
 } from '../../lib/session-scroll-memory'
 
@@ -196,21 +197,36 @@ const TurnPanel = memo(function TurnPanel({ turn, isLastTurn, isStreaming, vibe 
   )
 }, areTurnPanelPropsEqual)
 
-/** 挂载时的滚动落点：有记忆按记忆恢复，无记忆（或上次贴底）则看最新消息——与虚拟化前一致 */
-function planInitialScroll(
-  turns: Turn[],
-  sizes: number[],
-  memory: SessionScrollMemory | undefined
-): { offset: number; atBottom: boolean } {
-  const decision = resolveScrollRestore(turns, memory)
+/** 滚动停住多久之后补一次「行锚点」记忆（锚点要读全部行矩形，不能每个 scroll 事件都读） */
+const SCROLL_MEMORY_SETTLE_MS = 200
+
+/**
+ * 首帧滚动落位：底部与行顶都只认真实 DOM。
+ * 早先这里返回的是「估算总高」，而估算口径是 184+72/条（`TURN_BASE_PX`），
+ * 带代码块或工具输出的真实 turn 远高于它——写进 scrollTop 后浏览器不会替你夹到底，
+ * 于是打开会话停在中间，且非流式时「回到底部」按钮并不出现，用户没有逃生口。
+ */
+function applyInitialScroll(el: HTMLDivElement, decision: ScrollRestoreDecision, sizes: number[]): void {
   if (decision.kind === 'turn') {
-    return { offset: estimateStartPx(sizes, decision.index) + decision.offsetWithinTurn, atBottom: false }
+    const row = el.querySelector<HTMLElement>(`[data-turn-index="${decision.index}"]`)
+    // 行已在 DOM 里（未虚拟化分支必然如此）：按真实矩形对齐，避免估算坐标与真实坐标两套体系混用
+    if (row) {
+      el.scrollTop += row.getBoundingClientRect().top - el.getBoundingClientRect().top + decision.offsetWithinTurn
+      return
+    }
+    el.scrollTop = estimateStartPx(sizes, decision.index) + decision.offsetWithinTurn
+    return
   }
   if (decision.kind === 'offset') {
-    return { offset: decision.offset, atBottom: false }
+    el.scrollTop = decision.offset
+    return
   }
-  // 'bottom'：写入时浏览器自然夹到真实底部，同时让虚拟列表首帧就渲染末段行
-  return { offset: estimateTotalSizePx(sizes), atBottom: true }
+  el.scrollTop = el.scrollHeight
+}
+
+/** 挂载时的滚动落点：有记忆按记忆恢复，无记忆（或上次贴底）则看最新消息——与虚拟化前一致 */
+function planInitialScroll(turns: Turn[], memory: SessionScrollMemory | undefined): ScrollRestoreDecision {
+  return resolveScrollRestore(turns, memory)
 }
 
 /** 行矩形取 DOM 真实值，两条渲染分支同一套口径（行用 data-turn-index 标记，与虚拟库共用） */
@@ -238,6 +254,13 @@ function captureScrollMemory(el: HTMLDivElement, turns: Turn[], distance: number
   }
 }
 
+/** 虚拟列表首帧要渲染哪一段：那套坐标系由估算行高构成，与真实 DOM 几何无关 */
+function estimateOffsetFor(decision: ScrollRestoreDecision, sizes: number[]): number {
+  if (decision.kind === 'bottom') return estimateTotalSizePx(sizes)
+  if (decision.kind === 'offset') return decision.offset
+  return estimateStartPx(sizes, decision.index) + decision.offsetWithinTurn
+}
+
 export default function MessageList({ messages, isStreaming, sessionId, vibe }: MessageListProps) {
   const { t } = useTranslation()
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -248,9 +271,9 @@ export default function MessageList({ messages, isStreaming, sessionId, vibe }: 
   const turns = useMemo(() => groupIntoTurns(messages), [messages])
   const turnSizes = useMemo(() => turnSizeEstimates(turns), [turns])
 
-  const [scrollPlan] = useState(() => planInitialScroll(turns, turnSizes, peekSessionScroll(sessionId)))
+  const [scrollPlan] = useState(() => planInitialScroll(turns, peekSessionScroll(sessionId)))
   // 用户上翻后置 true：配合 isStreaming 控制悬浮「回到底部」按钮的显隐
-  const [awayFromBottom, setAwayFromBottom] = useState(!scrollPlan.atBottom)
+  const [awayFromBottom, setAwayFromBottom] = useState(scrollPlan.kind !== 'bottom')
   const [virtualized, setVirtualized] = useState(() => turns.length >= VIRTUALIZE_MIN_TURNS)
 
   const useVirtual = shouldVirtualizeTurns(turns.length, virtualized, !awayFromBottom)
@@ -281,21 +304,37 @@ export default function MessageList({ messages, isStreaming, sessionId, vibe }: 
     rangeExtractor,
     indexAttribute: 'data-turn-index',
     overscan: VIRTUAL_OVERSCAN,
-    initialOffset: () => scrollPlan.offset,
+    initialOffset: () => estimateOffsetFor(scrollPlan, sizesRef.current),
   })
 
   // Only auto-scroll while the user is already near the latest message.
+  const memoryRef = useRef<SessionScrollMemory | null>(null)
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
+    let settleTimer: ReturnType<typeof setTimeout> | null = null
+    const capture = () => captureScrollMemory(el, turnsRef.current, distanceToBottomPx(el.scrollTop, el.scrollHeight, el.clientHeight))
     const onScroll = () => {
       const distance = distanceToBottomPx(el.scrollTop, el.scrollHeight, el.clientHeight)
       isNearBottomRef.current = isNearBottomDistance(distance)
       setAwayFromBottom(!isNearBottomRef.current)
-      if (sessionId) rememberSessionScroll(sessionId, captureScrollMemory(el, turnsRef.current, distance))
+      // 锚点要读每一行的真实矩形（querySelectorAll + 每行一次 getBoundingClientRect），
+      // 挂在每个 scroll 事件上等于每帧强制重排一次。改成滚动停住后补锚点，
+      // 其间只刷新便宜的 scrollTop / 贴底标记，卸载时拿这份近似值记忆。
+      if (!memoryRef.current) memoryRef.current = capture()
+      else memoryRef.current = { ...memoryRef.current, offset: el.scrollTop, atBottom: isNearBottomDistance(distance) }
+      if (settleTimer) clearTimeout(settleTimer)
+      settleTimer = setTimeout(() => {
+        settleTimer = null
+        memoryRef.current = capture()
+      }, SCROLL_MEMORY_SETTLE_MS)
     }
     el.addEventListener('scroll', onScroll, { passive: true })
-    return () => el.removeEventListener('scroll', onScroll)
+    return () => {
+      el.removeEventListener('scroll', onScroll)
+      if (settleTimer) clearTimeout(settleTimer)
+      if (sessionId && memoryRef.current) rememberSessionScroll(sessionId, memoryRef.current)
+    }
   }, [sessionId])
 
   // 滚动落位在布局阶段写入：浏览器绘制前就位，长会话首帧不会先画顶部再跳底。
@@ -305,7 +344,7 @@ export default function MessageList({ messages, isStreaming, sessionId, vibe }: 
     const el = scrollRef.current
     if (!el) return
     restoredRef.current = true
-    el.scrollTop = scrollPlan.offset
+    applyInitialScroll(el, scrollPlan, sizesRef.current)
     const distance = distanceToBottomPx(el.scrollTop, el.scrollHeight, el.clientHeight)
     isNearBottomRef.current = isNearBottomDistance(distance)
     setAwayFromBottom(!isNearBottomRef.current)
