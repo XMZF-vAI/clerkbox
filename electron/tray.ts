@@ -100,8 +100,10 @@ function configPath(): string {
 }
 
 /**
- * 托盘图标：Windows / Linux 用透明底品牌字形；macOS 用模板图（纯黑 + alpha，
- * 系统按 alpha 自动适配深浅色菜单栏，文件名须含 Template 且 @2x 同名）。
+ * 托盘图标：应用图标（CB 立方体）的托盘版，由 `npm run gen:tray-icons` 从 build/icon.png
+ * 量出字形包围盒、裁切降采样生成。Windows / Linux 保留深色圆角底（托盘底色可能是浅色，
+ * 只留白色字形会看不见）；macOS 用「纯黑 + alpha」模板图（系统按 alpha 自动适配深浅色
+ * 菜单栏，文件名须含 Template 且 @2x 同名）。
  */
 function trayIconPath(): string {
   const file = process.platform === 'darwin'
