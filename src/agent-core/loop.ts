@@ -43,9 +43,6 @@ import type {
 import type { AgentPorts, AgentSettings } from './ports'
 import type { SessionContext } from './session-context'
 
-/** Vite 注入的 env（tsconfig 未含 vite/client 类型，安全取值） */
-const IS_DEV = (import.meta as unknown as { env?: { DEV?: boolean } }).env?.DEV ?? false
-
 export const makeId = (): string => `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
 /** 每张多模态图片的固定 token 粗估成本（视觉输入按图片 token 计价，粗估 1000/张，用于截断/预算估算） */
@@ -652,7 +649,7 @@ function buildAPIMessages(
   // dev 校验：静态段在同来源下跨请求必须字节一致——若未来有人把易变内容
   // （时间戳/记忆/技能索引等）塞回静态段，这里立刻暴露，避免缓存命中率悄悄归零。
   // 来源含 harness 模式：切换会话/模式导致的静态段变化属正常现象，不算泄漏。
-  if (IS_DEV) {
+  if (ports.env.isDev) {
     const origin = extraSystemPrompt ? 'sub' : `main:${harnessMode}`
     const hash = hashString(staticSystemContent)
     const prev = ctx.staticSystemHash

@@ -202,6 +202,7 @@ function makePorts(opts: {
     platform: 'win32',
     osDescription: 'Windows 11 (test)',
     shellDescription: 'PowerShell',
+    isDev: false,
     homeDir: () => 'C:\\Users\\tester',
     readFile: vi.fn(async () => ''),
     runShell: vi.fn(async () => ({ exitCode: 1, stdout: '' })), // git 探测恒为非仓库

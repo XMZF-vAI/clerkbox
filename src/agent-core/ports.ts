@@ -101,6 +101,11 @@ export interface AgentEnvPort {
   platform: string
   osDescription: string
   shellDescription: string
+  /**
+   * 开发态标记。由宿主注入而非 import.meta.env.DEV：agent-core 同时要能被
+   * CommonJS 目标（electron 主进程）编译，import.meta 在该目标下是语法错误。
+   */
+  isDev: boolean
   homeDir(): string
   readFile(path: string): Promise<string>
   /** git 仓库探测专用（execute_commandWithShell 语义：exitCode + stdout） */

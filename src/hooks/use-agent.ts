@@ -160,6 +160,8 @@ export function useAgent(sessionId: string) {
       platform: navigator.platform || 'unknown',
       osDescription: getOsDescription(),
       shellDescription: getShellDescription(),
+      // Vite 注入的开发态标记（agent-core 侧不能直接用 import.meta，主进程为 CommonJS）
+      isDev: (import.meta as unknown as { env?: { DEV?: boolean } }).env?.DEV ?? false,
       homeDir: () => ipc.homeDir(),
       readFile: (path) => ipc.readFile(path),
       runShell: (command, cwd) => ipc.executeCommandWithShell(command, cwd, 'cmd'),

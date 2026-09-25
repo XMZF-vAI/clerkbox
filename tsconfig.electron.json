@@ -10,6 +10,6 @@
     "jsx": "preserve",
     "allowImportingTsExtensions": false
   },
-  "include": ["electron"],
-  "exclude": ["src"]
+  "include": ["electron", "src/agent-core"],
+  "exclude": []
 }
