@@ -15,11 +15,91 @@
         height: 100%;
         overflow: hidden;
       }
+
+      /* ── 启动遮罩 ──
+         底色不能依赖 --dark-surface-rgb：dev 模式 Vite 的 CSS 由 JS 注入，
+         首帧这些变量还不存在，必须按 .dark 类硬编码（theme-init.js 已提前设好该类）。 */
+      #clerkbox-startup {
+        --startup-fg: 26 26 26;
+        position: fixed;
+        inset: 0;
+        z-index: 2147483647;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        background: #fafafa;
+        /* 透明窗口下与主界面的 rounded-xl 对齐，避免启动瞬间露出方角 */
+        border-radius: 12px;
+        /* 遮罩盖住整个窗口，期间仍可拖动窗口 */
+        -webkit-app-region: drag;
+        transition: opacity 0.2s ease;
+      }
+      html.dark #clerkbox-startup {
+        --startup-fg: 235 235 235;
+        background: #121212;
+      }
+      html.clerkbox-startup-square #clerkbox-startup { border-radius: 0; }
+      html.clerkbox-startup-hidden #clerkbox-startup { opacity: 0; pointer-events: none; }
+
+      #clerkbox-startup-logo {
+        width: 96px;
+        height: 96px;
+        opacity: 0;
+        transform: scale(0.72);
+        transform-origin: center;
+        animation: clerkbox-logo-pop 0.72s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+      }
+      @keyframes clerkbox-logo-pop {
+        0%   { opacity: 0; transform: scale(0.72); }
+        38%  { opacity: 1; transform: scale(1.045); }
+        58%  { transform: scale(0.985); }
+        76%  { transform: scale(1.008); }
+        100% { opacity: 1; transform: scale(1); }
+      }
+
+      .clerkbox-startup-progress {
+        position: relative;
+        width: 160px;
+        height: 2px;
+        margin-top: 36px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: rgb(var(--startup-fg) / 0.14);
+      }
+      .clerkbox-startup-progress::after {
+        content: "";
+        position: absolute;
+        inset: 0 auto 0 0;
+        width: 40%;
+        border-radius: inherit;
+        background: rgb(var(--startup-fg) / 0.65);
+        animation: clerkbox-progress-slide 1.15s ease-in-out infinite;
+      }
+      @keyframes clerkbox-progress-slide {
+        0%   { transform: translateX(-100%); }
+        100% { transform: translateX(250%); }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        #clerkbox-startup-logo { opacity: 1; transform: none; animation: none; }
+        .clerkbox-startup-progress::after { animation: none; width: 100%; }
+      }
     </style>
     <script src="/theme-init.js"></script>
   </head>
   <body>
     <div id="root"></div>
+    <div
+      id="clerkbox-startup"
+      role="status"
+      aria-busy="true"
+      aria-label="ClerkBox"
+    >
+      <img id="clerkbox-startup-logo" src="./icon.png" alt="" draggable="false" />
+      <div class="clerkbox-startup-progress" aria-hidden="true"></div>
+    </div>
+    <script src="./startup-init.js"></script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

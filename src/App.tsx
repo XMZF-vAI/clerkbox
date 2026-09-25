@@ -4,6 +4,7 @@ import Sidebar from './components/layout/Sidebar'
 import TitleBar from './components/layout/TitleBar'
 import WorkbenchPanel from './components/workbench/WorkbenchPanel'
 import { useSettingsStore, migrateProvidersIfNeeded, hydrateProviderApiKeys } from './stores/settings-store'
+import { useChatStore } from './stores/chat-store'
 import { initMcp } from './stores/mcp-store'
 import { useUpdaterStore } from './stores/updater-store'
 import { useAccountStore } from './stores/account-store'
@@ -97,6 +98,16 @@ export default function App() {
 
   useEffect(() => window.clerkbox?.onWindowStateChange(setIsMaximized), [])
   useEffect(() => useSettingsStore.persist.onFinishHydration(() => setHydrated(true)), [])
+
+  // 启动遮罩退场信号（见 index.html 的 #clerkbox-startup 与 public/startup-init.js）：
+  // 设置水合与会话载入都完成才派发，遮罩不会在数据未就绪时提前揭开空列表。
+  // 欢迎页不挂载 ChatPage、不会触发 loadFromDb，此时界面本身已可交互，同样视为就绪。
+  const sessionsReady = useChatStore((s) => s.initialized)
+  useEffect(() => {
+    if (!hydrated) return
+    if (!sessionsReady && hasCompletedOnboarding) return
+    window.dispatchEvent(new Event('clerkbox-startup-ready'))
+  }, [hydrated, sessionsReady, hasCompletedOnboarding])
 
   // 启动后稍作空闲预取设置页 chunk，首次打开即点即开、不再闪白（延迟加载，不影响启动）
   useEffect(() => {
