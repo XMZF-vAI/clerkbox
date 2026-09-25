@@ -21,6 +21,7 @@ import { estimateTokensForText } from '../lib/token-estimate'
 import { SYSTEM_PROMPT } from '../lib/prompts'
 import { findAgent } from '../lib/agent-registry'
 import { useAgentRunsStore } from '../stores/agent-runs-store'
+import { agentClient } from '../lib/agent-client'
 import { useShallow } from 'zustand/react/shallow'
 import { notifyIfNotViewing } from '../lib/notify'
 import { openChatStream } from '../lib/api-transport'
@@ -95,6 +96,8 @@ export function useAgent(sessionId: string) {
   const setStreaming = useChatStore((s) => s.setStreaming)
   const compactSession = useChatStore((s) => s.compactSession)
   const setSessionStatus = useChatStore((s) => s.setSessionStatus)
+  // 宿主模式下的运行期失败经事件回流到 store；本地路径仍用下面的 error state
+  const hostError = useChatStore((s) => s.sessionErrors[sessionId])
   // 「本次运行」状态按 sessionId 隔离（per-session 并发）：多会话同时跑 ReAct 循环时，
   // 后台会话的 run 仍持有自己的 SessionContext（token 锚点/读取快照/任务模式）。
   const contextsRef = useRef(new SessionContextStore())
@@ -189,6 +192,28 @@ export function useAgent(sessionId: string) {
       if (!settings.apiKey && requiresApiKey(settings.baseUrl, activeProvider?.presetId)) {
         setError(i18n.t('agent.needApiKey'))
         return false
+      }
+
+      // 宿主模式（批次 B · P4）：入口守卫照旧在本地判定（沿用同一套友好报错），通过后
+      // 把这一轮整个交给主进程 AgentHost——界面状态一律靠事件回流，本地不再跑循环。
+      if ((await agentClient.ensureMode()) === 'main') {
+        if (taskMode === 'goal' && content.trim()) useGoalStore.getState().setGoal(sessionId, content.trim())
+        const catalog = useSkillsStore.getState().getSkillCatalog()
+        const res = await agentClient.send({
+          type: 'run',
+          sessionId,
+          content,
+          attachments,
+          taskMode,
+          skills,
+          settings,
+          skillCatalog: catalog,
+          skillReminder: buildRelevantSkillReminder(content, catalog) ?? undefined,
+          goal: useGoalStore.getState().bySession[sessionId] ?? null,
+          todos: useTodoStore.getState().bySession[sessionId] ?? [],
+        })
+        if (!res.ok) setError(res.error ?? i18n.t('agent.busy'))
+        return res.ok
       }
 
       setError(null)
@@ -345,6 +370,11 @@ export function useAgent(sessionId: string) {
    *  仅两处差异：trigger 标记为 'manual'、支持可选自定义指令（留空则行为等同自动压缩）。 */
   const manualCompact = useCallback(
     async (customInstructions?: string) => {
+      if (agentClient.getState().mode === 'main') {
+        // 宿主模式：压缩由宿主的同一套编排执行，占位提示与结果都走事件回流
+        void agentClient.send({ type: 'manual.compact', sessionId, instructions: customInstructions })
+        return
+      }
       // 重入防护 + Agent 运行中忽略（避免与 ReAct 循环中途的消息状态冲突）
       if (isCompactingRef.current || getSessionAbortController(sessionId)) return
       if (!settings.baseUrl) {
@@ -461,6 +491,13 @@ export function useAgent(sessionId: string) {
   }, [sessionId, manualCompact, getContextUsage])
 
   const abort = useCallback(() => {
+    if (agentClient.getState().mode === 'main') {
+      // 宿主模式：中断指令交给宿主（它会停模型流并杀本会话 shell），界面状态等事件回流
+      void agentClient.send({ type: 'abort', sessionId })
+      void ipc.cancelSessionCommands(sessionId).catch(() => { /* ignore */ })
+      useInteractiveStore.getState().cancelQuestion(sessionId)
+      return
+    }
     // per-session abort：只中止当前会话的 controller，不影响其他并发会话
     const ctrl = getSessionAbortController(sessionId)
     if (ctrl) {
@@ -479,5 +516,5 @@ export function useAgent(sessionId: string) {
     }
   }, [sessionId])
 
-  return { sendMessage, abort, manualCompact, isCompacting, error, sendQueuedNow, requestQueuedFlush: scheduleQueuedFlush }
+  return { sendMessage, abort, manualCompact, isCompacting, error: hostError ?? error, sendQueuedNow, requestQueuedFlush: scheduleQueuedFlush }
 }

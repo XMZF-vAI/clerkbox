@@ -139,6 +139,14 @@ export function messageToRow(message: Message, sessionId: string): MessageRow {
   }
 }
 
+/**
+ * 会话标题：取首条用户消息前 30 字。渲染层与宿主必须同一条规则，
+ * 否则宿主改名与本地即时改名会给出两种标题。
+ */
+export function deriveSessionTitle(content: string): string {
+  return content.slice(0, 30) + (content.length > 30 ? '...' : '')
+}
+
 /** dbUpdateMessage 的位置参数（增量回落同一条编码规则） */
 export function messageUpdateArgs(message: Message): [
   id: string,

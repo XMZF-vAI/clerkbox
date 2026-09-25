@@ -6,13 +6,13 @@
  * 因为那需要读当前状态，纯函数做不到。
  */
 import type { AgentEvent } from '../agent-core/protocol'
-import type { ContextUsageInfo } from './context-usage'
 import type { Message, SessionGoal, SubAgentRun, TodoItem, UserQuestion } from '../types/agent'
 import type { QueuedMessageItem, SessionStatus } from '../stores/chat-store'
 
 export type StorePatch =
   | { kind: 'set-streaming'; sessionId: string; on: boolean }
-  | { kind: 'set-status'; sessionId: string; status: SessionStatus | null }
+  /** error 为 null 表示清除，undefined 表示不改动当前错误串 */
+  | { kind: 'set-status'; sessionId: string; status: SessionStatus | null; error?: string | null }
   | { kind: 'upsert-message'; sessionId: string; message: Message }
   | { kind: 'update-message'; sessionId: string; messageId: string; updates: Partial<Message> }
   /** 流式增量：应用侧按 messageId 追加到已有内容，重复投递不在此处去重 */
@@ -20,7 +20,6 @@ export type StorePatch =
   | { kind: 'set-queue'; sessionId: string; items: QueuedMessageItem[] }
   | { kind: 'set-todos'; sessionId: string; items: TodoItem[] }
   | { kind: 'set-goal'; sessionId: string; goal: SessionGoal | null }
-  | { kind: 'set-usage'; sessionId: string; usage: ContextUsageInfo }
   | { kind: 'upsert-subagent-run'; sessionId: string; run: SubAgentRun }
   | { kind: 'open-question'; sessionId: string; requestId: string; questions: UserQuestion[] }
   | { kind: 'notify'; sessionId: string; channel: 'error' | 'done' | 'confirm-danger'; message?: string }
@@ -37,7 +36,8 @@ export function planAgentEvent(event: AgentEvent): StorePatch[] {
     case 'run.started':
       return [
         { kind: 'set-streaming', sessionId: event.sessionId, on: true },
-        { kind: 'set-status', sessionId: event.sessionId, status: 'working' },
+        // 新一轮开始即清上一次的错误串：失败要留在横幅上，直到用户再次发起
+        { kind: 'set-status', sessionId: event.sessionId, status: 'working', error: null },
       ]
     case 'run.completed':
       return [
@@ -51,9 +51,9 @@ export function planAgentEvent(event: AgentEvent): StorePatch[] {
       ]
     case 'run.status': {
       const patches: StorePatch[] = [{ kind: 'set-streaming', sessionId: event.sessionId, on: event.status !== 'idle' }]
-      // 宿主的 awaiting 对应渲染层的危险确认态；error 串由错误横幅单独消费
+      // 宿主的 awaiting 对应渲染层的危险确认态；error 串交给横幅，不改状态机
       const status: SessionStatus | null = event.status === 'awaiting' ? 'confirm-danger' : event.status === 'working' ? 'working' : null
-      patches.push({ kind: 'set-status', sessionId: event.sessionId, status })
+      patches.push({ kind: 'set-status', sessionId: event.sessionId, status, error: event.error })
       return patches
     }
     case 'message.added':
@@ -78,7 +78,8 @@ export function planAgentEvent(event: AgentEvent): StorePatch[] {
     case 'subagent.updated':
       return [{ kind: 'upsert-subagent-run', sessionId: event.sessionId, run: event.run }]
     case 'usage.updated':
-      return [{ kind: 'set-usage', sessionId: event.sessionId, usage: event.usage }]
+      // 宿主目前不广播用量（P3 只在宿主侧留档），上下文指示器的宿主化属 P5 范围
+      return []
     case 'notify':
       return [{ kind: 'notify', sessionId: event.sessionId, channel: event.kind, message: event.message }]
     case 'resync':

@@ -23,14 +23,21 @@ describe('运行态事件 → 流式与状态标记', () => {
     }
   })
 
-  it('run.status 三态映射：awaiting→confirm-danger，idle→清状态且熄流', () => {
+  it('run.status 三态映射：awaiting→confirm-danger，idle→清状态且熄流；error 串随补丁走', () => {
     expect(planAgentEvent({ type: 'run.status', sessionId: 's1', status: 'awaiting' })).toEqual([
       { kind: 'set-streaming', sessionId: 's1', on: true },
-      { kind: 'set-status', sessionId: 's1', status: 'confirm-danger' },
+      { kind: 'set-status', sessionId: 's1', status: 'confirm-danger', error: undefined },
     ])
     expect(planAgentEvent({ type: 'run.status', sessionId: 's1', status: 'idle', error: 'boom' })).toEqual([
       { kind: 'set-streaming', sessionId: 's1', on: false },
-      { kind: 'set-status', sessionId: 's1', status: null },
+      { kind: 'set-status', sessionId: 's1', status: null, error: 'boom' },
+    ])
+  })
+
+  it('新一轮开始即清除上一次的错误串（失败要留在横幅上直到用户再次发起）', () => {
+    expect(planAgentEvent({ type: 'run.started', sessionId: 's1', runId: 'r1', ts: 1 })).toEqual([
+      { kind: 'set-streaming', sessionId: 's1', on: true },
+      { kind: 'set-status', sessionId: 's1', status: 'working', error: null },
     ])
   })
 })
@@ -76,14 +83,12 @@ describe('审批与其余通道', () => {
     ])
   })
 
-  it('goal/usage/todos/subagent 各归各位（usage 不能被塞进 goal 补丁）', () => {
+  it('goal/todos/subagent 各归各位；usage 当前由宿主留档不广播', () => {
     expect(planAgentEvent({ type: 'goal.updated', sessionId: 's1', goal: null })).toEqual([
       { kind: 'set-goal', sessionId: 's1', goal: null },
     ])
     const usage = { total: 10, budget: 100, autoCompactThreshold: 80, categories: [] }
-    expect(planAgentEvent({ type: 'usage.updated', sessionId: 's1', usage })).toEqual([
-      { kind: 'set-usage', sessionId: 's1', usage },
-    ])
+    expect(planAgentEvent({ type: 'usage.updated', sessionId: 's1', usage })).toEqual([])
     expect(planAgentEvent({ type: 'todos.updated', sessionId: 's1', items: [] })).toEqual([
       { kind: 'set-todos', sessionId: 's1', items: [] },
     ])

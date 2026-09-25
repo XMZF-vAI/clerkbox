@@ -33,7 +33,7 @@ import { createSeqCounter } from '../src/agent-core/protocol'
 import type { AgentCommand, AgentEvent, AgentSnapshot } from '../src/agent-core/protocol'
 import type { AgentPorts, AgentSettings } from '../src/agent-core/ports'
 import type { MessageRow, SessionRow } from '../src/types/ipc'
-import { mapMessageRows, messageToRow } from '../src/lib/chat-row'
+import { deriveSessionTitle, mapMessageRows, messageToRow } from '../src/lib/chat-row'
 import type { Message, Session, SubAgentRun, TodoItem, TokenUsage } from '../src/types/agent'
 import type { QueuedMessageItem } from '../src/stores/chat-store'
 
@@ -204,6 +204,17 @@ export class AgentSessionManager {
     void this.store.addMessage(messageToRow(message, s.sessionId) as never).catch((err) => {
       console.error('[agent-host] addMessage failed:', err)
     })
+    // 首条用户消息定标题：本地路径由渲染层做同一件事，宿主模式必须宿主自己来做，
+    // 否则无人看管跑完的后台会话会全留成「新会话」。标题规则与渲染层共用一个函数。
+    if (message.role === 'user') {
+      const cached = sessionCache.get(s.sessionId)
+      if (cached && cached.title === '新会话') {
+        cached.title = deriveSessionTitle(message.content)
+        void this.store.updateSessionTitle(s.sessionId, cached.title, Date.now()).catch((err) => {
+          console.error('[agent-host] updateSessionTitle failed:', err)
+        })
+      }
+    }
     this.emit(s, { type: 'message.added', sessionId: s.sessionId, message })
   }
 
@@ -400,6 +411,8 @@ export class AgentSessionManager {
       case 'abort': {
         if (!s.run) return { ok: false, error: 'no-run' }
         s.run.controller.abort()
+        // 中断语义（计划 §5.4）：停模型流 + 杀本会话仍在跑的 shell + 清运行态，缺一不可
+        void ipc.cancelSessionCommands(s.sessionId).catch(() => { /* 主进程未注册该 handler 时无害 */ })
         return { ok: true }
       }
       case 'queue.enqueue':

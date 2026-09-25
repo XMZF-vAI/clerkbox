@@ -34,8 +34,14 @@ export interface AgentClientOptions {
 }
 
 export interface AgentClient {
-  /** 订阅并判定模式。返回 true 表示宿主模式已接管编排，调用方才该把运行交给它 */
+  /** 订阅并判定模式。返回 true 表示宿主模式已接管编排，调用方才该把运行交给宿主 */
   start(): Promise<boolean>
+  /**
+   * 拿到确定的模式答案：尚未 start 过就就地启动。
+   * 发消息前必须走这里——否则应用刚启动、模式还没问出来那一刻会被误判成本地路径，
+   * 结果本地循环与宿主循环同时跑一遍（同一会话两份请求、两份落库）。
+   */
+  ensureMode(): Promise<'main' | 'renderer'>
   stop(): void
   send(cmd: AgentCommand): Promise<{ ok: boolean; error?: string }>
   subscribe(listener: (event: AgentEvent, seq: number) => void): () => void
@@ -121,22 +127,28 @@ export function createAgentClient(
     }
   }
 
+  async function startInner(): Promise<boolean> {
+    if (started) return mode === 'main'
+    started = true
+    const resolved = await transport.mode().catch(() => 'renderer' as const)
+    mode = resolved
+    if (resolved !== 'main') {
+      // renderer 模式下不建订阅：省一份常驻开销，也避免把 no-op 通道当"已连接"
+      setConnection('offline')
+      return false
+    }
+    unsubEvents = transport.onEvent(handlePayload)
+    setConnection('connected')
+    // 冷启动与 F5 都靠这一次把窗口期内产生的事件补回来（lastSeq 从 0 起，即整环回放）
+    await resync()
+    return true
+  }
+
   return {
-    async start() {
-      if (started) return mode === 'main'
-      started = true
-      const resolved = await transport.mode().catch(() => 'renderer' as const)
-      mode = resolved
-      if (resolved !== 'main') {
-        // renderer 模式下不建订阅：省一份常驻开销，也避免把 no-op 通道当"已连接"
-        setConnection('offline')
-        return false
-      }
-      unsubEvents = transport.onEvent(handlePayload)
-      setConnection('connected')
-      // 冷启动与 F5 都靠这一次把窗口期内产生的事件补回来（lastSeq 从 0 起，即整环回放）
-      await resync()
-      return true
+    start: startInner,
+    async ensureMode() {
+      if (!started) await startInner()
+      return mode ?? 'renderer'
     },
     stop() {
       started = false

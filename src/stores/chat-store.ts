@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { ipc } from '../lib/ipc-client'
 import type { HarnessMode, Message, MessageAttachment, MessageSkillSnapshot, Session, TaskMode, ToolCall, ToolResult } from '../types/agent'
 import { normalizeHarnessMode } from '../lib/harness-modes'
-import { mapMessageRows, messageToRow, messageUpdateArgs } from '../lib/chat-row'
+import { deriveSessionTitle, mapMessageRows, messageToRow, messageUpdateArgs } from '../lib/chat-row'
 import type { SessionRow } from '../types/ipc'
 import { useInteractiveStore } from './interactive-store'
 
@@ -111,6 +111,17 @@ interface ChatState {
   loadFromDb: () => Promise<void>
   /** 增量同步：从 DB 拉取最新会话/消息，合并进内存状态（跳过正在流式的会话，避免覆盖本地流式内容） */
   syncFromDb: () => Promise<void>
+
+  // ── 宿主模式回灌（批次 B · P4）：只改内存，一律不落库——运行期持久化由宿主独占 ──
+  /** 幂等 upsert：整环回放必然与 DB 已加载的消息重叠，重复投递不能长出两条 */
+  remoteUpsertMessage: (sessionId: string, message: Message) => void
+  remoteUpdateMessage: (sessionId: string, messageId: string, updates: Partial<Message>) => void
+  remoteAppendContent: (sessionId: string, messageId: string, text: string) => void
+  /** 宿主的 queue.snapshot 是全量视图，整段替换本地队列 */
+  setQueuedMessages: (sessionId: string, items: QueuedMessageItem[]) => void
+  /** 宿主广播的运行期失败：宿主模式下错误横幅的数据源（本地路径仍用 useAgent 的 error） */
+  sessionErrors: Record<string, string | undefined>
+  setSessionError: (sessionId: string, error?: string) => void
 }
 
 /** 排队消息条目：字段与 sendMessage 入参对齐，自动发出时原样透传 */
@@ -192,6 +203,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   queuedMessages: {},
   recentsFolders: [],
   initialized: false,
+  sessionErrors: {},
 
   enqueueQueuedMessage: (sessionId, item) =>
     set((state) => ({
@@ -429,7 +441,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Auto-update session title from first user message
     const session = get().sessions.find((s) => s.id === sessionId)
     if (session && session.title === '新会话' && message.role === 'user') {
-      const newTitle = message.content.slice(0, 30) + (message.content.length > 30 ? '...' : '')
+      const newTitle = deriveSessionTitle(message.content)
       set((state) => ({
         sessions: state.sessions.map((s) =>
           s.id === sessionId ? { ...s, title: newTitle } : s
@@ -457,6 +469,53 @@ export const useChatStore = create<ChatState>((set, get) => ({
       scheduleMessagePersistence(sessionId, msg, msg._isStreaming !== true)
     }
   },
+
+  /** 宿主事件回灌：幂等 upsert（同 id 合并而不是追加），并沿用同一套会话标题规则 */
+  remoteUpsertMessage: (sessionId, message) => {
+    const now = Date.now()
+    set((state) => ({
+      sessions: state.sessions.map((s) => {
+        if (s.id !== sessionId) return s
+        const index = s.messages.findIndex((m) => m.id === message.id)
+        const messages =
+          index === -1 ? [...s.messages, message] : s.messages.map((m, i) => (i === index ? { ...m, ...message } : m))
+        const renamed =
+          index === -1 && message.role === 'user' && s.title === '新会话' ? deriveSessionTitle(message.content) : s.title
+        return { ...s, messages, title: renamed, updatedAt: now }
+      }),
+    }))
+  },
+
+  remoteUpdateMessage: (sessionId, messageId, updates) => {
+    set((state) => ({
+      sessions: state.sessions.map((s) =>
+        s.id === sessionId
+          ? { ...s, messages: s.messages.map((m) => (m.id === messageId ? { ...m, ...updates } : m)), updatedAt: Date.now() }
+          : s
+      ),
+    }))
+  },
+
+  /** 流式增量：只长内容，落库由宿主负责 */
+  remoteAppendContent: (sessionId, messageId, text) => {
+    set((state) => ({
+      sessions: state.sessions.map((s) =>
+        s.id === sessionId
+          ? { ...s, messages: s.messages.map((m) => (m.id === messageId ? { ...m, content: m.content + text } : m)) }
+          : s
+      ),
+    }))
+  },
+
+  setQueuedMessages: (sessionId, items) =>
+    set((state) => ({
+      queuedMessages: { ...state.queuedMessages, [sessionId]: items },
+    })),
+
+  setSessionError: (sessionId, error) =>
+    set((state) => ({
+      sessionErrors: { ...state.sessionErrors, [sessionId]: error },
+    })),
 
   setStreaming: (streaming, sessionId) => {
     const sid = sessionId || get().activeSessionId

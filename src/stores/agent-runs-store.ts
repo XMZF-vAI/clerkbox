@@ -8,6 +8,8 @@ interface AgentRunsState {
   selectedRunId: string | null
 
   addSubAgentRun: (sessionId: string, run: SubAgentRun) => void
+  /** 宿主模式回灌：同 id 覆盖，不同 id 追加 */
+  upsertSubAgentRun: (sessionId: string, run: SubAgentRun) => void
   appendSubAgentMessage: (sessionId: string, runId: string, msg: Message) => void
   updateSubAgentMessage: (sessionId: string, runId: string, msgId: string, updates: Partial<Message>) => void
   completeSubAgentRun: (sessionId: string, runId: string, result: string) => void
@@ -31,6 +33,19 @@ export const useAgentRunsStore = create<AgentRunsState>((set) => ({
         [sessionId]: [...(state.runsBySession[sessionId] || []), run],
       },
     })),
+
+  /** 宿主模式下按 id 覆盖：整环回放会把同一个 run 推多次，append 会长出重复卡片 */
+  upsertSubAgentRun: (sessionId, run) =>
+    set((state) => {
+      const runs = state.runsBySession[sessionId] || []
+      const index = runs.findIndex((r) => r.id === run.id)
+      return {
+        runsBySession: {
+          ...state.runsBySession,
+          [sessionId]: index === -1 ? [...runs, run] : runs.map((r, i) => (i === index ? run : r)),
+        },
+      }
+    }),
 
   appendSubAgentMessage: (sessionId, runId, msg) =>
     set((state) => {

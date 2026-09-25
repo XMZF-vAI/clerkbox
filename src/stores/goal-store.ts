@@ -16,6 +16,8 @@ interface GoalState {
   updateGoal: (sessionId: string, patch: Partial<SessionGoal>) => void
   /** 清除目标（/goal clear 或用户在状态条上清除） */
   clearGoal: (sessionId: string) => void
+  /** 宿主模式回灌：整体覆盖为宿主给出的目标快照 */
+  upsertGoal: (sessionId: string, goal: SessionGoal) => void
 }
 
 export const useGoalStore = create<GoalState>()(
@@ -44,6 +46,9 @@ export const useGoalStore = create<GoalState>()(
           },
         }
       }),
+      upsertGoal: (sessionId, goal) => set((state) => ({
+        bySession: { ...state.bySession, [sessionId]: goal },
+      })),
       clearGoal: (sessionId) => set((state) => {
         const next = { ...state.bySession }
         delete next[sessionId]
