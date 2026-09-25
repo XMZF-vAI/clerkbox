@@ -14,7 +14,7 @@ import { initScheduledTasks, useScheduledTasksStore } from './stores/scheduled-t
 import TaskRunHost from './components/scheduled/TaskRunHost'
 import TrayBridge from './components/system/TrayBridge'
 import CommandPalette from './components/ui/CommandPalette'
-import { applyColorScheme, applyAppFont, resolveSeed } from './lib/theme-engine'
+import { applyColorScheme, applyAppFont, applyUiScale, resolveSeed } from './lib/theme-engine'
 import { I18nProvider } from './components/I18nProvider'
 import { isWebUIMode } from './lib/ipc-client'
 import { useIsMobile } from './hooks/use-mobile'
@@ -36,6 +36,7 @@ function ThemeProvider({ children }: { children: React.ReactNode }) {
   const colorScheme = useSettingsStore((s) => s.colorScheme)
   const customSeedColor = useSettingsStore((s) => s.customSeedColor)
   const appFont = useSettingsStore((s) => s.appFont)
+  const uiScale = useSettingsStore((s) => s.uiScale)
   const [hydrated, setHydrated] = useState(false)
 
   useEffect(() => {
@@ -72,6 +73,12 @@ function ThemeProvider({ children }: { children: React.ReactNode }) {
     if (!hydrated) return
     applyAppFont(appFont)
   }, [appFont, hydrated])
+
+  // 字号缩放：同上，theme-init.js 先于 React 预设 --ui-font-size
+  useEffect(() => {
+    if (!hydrated) return
+    applyUiScale(uiScale ?? 1)
+  }, [uiScale, hydrated])
 
   return <>{children}</>
 }

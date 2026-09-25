@@ -6,6 +6,9 @@
 :root {
   /* 全局字体栈（出厂黑体系）：applyAppFont('serif') 时在 documentElement 上内联覆盖 */
   --app-font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  /* 字号缩放基准（= rem base）：applyUiScale 写 16px * scale；16px 正是 Chromium UA 默认 root 字号，
+     故 scale=100% 时所有旧 rem 类名逐像素不变 */
+  --ui-font-size: 16px;
   --md-primary-rgb: 26 26 26;
   --md-onPrimary-rgb: 255 255 255;
   --md-primaryContainer-rgb: 227 227 227;
@@ -33,6 +36,13 @@
   --md-success-rgb: 76 175 80;
   --md-warning-rgb: 255 152 0;
   --md-info-rgb: 33 150 243;
+
+  /* ── Agent 交互语义色：ask=等待审批（琥珀），confirmation=危险确认（红）
+     固定基线，不进入 applyColorScheme 的 seed 生成链（theme-engine 覆写时自动跳过） ── */
+  --md-ask-surface-rgb: 255 236 179;
+  --md-ask-onSurface-rgb: 110 70 0;
+  --md-confirmation-surface-rgb: 255 222 220;
+  --md-confirmation-onSurface-rgb: 124 22 20;
 
   --dark-surface-rgb: 250 250 250;
   --dark-surfaceDim-rgb: 245 245 245;
@@ -88,6 +98,11 @@
   --md-success-rgb: 165 214 167;
   --md-warning-rgb: 255 204 128;
   --md-info-rgb: 144 202 249;
+
+  --md-ask-surface-rgb: 78 58 12;
+  --md-ask-onSurface-rgb: 255 214 130;
+  --md-confirmation-surface-rgb: 88 32 28;
+  --md-confirmation-onSurface-rgb: 255 209 204;
 
   --dark-surface-rgb: 18 18 18;
   --dark-surfaceDim-rgb: 10 10 10;
@@ -283,6 +298,7 @@
 @layer base {
   html {
     font-family: var(--app-font-family);
+    font-size: var(--ui-font-size);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }

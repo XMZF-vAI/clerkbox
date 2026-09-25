@@ -9,8 +9,8 @@ import { sharedStorage } from '../lib/shared-storage'
 interface SettingsState extends AppSettings {
   showSettings: boolean
   /** 一次性 transient 标记：侧边栏账户入口等点击后，SettingsPage 挂载时定位到指定 tab（不持久化，消费即清空） */
-  pendingSettingsTab?: 'account' | 'mcp'
-  updateSettings: (partial: Partial<AppSettings & { showSettings?: boolean; pendingSettingsTab?: 'account' | 'mcp' }>) => void
+  pendingSettingsTab?: 'account' | 'mcp' | 'api'
+  updateSettings: (partial: Partial<AppSettings & { showSettings?: boolean; pendingSettingsTab?: 'account' | 'mcp' | 'api' }>) => void
   resetSettings: () => void
   /** 添加/更新提供商 */
   upsertProvider: (provider: ModelProvider) => void
@@ -33,6 +33,7 @@ const defaultSettings: AppSettings = {
   maxTokens: 16000,
   theme: 'dark',
   appFont: 'default',
+  uiScale: 1,
   colorScheme: 'classic',
   customSeedColor: '#F4A7B9',
   language: 'zh-CN',

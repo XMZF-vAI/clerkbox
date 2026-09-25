@@ -6,7 +6,7 @@ import {
 import { useTranslation } from 'react-i18next'
 import { useSettingsStore } from '../../stores/settings-store'
 import { useVibeStore } from '../../stores/vibe-store'
-import { MACARON_PRESETS, schemeSwatches } from '../../lib/theme-engine'
+import { MACARON_PRESETS, schemeSwatches, UI_SCALE_OPTIONS } from '../../lib/theme-engine'
 import { SUPPORTED_LANGUAGES } from '../../i18n'
 import ProvidersSection from './ProvidersSection'
 import McpSection from './McpSection'
@@ -50,6 +50,7 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
   // mac 走系统原生"关窗不退出"，不提供关闭行为选择（见 trayMacNote）
   const isMacPlatform = window.clerkbox?.platform === 'darwin'
   const sessionLimitOptions = [3, 5, 8]
+  const uiScaleValue = settings.uiScale ?? 1
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle')
   const [testError, setTestError] = useState('')
   const [showResetConfirmation, setShowResetConfirmation] = useState(false)
@@ -431,6 +432,30 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
                         }`}
                       >
                         {t(FONT_LABEL_KEY[font])}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-ui-sm font-medium mb-2 block">{t('settings.appearance.uiScaleTitle')}</label>
+                  <p className="text-xs text-dark-onSurfaceVariant/60 mt-0.5 mb-2">
+                    {t('settings.appearance.uiScaleDesc')}
+                  </p>
+                  <div className="flex gap-2">
+                    {UI_SCALE_OPTIONS.map((scale) => (
+                      <button
+                        key={scale}
+                        type="button"
+                        onClick={() => settings.updateSettings({ uiScale: scale })}
+                        aria-pressed={uiScaleValue === scale}
+                        className={`flex-1 py-2.5 rounded-md3-sm text-ui-sm border transition-colors ${
+                          uiScaleValue === scale
+                            ? 'border-md-primary/40 bg-md-primary/10 text-md-primary'
+                            : 'border-dark-onSurfaceVariant/10 hover:bg-dark-surfaceContainer'
+                        }`}
+                      >
+                        {Math.round(scale * 100)}%
                       </button>
                     ))}
                   </div>

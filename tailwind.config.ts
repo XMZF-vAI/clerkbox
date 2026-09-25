@@ -37,6 +37,11 @@ const config: Config = {
           success: 'rgb(var(--md-success-rgb) / <alpha-value>)',
           warning: 'rgb(var(--md-warning-rgb) / <alpha-value>)',
           info: 'rgb(var(--md-info-rgb) / <alpha-value>)',
+          // Agent 交互语义色（固定基线，不随 seed 变化）：ask=待审批，confirmation=危险确认
+          askSurface: 'rgb(var(--md-ask-surface-rgb) / <alpha-value>)',
+          askForeground: 'rgb(var(--md-ask-onSurface-rgb) / <alpha-value>)',
+          confirmationSurface: 'rgb(var(--md-confirmation-surface-rgb) / <alpha-value>)',
+          confirmationForeground: 'rgb(var(--md-confirmation-onSurface-rgb) / <alpha-value>)',
         },
         dark: {
           surface: 'rgb(var(--dark-surface-rgb) / <alpha-value>)',
@@ -51,6 +56,16 @@ const config: Config = {
       },
       fontFamily: {
         sans: ['var(--app-font-family)'],
+      },
+      // text-ui-*：跟随 --ui-font-size 整体缩放；倍率与 line-height 取自 Tailwind 默认档，
+      // 故 scale=100% 时与同名默认类（xs/sm/base/lg/xl/2xl）计算值完全相等，可逐档迁移
+      fontSize: {
+        'ui-2xl': ['calc(var(--ui-font-size) * 1.5)', { lineHeight: '2rem' }],
+        'ui-xl': ['calc(var(--ui-font-size) * 1.25)', { lineHeight: '2rem' }],
+        'ui-lg': ['calc(var(--ui-font-size) * 1.125)', { lineHeight: '1.75rem' }],
+        'ui-base': ['var(--ui-font-size)', { lineHeight: '1.5rem' }],
+        'ui-sm': ['calc(var(--ui-font-size) * 0.875)', { lineHeight: '1.25rem' }],
+        'ui-xs': ['calc(var(--ui-font-size) * 0.75)', { lineHeight: '1rem' }],
       },
       borderRadius: {
         'md3-xs': '4px',

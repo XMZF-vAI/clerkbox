@@ -270,6 +270,8 @@ export interface AppSettings {
   theme: 'light' | 'dark' | 'system'
   /** 全局字体档位：default=出厂黑体系；serif=衬线（西文 Georgia、中文宋体系） */
   appFont: 'default' | 'serif'
+  /** UI 字号缩放档位，1 = 基准 16px；由 applyUiScale 写入 --ui-font-size */
+  uiScale?: number
   /** 色系：马卡龙预设 id 或 'custom' */
   colorScheme: string
   /** 自定义种子色（colorScheme 为 'custom' 时生效） */

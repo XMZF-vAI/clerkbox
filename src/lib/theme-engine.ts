@@ -130,3 +130,23 @@ export function applyAppFont(font: AppFont): void {
     root.style.removeProperty('--app-font-family')
   }
 }
+
+/** 字号缩放基准（rem base），与 index.css :root --ui-font-size 及 theme-init.js 保持同步 */
+export const UI_FONT_BASE_PX = 16
+export const UI_SCALE_MIN = 0.8
+export const UI_SCALE_MAX = 1.6
+export const UI_SCALE_OPTIONS = [0.9, 1, 1.1, 1.25] as const
+
+/**
+ * 应用字号缩放：写 --ui-font-size = UI_FONT_BASE_PX * scale。
+ * 1（标准档）时移除内联值，回落 :root 里的默认 16px，避免内联样式长期挂 root。
+ */
+export function applyUiScale(scale: number): void {
+  const root = document.documentElement
+  const safe = Number.isFinite(scale) && scale >= UI_SCALE_MIN && scale <= UI_SCALE_MAX ? scale : 1
+  if (safe === 1) {
+    root.style.removeProperty('--ui-font-size')
+  } else {
+    root.style.setProperty('--ui-font-size', `${UI_FONT_BASE_PX * safe}px`)
+  }
+}
