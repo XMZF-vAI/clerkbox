@@ -1,25 +1,50 @@
-import { useEffect, useRef, useState, memo, useMemo } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, memo } from 'react'
 import { ChevronDown, ChevronUp, Wrench } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import { defaultRangeExtractor, useVirtualizer, type Range } from '@tanstack/react-virtual'
 import type { Message } from '../../types/agent'
 import MessageItem from './MessageItem'
 import AgentStatusIndicator from './AgentStatusIndicator'
+import {
+  VIRTUALIZE_MIN_TURNS,
+  VIRTUAL_OVERSCAN,
+  distanceToBottomPx,
+  estimateStartPx,
+  estimateTotalSizePx,
+  estimateTurnSizePx,
+  findTopVisibleRow,
+  isNearBottomDistance,
+  selectTurnRows,
+  shouldVirtualizeTurns,
+  streamingTailIndex,
+  turnSizeEstimates,
+  withPinnedIndex,
+  type RowSpan,
+} from '../../lib/message-list-virtual'
+import {
+  peekSessionScroll,
+  rememberSessionScroll,
+  resolveScrollRestore,
+  type SessionScrollMemory,
+} from '../../lib/session-scroll-memory'
 
 interface MessageListProps {
   messages: Message[]
   isStreaming: boolean
+  /** 滚动记忆按会话隔离，必须由调用方显式下发（同排组件同一约定） */
+  sessionId: string
   vibe?: boolean
 }
 
 /** A "turn" = user message + all AI messages until the next user message or end */
-interface Turn {
+export interface Turn {
   userMsg: Message
   aiMessages: Message[]
   turnId: string
 }
 
 /** Group messages into turns */
-function groupIntoTurns(messages: Message[]): Turn[] {
+export function groupIntoTurns(messages: Message[]): Turn[] {
   const turns: Turn[] = []
   let currentTurn: Turn | null = null
 
@@ -171,28 +196,130 @@ const TurnPanel = memo(function TurnPanel({ turn, isLastTurn, isStreaming, vibe 
   )
 }, areTurnPanelPropsEqual)
 
-export default function MessageList({ messages, isStreaming, vibe }: MessageListProps) {
+/** 挂载时的滚动落点：有记忆按记忆恢复，无记忆（或上次贴底）则看最新消息——与虚拟化前一致 */
+function planInitialScroll(
+  turns: Turn[],
+  sizes: number[],
+  memory: SessionScrollMemory | undefined
+): { offset: number; atBottom: boolean } {
+  const decision = resolveScrollRestore(turns, memory)
+  if (decision.kind === 'turn') {
+    return { offset: estimateStartPx(sizes, decision.index) + decision.offsetWithinTurn, atBottom: false }
+  }
+  if (decision.kind === 'offset') {
+    return { offset: decision.offset, atBottom: false }
+  }
+  // 'bottom'：写入时浏览器自然夹到真实底部，同时让虚拟列表首帧就渲染末段行
+  return { offset: estimateTotalSizePx(sizes), atBottom: true }
+}
+
+/** 行矩形取 DOM 真实值，两条渲染分支同一套口径（行用 data-turn-index 标记，与虚拟库共用） */
+function readTopTurnRow(el: HTMLDivElement): { index: number; offsetWithinRow: number } | null {
+  const scrollerTop = el.getBoundingClientRect().top
+  const spans: RowSpan[] = []
+  el.querySelectorAll<HTMLElement>('[data-turn-index]').forEach((node) => {
+    const index = Number(node.dataset.turnIndex)
+    if (!Number.isInteger(index)) return
+    const rect = node.getBoundingClientRect()
+    spans.push({ index, top: rect.top - scrollerTop, bottom: rect.bottom - scrollerTop })
+  })
+  return findTopVisibleRow(spans, 0)
+}
+
+/** 记下当前视口所在 turn，切走再切回来时原位恢复 */
+function captureScrollMemory(el: HTMLDivElement, turns: Turn[], distance: number): SessionScrollMemory {
+  const anchor = readTopTurnRow(el)
+  const turn = anchor ? turns[anchor.index] : undefined
+  return {
+    turnId: turn?.turnId ?? null,
+    offsetWithinTurn: anchor?.offsetWithinRow ?? 0,
+    offset: el.scrollTop,
+    atBottom: isNearBottomDistance(distance),
+  }
+}
+
+export default function MessageList({ messages, isStreaming, sessionId, vibe }: MessageListProps) {
   const { t } = useTranslation()
   const scrollRef = useRef<HTMLDivElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const scrollRafRef = useRef<number | null>(null)
   const isNearBottomRef = useRef(true)
+
+  const turns = useMemo(() => groupIntoTurns(messages), [messages])
+  const turnSizes = useMemo(() => turnSizeEstimates(turns), [turns])
+
+  const [scrollPlan] = useState(() => planInitialScroll(turns, turnSizes, peekSessionScroll(sessionId)))
   // 用户上翻后置 true：配合 isStreaming 控制悬浮「回到底部」按钮的显隐
-  const [awayFromBottom, setAwayFromBottom] = useState(false)
+  const [awayFromBottom, setAwayFromBottom] = useState(!scrollPlan.atBottom)
+  const [virtualized, setVirtualized] = useState(() => turns.length >= VIRTUALIZE_MIN_TURNS)
+
+  const useVirtual = shouldVirtualizeTurns(turns.length, virtualized, !awayFromBottom)
+
+  // 流式中的末行永不回收（打字不被卸载导致闪烁）；未虚拟化时 count=0，虚拟库整体惰性、不写任何 DOM。
+  const pinnedRef = useRef<number | null>(null)
+  pinnedRef.current = streamingTailIndex(useVirtual ? turns.length : 0, isStreaming)
+
+  const turnsRef = useRef(turns)
+  turnsRef.current = turns
+  const sizesRef = useRef(turnSizes)
+  sizesRef.current = turnSizes
+
+  // getItemKey / estimateSize / rangeExtractor 必须保持恒定身份：它们是虚拟库测量缓存的
+  // memo 依赖，每个 token 换一次引用会让整列（可达上千行）重算。
+  const getItemKey = useCallback((index: number) => turnsRef.current[index]?.turnId ?? index, [])
+  const estimateSize = useCallback((index: number) => sizesRef.current[index] ?? estimateTurnSizePx(1), [])
+  const rangeExtractor = useCallback(
+    (range: Range) => withPinnedIndex(defaultRangeExtractor(range), range.count, pinnedRef.current),
+    []
+  )
+
+  const virtualizer = useVirtualizer<HTMLDivElement, HTMLDivElement>({
+    count: useVirtual ? turns.length : 0,
+    getScrollElement: () => scrollRef.current,
+    estimateSize,
+    getItemKey,
+    rangeExtractor,
+    indexAttribute: 'data-turn-index',
+    overscan: VIRTUAL_OVERSCAN,
+    initialOffset: () => scrollPlan.offset,
+  })
 
   // Only auto-scroll while the user is already near the latest message.
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
-    const THRESHOLD = 100
     const onScroll = () => {
-      const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight
-      isNearBottomRef.current = distanceToBottom < THRESHOLD
+      const distance = distanceToBottomPx(el.scrollTop, el.scrollHeight, el.clientHeight)
+      isNearBottomRef.current = isNearBottomDistance(distance)
       setAwayFromBottom(!isNearBottomRef.current)
+      if (sessionId) rememberSessionScroll(sessionId, captureScrollMemory(el, turnsRef.current, distance))
     }
     el.addEventListener('scroll', onScroll, { passive: true })
     return () => el.removeEventListener('scroll', onScroll)
-  }, [])
+  }, [sessionId])
+
+  // 滚动落位在布局阶段写入：浏览器绘制前就位，长会话首帧不会先画顶部再跳底。
+  const restoredRef = useRef(false)
+  useLayoutEffect(() => {
+    if (restoredRef.current) return
+    const el = scrollRef.current
+    if (!el) return
+    restoredRef.current = true
+    el.scrollTop = scrollPlan.offset
+    const distance = distanceToBottomPx(el.scrollTop, el.scrollHeight, el.clientHeight)
+    isNearBottomRef.current = isNearBottomDistance(distance)
+    setAwayFromBottom(!isNearBottomRef.current)
+  }, [scrollPlan])
+
+  const scrollToEnd = useCallback((behavior: 'instant' | 'smooth') => {
+    const count = virtualizer.options.count
+    if (count > 0) {
+      // 末项 + align:'end' 命中库内的「真实 maxScrollOffset」分支，与原 bottomRef.scrollIntoView 等价
+      virtualizer.scrollToIndex(count - 1, { align: 'end', behavior })
+    } else {
+      bottomRef.current?.scrollIntoView({ behavior })
+    }
+  }, [virtualizer])
 
   useEffect(() => {
     if (isNearBottomRef.current) {
@@ -202,43 +329,79 @@ export default function MessageList({ messages, isStreaming, vibe }: MessageList
       if (scrollRafRef.current !== null) return
       scrollRafRef.current = requestAnimationFrame(() => {
         scrollRafRef.current = null
-        bottomRef.current?.scrollIntoView({ behavior: isStreaming ? 'instant' : 'smooth' })
+        scrollToEnd(isStreaming ? 'instant' : 'smooth')
       })
     }
-  }, [messages, isStreaming])
+  }, [messages, isStreaming, scrollToEnd])
+
+  // 达到阈值后只在粘底时切入虚拟化：上翻阅读历史时切换布局会让整列按估算重排、视口跳位。
+  useEffect(() => {
+    if (virtualized || awayFromBottom) return
+    if (turns.length >= VIRTUALIZE_MIN_TURNS) setVirtualized(true)
+  }, [virtualized, awayFromBottom, turns.length])
 
   useEffect(() => () => {
     if (scrollRafRef.current !== null) cancelAnimationFrame(scrollRafRef.current)
   }, [])
 
-  const turns = useMemo(() => groupIntoTurns(messages), [messages])
-
   /** 悬浮「回到底部」：滚到底并恢复粘底（随后的 scroll 事件会重新校准 isNearBottomRef） */
   const scrollToBottom = () => {
     isNearBottomRef.current = true
     setAwayFromBottom(false)
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+    scrollToEnd('smooth')
   }
 
   if (messages.length === 0) {
     return null
   }
 
+  const lastTurnIndex = turns.length - 1
+  const rows = useVirtual ? selectTurnRows(turns, virtualizer.getVirtualItems()) : []
+
   return (
     <div className="relative flex-1 min-h-0 flex flex-col">
-      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-4 py-6 space-y-6">
-        {turns.map((turn, index) => (
-          <TurnPanel
-            key={turn.turnId}
-            turn={turn}
-            isLastTurn={index === turns.length - 1}
-            isStreaming={isStreaming}
-            vibe={vibe}
-          />
-        ))}
-        {/* Agent 工作状态指示器：像素网格 + 阶段文案 + 耗时，固定在对话最底部 */}
-        {isStreaming && <AgentStatusIndicator messages={messages} vibe={vibe} />}
-        <div ref={bottomRef} />
+      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-4 pb-6">
+        {/* 行距由每行自身的 pt-6 承载（rem，随字号缩放），两条分支共用，切换时总高不变 */}
+        <div
+          className={useVirtual ? 'relative' : undefined}
+          style={useVirtual ? { height: virtualizer.getTotalSize() } : undefined}
+        >
+          {useVirtual
+            ? rows.map(({ turn, row }) => (
+                <div
+                  key={row.turnId}
+                  data-turn-index={row.index}
+                  ref={virtualizer.measureElement}
+                  className="absolute left-0 right-0 top-0 pt-6"
+                  style={{ transform: `translateY(${row.start}px)` }}
+                >
+                  <TurnPanel
+                    turn={turn}
+                    isLastTurn={row.index === lastTurnIndex}
+                    isStreaming={isStreaming}
+                    vibe={vibe}
+                  />
+                </div>
+              ))
+            : turns.map((turn, index) => (
+                <div key={turn.turnId} data-turn-index={index} className="pt-6">
+                  <TurnPanel
+                    turn={turn}
+                    isLastTurn={index === lastTurnIndex}
+                    isStreaming={isStreaming}
+                    vibe={vibe}
+                  />
+                </div>
+              ))}
+        </div>
+        {/* 行间距口径与上方一致：指示器前 24、其后再留 24 + 容器 pb-6，等价改造前 space-y-6 + py-6 */}
+        {isStreaming && (
+          <div className="pt-6">
+            {/* Agent 工作状态指示器：像素网格 + 阶段文案 + 耗时，固定在对话最底部 */}
+            <AgentStatusIndicator messages={messages} vibe={vibe} />
+          </div>
+        )}
+        <div ref={bottomRef} className="pt-6" />
       </div>
       {/* 流式期间用户上翻：底部中央悬浮「回到底部」按钮 */}
       {awayFromBottom && isStreaming && (

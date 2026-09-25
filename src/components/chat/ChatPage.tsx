@@ -151,7 +151,7 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
     <div className={`relative flex h-full ${vibe ? 'bg-transparent' : 'bg-dark-surface'}`}>
       <div className="flex flex-1 flex-col min-h-0 min-w-0 overflow-x-hidden">
         {/* key=会话 id：切会话强制重挂载，重置滚动粘底状态并回到最新消息 */}
-        <MessageList key={sessionId} messages={messages} isStreaming={isCurrentSessionStreaming} vibe={vibe} />
+        <MessageList key={sessionId} sessionId={sessionId} messages={messages} isStreaming={isCurrentSessionStreaming} vibe={vibe} />
         <GoalBanner sessionId={sessionId} vibe={vibe} />
         <TodoListCard sessionId={sessionId} vibe={vibe} />
         <QuestionCard sessionId={sessionId} vibe={vibe} />
