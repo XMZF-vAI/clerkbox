@@ -193,6 +193,8 @@ export default {
       custom: '自定义',
       customColor: '自定义颜色',
       customSeedAriaLabel: '自定义种子色',
+      uiScaleTitle: '界面字号',
+      uiScaleDesc: '整体缩放文字与界面元素，100% 为标准档；重启后保持',
     },
     mcp: {
       title: 'MCP 服务器',
@@ -564,6 +566,45 @@ export default {
     subAgentDetailAria: '子代理 {{name}} 详情',
     closePanelAria: '关闭详情面板',
     closePanelTitle: '关闭',
+
+    // 结构化错误横幅（批次 C4）：错误码 → 文案，操作按钮见 ChatErrorBanner.tsx
+    error: {
+      rateLimit: '请求过于频繁（已限流）',
+      auth: '鉴权或配额异常',
+      contextOverflow: '上下文已超出模型窗口',
+      network: '网络连接中断',
+      retryable: '服务暂时不可用',
+      unknown: '运行出错',
+      retry: '重试',
+      retryIn: '{{seconds}} 秒后重试',
+      openSettings: '去设置',
+      copyDiagnostics: '复制诊断',
+      copied: '已复制',
+    },
+
+    // 权限审批卡片（批次 C2）：预览纯函数见 src/lib/permission-preview.ts
+    permission: {
+      title: '需要你的批准',
+      deny: '拒绝',
+      allowOnce: '本次允许',
+      allowAlways: '本会话始终允许',
+      hint: '选择会记入对话记录',
+      awaitHostHint: '请在系统弹窗中完成确认',
+      expired: '审批已超时，按拒绝处理',
+      previouslyGranted: '本会话此前已允许该操作',
+      targetLabel: '操作内容',
+      targetAria: '待批准操作的原文',
+      emptyTarget: '（无参数）',
+      truncated: '内容过长，仅显示前 4000 字',
+      resultDeny: '已拒绝',
+      resultAllowOnce: '已允许（本次）',
+      resultAllowAlways: '已允许（本会话始终）',
+      reasonDangerousCommand: '命中高危命令规则',
+      reasonOutsideWorkDir: '目标在工作目录之外',
+      reasonSystemPath: '目标是系统目录',
+      reasonExternalNetwork: '将访问外部网络',
+      reasonMcpTool: '调用 MCP 服务器工具',
+    },
   },
 
   question: {
@@ -644,6 +685,22 @@ export default {
     executionFailed: '失败',
     executionComplete: '完成',
     executing: '执行中...',
+  },
+
+  // 工具调用专属渲染器（批次 C5）：注册表见 src/components/chat/tool-renderers/resolveRenderer.ts
+  toolRenderer: {
+    emptyCommand: '（空命令）',
+    standardError: '标准错误',
+    noOutput: '无输出',
+    hiddenLines: '另有 {{count}} 行未显示',
+    timedOut: '已超时终止',
+    failed: '执行失败',
+    lineCount: '{{count}} 行',
+    rereadStub: '文件未变化（未重复返回全文）',
+    unknownTarget: '未知目标',
+    hitCount: '{{count}} 条结果',
+    editCount: '{{count}} 处编辑',
+    arguments: '参数',
   },
 
   skillstore: {
