@@ -32,7 +32,7 @@ export const handlerRegistry = new Map<string, (...args: unknown[]) => unknown>(
 // ipcMain.on 上（本就不在 handlerRegistry 中），这里一并列入以防实现变化；
 // executeCommandWithShell / cancelSessionCommands / mcpTest 与 executeCommand /
 // mcpSync 同属命令执行、进程控制与按配置拉起子进程的范畴，一并禁止。
-const REMOTE_INVOKE_BLOCKLIST: readonly string[] = [
+export const REMOTE_INVOKE_BLOCKLIST: readonly string[] = [
   // 凭据 / API Key
   'loadApiKeys',
   'saveApiKey',
@@ -53,6 +53,15 @@ const REMOTE_INVOKE_BLOCKLIST: readonly string[] = [
   // 技能目录整目录写入 / 删除
   'writeSkillDir',
   'removeSkillDir',
+  // Agent 宿主通道：ipcMain.handle 被 monkey-patch 自动同步进 handlerRegistry（见 main.ts
+  // 的 patchedHandle），所以 agent:* 从 /api/invoke 天然可达。必须在此拦死：
+  // - run 命令=以用户身份驱动本机 agent 执行 shell/写文件，token 泄漏即等同 RCE；
+  // - permission.resolve=替本地用户批准危险操作，直接破坏宿主「UI 离线绝不放行」的红线；
+  // - snapshot=回吐队列内容与待决审批的命令预览。
+  // P5 要做真正的远程视图时，在此按命令类型定点放开，并让放行回执只能来自本地窗口。
+  'agent:command',
+  'agent:snapshot',
+  'agent:host-mode',
   // 诊断导出（弹保存对话框属桌面端交互，远程调用无意义）
   'diagExport',
 ]
