@@ -124,11 +124,30 @@ describe('其余通道', () => {
     expect(useGoalStore.getState().bySession[sid]).toBeUndefined()
   })
 
-  it('resync 触发整会话按 DB 重拉', async () => {
-    const spy = vi.spyOn(useChatStore.getState(), 'syncFromDb').mockResolvedValue(undefined)
+  it('resync 触发整会话按 DB 重拉，且不许走「流式会话保留本地」的 syncFromDb', async () => {
+    // 回归点：宿主模式下运行中的会话必然在 streamingSessionIds 里，而 syncFromDb 对这类
+    // 会话刻意跳过合并——等于在最需要重拉的时刻空转，长回答溢出后界面再也回不来。
+    useChatStore.getState().setStreaming(true, sid)
+    const reload = vi.spyOn(useChatStore.getState(), 'reloadSessionFromDb').mockResolvedValue(undefined)
+    const sync = vi.spyOn(useChatStore.getState(), 'syncFromDb').mockResolvedValue(undefined)
     applyAgentEvent({ type: 'resync', sessionId: sid, reason: 'ring-overflow' })
-    await Promise.resolve()
-    expect(spy).toHaveBeenCalledTimes(1)
-    spy.mockRestore()
+    expect(reload).toHaveBeenCalledWith(sid)
+    expect(sync).not.toHaveBeenCalled()
+    vi.restoreAllMocks()
+  })
+
+  it('reloadSessionFromDb 用 DB 覆盖本地消息，流式会话也不例外', async () => {
+    const { ipc } = await import('../src/lib/ipc-client')
+    vi.spyOn(ipc, 'dbGetMessages').mockResolvedValue([
+      { id: 'db1', session_id: sid, role: 'user', content: 'DB 里的', timestamp: 5 },
+    ] as never)
+    vi.spyOn(ipc, 'dbGetAllSessions').mockResolvedValue([
+      { id: sid, title: '新会话', created_at: 1, updated_at: 9, harness_mode: 'code' },
+    ] as never)
+    useChatStore.getState().remoteUpsertMessage(sid, msg({ id: 'local-only', content: '本地才有' }))
+    useChatStore.getState().setStreaming(true, sid)
+    await useChatStore.getState().reloadSessionFromDb(sid)
+    expect(session()?.messages.map((m) => m.id)).toEqual(['db1'])
+    vi.restoreAllMocks()
   })
 })

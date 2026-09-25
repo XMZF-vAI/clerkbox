@@ -92,14 +92,39 @@ describe('事件按序、不重、不丢', () => {
     expect(client.getState().lastSeq).toBe(2)
   })
 
-  it('出现缺口即按已见位置请求补发', async () => {
+  it('缺口期间游标停在已确认位置，补发回来的旧事件按序补齐后才放行新事件', async () => {
     const f = fakeTransport()
     const client = createAgentClient(f.transport)
     await client.start()
+    const seen: number[] = []
+    client.subscribe((_e, seq) => seen.push(seq))
     f.push(1)
     f.push(5) // 缺 2~4
     expect(f.calls.snapshotSince).toEqual([0, 1])
+    // 回归点：旧实现把游标直接推到 5，于是补发回来的 2~4 全被「seq <= lastSeq」判成重复丢弃，
+    // 补发等于没补——窗口销毁期间漏掉的消息再也回不到界面上。
+    expect(seen).toEqual([1])
+    expect(client.getState().lastSeq).toBe(1)
+    f.push(2)
+    f.push(3)
+    f.push(4)
+    expect(seen).toEqual([1, 2, 3, 4, 5])
     expect(client.getState().lastSeq).toBe(5)
+  })
+
+  it('补发填不上洞时兜底放行，不把后续事件永久扣住', async () => {
+    vi.useFakeTimers()
+    const f = fakeTransport()
+    const client = createAgentClient(f.transport)
+    await client.start()
+    const seen: number[] = []
+    client.subscribe((_e, seq) => seen.push(seq))
+    f.push(1)
+    f.push(9) // 2~8 已被环裁掉，永远不会回来
+    expect(seen).toEqual([1])
+    await tick(3_100)
+    expect(seen).toEqual([1, 9])
+    expect(client.getState().lastSeq).toBe(9)
   })
 
   it('一个订阅方抛错不影响其余订阅方', async () => {

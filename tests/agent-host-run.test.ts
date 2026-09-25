@@ -104,6 +104,27 @@ describe('宿主跑完一轮纯文本对话', () => {
     expect(m.inspect()[0]).toMatchObject({ sessionId: 's1', status: 'idle', hasRun: false })
   })
 
+  it('流式正文走 stream.delta 增量回流，不再逐帧把全文搬过进程边界', async () => {
+    script = [
+      { chunk: sse({ choices: [{ delta: { content: '第一段' }, finish_reason: null }] }) },
+      { chunk: sse({ choices: [{ delta: { content: '第二段' }, finish_reason: null }] }) },
+      { chunk: sse({ choices: [{ delta: {}, finish_reason: 'stop' }] }) },
+      { done: true },
+    ]
+    const m = new AgentSessionManager(fakeStore().store)
+    await m.handleCommand({ type: 'run', sessionId: 's1', content: 'hi', settings })
+    const ring = m.peekRing('s1')
+    const deltas = ring.filter((e): e is Extract<AgentEvent, { type: 'stream.delta' }> => e.type === 'stream.delta')
+    expect(deltas.length).toBeGreaterThan(0)
+    // 协议里一直挂着 stream.delta，却没有生产者：宿主只能靠 message.updated 携带「已累计全文」
+    // 逐帧外发，长回答既是指数字节的 structured clone，也是环溢出的主因。
+    expect(deltas.map((d) => d.text).join('')).toContain('第一段')
+    const fullContent = ring.filter(
+      (e) => e.type === 'message.updated' && typeof (e as { updates?: { content?: string } }).updates?.content === 'string'
+    )
+    expect(fullContent.length).toBeLessThanOrEqual(2) // 只容许收尾覆盖与最终落库那两次
+  })
+
   it('模型请求体带上了下发的设置快照，而不是猜默认值', async () => {
     script = textStream('ok')
     const m = new AgentSessionManager(fakeStore().store)

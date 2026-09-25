@@ -111,6 +111,12 @@ interface ChatState {
   loadFromDb: () => Promise<void>
   /** 增量同步：从 DB 拉取最新会话/消息，合并进内存状态（跳过正在流式的会话，避免覆盖本地流式内容） */
   syncFromDb: () => Promise<void>
+  /**
+   * 宿主模式专用：把单个会话整段按 DB 为准重拉（环溢出 / 压缩后的 resync 走这里）。
+   * 不能用 syncFromDb——它对「流式中」的会话刻意保留本地内存，而宿主模式下运行中的会话
+   * 恰恰是必须重拉的那个：宿主先落库再广播，本地从来不是权威源。
+   */
+  reloadSessionFromDb: (sessionId: string) => Promise<void>
 
   // ── 宿主模式回灌（批次 B · P4）：只改内存，一律不落库——运行期持久化由宿主独占 ──
   /** 幂等 upsert：整环回放必然与 DB 已加载的消息重叠，重复投递不能长出两条 */
@@ -354,6 +360,36 @@ export const useChatStore = create<ChatState>((set, get) => ({
       lastSyncedRevision = revision
     } catch (e) {
       console.error('[chat-store] syncFromDb failed:', e)
+    }
+  },
+
+  reloadSessionFromDb: async (sessionId) => {
+    try {
+      const [msgRows, sessionRows] = await Promise.all([
+        ipc.dbGetMessages(sessionId),
+        ipc.dbGetAllSessions().catch(() => []),
+      ])
+      const local = get().sessions.find((s) => s.id === sessionId)
+      if (!local) return
+      const row = sessionRows.find((r) => r.id === sessionId)
+      const restored = row ? restoreWorkDirs(row) : {}
+      const messages = mapMessageRows(msgRows)
+      set((state) => ({
+        sessions: state.sessions.map((item) =>
+          item.id !== sessionId
+            ? item
+            : {
+                ...item,
+                messages,
+                // 宿主改名的落库是异步的：DB 仍写着待命名哨兵时保留本地已改的标题，避免横幅闪回
+                title: row && row.title !== NEW_SESSION_TITLE ? row.title : item.title,
+                workingDir: restored.workingDir ?? item.workingDir,
+                defaultWorkDir: restored.defaultWorkDir ?? item.defaultWorkDir,
+              }
+        ),
+      }))
+    } catch (e) {
+      console.error('[chat-store] reloadSessionFromDb failed:', e)
     }
   },
 

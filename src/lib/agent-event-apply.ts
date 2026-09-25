@@ -67,8 +67,9 @@ function applyPatch(patch: StorePatch): void {
       notifyIfNotViewing(patch.sessionId, patch.channel, patch.message)
       return
     case 'reload-session':
-      // 环形溢出与压缩后的原子重写，本地推断都不可靠，整会话按 DB 为准重拉
-      void useChatStore.getState().syncFromDb()
+      // 环形溢出与压缩后的原子重写，本地推断都不可靠：整会话按 DB 为准重拉。
+      // 走专用方法而不是 syncFromDb——后者对流式会话保留本地，而宿主模式恰恰要重拉流式会话。
+      void useChatStore.getState().reloadSessionFromDb(patch.sessionId)
       return
     default:
       return

@@ -42,6 +42,9 @@ const PERMISSION_TIMEOUT_MS = 120_000
 /** 提问挂起上限：用户不答时让本轮收尾，而不是永久占着 run */
 const QUESTION_TIMEOUT_MS = 600_000
 const EVENT_RING_LIMIT = 500
+/** 环溢出触发的 resync 合并窗口：溢出会连续发生（环就卡在上限上），
+ *  每事件发一次等于让渲染层每帧整会话重拉一次 */
+const RESYNC_COALESCE_MS = 1_000
 /** 渲染层尚未升级为带快照的薄客户端时，main 模式受理 run 会明确拒绝而不是猜配置 */
 const MISSING_SETTINGS = 'run-command-missing-settings'
 
@@ -85,6 +88,8 @@ interface HostSession {
   sessionId: string
   seq: ReturnType<typeof createSeqCounter>
   ring: { seq: number; event: AgentEvent }[]
+  /** 上一次因环溢出广播 resync 的时刻（合并窗口用） */
+  lastResyncAt: number
   run?: { runId: string; controller: AbortController; startedAt: number }
   status: RunStatus
   error?: string
@@ -118,6 +123,7 @@ export class AgentSessionManager {
         sessionId,
         seq: createSeqCounter(),
         ring: [],
+        lastResyncAt: 0,
         status: 'idle',
         queue: [],
         pendingPermissions: new Map(),
@@ -132,16 +138,24 @@ export class AgentSessionManager {
     return s
   }
 
-  /** 入环 + 广播。超出上限时发 resync：宁可让渲染层整会话重拉，也不悄悄丢事件 */
+  /**
+   * 入环 + 广播。
+   * 溢出分支曾经把触发事件留在环里却只广播 resync，而环被裁后长度恰好等于上限，
+   * 于是此后每一个事件都「溢出」——真事件再也不发，渲染层只收到一串 resync；
+   * 一段 30s 的流式回答（约 20 事件/秒）就能长期卡进这个状态。
+   * 现在：事件无条件广播，裁剪只在合并窗口外发一次 resync 让渲染层整会话重拉。
+   */
   private emit(s: HostSession, event: AgentEvent): void {
     const seq = s.seq.next()
     s.ring.push({ seq, event })
-    if (s.ring.length > EVENT_RING_LIMIT) {
-      s.ring.splice(0, s.ring.length - EVENT_RING_LIMIT)
-      this.pushAndBroadcast(s, { type: 'resync', sessionId: s.sessionId, reason: 'ring-overflow' })
-    } else {
-      this.broadcast({ seq, event })
-    }
+    this.broadcast({ seq, event })
+    const trimmed = s.ring.length - EVENT_RING_LIMIT
+    if (trimmed <= 0) return
+    s.ring.splice(0, trimmed)
+    const now = Date.now()
+    if (now - s.lastResyncAt < RESYNC_COALESCE_MS) return
+    s.lastResyncAt = now
+    this.pushAndBroadcast(s, { type: 'resync', sessionId: s.sessionId, reason: 'ring-overflow' })
   }
 
   private pushAndBroadcast(s: HostSession, event: AgentEvent): void {
@@ -246,14 +260,32 @@ export class AgentSessionManager {
         getSession: () => sessionCache.get(sessionId),
         addMessage: (_sid, message) => this.persistMessage(s, message),
         updateMessage: (_sid, msgId, updates) => {
-          const base = s.messages.get(msgId)
-          if (base) {
-            const next = { ...base, ...updates }
+          const prev = s.messages.get(msgId)
+          let deltaText: string | null = null
+          if (prev) {
+            const next = { ...prev, ...updates }
             s.messages.set(msgId, next)
             // 落库参数走 chat-row 的同一份编码：手抄一份列顺序正是这个模块要避免的漂移
             void this.store
               .updateMessage(...messageUpdateArgs(next))
               .catch((err) => console.error('[agent-host] updateMessage failed:', err))
+            // 流式正文改走 stream.delta：updateMessage 携带的是「已累计的全文」，
+            // 按 20fps 把全文跨进程推一遍是 O(n²) 的字节量（4000 字回答能推到兆级）。
+            // 只有纯正文、且确为前缀延长时才发增量；其余（思考块、收尾覆盖、改写）仍走全量，
+            // 漏帧由 resync 兜底。
+            const content = updates.content
+            if (
+              Object.keys(updates).length === 1 &&
+              typeof content === 'string' &&
+              content.length > prev.content.length &&
+              content.startsWith(prev.content)
+            ) {
+              deltaText = content.slice(prev.content.length)
+            }
+          }
+          if (deltaText !== null) {
+            this.emit(s, { type: 'stream.delta', sessionId, messageId: msgId, text: deltaText })
+            return
           }
           this.emit(s, { type: 'message.updated', sessionId, messageId: msgId, updates })
         },

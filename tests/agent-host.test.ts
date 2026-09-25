@@ -102,6 +102,19 @@ describe('事件环与 seq', () => {
     expect(seqs).toBeGreaterThan(500)
   })
 
+  it('溢出后真事件仍在继续入环，resync 按合并窗口收束而不是每事件一次', async () => {
+    const m = new AgentSessionManager(fakeStore())
+    for (let i = 0; i < 600; i++) {
+      await m.handleCommand({ type: 'queue.enqueue', sessionId: 's1', item: { id: `q${i}`, content: '', queuedAt: i } })
+    }
+    const ring = m.peekRing('s1')
+    expect(ring.filter((e) => e.type === 'queue.snapshot').length).toBeGreaterThan(400)
+    expect(ring.filter((e) => e.type === 'resync').length).toBeLessThanOrEqual(2)
+    // 回归点：旧实现把环裁到上限后只广播 resync、扣下触发事件，而下一帧又立刻「溢出」——
+    // 于是一段长回答（约 20 事件/秒）里真事件再也不外发，渲染层只剩每秒一次整会话重拉。
+    expect(ring[ring.length - 1]!.type).toBe('queue.snapshot')
+  })
+
   it('snapshot 汇报在队队列与运行态，供重连恢复', async () => {
     const m = new AgentSessionManager(fakeStore())
     await m.handleCommand({ type: 'queue.enqueue', sessionId: 's1', item: { id: 'q1', content: 'x', queuedAt: 1 } })
