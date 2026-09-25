@@ -8,14 +8,31 @@
  * 字段语义为 C/D 批次（权限审批 UI 等）的共享契约：只增不改。
  */
 import type { ContextUsageInfo } from '../lib/context-usage'
+import type { SkillCatalogEntry } from '../lib/skill-catalog'
 import type { QueuedMessageItem } from '../stores/chat-store'
-import type { Message, MessageAttachment, MessageSkillSnapshot, SubAgentRun, TaskMode } from '../types/agent'
+import type {
+  Message,
+  MessageAttachment,
+  MessageSkillSnapshot,
+  SessionGoal,
+  SubAgentRun,
+  TaskMode,
+  TodoItem,
+} from '../types/agent'
+import type { AgentSettings } from './ports'
 
 // ── 渲染层 → 宿主（invoke 'agent:command'）──
 
 export type AgentCommand =
   | { type: 'run'; sessionId: string; content: string;
-      attachments?: MessageAttachment[]; taskMode?: TaskMode; skills?: MessageSkillSnapshot[] }
+      attachments?: MessageAttachment[]; taskMode?: TaskMode; skills?: MessageSkillSnapshot[];
+      /**
+       * P3 宿主运行随命令下发的快照。宿主不读渲染层的 zustand persist（localStorage），
+       * 故设置、技能目录、目标与待办的初值由下发方给出；运行期真相源再改由宿主持有，
+       * 变更以事件回流。消息历史不在此列——宿主直接读 ChatStore。
+       */
+      settings?: AgentSettings; skillCatalog?: SkillCatalogEntry[];
+      skillReminder?: string; goal?: SessionGoal; todos?: TodoItem[] }
   | { type: 'abort'; sessionId: string }
   | { type: 'queue.enqueue'; sessionId: string; item: QueuedMessageItem }
   | { type: 'queue.remove'; sessionId: string; id: string }
@@ -44,6 +61,12 @@ export type AgentEvent =
   | { type: 'run.aborted';      sessionId: string; runId: string; byUser: boolean }
   | { type: 'subagent.updated'; sessionId: string; run: SubAgentRun }
   | { type: 'usage.updated';    sessionId: string; usage: ContextUsageInfo }
+  // ── P3 追加（只增不改）：宿主在运行期持有的 UI 侧状态回流渲染层 ──
+  | { type: 'todos.updated';    sessionId: string; items: TodoItem[] }
+  | { type: 'goal.updated';     sessionId: string; goal: SessionGoal | null }
+  | { type: 'notify';           sessionId: string; kind: 'error' | 'done' | 'confirm-danger'; message?: string }
+  /** 环形缓冲溢出：渲染层放弃补发，整会话重拉 DB */
+  | { type: 'resync';           sessionId: string; reason: string }
 
 // ── 重连回放（invoke 'agent:snapshot' 或 attach 返回）──
 

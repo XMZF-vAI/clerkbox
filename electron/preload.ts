@@ -134,6 +134,19 @@ contextBridge.exposeInMainWorld('clerkbox', {
     return () => ipcRenderer.removeListener('apiChunk', listener)
   },
 
+  // ── Agent 宿主通道（批次 B · P3）：指令下发 / 事件订阅 / 重连快照 ──
+  agentCommand: (cmd: unknown): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('agent:command', cmd),
+  agentSnapshot: (sessionId: string | undefined, sinceSeq: number): Promise<unknown> =>
+    ipcRenderer.invoke('agent:snapshot', sessionId, sinceSeq),
+  /** 订阅宿主事件流；返回退订函数。payload 带单调 seq，缺口即需重连补发 */
+  onAgentEvent: (
+    callback: (payload: { seq: number; event: unknown }) => void
+  ): (() => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, payload: { seq: number; event: unknown }) => callback(payload)
+    ipcRenderer.on('agent:event', listener)
+    return () => ipcRenderer.removeListener('agent:event', listener)
+  },
+
   // Credentials are encrypted by Electron's OS-backed safeStorage in the main process.
   loadApiKeys: (): Promise<Record<string, string>> => ipcRenderer.invoke('loadApiKeys'),
   saveApiKey: (id: string, apiKey: string): Promise<void> => ipcRenderer.invoke('saveApiKey', id, apiKey),

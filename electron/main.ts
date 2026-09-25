@@ -30,6 +30,7 @@ import { registerTerminalHandlers, disposeAllTerminals } from './terminal'
 import { initUpdater, isAgentBusyNow } from './updater'
 import { initMainLogger, registerLogIpcHandlers } from './logger'
 import { createChatStore, registerDbIpcHandlers, type ChatStore } from './db'
+import { registerAgentHostIpc } from './agent-host'
 import {
   initTray,
   isTrayAvailable,
@@ -1921,6 +1922,10 @@ function registerIpcHandlers(chatStore: ChatStore) {
   // ── 会话存储（A3：SQLite 主引擎 + 旧 JSON 降级兜底，实现见 electron/db.ts）──
   // IPC 契约（db* handler 名称/参数/返回）与 JSON 时代完全一致，渲染层零感知。
   registerDbIpcHandlers(chatStore)
+  // Agent 宿主（批次 B · P3）：装配主进程端口并注册 agent:command / agent:snapshot 通道。
+  // 运行模式默认 renderer（P6 才切 main），故此处只挂通道，不改变现有渲染层驱动路径；
+  // 桥接的 handler 查找是惰性的，放在这里不依赖其它 handler 已注册。
+  registerAgentHostIpc(chatStore)
   // 托盘菜单的最近会话：直读存储层（SQLite 下是廉价索引查询，不再需要 mtime 缓存）
   recentSessionsProvider = () => chatStore.getRecentSessions()
 
