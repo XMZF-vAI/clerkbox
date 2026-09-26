@@ -43,10 +43,11 @@ Thumbs.db
 # 临时截图/图标素材（正式图标在 build/ public/ src/assets/ 下，不受影响）
 /IMG_*.PNG
 /图标.png
-# 计划与评审文档
+# 计划与评审文档：一次性执行文档，进库只会让 diff 混进大段散文。
+# 沉淀下来的约定写进 AGENTS.md / DESIGN.md，历史版本留在 git 历史里（文件仍在磁盘上）。
 /plan-*.md
+/*_PLAN.md
 /CODE_REVIEW.md
-/CABIN_SYSTEM_PLAN.md
 # 第三方工作目录
 /.workbuddy/
 /.freebuff/
