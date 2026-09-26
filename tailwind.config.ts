@@ -2,10 +2,16 @@ import type { Config } from 'tailwindcss'
 
 const config: Config = {
   darkMode: 'class',
-  content: [
-    './index.html',
-    './src/**/*.{ts,tsx}',
-  ],
+  content: {
+    files: [
+      './index.html',
+      './src/**/*.{ts,tsx}',
+      // markdown 渲染器不是模板文件：里面的字符类正则（表格分隔行 /^[-:|\s]+$/）
+      // 会被扫描器当成 Tailwind 任意属性，产物 CSS 里因此长出一条非法声明
+      // `-: |s` 并触发 esbuild 的 css-syntax-error 告警。
+      '!./src/lib/markdown.ts',
+    ],
+  },
   theme: {
     extend: {
       colors: {
