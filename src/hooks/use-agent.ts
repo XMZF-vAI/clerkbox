@@ -137,7 +137,8 @@ export function useAgent(sessionId: string) {
       compact: (sid, messages, boundaryMessageId) => useChatStore.getState().compactSession(sid, messages, boundaryMessageId),
     },
     permission: {
-      confirm: (title, body) => ipc.confirmDialog(title, body),
+      // 渲染层宿主仍走原生确认框：文案由 loop 一并给出，两种模式措辞一致
+      confirm: (request) => ipc.confirmDialog(request.title, request.body),
     },
     ui: {
       askQuestion: (sid, questions) => useInteractiveStore.getState().requestQuestion(sid, questions),

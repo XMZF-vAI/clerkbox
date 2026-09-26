@@ -26,12 +26,13 @@ import { findAgent } from '../src/lib/agent-registry'
 import { buildMemoryPrompt } from '../src/lib/memory'
 import { compactConversation, findKeepBoundaryIndex } from '../src/lib/compact'
 import { normalizeHarnessMode } from '../src/lib/harness-modes'
+import { buildPermissionPreview, formatPermissionAuditContent, type PermissionDecision } from '../src/lib/permission-preview'
 import i18n from '../src/i18n'
 import { makeId, runReactLoop } from '../src/agent-core/loop'
 import { SessionContextStore } from '../src/agent-core/session-context'
 import { createSeqCounter } from '../src/agent-core/protocol'
 import type { AgentCommand, AgentEvent, AgentSnapshot } from '../src/agent-core/protocol'
-import type { AgentPorts, AgentSettings } from '../src/agent-core/ports'
+import type { AgentPermissionRequest, AgentPorts, AgentSettings } from '../src/agent-core/ports'
 import type { MessageRow, SessionRow } from '../src/types/ipc'
 import { deriveSessionTitle, mapMessageRows, messageToRow, messageUpdateArgs, NEW_SESSION_TITLE } from '../src/lib/chat-row'
 import type { Message, Session, SubAgentRun, TodoItem, TokenUsage } from '../src/types/agent'
@@ -94,7 +95,16 @@ interface HostSession {
   status: RunStatus
   error?: string
   queue: QueuedMessageItem[]
-  pendingPermissions: Map<string, { resolve: (v: boolean) => void; timer: NodeJS.Timeout; event: AgentEvent }>
+  pendingPermissions: Map<string, {
+    resolve: (v: boolean) => void
+    timer: NodeJS.Timeout
+    event: AgentEvent
+    /** 审批原文：留痕与「本会话允许」都要用它，光有渲染好的 preview 字符串不够 */
+    request: AgentPermissionRequest
+    grantKey: string
+  }>
+  /** 会话级放行集合（grantKey）：批过一次就不再打扰，无人看管的后台 run 也不会卡到超时 */
+  sessionGrants: Set<string>
   pendingQuestions: Map<string, { resolve: (v: Record<string, string[]>) => void; timer: NodeJS.Timeout; event: AgentEvent }>
   /** 运行期由宿主持有、靠事件回流渲染层的会话状态 */
   todos: TodoItem[]
@@ -127,6 +137,7 @@ export class AgentSessionManager {
         status: 'idle',
         queue: [],
         pendingPermissions: new Map(),
+        sessionGrants: new Set(),
         pendingQuestions: new Map(),
         todos: [],
         goal: null,
@@ -306,7 +317,7 @@ export class AgentSessionManager {
         },
       },
       permission: {
-        confirm: (title, body) => this.requestPermission(s, title, body, settings.approvalMode),
+        confirm: (request) => this.requestPermission(s, request, settings.approvalMode),
       },
       ui: {
         askQuestion: (_sid, questions) => this.requestQuestion(s, questions),
@@ -384,11 +395,21 @@ export class AgentSessionManager {
     this.emit(s, { type: 'subagent.updated', sessionId: s.sessionId, run: next })
   }
 
-  /** fail-closed：无可用窗口立即拒绝；挂起超时同样拒绝 */
-  private requestPermission(s: HostSession, title: string, body: string, mode: AgentSettings['approvalMode']): Promise<boolean> {
+  /**
+   * fail-closed：无可用窗口立即拒绝；挂起超时同样拒绝。
+   * 但"拒绝"不是唯一的静默路径——批过一次的目标进会话放行集合，后续直接批准，
+   * 否则无人看管的后台 run 会一次次撞上 120s 超时被拒。
+   */
+  private requestPermission(s: HostSession, request: AgentPermissionRequest, mode: AgentSettings['approvalMode']): Promise<boolean> {
     const sessionId = s.sessionId
+    const preview = buildPermissionPreview(request.tool, request.args, { workingDir: request.workingDir })
+    if (s.sessionGrants.has(preview.grantKey)) {
+      console.log(`[agent-host] 会话级放行命中：${request.tool} ${preview.target}`)
+      return Promise.resolve(true)
+    }
     if (!this.hasLiveWindow()) {
-      console.warn('[agent-host] 无可用窗口，危险操作按拒绝处理（fail-closed）:', title)
+      console.warn('[agent-host] 无可用窗口，危险操作按拒绝处理（fail-closed）:', request.title)
+      this.writeAudit(s, request, 'deny')
       return Promise.resolve(false)
     }
     const requestId = makeId()
@@ -396,18 +417,63 @@ export class AgentSessionManager {
       type: 'permission.requested',
       sessionId,
       requestId,
-      preview: body,
-      risk: 'dangerous',
+      preview: request.body,
+      risk: request.risk,
       mode: mode === 'manual' || mode === 'auto' || mode === 'full' ? mode : 'manual',
+      tool: request.tool,
+      args: request.args,
+      reason: request.reason,
+      workingDir: request.workingDir,
     }
     this.emit(s, event)
     return new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => {
-        if (!s.pendingPermissions.delete(requestId)) return
-        console.warn(`[agent-host] 审批超时 ${Math.round(PERMISSION_TIMEOUT_MS / 1000)}s，按拒绝处理: ${title}`)
-        resolve(false)
+        if (!s.pendingPermissions.has(requestId)) return
+        console.warn(`[agent-host] 审批超时 ${Math.round(PERMISSION_TIMEOUT_MS / 1000)}s，按拒绝处理: ${request.title}`)
+        this.settlePermission(s, requestId, false, true, 'once')
       }, PERMISSION_TIMEOUT_MS)
-      s.pendingPermissions.set(requestId, { resolve, timer, event })
+      s.pendingPermissions.set(requestId, { resolve, timer, event, request, grantKey: preview.grantKey })
+    })
+  }
+
+  /** 审批的唯一收尾点：解除挂起、留痕、广播 settled、回到 working，四者不允许分头漏 */
+  private settlePermission(
+    s: HostSession,
+    requestId: string,
+    approved: boolean,
+    timedOut: boolean,
+    scope: 'once' | 'session'
+  ): void {
+    const pending = s.pendingPermissions.get(requestId)
+    if (!pending) return
+    clearTimeout(pending.timer)
+    s.pendingPermissions.delete(requestId)
+    pending.resolve(approved)
+    if (approved && scope === 'session') s.sessionGrants.add(pending.grantKey)
+    const decision: PermissionDecision = approved ? (scope === 'session' ? 'allow_session' : 'allow_once') : 'deny'
+    this.writeAudit(s, pending.request, decision)
+    this.emit(s, { type: 'permission.settled', sessionId: s.sessionId, requestId, approved, timedOut })
+    if (s.run) {
+      s.status = 'working'
+      this.emit(s, { type: 'run.status', sessionId: s.sessionId, status: s.status })
+    }
+  }
+
+  /** 审批结果作为 system 留痕行进对话流（与渲染层本地路径同一个编码，宿主独占运行期写入） */
+  private writeAudit(s: HostSession, request: AgentPermissionRequest, decision: PermissionDecision): void {
+    const preview = buildPermissionPreview(request.tool, request.args, { workingDir: request.workingDir })
+    const at = Date.now()
+    this.persistMessage(s, {
+      id: makeId(),
+      role: 'system',
+      content: formatPermissionAuditContent({
+        decision,
+        tool: request.tool,
+        target: preview.target,
+        risk: preview.risk,
+        at,
+      }),
+      timestamp: at,
     })
   }
 
@@ -468,13 +534,8 @@ export class AgentSessionManager {
         return { ok: true }
       }
       case 'permission.resolve': {
-        const pending = s.pendingPermissions.get(cmd.requestId)
-        if (!pending) return { ok: false, error: 'stale-request' }
-        clearTimeout(pending.timer)
-        s.pendingPermissions.delete(cmd.requestId)
-        pending.resolve(cmd.approved === true)
-        s.status = 'working'
-        this.emit(s, { type: 'run.status', sessionId: s.sessionId, status: s.status })
+        if (!s.pendingPermissions.has(cmd.requestId)) return { ok: false, error: 'stale-request' }
+        this.settlePermission(s, cmd.requestId, cmd.approved === true, false, cmd.scope ?? 'once')
         return { ok: true }
       }
       case 'question.resolve': {
@@ -568,6 +629,9 @@ export class AgentSessionManager {
       ctx.activeTaskMode = null
       s.run = undefined
       s.status = 'idle'
+      // 本轮结束时还挂着的审批（多为 abort 打断等待）：按超时收尾，
+      // 否则界面上的待批卡片会永远留在"等待宿主"
+      for (const requestId of [...s.pendingPermissions.keys()]) this.settlePermission(s, requestId, false, true, 'once')
       // 终态单点决定：abort 落在等流窗口时循环是优雅收尾的（与渲染层现状一致），
       // 只凭 catch 会漏报中断——UI 会显示"完成"而用户明明按了停止。
       if (controller.signal.aborted) {
@@ -651,11 +715,19 @@ export class AgentSessionManager {
     for (const s of targets) {
       if (s.run) activeRuns.push({ sessionId: s.sessionId, runId: s.run.runId, status: s.status === 'awaiting' ? 'awaiting' : 'working' })
       queue[s.sessionId] = s.queue
-      for (const p of s.pendingPermissions.values()) pendingPermissions.push(p.event)
-      for (const q of s.pendingQuestions.values()) pendingPermissions.push(q.event)
       for (const item of s.ring) {
         if (item.seq > sinceSeq) this.broadcast({ seq: item.seq, event: item.event })
         if (item.seq > lastSeq) lastSeq = item.seq
+      }
+      // 待批/待答要按新序号重发：它们原事件的 seq 早已被客户端见过，直接回放会被去重闸门丢掉，
+      // 于是重连（F5 / 窗口销毁期间漏事件）之后卡片再也回不来。返回字段同时保留，供 P5 远程端用。
+      for (const p of s.pendingPermissions.values()) {
+        pendingPermissions.push(p.event)
+        this.emit(s, p.event)
+      }
+      for (const q of s.pendingQuestions.values()) {
+        pendingPermissions.push(q.event)
+        this.emit(s, q.event)
       }
     }
     return { activeRuns, queue, pendingPermissions, lastSeq }
@@ -702,12 +774,24 @@ function describeOs(): string {
 
 /** 当前可接收事件的窗口；electron 不在位（如 vitest 跑在 node 下）时返回空 */
 function liveWindows(): BrowserWindow[] {
+  if (windowProbe) return windowProbe()
   try {
     const electron = require('electron') as { BrowserWindow?: { getAllWindows(): BrowserWindow[] } }
     return electron.BrowserWindow?.getAllWindows().filter((w) => !w.isDestroyed() && !w.webContents.isDestroyed()) ?? []
   } catch {
     return []
   }
+}
+
+let windowProbe: (() => BrowserWindow[]) | null = null
+
+/**
+ * 测试注入点：真实环境取所有存活窗口。
+ * 审批链路（无窗口即 fail-closed、有窗口才广播 requested 并挂起等待）在单测里必须可跑，
+ * 否则这段最关键的 fail-closed 语义只能靠人肉在 GUI 里验。
+ */
+export function setAgentHostWindowProbeForTest(probe: (() => BrowserWindow[]) | null): void {
+  windowProbe = probe
 }
 
 function isPackaged(): boolean {

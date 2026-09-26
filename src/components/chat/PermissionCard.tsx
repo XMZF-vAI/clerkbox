@@ -2,6 +2,8 @@ import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Ban, Check, ChevronDown, ChevronUp, Clock, ShieldAlert, ShieldCheck, ShieldQuestion } from 'lucide-react'
 import { useChatStore } from '../../stores/chat-store'
+import { agentClient } from '../../lib/agent-client'
+import { usePermissionStore, type HostPermission } from '../../stores/permission-store'
 import { makeId } from '../../agent-core/loop'
 import {
   buildPermissionPreview,
@@ -173,12 +175,53 @@ export function PermissionCard({ request, onResolve, interactive = true, vibe = 
 }
 
 /**
- * 阶段一挂载点：数据源是渲染层已有的 confirm-danger 会话状态 + 尚未收尾的门控工具调用。
- * interactive=false：放行判定此刻仍由宿主侧的确认弹窗决定（agent-core 的 permission.confirm 端口），
- * 本卡片只做风险预览，不冒充决策入口。批次 B 的 permission.requested/resolve 落地后，
- * 把此处换成事件数据源并置 interactive=true，PermissionCard 的 props 不变。
+ * 宿主模式（C2 阶段二）：数据源是宿主的 permission.requested 事件，带 tool/args，
+ * 所以卡片既画得出富预览也算得出「本会话允许」的匹配键；三个按钮真的决定放行。
+ * 这份 store 只在宿主模式下会被写入，本地路径的放行权仍在原生确认框里（见下方镜像态）。
+ */
+const NO_PENDING: HostPermission[] = []
+
+function HostPermissionCard({ request, vibe }: { request: HostPermission; vibe: boolean }) {
+  const preview = useMemo(
+    () => buildPermissionPreview(request.tool, request.args, { workingDir: request.workingDir }),
+    [request.tool, request.args, request.workingDir]
+  )
+  const view = useMemo<PermissionRequestView>(
+    () => ({
+      id: request.requestId,
+      tool: request.tool,
+      preview,
+      status: 'pending',
+      requestedAt: request.requestedAt,
+      previouslyGranted: false,
+    }),
+    [request.requestId, request.tool, request.requestedAt, preview]
+  )
+
+  const resolve = (decision: PermissionDecision) => {
+    // 只回布尔给宿主不够：「本会话允许」要让它记住匹配键，否则后台无人看管的 run
+    // 会带着同一个目标一次次撞回 120s 超时
+    void agentClient.send({
+      type: 'permission.resolve',
+      sessionId: request.sessionId,
+      requestId: request.requestId,
+      approved: decision !== 'deny',
+      scope: decision === 'allow_session' ? 'session' : 'once',
+    })
+    // 乐观收尾；宿主的 permission.settled 到达时再 settle 一次是幂等的
+    usePermissionStore.getState().settle(request.sessionId, request.requestId)
+  }
+
+  return <PermissionCard request={view} onResolve={(_id, decision) => resolve(decision)} interactive vibe={vibe} />
+}
+
+/**
+ * 挂载点：宿主模式走上面的事件数据源；渲染层本地路径这里是镜像态
+ * （confirm-danger 会话状态 + 尚未收尾的门控工具调用推断出来），interactive=false
+ * 是因为那条路径的放行权在原生确认框手里，卡片不该伪装成决策入口。
  */
 export function PermissionApprovalCard({ sessionId, vibe = false }: { sessionId: string; vibe?: boolean }) {
+  const hostPending = usePermissionStore((s) => s.bySession[sessionId] ?? NO_PENDING)
   const status = useChatStore((s) => s.sessionStatus[sessionId])
   const messages = useChatStore((s) => s.sessions.find((session) => session.id === sessionId)?.messages)
   const workingDir = useChatStore((s) => {
@@ -208,6 +251,9 @@ export function PermissionApprovalCard({ sessionId, vibe = false }: { sessionId:
       previouslyGranted: grants.sessionId === sessionId && grants.keys.includes(preview.grantKey),
     }
   }, [status, messages, sessionId, workingDir, answered, grants])
+
+  // 宿主模式下待批来自事件流；镜像态（靠消息扫描 + 会话状态推断）让位给它
+  if (hostPending.length > 0) return <HostPermissionCard request={hostPending[0]} vibe={vibe} />
 
   if (!request) return null
 

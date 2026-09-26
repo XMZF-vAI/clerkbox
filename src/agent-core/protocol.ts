@@ -19,7 +19,7 @@ import type {
   TaskMode,
   TodoItem,
 } from '../types/agent'
-import type { AgentSettings } from './ports'
+import type { AgentSettings, PermissionReason } from './ports'
 
 // ── 渲染层 → 宿主（invoke 'agent:command'）──
 
@@ -37,7 +37,9 @@ export type AgentCommand =
   | { type: 'queue.enqueue'; sessionId: string; item: QueuedMessageItem }
   | { type: 'queue.remove'; sessionId: string; id: string }
   | { type: 'queue.flush'; sessionId: string; id?: string }  // 立即发送队首（给 id 则先把该条提到队首）
-  | { type: 'permission.resolve'; sessionId: string; requestId: string; approved: boolean }
+  | { type: 'permission.resolve'; sessionId: string; requestId: string; approved: boolean;
+      /** 'session' = 本会话内同类目标不再询问（放行集合由宿主持有，UI 关闭/离线也照旧生效） */
+      scope?: 'once' | 'session' }
   | { type: 'question.resolve'; sessionId: string; requestId: string; payload: unknown }
   | { type: 'manual.compact'; sessionId: string; instructions?: string }
 
@@ -53,7 +55,16 @@ export type AgentEvent =
   | { type: 'tool.finished';    sessionId: string; callId: string; result: string; isError: boolean }
   | { type: 'permission.requested'; sessionId: string; requestId: string;
       preview: string;   // UI 纯函数渲染命令/文件预览（参照 ZCode permission-request-preview）
-      risk: 'dangerous' | 'normal'; mode: 'manual' | 'auto' | 'full' }
+      risk: 'dangerous' | 'normal'; mode: 'manual' | 'auto' | 'full';
+      /**
+       * P4 追加（只增不改）：只带一段已渲染好的 preview 字符串时，界面既画不出富预览、
+       * 也算不出「本会话允许」的匹配键 —— 于是宿主模式下的危险操作实际无人能批，
+       * 120s 后一律 fail-closed 拒绝。这几项把 loop 判定用的原始入参带过来，
+       * UI 侧据此复用同一个 buildPermissionPreview，两侧不会长出第二套判定。
+       */
+      tool?: string; args?: Record<string, unknown>; reason?: PermissionReason; workingDir?: string }
+  /** 审批收尾：批准/拒绝/超时/运行结束回收都发这条，卡片才不会永远挂着 */
+  | { type: 'permission.settled'; sessionId: string; requestId: string; approved: boolean; timedOut: boolean }
   | { type: 'question.requested'; sessionId: string; requestId: string; question: unknown } // QuestionCard
   | { type: 'queue.snapshot';   sessionId: string; items: QueuedMessageItem[] }
   | { type: 'run.status';       sessionId: string; status: 'working' | 'awaiting' | 'idle'; error?: string }

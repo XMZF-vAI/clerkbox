@@ -11,6 +11,7 @@ import { notifyIfNotViewing } from './notify'
 import { useChatStore } from '../stores/chat-store'
 import { useInteractiveStore, useTodoStore } from '../stores/interactive-store'
 import { useGoalStore } from '../stores/goal-store'
+import { usePermissionStore } from '../stores/permission-store'
 import { useAgentRunsStore } from '../stores/agent-runs-store'
 import type { AgentEvent } from '../agent-core/protocol'
 import type { SessionGoal } from '../types/agent'
@@ -50,6 +51,23 @@ function applyPatch(patch: StorePatch): void {
     case 'upsert-subagent-run':
       useAgentRunsStore.getState().upsertSubAgentRun(patch.sessionId, patch.run)
       return
+    case 'open-permission':
+      // 幂等由 store 按 requestId 兜住：实时、补发与整环回放会各投一次
+      usePermissionStore.getState().open({
+        sessionId: patch.sessionId,
+        requestId: patch.requestId,
+        tool: patch.tool,
+        args: patch.args,
+        reason: patch.reason,
+        workingDir: patch.workingDir,
+        mode: patch.mode,
+        body: patch.body,
+        requestedAt: Date.now(),
+      })
+      return
+    case 'settle-permission':
+      usePermissionStore.getState().settle(patch.sessionId, patch.requestId)
+      return
     case 'open-question': {
       const key = `${patch.sessionId}:${patch.requestId}`
       if (openedQuestions.has(key)) return
@@ -88,6 +106,8 @@ export function applyAgentEvent(event: AgentEvent): void {
   // 危险确认与提问由宿主挂起等待回执；本轮收尾时本地对话框不该留着
   if (event.type === 'run.completed' || event.type === 'run.aborted' || event.type === 'resync') {
     useInteractiveStore.getState().cancelQuestion(event.sessionId)
+    // 宿主正常会先发 settled 再收尾；这条兜底防漏发把待批卡片永久留在界面上
+    usePermissionStore.getState().clearSession(event.sessionId)
     for (const key of [...openedQuestions]) if (key.startsWith(`${event.sessionId}:`)) openedQuestions.delete(key)
   }
 }

@@ -6,6 +6,7 @@
  * 因为那需要读当前状态，纯函数做不到。
  */
 import type { AgentEvent } from '../agent-core/protocol'
+import type { PermissionReason } from '../agent-core/ports'
 import type { Message, SessionGoal, SubAgentRun, TodoItem, UserQuestion } from '../types/agent'
 import type { QueuedMessageItem, SessionStatus } from '../stores/chat-store'
 
@@ -22,6 +23,19 @@ export type StorePatch =
   | { kind: 'set-goal'; sessionId: string; goal: SessionGoal | null }
   | { kind: 'upsert-subagent-run'; sessionId: string; run: SubAgentRun }
   | { kind: 'open-question'; sessionId: string; requestId: string; questions: UserQuestion[] }
+  /** 宿主待批审批：带 tool/args 才画得出富预览与「本会话允许」的匹配键 */
+  | {
+      kind: 'open-permission'
+      sessionId: string
+      requestId: string
+      tool: string
+      args: Record<string, unknown>
+      reason: PermissionReason
+      workingDir: string
+      mode: 'manual' | 'auto' | 'full'
+      body: string
+    }
+  | { kind: 'settle-permission'; sessionId: string; requestId: string }
   | { kind: 'notify'; sessionId: string; channel: 'error' | 'done' | 'confirm-danger'; message?: string }
   /** 整会话重拉：环形缓冲溢出或宿主原子重写历史（压缩）时唯一的正确动作 */
   | { kind: 'reload-session'; sessionId: string; reason: string }
@@ -67,8 +81,26 @@ export function planAgentEvent(event: AgentEvent): StorePatch[] {
       return []
     case 'queue.snapshot':
       return [{ kind: 'set-queue', sessionId: event.sessionId, items: event.items }]
-    case 'permission.requested':
-      return [{ kind: 'set-status', sessionId: event.sessionId, status: 'confirm-danger' }]
+    case 'permission.requested': {
+      const patches: StorePatch[] = [{ kind: 'set-status', sessionId: event.sessionId, status: 'confirm-danger' }]
+      // 只带 preview 字符串的精简事件维持镜像态，不长出一张点不动的半卡片
+      if (event.tool && event.args) {
+        patches.push({
+          kind: 'open-permission',
+          sessionId: event.sessionId,
+          requestId: event.requestId,
+          tool: event.tool,
+          args: event.args,
+          reason: event.reason ?? 'dangerous-command',
+          workingDir: event.workingDir ?? '',
+          mode: event.mode,
+          body: event.preview,
+        })
+      }
+      return patches
+    }
+    case 'permission.settled':
+      return [{ kind: 'settle-permission', sessionId: event.sessionId, requestId: event.requestId }]
     case 'question.requested':
       return [{ kind: 'open-question', sessionId: event.sessionId, requestId: event.requestId, questions: event.question as UserQuestion[] }]
     case 'todos.updated':

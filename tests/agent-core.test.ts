@@ -186,7 +186,10 @@ function makePorts(opts: {
   const settings = makeSettings(opts.settings)
   const { store, session, addMessage, updateMessage } = makeStorePort({ workingDir })
   const ui = makeUiPort()
-  const permission = { confirm: vi.fn(async () => true) }
+  // 带形参声明：断言「审批请求长什么样」时要能从 mock 调用记录里取出实参
+  const permission = {
+    confirm: vi.fn(async (_request: Parameters<AgentPorts['permission']['confirm']>[0]) => true),
+  }
   const goal = {
     get: vi.fn(() => opts.goalState),
     setGoal: vi.fn(),
@@ -548,7 +551,6 @@ describe('runReactLoop · 黄金序列', () => {
     const toolMsg = session.messages.find((m) => m.role === 'tool')
     expect(toolMsg).toBeDefined()
     expect(toolMsg!.toolResults![0].isError).toBe(true)
-    // 注：agent.toolExecFailed 在两份 locale 均缺失（历史缺口），i18n.t 回落为 key 本身
     expect(toolMsg!.content.length).toBeGreaterThan(0)
     expect(session.messages.at(-1)!.content).toBe('recovered')
   })
@@ -615,6 +617,30 @@ describe('runReactLoop · 权限与运行时防护', () => {
     await runLoop(ports)
     expect(permission.confirm).toHaveBeenCalledTimes(1)
     expect(tools.execute).toHaveBeenCalledTimes(1)
+  })
+
+  it('审批请求带结构化入参（宿主与界面靠它画预览、算「本会话允许」的匹配键）', async () => {
+    const { ports, permission } = makePorts({
+      settings: { approvalMode: 'manual' },
+      turns: [toolTurn('execute_command', { command: 'rm -rf /tmp/x' }), textTurn('done')],
+    })
+    await runLoop(ports)
+    // 过去只传一对已渲染好的 title/body 字符串：宿主拿不到 tool/args，
+    // 界面既画不出富预览也算不出匹配键，于是 main 模式的危险操作实际无人能批。
+    expect(permission.confirm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tool: 'execute_command',
+        args: expect.objectContaining({ command: 'rm -rf /tmp/x' }),
+        reason: 'dangerous-command',
+        risk: 'dangerous',
+      })
+    )
+    const [request] = permission.confirm.mock.calls[0]
+    // 命令原文不靠已渲染文案传递（测试环境里 i18n 未装载资源，只能断言结构字段）：
+    // 宿主与界面都从 args 取，两种模式共用同一份 buildPermissionPreview
+    expect(request.title.length).toBeGreaterThan(0)
+    expect(request.body.length).toBeGreaterThan(0)
+    expect(typeof request.workingDir).toBe('string')
   })
 
   it('plan 模式只读：write_file 拒绝、read_file 放行', async () => {
@@ -705,7 +731,7 @@ describe('runReactLoop · 权限与运行时防护', () => {
     await runLoop(ports)
     // 每轮参数不同（绕过 doom-loop），恰好执行 100 次
     expect(tools.execute).toHaveBeenCalledTimes(100)
-    // 收尾轮拒绝执行 + 兜底终止消息（注：agent.maxTurnsTerminated 在两份 locale 均缺失，i18n 回落为 key）
+    // 收尾轮拒绝执行 + 兜底终止消息
     const finalAssistant = session.messages.at(-1)!
     expect(finalAssistant.role).toBe('assistant')
     expect(finalAssistant.content.length).toBeGreaterThan(0)

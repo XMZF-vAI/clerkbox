@@ -60,9 +60,35 @@ export interface AgentStorePort {
   compact(sessionId: string, messages: Message[], boundaryMessageId: string): void
 }
 
+/**
+ * 需要人工确认的四种场景。UI 侧据此选文案与风险档，宿主据此决定是否进会话级放行集合。
+ * 语义与 loop 里的分支一一对应，不额外放宽任何拦截。
+ */
+export type PermissionReason = 'dangerous-command' | 'outside-cwd' | 'system-dir' | 'outside-write'
+
+/**
+ * 审批请求的结构化入参。
+ *
+ * 原先这里只有一对已渲染好的 title/body 字符串：主进程宿主拿不到 tool/args，
+ * 界面就只能显示一段纯文本、也无法给出「本会话允许」的匹配键，
+ * 于是 main 模式的危险操作实际无人能批（120s 后 fail-closed 拒绝）。
+ */
+export interface AgentPermissionRequest {
+  tool: string
+  args: Record<string, unknown>
+  reason: PermissionReason
+  /** loop 侧已解析好的工作目录：预览的目标路径必须与它判定过的同一个值 */
+  workingDir: string
+  /** 危险命令 / 系统目录 = dangerous，越界写入 / 越界执行 = normal */
+  risk: 'dangerous' | 'normal'
+  /** 渲染层与原生对话框共用的文案（同一套 i18n，两种模式观感一致） */
+  title: string
+  body: string
+}
+
 /** 权限审批（P1 = Electron 原生确认框；P3 起宿主侧 fail-closed：超时/UI 离线默认拒绝）。 */
 export interface AgentPermissionPort {
-  confirm(title: string, body: string): Promise<boolean>
+  confirm(request: AgentPermissionRequest): Promise<boolean>
 }
 
 /** UI 耦合回执：提问/待办/通知/用量统计/子 agent 运行态/记忆捕获。 */

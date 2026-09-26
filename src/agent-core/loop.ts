@@ -932,10 +932,15 @@ async function checkToolPermission(
       // 危险命令确认前：标记 confirm-danger + 通知（仅当用户不在此会话时）
       ports.store.setStatus(sessionId, 'confirm-danger')
       ports.ui.notify(sessionId, 'confirm-danger', i18n.t('agent.notifyDangerCommand', { command: cmd.slice(0, 100) }))
-      const confirmed = await ports.permission.confirm(
-        i18n.t('agent.confirmDangerTitle'),
-        i18n.t('agent.confirmDangerBody', { command: cmd.slice(0, 200) })
-      )
+      const confirmed = await ports.permission.confirm({
+        tool: toolName,
+        args,
+        reason: 'dangerous-command',
+        workingDir: workingDir || commandCwd || '',
+        risk: 'dangerous',
+        title: i18n.t('agent.confirmDangerTitle'),
+        body: i18n.t('agent.confirmDangerBody', { command: cmd.slice(0, 200) }),
+      })
       // 确认或取消后：恢复 working 状态（sendMessage 仍在执行中）
       ports.store.setStatus(sessionId, 'working')
       if (!confirmed) {
@@ -944,10 +949,15 @@ async function checkToolPermission(
     }
     // auto 档：AI 已自审该操作，目录外执行免确认；manual 档仍弹窗
     if (approvalMode === 'manual' && workingDir && commandCwd && !isPathInside(commandCwd, workingDir)) {
-      const confirmed = await ports.permission.confirm(
-        i18n.t('agent.confirmOutsideCwdTitle'),
-        i18n.t('agent.confirmOutsideCwdBody', { cwd: commandCwd, workingDir })
-      )
+      const confirmed = await ports.permission.confirm({
+        tool: toolName,
+        args,
+        reason: 'outside-cwd',
+        workingDir: workingDir || '',
+        risk: 'normal',
+        title: i18n.t('agent.confirmOutsideCwdTitle'),
+        body: i18n.t('agent.confirmOutsideCwdBody', { cwd: commandCwd, workingDir }),
+      })
       if (!confirmed) return { allowed: false, reason: i18n.t('agent.deniedCancelOutsideCwd') }
     }
   }
@@ -958,10 +968,15 @@ async function checkToolPermission(
     const path = resolveToolPath(workingDir, args.path)
     // 系统目录写入：manual/auto 都弹窗（最后一道防线，仅 full 档放行）
     if (isSystemPath(path)) {
-      const confirmed = await ports.permission.confirm(
-        i18n.t('agent.confirmSystemDirTitle'),
-        i18n.t('agent.confirmSystemDirBody', { path })
-      )
+      const confirmed = await ports.permission.confirm({
+        tool: toolName,
+        args,
+        reason: 'system-dir',
+        workingDir: workingDir || path,
+        risk: 'dangerous',
+        title: i18n.t('agent.confirmSystemDirTitle'),
+        body: i18n.t('agent.confirmSystemDirBody', { path }),
+      })
       if (!confirmed) {
         return { allowed: false, reason: i18n.t('agent.deniedCancelSystemDir') }
       }
@@ -971,10 +986,15 @@ async function checkToolPermission(
     if (approvalMode === 'manual' && workingDir) {
       const isOutside = !isPathInside(path, workingDir)
       if (isOutside) {
-        const confirmed = await ports.permission.confirm(
-          i18n.t('agent.confirmOutsideWriteTitle'),
-          i18n.t('agent.confirmOutsideWriteBody', { path, workingDir })
-        )
+        const confirmed = await ports.permission.confirm({
+          tool: toolName,
+          args,
+          reason: 'outside-write',
+          workingDir: workingDir || '',
+          risk: 'normal',
+          title: i18n.t('agent.confirmOutsideWriteTitle'),
+          body: i18n.t('agent.confirmOutsideWriteBody', { path, workingDir }),
+        })
         if (!confirmed) {
           return { allowed: false, reason: i18n.t('agent.deniedCancelOutsideWrite') }
         }
