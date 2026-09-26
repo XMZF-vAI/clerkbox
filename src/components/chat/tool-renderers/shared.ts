@@ -97,7 +97,8 @@ export function parseSearchResults(content: string): SearchHit[] {
     const lines = block.split('\n').map((l) => l.trim()).filter(Boolean)
     if (lines.length === 0) continue
     const titleMatch = lines[0].match(/^\d+\.\s*\*\*(.+?)\*\*$/)
-    if (!titleMatch) return []
+    // 单块格式不符只跳过这一块：return 会让前面已解析出的结果全部作废
+    if (!titleMatch) continue
     const urlLine = [...lines].reverse().find((l) => /^https?:\/\//.test(l)) || ''
     const snippet = lines
       .filter((l) => l !== lines[0] && l !== urlLine)

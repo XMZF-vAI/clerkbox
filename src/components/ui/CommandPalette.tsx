@@ -37,6 +37,19 @@ export default function CommandPalette() {
     requestAnimationFrame(() => inputRef.current?.focus())
   }, [open])
 
+  // Esc 必须总能关掉面板：只绑在 dialog div 上时，焦点一旦跑到面板外（Tab 出框、
+  // 点选列表项后）就再也收不到 keydown，用户被关在一个关不掉的模态里。
+  useEffect(() => {
+    if (!open) return
+    const onDocKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      useUIStore.getState().setCommandPaletteOpen(false)
+    }
+    document.addEventListener('keydown', onDocKeyDown)
+    return () => document.removeEventListener('keydown', onDocKeyDown)
+  }, [open])
+
   const items = useMemo<PaletteItem[]>(() => {
     const q = query.trim().toLowerCase()
     const result: PaletteItem[] = []

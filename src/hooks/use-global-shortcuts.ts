@@ -20,7 +20,9 @@ export function useGlobalShortcuts(): void {
       for (const command of COMMANDS) {
         if (!command.shortcut || !shortcutMatches(event, command.shortcut)) continue
         if (paletteOpen && command.id !== 'palette.open') return
-        if (command.when && !command.when()) return
+        // 命中键位但被 when() 拦下：继续看后面的命令，别让一条 gating 掉的命令
+        // 吞掉共享同一键位的其它命令（return 会让后者永远没机会）
+        if (command.when && !command.when()) continue
         event.preventDefault()
         command.run()
         return

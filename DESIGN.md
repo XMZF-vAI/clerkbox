@@ -191,7 +191,7 @@ grep -rEo 'shadow-elevation-[0-9]' src --include=*.tsx | wc -l
 | 首帧防闪 | `public/theme-init.js:17-21` | 读 `state.uiScale` 预设内联值（越界/等于 1 时不写） |
 | 设置控件（桌面） | `src/components/settings/SettingsPage.tsx:430-452` | 四档分段按钮 |
 | 设置控件（移动） | `src/components/settings/MSettingsPage.tsx:440-462` | 同上，触控高度 `py-2.5` |
-| 类型与默认值 | `src/types/agent.ts:273-274`、`src/stores/settings-store.ts:36` | `uiScale?: number`，默认 `1`（`agent.ts:273` 的旧注释写「基准 14px」，与实现的 16px 不符，待 owner 修正）|
+| 类型与默认值 | `src/types/agent.ts:273-274`、`src/stores/settings-store.ts:36` | `uiScale?: number`，默认 `1`（= 基准 16px；旧注释已按实现修正）|
 
 **为什么基准是 16px 而不是 14px**：Tailwind 3.4 的 preflight（`node_modules/tailwindcss/src/css/preflight.css:30-40`）
 **不设** `html { font-size }`，改动前 root 字号是 Chromium UA 默认 = 16px；而所有 `text-*`、间距、宽度都是 rem。

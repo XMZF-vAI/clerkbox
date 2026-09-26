@@ -8,8 +8,9 @@ import { ipc, isWebUIMode } from './ipc-client'
  * 设计要点：
  * - KV（主进程 clerkbox-kv.json）是唯一事实来源，主进程用写队列串行化，天然跨模式共享
  * - localStorage 仅作为存量 Electron 用户的迁移来源：KV 为空而 localStorage 有数据时，
- *   首次读取自动迁移进 KV；之后 Electron 模式双写 localStorage 作为本地兜底缓存
- * - WebUI 模式下 localStorage 属于不同 origin、读不到桌面端数据，因此只走 KV
+ *   首次读取自动迁移进 KV；写入后两种模式都双写 localStorage，但那份只当
+ *   「本浏览器缓存」用（供 theme-init.js 首帧取主题，以及桌面端的兜底读），不是事实来源
+ * - WebUI 模式下 localStorage 属于不同 origin、读不到桌面端数据，因此真源仍走 KV
  * - API Key 不经过这里（settings-store 的 partialize 已剥离），仍由 safeStorage 加密保管
  */
 
@@ -38,23 +39,22 @@ const kvStateStorage: StateStorage = {
   },
   setItem: async (name: string, value: string) => {
     await ipc.kvSet(name, value).catch((e) => console.error('[shared-storage] kvSet failed:', e))
-    // Electron 模式双写 localStorage 作为本地兜底缓存
-    if (!isWebUIMode) {
-      try {
-        window.localStorage.setItem(name, value)
-      } catch {
-        /* 忽略配额等异常 */
-      }
+    // 双写 localStorage：真源仍是 KV，这份只是本浏览器的副本。
+    // 两个用途：① Electron 侧的本地兜底缓存；② 让 public/theme-init.js 在 React 挂载前
+    // 就能读到主题/字号——它读不到 KV（那是异步 IPC），WebUI 里于是曾被强制成默认深色，
+    // 恰好是这个文件要防的白闪。WebUI 的 localStorage 是独立 origin，只影响这台浏览器自己。
+    try {
+      window.localStorage.setItem(name, value)
+    } catch {
+      /* 忽略配额等异常：真源已经写成功 */
     }
   },
   removeItem: async (name: string) => {
     await ipc.kvRemove(name).catch(() => {})
-    if (!isWebUIMode) {
-      try {
-        window.localStorage.removeItem(name)
-      } catch {
-        /* 忽略 */
-      }
+    try {
+      window.localStorage.removeItem(name)
+    } catch {
+      /* 忽略 */
     }
   },
 }
