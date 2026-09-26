@@ -228,6 +228,16 @@ describe('SQLite 引擎语义（与旧 JSON 引擎对齐）', () => {
     expect(sessions[0]!.updated_at).toBe(5000)
   })
 
+  it('createSession 重复写入保持原位（rowid 不重排），合并字段照常生效', async () => {
+    await store.createSession({ id: 'a', title: 'A', created_at: 1, updated_at: 1 })
+    await store.createSession({ id: 'b', title: 'B', created_at: 2, updated_at: 2 })
+    await store.createSession({ id: 'a', title: 'A 改名', created_at: 1, updated_at: 9, working_dir: 'D:\\p' })
+    const rows = await store.getAllSessions()
+    // getAllSessions 按 rowid 排序：INSERT OR REPLACE 是「删了再插」，会把重新打开的会话甩到末尾
+    expect(rows.map((r) => r.id)).toEqual(['a', 'b'])
+    expect(rows[0]).toMatchObject({ title: 'A 改名', updated_at: 9, working_dir: 'D:\\p' })
+  })
+
   it('修订号随写操作自增；updateMessage 未命中不写不增', async () => {
     const before = await store.getRevision()
     await store.createSession({ id: 'r1', title: 't', created_at: 1, updated_at: 1 })

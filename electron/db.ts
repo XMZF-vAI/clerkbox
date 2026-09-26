@@ -42,7 +42,13 @@ async function loadSqlJs(wasmBinary: Buffer): Promise<SqlJsStatic> {
   const candidate = (mod as { default?: unknown }).default ?? mod
   if (typeof candidate !== 'function') throw new Error('sql.js module shape unexpected')
   const initFn = candidate as (config: { wasmBinary: Buffer }) => Promise<SqlJsStatic>
-  return await initFn({ wasmBinary })
+  return await withTimeout(
+    initFn({ wasmBinary }),
+    // 启动窗口创建排在这一步之后：wasm 实例化一旦卡死就是「没有窗口、没有 IPC handler」，
+    // 而启动动画只有固定超时兜底。到点改走 JSON 引擎，至少把应用开起来。
+    ENGINE_BOOTSTRAP_TIMEOUT_MS,
+    'sql.js 初始化'
+  )
 }
 
 export interface TraySessionItem {
@@ -87,6 +93,26 @@ const PERSIST_DEBOUNCE_MS = 300
 const PERSIST_MAX_PENDING_MS = 2000
 /** 磁盘忙（EBUSY/EACCES/写入失败）后的单次重试间隔 */
 const PERSIST_RETRY_MS = 1000
+/** wasm 引擎初始化上限：与启动动画的兜底时长同量级，超时即降级而不是把启动挂住 */
+const ENGINE_BOOTSTRAP_TIMEOUT_MS = 15_000
+
+/** 给一个可能永不 settle 的 Promise 加时限（超时抛错，交由调用方走非破坏降级） */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label}超时（${ms}ms）`)), ms)
+    timer.unref?.()
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (error) => {
+        clearTimeout(timer)
+        reject(error instanceof Error ? error : new Error(String(error)))
+      }
+    )
+  })
+}
 
 function isRecord(value: unknown): value is Row {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -355,12 +381,14 @@ class SqliteChatStore implements ChatStore {
     if (typeof row?.id !== 'string' || !row.id) throw new Error('Invalid session row')
     const existing = this.queryDataRows('SELECT data FROM sessions WHERE id = ?', [row.id])
     const merged: Row = existing.length > 0 ? { ...existing[0], ...row } : row
-    this.db.run('INSERT OR REPLACE INTO sessions (id, title, updated_at, data) VALUES (?, ?, ?, ?)', [
-      row.id,
-      asString(merged.title),
-      asNumber(merged.updated_at),
-      JSON.stringify(merged),
-    ])
+    // 用 UPSERT 而不是 INSERT OR REPLACE：后者是「删了再插」，会重发行号，
+    // 而 getAllSessions 按 rowid 排序——重新打开一个会话就把它甩到列表末尾。
+    // 旧 JSON 引擎是数组原位替换，消息侧同理走 UPDATE（见 addMessage），会话必须同构。
+    this.db.run(
+      `INSERT INTO sessions (id, title, updated_at, data) VALUES (?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET title = excluded.title, updated_at = excluded.updated_at, data = excluded.data`,
+      [row.id, asString(merged.title), asNumber(merged.updated_at), JSON.stringify(merged)],
+    )
     this.afterMutation()
   }
 
