@@ -407,7 +407,9 @@ export const ipc = {
    * 而 snapshots 里存着含 apiKey 的设置快照与整段事件环——删掉的会话也在替用户留着它们。
    */
   agentDropSession: (sessionId: string): void => {
-    if (isElectron) window.clerkbox.agentDropSession(sessionId)
+    // 可选调用：主进程侧改动要重启才生效，开发态会出现「渲染层已更新、preload 还是旧的」，
+    // 而这条只是请宿主回收运行态，缺桥接不该把「删除会话」这一步整个报错中断
+    if (isElectron) window.clerkbox.agentDropSession?.(sessionId)
     // WebUI：agent:* 通道对远程调用一律 403（见 webui-server 的黑名单），无宿主运行态可回收
   },
   /**
