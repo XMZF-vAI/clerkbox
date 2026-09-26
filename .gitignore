@@ -71,3 +71,10 @@ Thumbs.db
 /.release-notes.md
 # 历史发版说明（不跟踪）
 /release-notes-*.md
+
+# 一次性验证残留（构建/样式试跑产物，零引用；正式实现都在 src 与 build/ 下）
+/tw-test.css
+/vite-err.txt
+/vite-out.txt
+/tmp-check/
+/verify-*.mjs

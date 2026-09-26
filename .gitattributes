@@ -1,0 +1,31 @@
+# 换行处理：入库一律 LF。
+# 此前仓库靠每台机器各自的 core.autocrlf 达成同一结果——只要有一台是 false 并用
+# 默认写 CRLF 的编辑器保存，就会把 CRLF 整文件入库，把真实改动的 diff 冲掉。
+* text=auto
+
+# Windows 批处理必须是 CRLF，否则 cmd.exe 解析行为会变
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制：一个字节都不许改写（行尾转换会直接毁掉图标/字体/wasm）
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.icns binary
+*.ttf binary
+*.woff binary
+*.woff2 binary
+*.eot binary
+*.node binary
+*.wasm binary
+*.pdf binary
+*.blockmap binary
+*.exe binary
+*.zip binary
+
+# 压缩包/打包产物里的 minify 文件不参与 diff
+*.min.js -diff
+*.min.css -diff
