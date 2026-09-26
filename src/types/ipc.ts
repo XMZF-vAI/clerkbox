@@ -359,6 +359,8 @@ export interface ClerkBoxAPI {
   agentHostMode: () => Promise<'main' | 'renderer'>
   /** 重连取回运行态并按 sinceSeq 补发缺口事件 */
   agentSnapshot: (sessionId: string | undefined, sinceSeq: number) => Promise<AgentSnapshot>
+  /** 会话删除时回收宿主运行态（fire-and-forget） */
+  agentDropSession: (sessionId: string) => void
   /** 订阅宿主事件流；返回退订函数。payload 带单调 seq */
   onAgentEvent: (callback: (payload: { seq: number; event: AgentEvent }) => void) => () => void
   loadApiKeys: () => Promise<Record<string, string>>

@@ -493,6 +493,11 @@ let chatStoreRef: ChatStore | null = null
 // （最小化时先还原），把用户引导回正在运行的实例。
 const gotSingleInstanceLock = app.requestSingleInstanceLock()
 if (!gotSingleInstanceLock) {
+  // 抢锁失败此前完全静默：日志停在启动第一行、退出码 0，看上去像"应用自己崩了"，
+  // 而真相只是"已经有一个实例在跑（或在托盘后台）"。正常路径下已有实例会收到
+  // second-instance 并把自己的窗口唤到前台，这里只负责把这一次退出的原因留在日志里。
+  // 不用模态框：此处早于 app ready，dialog 不可用，而且无人值守的二次启动会被卡住。
+  console.warn('[main] 未拿到单实例锁：已有 ClerkBox 实例在运行，本次启动退出（窗口可能在托盘后台）')
   app.quit()
 } else {
   app.on('second-instance', () => {
@@ -3509,18 +3514,30 @@ function htmlToText(html: string): string {
 // ── App lifecycle ──
 
 // Log uncaught failures instead of terminating the main process without diagnostics.
-process.on('uncaughtException', (err) => {
-  console.error('Uncaught Exception:', err)
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    dialog.showErrorBox('主进程错误', err?.message || String(err))
+/** 正在弹错误框：一条故障不该拍出一串模态框 */
+let reportingFatal = false
+
+/** 管道断开不是应用故障——是拉起我们的终端/管道先没了（见 logger.ts 里的流错误兜底） */
+function isPipeFailure(err: unknown): boolean {
+  const e = err as { code?: string; message?: string } | null
+  return e?.code === 'EPIPE' || /EPIPE|broken pipe/i.test(String(e?.message ?? err ?? ''))
+}
+
+function reportFatal(title: string, boxTitle: string, err: unknown): void {
+  // EPIPE 时 console 本身就是坏的：再写一次就是自递归刷屏
+  if (!isPipeFailure(err)) console.error(`${title}:`, err)
+  if (reportingFatal || isPipeFailure(err)) return
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  reportingFatal = true
+  try {
+    dialog.showErrorBox(boxTitle, err instanceof Error ? err.message || String(err) : String(err))
+  } catch { /* 弹框自身失败时只能留日志 */ } finally {
+    reportingFatal = false
   }
-})
-process.on('unhandledRejection', (reason) => {
-  console.error('Unhandled Rejection:', reason)
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    dialog.showErrorBox('未处理的 Promise 错误', String(reason))
-  }
-})
+}
+
+process.on('uncaughtException', (err) => reportFatal('Uncaught Exception', '主进程错误', err))
+process.on('unhandledRejection', (reason) => reportFatal('Unhandled Rejection', '未处理的 Promise 错误', reason))
 
 // 设置 AppUserModelID：让 Windows 任务栏正确识别应用身份，
 // 配合 BrowserWindow icon 让任务栏/开始菜单显示自定义图标而非默认 Electron 图标。

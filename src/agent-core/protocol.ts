@@ -36,7 +36,7 @@ export type AgentCommand =
   | { type: 'abort'; sessionId: string }
   | { type: 'queue.enqueue'; sessionId: string; item: QueuedMessageItem }
   | { type: 'queue.remove'; sessionId: string; id: string }
-  | { type: 'queue.flush'; sessionId: string }          // 立即发送队首
+  | { type: 'queue.flush'; sessionId: string; id?: string }  // 立即发送队首（给 id 则先把该条提到队首）
   | { type: 'permission.resolve'; sessionId: string; requestId: string; approved: boolean }
   | { type: 'question.resolve'; sessionId: string; requestId: string; payload: unknown }
   | { type: 'manual.compact'; sessionId: string; instructions?: string }

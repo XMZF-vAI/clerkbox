@@ -450,6 +450,15 @@ export class AgentSessionManager {
         this.setQueue(s, s.queue.filter((item) => item.id !== cmd.id))
         return { ok: true }
       case 'queue.flush': {
+        // 「立即发送」指定某一条时先把它提到队首，否则只能按 FIFO 发第一条
+        if (cmd.id) {
+          const index = s.queue.findIndex((item) => item.id === cmd.id)
+          if (index > 0) {
+            const next = [...s.queue]
+            const [picked] = next.splice(index, 1)
+            if (picked) this.setQueue(s, [picked, ...next])
+          }
+        }
         // 立即发送队首：先中断当前 run 并等它释放，与渲染层 sendQueuedNow 语义一致
         if (s.run) {
           s.run.controller.abort()

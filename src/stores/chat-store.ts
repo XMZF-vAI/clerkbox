@@ -641,6 +641,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       // 杀掉该会话在主进程里还在跑的 shell 子进程，避免点中断后命令继续执行
       logPersistenceFailure('cancel session commands', ipc.cancelSessionCommands(id))
+      // 宿主模式下同样要请主进程回收该会话的运行态：事件环、消息镜像与含 apiKey 的设置快照，
+      // 否则 sessions / contexts / snapshots 只增不减，删掉的会话仍替用户留着这些。
+      ipc.agentDropSession(id)
       // 该会话若还挂着未回答的 question：resolve 掉（空答案）。否则工具侧
       // await requestQuestion 的 Promise 永不返回，ReAct 循环闭包与
       // interactive-store 的 resolver 条目永久悬挂。
@@ -658,10 +661,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       delete nextQueued[id]
       const nextStreaming = new Set(state.streamingSessionIds)
       nextStreaming.delete(id)
+      // 宿主回灌的错误横幅数据源同样按会话隔离，会话没了要一并清掉
+      const nextErrors = { ...state.sessionErrors }
+      delete nextErrors[id]
       return {
         sessions: filtered,
         sessionStatus: nextStatus,
         queuedMessages: nextQueued,
+        sessionErrors: nextErrors,
         streamingSessionIds: nextStreaming,
         activeSessionId:
           state.activeSessionId === id

@@ -85,6 +85,15 @@ describe('排队语义（运行中收到新消息不并发，按队列 FIFO）',
     expect(m.inspect().find((s) => s.sessionId === 's1')?.hasRun).toBeFalsy()
     expect(m.inspect().find((s) => s.sessionId === 's1')?.queued).toBe(1)
   })
+  it('queue.flush 带 id 时把该条提到队首（「立即发送」不再只能发第一条）', async () => {
+    const m = new AgentSessionManager(fakeStore())
+    for (const id of ['q1', 'q2', 'q3']) {
+      await m.handleCommand({ type: 'queue.enqueue', sessionId: 's1', item: { id, content: id, queuedAt: 1 } })
+    }
+    await m.handleCommand({ type: 'queue.flush', sessionId: 's1', id: 'q3' })
+    const snaps = m.peekRing('s1').filter((e) => e.type === 'queue.snapshot')
+    expect(snaps.at(-1)).toMatchObject({ items: [{ id: 'q3' }, { id: 'q1' }, { id: 'q2' }] })
+  })
 })
 
 describe('事件环与 seq', () => {

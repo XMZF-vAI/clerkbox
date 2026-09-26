@@ -14,6 +14,7 @@ import type { FileEntry, WebUICapabilities } from '../../types/ipc'
 import ConfirmDialog from '../ui/ConfirmDialog'
 import { useIsMobile } from '../../hooks/use-mobile'
 import { useShallow } from 'zustand/react/shallow'
+import { hostQueue } from '../../lib/host-queue'
 
 // ── "/" 命令菜单里的命令（任务工作流 + 上下文压缩；工作流对齐 TRAE：Spec / Plan / Goal；Browser 模式不做） ──
 // 上下文压缩命令：选中后出现芯片，回车即手动压缩（输入文本作为可选的压缩重点指令）
@@ -401,6 +402,8 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
   const handleQueuedEdit = (item: QueuedMessageItem) => {
     if (!activeSessionId) return
     useChatStore.getState().removeQueuedMessage(activeSessionId, item.id)
+    // 本地队列只是视图：宿主模式下必须同时撤回，否则被删的那条仍会被发出去
+    void hostQueue.remove(activeSessionId, item.id)
     setContent(item.content)
     setTaskMode(item.taskMode ?? null)
     if (item.attachments?.length) commitAttachments(item.attachments)
@@ -420,6 +423,8 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
   const handleQueuedRemove = (item: QueuedMessageItem) => {
     if (!activeSessionId) return
     useChatStore.getState().removeQueuedMessage(activeSessionId, item.id)
+    // 本地队列只是视图：宿主模式下必须同时撤回，否则被删的那条仍会被发出去
+    void hostQueue.remove(activeSessionId, item.id)
   }
 
   const handleSend = () => {
@@ -439,7 +444,7 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
         alert(t('chat.imageBlocked'))
         return
       }
-      useChatStore.getState().enqueueQueuedMessage(activeSessionId, {
+      const queuedItem: QueuedMessageItem = {
         id: `queued-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         content: trimmed,
         ...(attachments.length ? { attachments } : {}),
@@ -448,7 +453,10 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
           ? { skills: activeSkills.map(({ id, name, icon, slug }) => ({ id, name, icon, slug })) }
           : {}),
         queuedAt: Date.now(),
-      })
+      }
+      useChatStore.getState().enqueueQueuedMessage(activeSessionId, queuedItem)
+      // 宿主模式下队列真源在主进程：只入本地的话，宿主一次 queue.snapshot 就把这条冲掉
+      void hostQueue.enqueue(activeSessionId, queuedItem)
       // 兜住"入队瞬间 run 恰好结束"的竞态：flush 自带空闲守卫，忙碌时跳过
       onEnqueueQueued?.()
       setContent('')

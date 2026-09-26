@@ -42,6 +42,14 @@ export function initMainLogger(): void {
   log.transports.file.level = 'info'
   // 开发态控制台保留 debug 级别便于调试；打包后控制台基本无人看，保持 info
   log.transports.console.level = app.isPackaged ? 'info' : 'debug'
+  // 两条标准流可能先于进程被关闭（由终端拉起时终端退出、或启动脚本硬杀进程组）。
+  // 之后每一次 console 写入都会抛 EPIPE，而下一行把 console 换成了 electron-log 的实现，
+  // 它的 console transport 抛出后会被 uncaughtException 接住、再 console.error 一次 →
+  // 自递归刷屏 + 给用户拍「主进程错误」模态框。挂个 no-op 处理器：丢字节即可，
+  // 文件 transport 走的是另一条路，日志不会因此缺失。
+  for (const stream of [process.stdout, process.stderr]) {
+    stream?.on('error', () => { /* 管道已断，忽略写入失败 */ })
+  }
   // 关键一步：接管 console，现有全部 console.log/warn/error 自动获得落盘能力
   Object.assign(console, log.functions)
 

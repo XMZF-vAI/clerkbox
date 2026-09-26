@@ -403,6 +403,14 @@ export const ipc = {
   agentSnapshot: (sessionId: string | undefined, sinceSeq: number): Promise<AgentSnapshot> =>
     isElectron ? window.clerkbox.agentSnapshot(sessionId, sinceSeq) : webInvoke('agent:snapshot', [sessionId, sinceSeq]),
   /**
+   * 会话删除即回收宿主侧运行态。不发的话 sessions / contexts / snapshots 只增不减，
+   * 而 snapshots 里存着含 apiKey 的设置快照与整段事件环——删掉的会话也在替用户留着它们。
+   */
+  agentDropSession: (sessionId: string): void => {
+    if (isElectron) window.clerkbox.agentDropSession(sessionId)
+    // WebUI：agent:* 通道对远程调用一律 403（见 webui-server 的黑名单），无宿主运行态可回收
+  },
+  /**
    * 订阅宿主事件流。WebUI 模式需要 SSE 通道 GET /api/agent/events，那是 P5 的活；
    * 在此之前浏览器端明确退订为 no-op——静默丢失比假装连上更安全（渲染层靠 seq 缺口判定断线）。
    */

@@ -22,6 +22,7 @@ import { SYSTEM_PROMPT } from '../lib/prompts'
 import { findAgent } from '../lib/agent-registry'
 import { useAgentRunsStore } from '../stores/agent-runs-store'
 import { agentClient } from '../lib/agent-client'
+import { hostQueue } from '../lib/host-queue'
 import { useShallow } from 'zustand/react/shallow'
 import { notifyIfNotViewing } from '../lib/notify'
 import { openChatStream } from '../lib/api-transport'
@@ -341,6 +342,12 @@ export function useAgent(sessionId: string) {
    *  剩余排队消息由新 run 正常结束后的自动 flush 继续 FIFO 逐条发出。 */
   const sendQueuedNow = useCallback(
     async (item: QueuedMessageItem) => {
+      if ((await agentClient.ensureMode()) === 'main') {
+        // 宿主模式：中断当前轮、把这条提到队首并发出，全部由宿主执行；
+        // 本地队列只是视图，随宿主的 queue.snapshot 回灌，绝不在这里各自删一份
+        await hostQueue.flush(sessionId, item.id)
+        return
+      }
       const ctrl = getSessionAbortController(sessionId)
       if (ctrl) {
         try {
@@ -370,7 +377,9 @@ export function useAgent(sessionId: string) {
    *  仅两处差异：trigger 标记为 'manual'、支持可选自定义指令（留空则行为等同自动压缩）。 */
   const manualCompact = useCallback(
     async (customInstructions?: string) => {
-      if (agentClient.getState().mode === 'main') {
+      // 同 abort：压缩也必须先问实模式。凭未解析的 null 落回本地路径，会与宿主
+      // 同时对同一会话做原子重写（compactMessages 是整段覆盖，两边各写一次就互相踩）
+      if ((await agentClient.ensureMode()) === 'main') {
         // 宿主模式：压缩由宿主的同一套编排执行，占位提示与结果都走事件回流
         void agentClient.send({ type: 'manual.compact', sessionId, instructions: customInstructions })
         return
@@ -491,29 +500,36 @@ export function useAgent(sessionId: string) {
   }, [sessionId, manualCompact, getContextUsage])
 
   const abort = useCallback(() => {
-    if (agentClient.getState().mode === 'main') {
+    // per-session abort：只中止当前会话的 controller，不影响其他并发会话
+    const abortLocally = () => {
+      const ctrl = getSessionAbortController(sessionId)
+      if (ctrl) {
+        ctrl.abort()
+      }
+      // 杀掉该会话在主进程里还在跑的 shell 子进程，让阻塞中的 execute_command 立即返回
+      if (sessionId) {
+        void ipc.cancelSessionCommands(sessionId).catch(() => { /* ignore */ })
+      }
+      // 仅清当前会话的 streaming 状态
+      useChatStore.getState().setStreaming(false, sessionId)
+      // 用户主动 abort：清当前会话工作状态，不发通知
+      if (sessionId) {
+        useChatStore.getState().setSessionStatus(sessionId, null)
+        useInteractiveStore.getState().cancelQuestion(sessionId)
+      }
+    }
+    // 必须走 ensureMode：冷启动那一刻模式还没问出来，凭 null 判定会落回本地路径，
+    // 于是宿主在跑、本地也在中断同一会话（sendMessage 已按同一口径修过）
+    void agentClient.ensureMode().then((mode) => {
+      if (mode !== 'main') {
+        abortLocally()
+        return
+      }
       // 宿主模式：中断指令交给宿主（它会停模型流并杀本会话 shell），界面状态等事件回流
       void agentClient.send({ type: 'abort', sessionId })
       void ipc.cancelSessionCommands(sessionId).catch(() => { /* ignore */ })
       useInteractiveStore.getState().cancelQuestion(sessionId)
-      return
-    }
-    // per-session abort：只中止当前会话的 controller，不影响其他并发会话
-    const ctrl = getSessionAbortController(sessionId)
-    if (ctrl) {
-      ctrl.abort()
-    }
-    // 杀掉该会话在主进程里还在跑的 shell 子进程，让阻塞中的 execute_command 立即返回
-    if (sessionId) {
-      void ipc.cancelSessionCommands(sessionId).catch(() => { /* ignore */ })
-    }
-    // 仅清当前会话的 streaming 状态
-    useChatStore.getState().setStreaming(false, sessionId)
-    // 用户主动 abort：清当前会话工作状态，不发通知
-    if (sessionId) {
-      useChatStore.getState().setSessionStatus(sessionId, null)
-      useInteractiveStore.getState().cancelQuestion(sessionId)
-    }
+    })
   }, [sessionId])
 
   return { sendMessage, abort, manualCompact, isCompacting, error: hostError ?? error, sendQueuedNow, requestQueuedFlush: scheduleQueuedFlush }
