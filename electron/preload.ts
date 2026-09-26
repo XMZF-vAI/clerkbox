@@ -139,6 +139,8 @@ contextBridge.exposeInMainWorld('clerkbox', {
   agentHostMode: (): Promise<'main' | 'renderer'> => ipcRenderer.invoke('agent:host-mode'),
   agentSnapshot: (sessionId: string | undefined, sinceSeq: number): Promise<unknown> =>
     ipcRenderer.invoke('agent:snapshot', sessionId, sinceSeq),
+  /** 会话被删除时通知宿主回收运行态（环、消息镜像、含 apiKey 的设置快照） */
+  agentDropSession: (sessionId: string): void => ipcRenderer.send('agent:drop-session', sessionId),
   /** 订阅宿主事件流；返回退订函数。payload 带单调 seq，缺口即需重连补发 */
   onAgentEvent: (
     callback: (payload: { seq: number; event: unknown }) => void
