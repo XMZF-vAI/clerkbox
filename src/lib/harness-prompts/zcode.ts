@@ -93,6 +93,10 @@ Do not invent calls to them:
  * - ZCode 的 Read 直接返回图片/视频/PDF 视觉内容，ClerkBox 的 read_file 只读文本、
  *   read_image 只给元数据——这一点在描述里说死，避免模型以为 read_file 能看图；
  * - ZCode 的 Bash 支持 run_in_background，ClerkBox 不支持，去掉该条并写明同步阻塞；
+ * - 本模式**不做任何工具裁剪**：ZCode 侧确有跨会话读取能力
+ *   （contracts/tools/read-session-context.ts 的 ReadSessionContext），所以 app_* 只读
+ *   工具照常暴露；tests/harness-modes.test.ts 钉住「zcode 与 default 工具集严格同名」，
+ *   将来要在这里加裁剪，那条断言得一起改，否则等于悄悄废掉同名语义；
  * - 工具名与执行实现保持 ClerkBox 内部不变（权限白名单/压缩/UI 的工具名引用零改动）。
  */
 export function zcodeTransformTools<T extends { name: string; description: string }>(defs: T[]): T[] {
