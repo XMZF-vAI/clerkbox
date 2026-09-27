@@ -83,38 +83,57 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Create or update release
-        # 用 gh CLI 集中上传，规避 electron-builder v26 并发上传产生多个草稿 Release 的 bug
+      - name: Create release and upload assets
+        # 不用 gh release create：它在「工作目录没有 .git + 显式传 tag 名」这个组合下
+        # 会建成 untagged-<sha> 的孤儿 release（tag 传对了也照样），且 job 仍报绿——
+        # 实测连打三�� tag 才定位到。REST API 的 tag_name 是必填字段，没有解析歧义。
+        # 资产上传仍走 gh release upload：它只上传、不创建，不受该问题影响。
         # -R 显式指定仓库：本 job 的 checkout 放在 source/ 下，git remote 不可靠
-        # TAG / SHA 经 env 显式注入：曾因依赖 GITHUB_REF 拿到空串，让 gh 造出一个
-        # untagged-<sha> 的孤儿 release 且 job 仍报绿。空值一律 fail fast。
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-          SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           REPO=XMZF-vAI/clerkbox
           if [ -z "$TAG" ]; then
-            echo "::error::TAG 为空（github.ref_name 未注入），拒绝创建 untagged release"
+            echo "::error::TAG 为空（github.ref_name 未注入）"
             exit 1
           fi
-          NOTES_ARGS=(--generate-notes)
-          if [ -f source/.release-notes.md ]; then
-            NOTES_ARGS=(--notes-file source/.release-notes.md)
+          # 取 tag 对应的那份中文发布说明；annotated tag 未必在本地 ref 里，退回 HEAD
+          if ! git -C source show "$TAG:.release-notes.md" > notes.md 2>/dev/null; then
+            if ! git -C source show "HEAD:.release-notes.md" > notes.md 2>/dev/null; then
+              rm -f notes.md
+            fi
           fi
-          # 重跑幂等：同一个 tag 重发时已存在 release，此时只改说明并覆盖资产，
-          # 而不是让 gh release create 撞「tag already exists」把整条流水线判红。
-          if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
-            gh release edit "$TAG" -R "$REPO" "${NOTES_ARGS[@]}"
-            gh release upload "$TAG" -R "$REPO" --clobber dist/*
+          if [ -f notes.md ]; then
+            echo "notes: 使用仓库内 .release-notes.md（$(wc -c < notes.md) bytes）"
           else
-            gh release create "$TAG" -R "$REPO" --verify-tag "${NOTES_ARGS[@]}" dist/*
+            echo "notes: 仓库内没有 .release-notes.md，回退 generate_release_notes"
           fi
-          # 清理同一 commit 上残留的 untagged release（tag 解析失败时的副产物）
-          SHORT="${SHA:0:20}"
-          for id in $(gh api "repos/$REPO/releases" --paginate \
-              --jq ".[] | select(.tag_name == \"untagged-$SHORT\") | .id"); do
-            echo "清理残留 untagged release: $id"
-            gh api -X DELETE "repos/$REPO/releases/$id"
-          done
+
+          EXISTING=$(gh api "repos/$REPO/releases/tags/$TAG" --jq '.id' 2>/dev/null || true)
+          if [ -n "$EXISTING" ]; then
+            echo "release $TAG 已存在（id=$EXISTING），只更新说明"
+            if [ -f notes.md ]; then
+              gh api -X PATCH "repos/$REPO/releases/$EXISTING" -F body=@notes.md --jq '.html_url'
+            fi
+          else
+            echo "创建 release $TAG"
+            if [ -f notes.md ]; then
+              gh api -X POST "repos/$REPO/releases" -f tag_name="$TAG" -f name="$TAG" \
+                -F draft=false -F prerelease=false -F body=@notes.md --jq '.html_url'
+            else
+              gh api -X POST "repos/$REPO/releases" -f tag_name="$TAG" -f name="$TAG" \
+                -F draft=false -F prerelease=false -F generate_release_notes=true --jq '.html_url'
+            fi
+          fi
+
+          gh release upload "$TAG" -R "$REPO" --clobber dist/*
+
+          # 收尾校验：建错 tag（曾经栽在 untagged 上）必须当场炸，不能等发版后才发现
+          ACTUAL=$(gh api "repos/$REPO/releases/tags/$TAG" --jq '.tag_name')
+          if [ "$ACTUAL" != "$TAG" ]; then
+            echo "::error::tag_name 不符，期望 $TAG 实得 $ACTUAL"
+            exit 1
+          fi
+          echo "OK: release $ACTUAL 就绪"
