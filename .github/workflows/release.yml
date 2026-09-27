@@ -70,17 +70,36 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      # 发布说明以版本库里的 .release-notes.md 为准（中文发布文档）。checkout 到
+      # tag 对应的那一份，因此重打 tag 时文档会随 commit 一起走。
+      # 缺文件时回退 gh 的 --generate-notes，保证发版流程不因缺文档而卡住。
+      - uses: actions/checkout@v4
+        with:
+          path: source
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
 
-      - name: Create release and upload assets
+      - name: Create or update release
         # 用 gh CLI 集中上传，规避 electron-builder v26 并发上传产生多个草稿 Release 的 bug
-        # -R 显式指定仓库：本 job 无 checkout，gh 无法从 git remote 推断
+        # -R 显式指定仓库：本 job 的 checkout 放在 source/ 下，git remote 不可靠
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
-          gh release create "$TAG" -R XMZF-vAI/clerkbox --generate-notes --verify-tag dist/*
+          REPO=XMZF-vAI/clerkbox
+          NOTES_ARGS=(--generate-notes)
+          if [ -f source/.release-notes.md ]; then
+            NOTES_ARGS=(--notes-file source/.release-notes.md)
+          fi
+          # 重跑幂等：同一个 tag 重发时已存在 release，此时只改说明并覆盖资产，
+          # 而不是让 gh release create 撞「tag already exists」把整条流水线判红。
+          if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
+            gh release edit "$TAG" -R "$REPO" "${NOTES_ARGS[@]}"
+            gh release upload "$TAG" -R "$REPO" --clobber dist/*
+          else
+            gh release create "$TAG" -R "$REPO" --verify-tag "${NOTES_ARGS[@]}" dist/*
+          fi

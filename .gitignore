@@ -68,10 +68,10 @@ Thumbs.db
 # 根目录遗留的组件草稿（正式实现在 src/ 下）
 /Vibe.tsx
 /Download.tsx
-# 发布说明草稿（每次发版重写）
-/.release-notes.md
 # 历史发版说明（不跟踪）
 /release-notes-*.md
+# 注：/.release-notes.md 已入版本库——release workflow 的 release job 从
+# checkout 到的这份文件取发布说明（缺文件时回退 gh 的 --generate-notes）。
 
 # 一次性验证残留（构建/样式试跑产物，零引用；正式实现都在 src 与 build/ 下）
 /tw-test.css
