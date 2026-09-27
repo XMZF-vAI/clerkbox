@@ -54,17 +54,135 @@ export const REMOTE_INVOKE_BLOCKLIST: readonly string[] = [
   'writeSkillDir',
   'removeSkillDir',
   // Agent 宿主通道：ipcMain.handle 被 monkey-patch 自动同步进 handlerRegistry（见 main.ts
-  // 的 patchedHandle），所以 agent:* 从 /api/invoke 天然可达。必须在此拦死：
-  // - run 命令=以用户身份驱动本机 agent 执行 shell/写文件，token 泄漏即等同 RCE；
-  // - permission.resolve=替本地用户批准危险操作，直接破坏宿主「UI 离线绝不放行」的红线；
-  // - snapshot=回吐队列内容与待决审批的命令预览。
-  // P5 要做真正的远程视图时，在此按命令类型定点放开，并让放行回执只能来自本地窗口。
+  // 的 patchedHandle），所以 agent:* 从 /api/invoke 天然可达。这里按能力划线：
+  // - agent:command 是 ReAct 编排总入口，拿到它等于「以用户身份驱动本机 agent」（等同 RCE），
+  //   且其中的 permission.resolve 能替本地用户批准危险操作。进黑名单是第一道门；
+  //   remoteAgentCommandAllowed（回环之外需显式开 CLERKBOX_WEBUI_ALLOW_REMOTE_RUN）是第二道。
+  //   两道都要留：环境变量是用户可选项，黑名单不是。
+  // - agent:snapshot 回吐 500 条事件环，内含完整消息内容与待批命令预览。远程视图本来就走
+  //   /api/agent/events（SSE，带 seq 去重），snapshot 在远程既多余又泄漏，故禁。
+  // - agent:host-mode 是唯一刻意放行的 agent 通道：只返回一个 'main' | 'renderer' 字符串，
+  //   零副作用零数据；WebUI 侧靠它判断该连宿主还是本地自跑
+  //   （agent-client.ts 的 transport.mode().catch(() => 'renderer')）。拦掉它会让远程视图
+  //   误判成渲染层模式，转而要求本地持有 API Key——Key 从不下发远程，结果就是
+  //   「客户端有 Key 却报缺 Key」。tests/webui-blocklist.test.ts 已把这条例外锁住。
   'agent:command',
   'agent:snapshot',
-  'agent:host-mode',
+  // WebUI 自身的控制面：startWebUI 的 lanAccess=true 会把服务从 127.0.0.1 改绑 0.0.0.0，
+  // 远程持 token 者可用它把暴露面从本机放大到整个局域网；getLanAddresses 则泄露内网 IP，
+  // 为横向探测提供起点。三者都是「管理 WebUI 自己」，远程调用无正当场景。
+  'startWebUI',
+  'stopWebUI',
+  'getLanAddresses',
   // 诊断导出（弹保存对话框属桌面端交互，远程调用无意义）
   'diagExport',
 ]
+
+/**
+ * 明确判定为「读得到、改不动」的宿主通道：无副作用，WebUI 视图靠它们显示运行态。
+ * 把它们重新列入黑名单会复现旧缺陷：mode 查询失败 → 薄客户端退回渲染层 → 要求本地持有
+ * API Key，而 Key 从不下发远程，于是「客户端明明有 Key，Web 端却报缺 Key」。
+ */
+export const REMOTE_AGENT_READONLY_CHANNELS: readonly string[] = ['agent:host-mode', 'agent:snapshot']
+
+/**
+ * 受双重门控的宿主命令通道：传输层看地址（remoteAgentCommandAllowed），
+ * 策略层看命令类型（见 electron/agent-host.ts 的远程规则：不带凭据、审批只认本地窗口）。
+ */
+export const REMOTE_AGENT_GATED_CHANNELS: readonly string[] = ['agent:command']
+
+/**
+ * 远程触发宿主运行的边界。默认只有回环地址（本机浏览器）能把 run / queue / abort 这类
+ * 命令发进宿主；局域网或公网设备要开，需显式设置 CLERKBOX_WEBUI_ALLOW_REMOTE_RUN=1。
+ * 理由：token 出现在 URL 与 HTTP 头里，泄漏面比本地窗口大得多，而 run 命令等于
+ * 「以用户身份驱动本机 agent」。
+ *
+ * 现状提醒：agent:command 目前同时留在 REMOTE_INVOKE_BLOCKLIST 里，于是这道地址门
+ * **走不到**（黑名单在前），CLERKBOX_WEBUI_ALLOW_REMOTE_RUN 因此暂时不生效。
+ * 「远程能不能触发运行」是老板要拍的策略题，两扇门只留一扇由他定；在此之前别假装 env 有效。
+ */
+export function remoteAgentCommandAllowed(address: string | undefined): boolean {
+  if (isLoopbackAddress(address)) return true
+  return process.env.CLERKBOX_WEBUI_ALLOW_REMOTE_RUN === '1'
+}
+
+// ── /api/agent/events：宿主事件流的远程订阅通道（SSE）──
+const agentEventClients = new Set<http.ServerResponse>()
+/** 由 main.ts 注入：把 sinceSeq 之后的事件重新广播一遍（只进 SSE，不进 HTTP 响应） */
+let agentEventReplayFn: ((sinceSeq: number, sessionId?: string) => void) | null = null
+
+export function setAgentEventBridge(hooks: { replay: (sinceSeq: number, sessionId?: string) => void }): void {
+  agentEventReplayFn = hooks.replay
+}
+
+/** /api/agent/resync 请求体解析：形状不对回 null，sinceSeq 归一到非负整数 */
+export function parseAgentResyncBody(raw: unknown): { sessionId?: string; sinceSeq: number } | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const body = raw as { sessionId?: unknown; sinceSeq?: unknown }
+  const sinceSeq =
+    typeof body.sinceSeq === 'number' && Number.isFinite(body.sinceSeq) ? Math.max(0, Math.floor(body.sinceSeq)) : 0
+  const sessionId = typeof body.sessionId === 'string' && body.sessionId.length > 0 ? body.sessionId : undefined
+  return { sessionId, sinceSeq }
+}
+
+/** 宿主每次广播事件时同步推给远程订阅者；无订阅时零开销 */
+export function pushAgentEvent(payload: { seq: number; event: unknown }): void {
+  if (agentEventClients.size === 0) return
+  const frame = `data: ${JSON.stringify(payload)}\n\n`
+  for (const res of agentEventClients) {
+    if (!res.writableEnded) res.write(frame)
+  }
+}
+
+function handleAgentEvents(req: http.IncomingMessage, res: http.ServerResponse): void {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+  })
+  res.write(': open\n\n')
+  agentEventClients.add(res)
+  // 心跳：反代与浏览器会掐掉长时间零字节的连接
+  const heartbeat = setInterval(() => {
+    if (!res.writableEnded) res.write(': ping\n\n')
+  }, 25_000)
+  req.on('close', () => {
+    clearInterval(heartbeat)
+    agentEventClients.delete(res)
+  })
+  // 补发整环：seq 去重与乱序整理在渲染层薄客户端里已有，重复回放是安全的
+  agentEventReplayFn?.(0)
+}
+
+/**
+ * 缺口补发的触发器：薄客户端检出 seq 跳号时调它取回漏掉的事件。
+ *
+ * 刻意**不回任何事件数据**：宿主 snapshot 的产物只经已鉴权的 SSE 广播出去，HTTP 响应固定
+ * 是 {ok:true}。否则等于把 500 条事件环（含完整消息内容与待批命令预览）做成一个可拉取的
+ * API——那正是 agent:snapshot 留在远程黑名单里的理由。触发与投递分道，两边都拿到所需，
+ * 泄漏面一点没加。
+ */
+async function handleAgentResync(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  const body = await readBody(req, 64 * 1024)
+  if (body === null) {
+    sendJson(res, 413, { error: 'Request body too large' })
+    return
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(body)
+  } catch {
+    sendJson(res, 400, { error: 'Invalid request format' })
+    return
+  }
+  const input = parseAgentResyncBody(parsed)
+  if (!input) {
+    sendJson(res, 400, { error: 'Invalid request format' })
+    return
+  }
+  agentEventReplayFn?.(input.sinceSeq, input.sessionId)
+  sendJson(res, 200, { result: { ok: true } })
+}
 
 // ── 流式对话桥接 ──
 // api-proxy.ts 导出 startChatStream / abortChatStream，main.ts 启动时注入。
@@ -260,7 +378,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
     // 发送，API 不再回退接受 query token，避免带 token 的完整 URL 进入访问日志 /
     // 浏览器历史后被长期重放（静态页面首次加载仍可经 query 带入 token）
     const token = (req.headers['x-webui-token'] as string) || ''
-    if (token !== currentToken) {
+    if (!tokenMatches(token)) {
       sendJson(res, 401, { error: 'Unauthorized' })
       return
     }
@@ -271,6 +389,14 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
     }
     if (url.pathname === '/api/chat-stream' && req.method === 'POST') {
       void handleChatStream(req, res)
+      return
+    }
+    if (url.pathname === '/api/agent/events' && req.method === 'GET') {
+      handleAgentEvents(req, res)
+      return
+    }
+    if (url.pathname === '/api/agent/resync' && req.method === 'POST') {
+      void handleAgentResync(req, res)
       return
     }
     if (url.pathname === '/api/upload' && req.method === 'POST') {
@@ -397,6 +523,26 @@ function isLoopbackAddress(address: string | undefined): boolean {
   return normalized === '::1' || normalized === '127.0.0.1' || normalized.startsWith('127.')
 }
 
+/**
+ * token 恒定时间比对（纯函数，导出以便单测）。
+ * 普通 !== 会在首个不同字节处提前返回，理论上可被时序侧信道逐字节爆破；token 是这条
+ * 链路上唯一的凭据，比对方式不该泄露前缀信息。长度不等先短路（timingSafeEqual 要求
+ * 等长入参，且长度不是秘密——固定 64 位 hex）；expected 为空同样短路，保证 fail-closed：
+ * stopWebUI 清空 currentToken 后不能让「不带 token 头」的请求蒙混过关。
+ */
+export function safeTokenEquals(candidate: string, expected: string): boolean {
+  if (!expected || candidate.length !== expected.length) return false
+  try {
+    return crypto.timingSafeEqual(Buffer.from(candidate, 'utf8'), Buffer.from(expected, 'utf8'))
+  } catch {
+    return false
+  }
+}
+
+function tokenMatches(candidate: string): boolean {
+  return safeTokenEquals(candidate, currentToken)
+}
+
 // ── /api/invoke：调用 handlerRegistry 中的 handler ──
 async function handleInvoke(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   const body = await readBody(req, 10 * 1024 * 1024)
@@ -416,6 +562,12 @@ async function handleInvoke(req: http.IncomingMessage, res: http.ServerResponse)
     //（见 REMOTE_INVOKE_BLOCKLIST 处的威胁模型说明）
     if (REMOTE_INVOKE_BLOCKLIST.includes(method)) {
       sendJson(res, 403, { error: 'Forbidden method' })
+      return
+    }
+
+    // 宿主命令通道：默认只允许本机回环触发（远程视图本身走 agent:snapshot + SSE，不受影响）
+    if (REMOTE_AGENT_GATED_CHANNELS.includes(method) && !remoteAgentCommandAllowed(req.socket.remoteAddress)) {
+      sendJson(res, 403, { error: 'Remote agent run is disabled; enable it with CLERKBOX_WEBUI_ALLOW_REMOTE_RUN=1' })
       return
     }
 

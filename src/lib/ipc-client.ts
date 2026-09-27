@@ -300,6 +300,115 @@ function webAbort(requestId: string): void {
   sseControllers.delete(requestId)
 }
 
+// ── 宿主事件流的 WebUI 订阅通道（批次 B · P5）──
+/** 重连退避上限 */
+const AGENT_STREAM_BACKOFF_MAX_MS = 10_000
+
+/**
+ * 用 fetch + ReadableStream 而不是 EventSource：token 只允许出现在请求头里
+ * （见 webui-server 的威胁模型注释），而 EventSource 没有自定义 header 的能力。
+ * 服务端在新连接建立时补发整环，所以断线重连不丢事件；seq 去重、乱序整理与缺口补发
+ * 都由 agent-client 的游标闸门负责，这里只负责把帧交出去。
+ */
+function openAgentEventStream(callback: (payload: { seq: number; event: AgentEvent }) => void): () => void {
+  // 主进程内的宿主自己就是事件源，不需要回环订阅
+  if (hostBridge) return () => {}
+
+  let closed = false
+  let attempt = 0
+  let controller: AbortController | null = null
+  let timer: ReturnType<typeof setTimeout> | null = null
+
+  const emitFrame = (frame: string): void => {
+    for (const line of frame.split('\n')) {
+      if (!line.startsWith('data:')) continue
+      const raw = line.slice(5).trim()
+      if (!raw) continue
+      try {
+        const payload = JSON.parse(raw) as { seq: number; event: AgentEvent }
+        if (typeof payload.seq !== 'number' || !payload.event) continue
+        attempt = 0
+        callback(payload)
+      } catch {
+        /* 半帧或心跳注释：忽略 */
+      }
+    }
+  }
+
+  const scheduleReconnect = (): void => {
+    if (timer || closed) return
+    const delay = Math.min(1000 * 2 ** attempt, AGENT_STREAM_BACKOFF_MAX_MS)
+    attempt += 1
+    timer = setTimeout(() => {
+      timer = null
+      void readStream()
+    }, delay)
+  }
+
+  const readStream = async (): Promise<void> => {
+    controller = new AbortController()
+    try {
+      const res = await fetch('/api/agent/events', {
+        headers: { 'X-WebUI-Token': webuiToken, Accept: 'text/event-stream' },
+        signal: controller.signal,
+      })
+      if (!res.ok || !res.body) throw new Error(`agent events failed (${res.status})`)
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        for (;;) {
+          const sep = buffer.indexOf('\n\n')
+          if (sep < 0) break
+          emitFrame(buffer.slice(0, sep))
+          buffer = buffer.slice(sep + 2)
+        }
+      }
+    } catch (err) {
+      if (closed) return
+      console.warn('[ipc] 宿主事件流中断，退避重连：', err instanceof Error ? err.message : err)
+    }
+    if (closed) return
+    // 连接结束（服务端重启、代理掐连、网络抖动）后重开，重开即触发补发
+    scheduleReconnect()
+  }
+
+  void readStream()
+  return () => {
+    closed = true
+    if (timer) clearTimeout(timer)
+    controller?.abort()
+  }
+}
+
+/**
+ * 缺口补发（批次 B · P5）。
+ *
+ * WebUI 侧走 POST /api/agent/resync 这个**触发器**：宿主把 sinceSeq 之后的事件重新广播一遍，
+ * 数据只经已鉴权的 SSE 回来，HTTP 响应固定 {ok:true}。远程拉取 agent:snapshot 会直接把 500 条
+ * 事件环（含完整消息与待批命令预览）做成可读取的 API，所以那条通道留在黑名单里。
+ * 薄客户端只 await 成/败并靠事件本身推进 seq 游标，因此这里的返回值是占位形状。
+ */
+async function requestAgentResync(sessionId: string | undefined, sinceSeq: number): Promise<AgentSnapshot> {
+  if (hostBridge) return hostBridge.invoke<AgentSnapshot>('agent:snapshot', [sessionId, sinceSeq])
+  const res = await fetch('/api/agent/resync', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-WebUI-Token': webuiToken,
+    },
+    body: JSON.stringify({ sessionId, sinceSeq }),
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`WebUI resync failed (${res.status}): ${text}`)
+  }
+  return { activeRuns: [], queue: {}, pendingPermissions: [], lastSeq: sinceSeq }
+}
+
 // ── 统一 ipc 对象 ──
 // Electron 模式直接委托 window.clerkbox；WebUI 模式走 HTTP。
 export const ipc = {
@@ -401,7 +510,7 @@ export const ipc = {
   agentHostMode: (): Promise<'main' | 'renderer'> =>
     isElectron ? window.clerkbox.agentHostMode() : webInvoke('agent:host-mode'),
   agentSnapshot: (sessionId: string | undefined, sinceSeq: number): Promise<AgentSnapshot> =>
-    isElectron ? window.clerkbox.agentSnapshot(sessionId, sinceSeq) : webInvoke('agent:snapshot', [sessionId, sinceSeq]),
+    isElectron ? window.clerkbox.agentSnapshot(sessionId, sinceSeq) : requestAgentResync(sessionId, sinceSeq),
   /**
    * 会话删除即回收宿主侧运行态。不发的话 sessions / contexts / snapshots 只增不减，
    * 而 snapshots 里存着含 apiKey 的设置快照与整段事件环——删掉的会话也在替用户留着它们。
@@ -410,17 +519,15 @@ export const ipc = {
     // 可选调用：主进程侧改动要重启才生效，开发态会出现「渲染层已更新、preload 还是旧的」，
     // 而这条只是请宿主回收运行态，缺桥接不该把「删除会话」这一步整个报错中断
     if (isElectron) window.clerkbox.agentDropSession?.(sessionId)
-    // WebUI：agent:* 通道对远程调用一律 403（见 webui-server 的黑名单），无宿主运行态可回收
+    // WebUI：这条走 ipcMain.on（不在 handlerRegistry 里），远程本就到不了，无宿主运行态可回收
   },
   /**
-   * 订阅宿主事件流。WebUI 模式需要 SSE 通道 GET /api/agent/events，那是 P5 的活；
-   * 在此之前浏览器端明确退订为 no-op——静默丢失比假装连上更安全（渲染层靠 seq 缺口判定断线）。
+   * 订阅宿主事件流。Electron 走 ipcRenderer 推送；WebUI 走 GET /api/agent/events（SSE，
+   * 批次 B · P5 已接入）——远程视图与本地窗口收的是同一份带 seq 的事件序列。
    */
   onAgentEvent: (callback: (payload: { seq: number; event: AgentEvent }) => void): (() => void) => {
     if (isElectron) return window.clerkbox.onAgentEvent(callback)
-    console.warn('[ipc] WebUI 模式下宿主事件通道尚未接入（P5），本轮运行状态不会实时回流')
-    void callback
-    return () => {}
+    return openAgentEventStream(callback)
   },
   onBrowserNewTab: (callback: (url: string) => void): (() => void) =>
     isElectron ? window.clerkbox.onBrowserNewTab(callback) : () => {},

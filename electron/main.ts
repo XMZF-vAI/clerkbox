@@ -20,7 +20,7 @@ import * as os from 'os'
 import * as cheerio from 'cheerio'
 import * as yaml from 'js-yaml'
 import { registerApiProxyHandlers, bindApiProxyCleanup, startChatStream, abortChatStream, type ApiConnConfig } from './api-proxy'
-import { handlerRegistry, setStreamHandlers, startWebUI, stopWebUI, getWebUIStatus, getLanAddresses } from './webui-server'
+import { handlerRegistry, setStreamHandlers, startWebUI, stopWebUI, getWebUIStatus, getLanAddresses, pushAgentEvent, setAgentEventBridge } from './webui-server'
 import * as rtAccount from './rt-account'
 import * as agentMemory from './agent-memory'
 import { mcpManager } from './mcp-manager'
@@ -30,7 +30,7 @@ import { registerTerminalHandlers, disposeAllTerminals } from './terminal'
 import { initUpdater, isAgentBusyNow } from './updater'
 import { initMainLogger, registerLogIpcHandlers } from './logger'
 import { createChatStore, registerDbIpcHandlers, type ChatStore } from './db'
-import { registerAgentHostIpc } from './agent-host'
+import { registerAgentHostIpc, getAgentSessionManager, registerAgentEventSink } from './agent-host'
 import {
   initTray,
   isTrayAvailable,
@@ -1931,6 +1931,15 @@ function registerIpcHandlers(chatStore: ChatStore) {
   // 运行模式默认 renderer（P6 才切 main），故此处只挂通道，不改变现有渲染层驱动路径；
   // 桥接的 handler 查找是惰性的，放在这里不依赖其它 handler 已注册。
   registerAgentHostIpc(chatStore)
+  // 批次 B · P5：宿主事件同时推给 WebUI 的 SSE 订阅者；新连接建立时补发整环，
+  // 远程视图与本地窗口共用同一 seq 序列（去重与乱序由渲染层薄客户端负责）。
+  registerAgentEventSink((payload) => pushAgentEvent(payload))
+  setAgentEventBridge({
+    // 返回值刻意丢弃：事件靠 snapshot 内部的 broadcast 走 sink 回流，远程响应只回 ok
+    replay: (sinceSeq, sessionId) => {
+      void getAgentSessionManager(chatStore).snapshot(sessionId, sinceSeq)
+    },
+  })
   // 托盘菜单的最近会话：直读存储层（SQLite 下是廉价索引查询，不再需要 mtime 缓存）
   recentSessionsProvider = () => chatStore.getRecentSessions()
 

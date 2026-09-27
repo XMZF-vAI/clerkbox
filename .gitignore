@@ -79,3 +79,6 @@ Thumbs.db
 /vite-out.txt
 /tmp-check/
 /verify-*.mjs
+
+# 双 agent 接力板（临时沟通文件，会话结束即可删）
+/AGENT_RELAY.txt
