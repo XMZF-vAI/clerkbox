@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo, memo, Suspense } from 'react'
 import { createPortal } from 'react-dom'
-import { Copy, Check, Terminal, FileText, FolderOpen, AlertTriangle, ChevronDown, ChevronUp, Wrench, FilePen, Globe, Pencil, Archive, Loader2, BookOpen, GitBranch, Target, CircleHelp, ListTodo, Sparkles } from 'lucide-react'
+import { Copy, Check, Terminal, FileText, FolderOpen, AlertTriangle, ChevronDown, ChevronUp, Wrench, FilePen, Globe, Pencil, Archive, Loader2, BookOpen, GitBranch, Target, CircleHelp, ListTodo, Sparkles, LayoutGrid } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { Message, StreamingToolCall } from '../../types/agent'
 import { useChatStore } from '../../stores/chat-store'
@@ -77,6 +77,9 @@ function extractFirstStringField(argsSoFar: string, keys: string[]): string {
 }
 
 function toolRowIcon(name: string) {
+  // app_* 自我管控工具要在关键词规则之前拦：app_list_sessions 会被 includes('list') 抓去
+  // FolderOpen、app_read_session 被 includes('read') 抓去 FileText，语义都不对
+  if (name.startsWith('app_')) return <LayoutGrid size={13} />
   if (name === 'question') return <CircleHelp size={13} />
   if (name === 'todowrite') return <ListTodo size={13} />
   if (name === 'search_replace' || name === 'edit_file') return <Pencil size={13} />
@@ -89,6 +92,9 @@ function toolRowIcon(name: string) {
 
 /** 行 chip 文本：读写类显示文件名，命令/搜索显示参数片段 */
 function chipTextFor(name: string, args: Record<string, unknown>, t: ReturnType<typeof useTranslation>['t']): string {
+  // 自我管控工具没有单一目标参数，用工具自身的短标签做 chip 比截断 JSON 可读；
+  // i18n 的 tools.app_* 补齐前会回落到英文工具名（defaultValue 兜底，与既有写法一致）
+  if (name.startsWith('app_')) return t(`tools.${name}`, { defaultValue: name })
   if (name === 'write_file' || name === 'search_replace' || name === 'edit_file' ||
       name === 'read_file' || name === 'read_image' || name === 'list_dir') {
     return fileBase(String(args.path || ''))

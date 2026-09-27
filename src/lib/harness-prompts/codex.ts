@@ -11,6 +11,8 @@
  *
  * 注意：本常量跨请求必须字节一致（prompt 前缀缓存前提），禁止注入易变内容。
  */
+import { APP_TOOL_NAMES } from '../app-tools'
+
 export const CODEX_SYSTEM_PROMPT = `You are ClerkBox running in Codex compatibility mode, a desktop coding agent. You are expected to be precise, safe, and helpful.
 
 Your capabilities:
@@ -292,7 +294,11 @@ If all steps are complete, ensure you call \`todowrite\` to mark all steps as \`
  * 工具名与执行实现保持 ClerkBox 内部不变。
  */
 export function codexTransformTools<T extends { name: string; description: string }>(defs: T[]): T[] {
-  const HIDDEN = new Set(['save_memory', 'search_memory', 'read_image'])
+  // app_* 自我管控工具按「上游 Codex CLI 有没有这个能力」裁掉，理由与记忆/图片两项一致：
+  // Codex CLI 是纯终端 agent，不托管宿主应用的会话历史、技能目录与 MCP 连接。
+  // 刻意不裁的是 zcode 模式——ZCode 侧确有跨会话读取能力（ReadSessionContext），
+  // 且 tests/harness-modes.test.ts 断言 zcode 与 default 工具集同名。
+  const HIDDEN = new Set(['save_memory', 'search_memory', 'read_image', ...APP_TOOL_NAMES])
   return defs
     .filter((d) => !HIDDEN.has(d.name))
     .map((d) => {

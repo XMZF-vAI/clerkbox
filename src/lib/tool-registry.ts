@@ -1,6 +1,7 @@
 import { ipc } from './ipc-client'
 import { slugify } from './memory'
 import { HARNESS_MODE_CONTENT } from './harness-modes'
+import { APP_TOOLS, executeAppTool } from './app-tools'
 import type { ToolDefinition, MemoryEntry, TodoItem, UserQuestion, ReadFileSnapshot, HarnessMode } from '../types/agent'
 import type { McpToolInfo } from '../types/ipc'
 
@@ -674,7 +675,9 @@ class ToolRegistry {
   private mcpDefinitions: ToolDefinition[] = []
 
   constructor() {
-    this.builtinDefinitions = [...fileTools, ...shellTools, ...webTools, ...memoryTools, ...agentTools, ...interactiveTools]
+    // appTools 放在最后：自我管控工具与内建文件/命令工具语义不同（只读、宿主内生），
+    // 排末尾让模型先按能力族浏览，最后才是「问宿主自己」的辅助能力
+    this.builtinDefinitions = [...fileTools, ...shellTools, ...webTools, ...memoryTools, ...agentTools, ...interactiveTools, ...APP_TOOLS]
   }
 
   /** 注入当前已连接 MCP 服务器提供的工具（mcp-store 同步后调用） */
@@ -1173,6 +1176,10 @@ class ToolRegistry {
         return JSON.stringify({ items })
       }
       default: {
+        // 自我管控工具（app_*）：全部只读，实现在 app-tools.ts。这里不占 switch case 位，
+        // 未命中时返回 null，落到下面的 mcp__ / unknown 分支。
+        const appResult = await executeAppTool(name, args ?? {}, ctx)
+        if (appResult !== null) return appResult
         // MCP 工具（mcp__<server>__<tool>）：转发到主进程 McpManager 执行
         if (name.startsWith('mcp__')) {
           try {

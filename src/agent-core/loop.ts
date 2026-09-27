@@ -127,9 +127,11 @@ const MAX_AUTO_COMPACT_FAILURES = 3
 // ── microcompact（工具结果级清理，参考 Claude Code Function Result Clearing）──
 /** 清空老工具结果时保留的最近条数 */
 const MICROCOMPACT_KEEP_RECENT = 6
-/** 可被清空的工具：输出大且可重跑。编辑/子代理/交互结果小而关键，不清。 */
+/** 可被清空的工具：输出大且可重跑。编辑/子代理/交互结果小而关键，不清。
+ *  app_* 自我管控工具同属「只读 + 可随时重问」，与 read_file 同类。 */
 const MICROCOMPACT_CLEARABLE_TOOLS = new Set([
   'read_file', 'read_image', 'execute_command', 'search_files', 'search_content', 'list_dir', 'web_search', 'web_fetch',
+  'app_status', 'app_list_sessions', 'app_read_session', 'app_list_skills', 'app_list_agents', 'app_search_memory', 'app_list_mcp_servers',
 ])
 const CLEARED_TOOL_RESULT_PLACEHOLDER =
   '[Old tool result cleared to free context. The key info should already be captured in earlier replies; re-run the tool if you need it again.]'
@@ -883,7 +885,13 @@ async function checkToolPermission(
   }
 
   const approvalMode = ports.settings.approvalMode
-  const READ_TOOLS = ['read_file', 'read_image', 'list_dir', 'search_files', 'search_content', 'web_search', 'web_fetch', 'search_memory']
+  // 只读工具白名单：plan / spec 两种规划期模式的唯一放行面。
+  // app_* 自我管控工具全为只读，语义上与 read_file 同级，故一并列入——
+  // 规划期禁止模型读取会话历史 / 技能清单是自缚手脚，规划本来就需要这些上下文。
+  const READ_TOOLS = [
+    'read_file', 'read_image', 'list_dir', 'search_files', 'search_content', 'web_search', 'web_fetch', 'search_memory',
+    'app_status', 'app_list_sessions', 'app_read_session', 'app_list_skills', 'app_list_agents', 'app_search_memory', 'app_list_mcp_servers',
+  ]
 
   // ── Plan 规划期：严格只读，用户确认后的下一条消息以普通模式运行 ──
   if (taskMode === 'plan') {

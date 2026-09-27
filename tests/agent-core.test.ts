@@ -687,6 +687,52 @@ describe('runReactLoop · 权限与运行时防护', () => {
     expect(firstToolMsg.toolResults![0].isError).toBe(true)
   })
 
+  it('plan 模式放行全部 7 个 app_* 自我管控工具（只读，规划期同样需要这些上下文）', async () => {
+    const appNames = [
+      'app_status', 'app_list_sessions', 'app_read_session', 'app_list_skills',
+      'app_list_agents', 'app_search_memory', 'app_list_mcp_servers',
+    ]
+    const { ports, tools, permission, session } = makePorts({
+      turns: [
+        ...appNames.map((name, i) => toolTurn(name, i === 2 ? { sessionId: 's1' } : {}, `tc${i + 1}`)),
+        textTurn('done'),
+      ],
+    })
+    await runLoop(ports, { taskMode: 'plan' })
+    expect(tools.execute.mock.calls.map((c) => c[0])).toEqual(appNames)
+    // 只读工具不该触发任何审批弹窗
+    expect(permission.confirm).not.toHaveBeenCalled()
+    const refused = session.messages.filter((m) => m.role === 'tool' && m.toolResults?.[0]?.isError)
+    expect(refused).toHaveLength(0)
+  })
+
+  it('多个 app_* 只读工具同批并发执行（不被误判成副作用工具而串行）', async () => {
+    let inFlight = 0
+    let peak = 0
+    const { ports, tools } = makePorts({
+      turns: [
+        [
+          sse(toolCallDelta(0, 'tc1', 'app_status', '{}')),
+          sse(toolCallDelta(1, 'tc2', 'app_list_sessions', '{}')),
+          sse(toolCallDelta(2, 'tc3', 'app_list_mcp_servers', '{}')),
+          sse(finishChunk('stop')),
+        ],
+        textTurn('done'),
+      ],
+      execute: async () => {
+        inFlight++
+        peak = Math.max(peak, inFlight)
+        await new Promise((r) => setTimeout(r, 10))
+        inFlight--
+        return 'OK'
+      },
+    })
+    await runLoop(ports)
+    expect(tools.execute).toHaveBeenCalledTimes(3)
+    // 并发峰值 3 = 同批 Promise.all；峰值 1 说明被 sideEffectingTools 误伤成串行
+    expect(peak).toBe(3)
+  })
+
   it('spec 模式：仅允许写入 .clerkbox/specs，禁止目录外写入与命令执行', async () => {
     // 目录内写入放行
     const inside = makePorts({

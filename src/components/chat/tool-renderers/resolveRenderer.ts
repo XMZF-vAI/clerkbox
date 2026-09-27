@@ -28,14 +28,18 @@ const REGISTRY: Record<string, ToolRenderer> = {
   edit_file: lazy(() => import('./EditFileRenderer')),
   web_search: lazy(() => import('./WebSearchRenderer')),
   web_fetch: lazy(() => import('./WebFetchRenderer')),
+  app: lazy(() => import('./AppRenderer')),
   mcp: lazy(() => import('./McpRenderer')),
 }
 
 const MCP_PREFIX = 'mcp__'
+/** 自我管控工具（app_*）：7 个只读工具共用一个渲染器 */
+const APP_PREFIX = 'app_'
 
 /** 工具名 → 专属渲染器；未注册返回 undefined，由调用方走通用回退 */
 export function resolveRenderer(name: string): ToolRenderer | undefined {
   if (isRenderedByUnifiedEntry(name)) return undefined
   if (name.startsWith(MCP_PREFIX)) return REGISTRY.mcp
+  if (name.startsWith(APP_PREFIX)) return REGISTRY.app
   return REGISTRY[name]
 }

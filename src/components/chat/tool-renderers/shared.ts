@@ -122,9 +122,36 @@ export function splitMcpToolName(name: string): { server: string; tool: string }
   return { server: rest.slice(0, sep), tool: rest.slice(sep + 2) }
 }
 
+/**
+ * app_* 自我管控工具的结果是纯文本，头部带一行 `[App xxx: N of M]` 计数标记。
+ * 只剥计数行；`[...N chars omitted...]` / `[App output truncated ...]` 原样留在正文里——
+ * 它们和 execute_command 既有的 `[Output truncated: ...]` 是同一类技术标记，不该被渲染层吃掉。
+ */
+export interface AppResultMeta {
+  /** 头部计数（已剥掉 `[App xxx: ]` 包装），如 "3 of 12"；无标记时为 null */
+  count: string | null
+  /** 剥掉计数标记后的正文行（保留空行：app_search_memory 的 index 段靠它分段） */
+  lines: string[]
+}
+
+const APP_COUNT_PATTERN = /^\[App (?:sessions|skills|agents|memory|MCP servers|session):\s*([^\]]*)\]/
+
+export function parseAppResult(content: string): AppResultMeta {
+  const lines: string[] = []
+  let count: string | null = null
+  for (const raw of content.split('\n')) {
+    const countMatch = raw.trim().match(APP_COUNT_PATTERN)
+    if (countMatch) {
+      count = (countMatch[1] || '').trim() || null
+      continue
+    }
+    lines.push(raw)
+  }
+  return { count, lines }
+}
+
 /** 正文预览行数上限（渲染器只展示头部，其余靠工具条展开后的滚动区） */
 export const PREVIEW_LINE_LIMIT = 20
-
 export function takeLines(text: string, limit = PREVIEW_LINE_LIMIT): { lines: string[]; hidden: number } {
   const lines = text.split('\n')
   if (lines.length <= limit) return { lines, hidden: 0 }

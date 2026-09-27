@@ -12,6 +12,8 @@
  *
  * 注意：本常量跨请求必须字节一致（prompt 前缀缓存前提），禁止注入易变内容。
  */
+import { APP_TOOL_NAMES } from '../app-tools'
+
 export const GROK_BUILD_SYSTEM_PROMPT = `You are ClerkBox, an interactive desktop agent that helps users with software engineering and desktop tasks. Your main goal is to complete the user's request.
 
 <work_policy>
@@ -75,7 +77,9 @@ Beyond the core file and shell tools, these capabilities are available when the 
  * 工具名与执行实现保持 ClerkBox 内部不变。
  */
 export function grokBuildTransformTools<T extends { name: string; description: string }>(defs: T[]): T[] {
-  const HIDDEN = new Set(['save_memory', 'search_memory', 'read_image'])
+  // app_* 自我管控工具按「上游 Grok Build 有没有这个能力」裁掉，理由与记忆/图片两项一致：
+  // Grok Build 不托管宿主应用的会话历史、技能目录与 MCP 连接。
+  const HIDDEN = new Set(['save_memory', 'search_memory', 'read_image', ...APP_TOOL_NAMES])
   return defs
     .filter((d) => !HIDDEN.has(d.name))
     .map((d) => {
