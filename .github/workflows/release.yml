@@ -111,12 +111,12 @@ jobs:
             echo "notes: 仓库内没有 .release-notes.md，回退 generate_release_notes"
           fi
 
-          # 存在性判断必须用 gh release view：gh api 在 404 时会把 {"message":"Not Found"}
-          # 打到 stdout，$( ) 取到的是那串 JSON 而非空值，会误判成「已存在」而走进
-          # PATCH 分支，拿一个 JSON 当 release id 去拼端点。
-          EXISTING=$(gh release view "$TAG" -R "$REPO" --json id --jq '.id' 2>/dev/null || true)
-          if [ -n "$EXISTING" ] && [ "$EXISTING" != "null" ]; then
-            echo "release $TAG 已存在（id=$EXISTING），只更新说明"
+          # 存在性判断只看 gh 的退出码，绝不解析它的输出：release 不存在时 gh 既可能
+          # 往 stdout 写 null，也可能写 {"message":"Not Found"}，两者都会让
+          # [ -n "$EXISTING" ] 误判成「已存在」，然后拿这串垃圾当 id 去 PATCH。
+          if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
+            echo "release $TAG 已存在，只更新说明"
+            EXISTING=$(gh release view "$TAG" -R "$REPO" --json id --jq '.id')
             if [ -f notes.md ]; then
               gh api -X PATCH "repos/$REPO/releases/$EXISTING" -F body=@notes.md --jq '.html_url'
             fi
