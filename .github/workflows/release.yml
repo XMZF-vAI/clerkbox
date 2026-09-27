@@ -111,12 +111,20 @@ jobs:
             echo "notes: 仓库内没有 .release-notes.md，回退 generate_release_notes"
           fi
 
-          # 存在性判断只看 gh 的退出码，绝不解析它的输出：release 不存在时 gh 既可能
-          # 往 stdout 写 null，也可能写 {"message":"Not Found"}，两者都会让
-          # [ -n "$EXISTING" ] 误判成「已存在」，然后拿这串垃圾当 id 去 PATCH。
+          # 存在性判断双层保险：
+          #  1) gh release view 的退出码（不存在时为非 0）
+          #  2) 拿到的 id 必须是纯数字——gh release view --json id 给的是 GraphQL
+          #     node id（RE_xxx），拼到 REST 端点上必然 404；gh api 在 404 时又把
+          #     {"message":"Not Found"} 打到 stdout。两类脏输出都在这里被清掉。
+          EXISTING=""
           if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
-            echo "release $TAG 已存在，只更新说明"
-            EXISTING=$(gh release view "$TAG" -R "$REPO" --json id --jq '.id')
+            EXISTING=$(gh api "repos/$REPO/releases/tags/$TAG" --jq '.id' 2>/dev/null || true)
+            case "$EXISTING" in
+              ''|*[!0-9]*) EXISTING="" ;;
+            esac
+          fi
+          if [ -n "$EXISTING" ]; then
+            echo "release $TAG 已存在（id=$EXISTING），只更新说明"
             if [ -f notes.md ]; then
               gh api -X PATCH "repos/$REPO/releases/$EXISTING" -F body=@notes.md --jq '.html_url'
             fi
