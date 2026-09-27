@@ -86,11 +86,19 @@ jobs:
       - name: Create or update release
         # 用 gh CLI 集中上传，规避 electron-builder v26 并发上传产生多个草稿 Release 的 bug
         # -R 显式指定仓库：本 job 的 checkout 放在 source/ 下，git remote 不可靠
+        # TAG / SHA 经 env 显式注入：曾因依赖 GITHUB_REF 拿到空串，让 gh 造出一个
+        # untagged-<sha> 的孤儿 release 且 job 仍报绿。空值一律 fail fast。
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
+          set -euo pipefail
           REPO=XMZF-vAI/clerkbox
+          if [ -z "$TAG" ]; then
+            echo "::error::TAG 为空（github.ref_name 未注入），拒绝创建 untagged release"
+            exit 1
+          fi
           NOTES_ARGS=(--generate-notes)
           if [ -f source/.release-notes.md ]; then
             NOTES_ARGS=(--notes-file source/.release-notes.md)
@@ -103,3 +111,10 @@ jobs:
           else
             gh release create "$TAG" -R "$REPO" --verify-tag "${NOTES_ARGS[@]}" dist/*
           fi
+          # 清理同一 commit 上残留的 untagged release（tag 解析失败时的副产物）
+          SHORT="${SHA:0:20}"
+          for id in $(gh api "repos/$REPO/releases" --paginate \
+              --jq ".[] | select(.tag_name == \"untagged-$SHORT\") | .id"); do
+            echo "清理残留 untagged release: $id"
+            gh api -X DELETE "repos/$REPO/releases/$id"
+          done
