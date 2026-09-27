@@ -79,13 +79,6 @@ export const REMOTE_INVOKE_BLOCKLIST: readonly string[] = [
 ]
 
 /**
- * 明确判定为「读得到、改不动」的宿主通道：无副作用，WebUI 视图靠它们显示运行态。
- * 把它们重新列入黑名单会复现旧缺陷：mode 查询失败 → 薄客户端退回渲染层 → 要求本地持有
- * API Key，而 Key 从不下发远程，于是「客户端明明有 Key，Web 端却报缺 Key」。
- */
-export const REMOTE_AGENT_READONLY_CHANNELS: readonly string[] = ['agent:host-mode', 'agent:snapshot']
-
-/**
  * 受双重门控的宿主命令通道：传输层看地址（remoteAgentCommandAllowed），
  * 策略层看命令类型（见 electron/agent-host.ts 的远程规则：不带凭据、审批只认本地窗口）。
  */
