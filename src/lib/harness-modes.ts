@@ -3,7 +3,7 @@
  *
  * 背景：各家模型按自家官方 harness（系统提示词 + 工具形态 + 行为规范）调优，
  * 第三方 harness 驱动这些模型时，对齐官方形态可获得接近官方的效果。
- * 本模块定义除默认模式外的四个兼容模式（Codex / Grok Build / dsh / dsh 极简），
+ * 本模块定义除默认模式外的五个兼容模式（Codex / Grok Build / dsh / dsh 极简 / ZCode），
  * 每个模式 = 一份静态 system prompt + 可选的内置工具集变换。
  *
  * 约束：
@@ -19,6 +19,7 @@ import { CODEX_SYSTEM_PROMPT, codexTransformTools } from './harness-prompts/code
 import { GROK_BUILD_SYSTEM_PROMPT, grokBuildTransformTools } from './harness-prompts/grok-build'
 import { DSH_SYSTEM_PROMPT, dshTransformTools } from './harness-prompts/dsh'
 import { DSH_MINIMAL_SYSTEM_PROMPT, dshMinimalTransformTools } from './harness-prompts/dsh-minimal'
+import { ZCODE_SYSTEM_PROMPT, zcodeTransformTools } from './harness-prompts/zcode'
 
 /** 动态 system 段的注入策略 */
 export type HarnessDynamicContext =
@@ -46,6 +47,7 @@ export const HARNESS_MODE_METAS: HarnessModeMeta[] = [
   { id: 'grok-build', group: 'compat', nameKey: 'chat.harnessGrok', descKey: 'chat.harnessGrokDesc', hintKey: 'chat.harnessGrokHint' },
   { id: 'dsh', group: 'compat', nameKey: 'chat.harnessDsh', descKey: 'chat.harnessDshDesc', hintKey: 'chat.harnessDshHint' },
   { id: 'dsh-minimal', group: 'compat', nameKey: 'chat.harnessDshMinimal', descKey: 'chat.harnessDshMinimalDesc', hintKey: 'chat.harnessDshMinimalHint' },
+  { id: 'zcode', group: 'compat', nameKey: 'chat.harnessZcode', descKey: 'chat.harnessZcodeDesc', hintKey: 'chat.harnessZcodeHint' },
 ]
 
 export interface HarnessModeContent {
@@ -87,6 +89,11 @@ export const HARNESS_MODE_CONTENT: Record<Exclude<HarnessMode, 'default'>, Harne
     dynamicContext: 'minimal',
     transformTools: dshMinimalTransformTools,
     includeMcpTools: false,
+  },
+  zcode: {
+    staticPrompt: ZCODE_SYSTEM_PROMPT,
+    dynamicContext: 'full',
+    transformTools: zcodeTransformTools,
   },
 }
 

@@ -30,7 +30,7 @@ export interface SessionRow {
   working_dir?: string | null
   /** 会话创建时自动生成的默认工作目录（回填用） */
   default_work_dir?: string | null
-  /** 本会话锁定的 harness 模式（default/codex/grok-build/dsh/dsh-minimal） */
+  /** 本会话锁定的 harness 模式（default/codex/grok-build/dsh/dsh-minimal/zcode） */
   harness_mode?: string | null
 }
 

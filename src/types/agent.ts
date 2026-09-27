@@ -161,7 +161,7 @@ export interface CompactionResult {
  * default = ClerkBox 内置 harness；其余为第三方官方 harness 兼容模式
  * （定义与内容见 src/lib/harness-modes.ts）。
  */
-export type HarnessMode = 'default' | 'codex' | 'grok-build' | 'dsh' | 'dsh-minimal'
+export type HarnessMode = 'default' | 'codex' | 'grok-build' | 'dsh' | 'dsh-minimal' | 'zcode'
 
 export interface Session {
   id: string

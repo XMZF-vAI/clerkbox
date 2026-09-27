@@ -464,6 +464,9 @@ export default {
     harnessDshMinimal: 'dsh 极简模式',
     harnessDshMinimalDesc: '镜像 dsh 官方 minimal 预设：极短固定提示词，仅保留终端与文件编辑两个工具',
     harnessDshMinimalHint: '推荐搭配 DeepSeek 系列模型',
+    harnessZcode: 'ZCode 兼容模式',
+    harnessZcodeDesc: '对齐智谱 ZCode 官方 harness 的提示词与沟通规范：结论先行、可读优先、自主推进',
+    harnessZcodeHint: '推荐搭配 GLM 系列模型',
     harnessLockedAria: '对话已开始，harness 模式已锁定',
     // "/" 命令菜单（任务工作流 + 技能）
     commandMenuAria: '命令与技能',

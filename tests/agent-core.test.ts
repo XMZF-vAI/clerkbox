@@ -28,6 +28,7 @@ import {
   getWorkingDir,
 } from '../src/agent-core/loop'
 import { createSeqCounter } from '../src/agent-core/protocol'
+import { ZCODE_SYSTEM_PROMPT } from '../src/lib/harness-prompts/zcode'
 import { SessionContext, SessionContextStore } from '../src/agent-core/session-context'
 import type { AgentPorts, AgentSettings, AgentStorePort } from '../src/agent-core/ports'
 import type { SkillCatalogEntry } from '../src/lib/skill-catalog'
@@ -574,6 +575,34 @@ describe('runReactLoop · 黄金序列', () => {
     expect(tools.execute).toHaveBeenCalledTimes(2)
     const assistant = session.messages.find((m) => m.role === 'assistant' && m.toolResults?.length)
     expect(assistant!.toolResults!.map((r) => r.content)).toEqual(['A-RESULT', 'B-RESULT'])
+  })
+})
+
+// ═══════════════ runReactLoop · harness 兼容模式 ═══════════════
+
+describe('runReactLoop · harness 兼容模式', () => {
+  const systemTexts = (body: unknown): string[] =>
+    ((body as { messages?: Array<{ role: string; content: unknown }> }).messages ?? [])
+      .filter((m) => m.role === 'system')
+      .map((m) => String(m.content))
+
+  it('zcode 档：静态段整体换成 ZCode prompt，动态段照常注入', async () => {
+    const { ports, model, session, tools } = makePorts({ turns: [textTurn('done')] })
+    session.harnessMode = 'zcode'
+    await runLoop(ports)
+    const systems = systemTexts(model.bodies[0])
+    expect(systems).toContain(ZCODE_SYSTEM_PROMPT)
+    // full 策略：兼容模式只替换静态段，工作目录/环境等动态段照旧注入
+    expect(systems.join('\n')).toContain('## Current Working Directory')
+    expect(systems.join('\n')).toContain('## Environment')
+    // 工具定义按模式取（注册表里做描述覆盖，工具名与实现不变）
+    expect(tools.definitions).toHaveBeenCalledWith('zcode')
+  })
+
+  it('default 档：不出现任何兼容模式的静态段', async () => {
+    const { ports, model } = makePorts({ turns: [textTurn('done')] })
+    await runLoop(ports)
+    expect(systemTexts(model.bodies[0])).not.toContain(ZCODE_SYSTEM_PROMPT)
   })
 })
 

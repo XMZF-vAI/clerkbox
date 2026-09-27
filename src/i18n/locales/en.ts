@@ -464,6 +464,9 @@ export default {
     harnessDshMinimal: 'dsh minimal',
     harnessDshMinimalDesc: "Mirrors dsh's official minimal preset: a short fixed prompt with only the shell and file-edit tools",
     harnessDshMinimalHint: 'Best with DeepSeek series models',
+    harnessZcode: 'ZCode compatible',
+    harnessZcodeDesc: "Aligns with Z.ai's official ZCode harness: outcome first, readability over brevity, autonomous execution",
+    harnessZcodeHint: 'Best with GLM series models',
     harnessLockedAria: 'Conversation started — harness mode is locked',
     // "/" command menu (task workflows + skills)
     commandMenuAria: 'Commands & skills',
