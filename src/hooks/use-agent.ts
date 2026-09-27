@@ -36,6 +36,17 @@ import { makeId, runReactLoop } from '../agent-core/loop'
 import { SessionContextStore } from '../agent-core/session-context'
 import type { AgentPorts } from '../agent-core/ports'
 
+/**
+ * 宿主拒绝理由 → 界面上看得懂的话。错误码原样回显等于把内部术语甩给用户，
+ * 而这两个码恰恰是最容易让人以为「软件坏了」的：一个要说先去桌面客户端跑一次，
+ * 一个要说审批只能在本地窗口点头。
+ */
+function hostRejectionText(error?: string): string {
+  if (error === 'run-command-missing-settings') return i18n.t('agent.hostNeedsLocalRun')
+  if (error === 'approval-local-only') return i18n.t('agent.approvalLocalOnly')
+  return error || i18n.t('agent.busy')
+}
+
 /** 会话级 Agent 能力注册表：供 TitleBar 等 hook 外部组件调用当前会话的手动压缩 / 用量统计 */
 export interface SessionAgentEntry {
   manualCompact: (instructions?: string) => Promise<void>
@@ -185,20 +196,26 @@ export function useAgent(sessionId: string) {
         return false
       }
 
-      if (!settings.baseUrl) {
-        setError(i18n.t('agent.needBaseUrl'))
-        return false
-      }
-      // 本地部署（Ollama / LM Studio 等）无需 Key，不能在这里一刀切拦掉
-      const activeProvider = settings.providers.find((p) => p.id === settings.activeProviderId)
-      if (!settings.apiKey && requiresApiKey(settings.baseUrl, activeProvider?.presetId)) {
-        setError(i18n.t('agent.needApiKey'))
-        return false
+      // 先问模式，再决定用哪套守卫：宿主模式下的凭据留在主进程（设置快照），
+      // 浏览器视图手里没有 Key 是常态而不是错配——把本地凭据守卫排在前面，
+      // 就会把「交给宿主跑」的远程界面谎报成「缺少 API 密钥」。
+      const hostMode = (await agentClient.ensureMode()) === 'main'
+      if (!hostMode) {
+        if (!settings.baseUrl) {
+          setError(i18n.t('agent.needBaseUrl'))
+          return false
+        }
+        // 本地部署（Ollama / LM Studio 等）无需 Key，不能在这里一刀切拦掉
+        const activeProvider = settings.providers.find((p) => p.id === settings.activeProviderId)
+        if (!settings.apiKey && requiresApiKey(settings.baseUrl, activeProvider?.presetId)) {
+          setError(i18n.t('agent.needApiKey'))
+          return false
+        }
       }
 
-      // 宿主模式（批次 B · P4）：入口守卫照旧在本地判定（沿用同一套友好报错），通过后
-      // 把这一轮整个交给主进程 AgentHost——界面状态一律靠事件回流，本地不再跑循环。
-      if ((await agentClient.ensureMode()) === 'main') {
+      // 宿主模式（批次 B · P4）：把这一轮整个交给主进程 AgentHost
+      // ——界面状态一律靠事件回流，本地不再跑循环。
+      if (hostMode) {
         if (taskMode === 'goal' && content.trim()) useGoalStore.getState().setGoal(sessionId, content.trim())
         const catalog = useSkillsStore.getState().getSkillCatalog()
         const res = await agentClient.send({
@@ -214,7 +231,7 @@ export function useAgent(sessionId: string) {
           goal: useGoalStore.getState().bySession[sessionId] ?? null,
           todos: useTodoStore.getState().bySession[sessionId] ?? [],
         })
-        if (!res.ok) setError(res.error ?? i18n.t('agent.busy'))
+        if (!res.ok) setError(hostRejectionText(res.error))
         return res.ok
       }
 

@@ -183,6 +183,14 @@ export class AgentSessionManager {
         /* 窗口正在销毁：事件仍在环里，重连按 sinceSeq 补发 */
       }
     }
+    // WebUI 远程订阅者（SSE）：与本地窗口同源同序，客户端侧靠 seq 去重与补发
+    for (const sink of eventSinks) {
+      try {
+        sink(payload)
+      } catch {
+        /* 某个远程连接正在断开 */
+      }
+    }
   }
 
   private hasLiveWindow(): boolean {
@@ -494,14 +502,19 @@ export class AgentSessionManager {
 
   /** 渲染层 → 宿主的指令入口。返回值只表示是否受理，运行结果一律走事件。 */
   async handleCommand(cmd: AgentCommand, meta: { remote?: boolean } = {}): Promise<{ ok: boolean; error?: string }> {
-    // 远程通道（WebUI /api/invoke 传 event=null）可回执审批，必须留痕便于事后追责
-    if (meta.remote && (cmd.type === 'permission.resolve' || cmd.type === 'question.resolve')) {
-      console.log(`[agent-host][audit] remote ${cmd.type} session=${cmd.sessionId} request=${cmd.requestId}`)
+    // 远程通道（WebUI /api/invoke 传 event=null）可回执提问，必须留痕便于事后追责
+    if (meta.remote && cmd.type === 'question.resolve') {
+      console.log(`[agent-host][audit] remote question.resolve session=${cmd.sessionId} request=${cmd.requestId}`)
+    }
+    // 危险操作审批只认本地窗口：远程界面能看（SSE/snapshot 里有待批卡片的状态），
+    // 但不能替本地用户点头——否则 token 泄漏就等同于「攻击者自批自跑」。
+    if (meta.remote && cmd.type === 'permission.resolve') {
+      return { ok: false, error: 'approval-local-only' }
     }
     const s = this.session(cmd.sessionId)
     switch (cmd.type) {
       case 'run':
-        return this.startRun(s, cmd)
+        return this.startRun(s, cmd, meta)
       case 'abort': {
         if (!s.run) return { ok: false, error: 'no-run' }
         s.run.controller.abort()
@@ -559,8 +572,24 @@ export class AgentSessionManager {
     this.emit(s, { type: 'queue.snapshot', sessionId: s.sessionId, items })
   }
 
-  private async startRun(s: HostSession, cmd: Extract<AgentCommand, { type: 'run' }>): Promise<{ ok: boolean; error?: string }> {
-    if (!cmd.settings) return { ok: false, error: MISSING_SETTINGS }
+  private async startRun(
+    s: HostSession,
+    cmd: Extract<AgentCommand, { type: 'run' }>,
+    meta: { remote?: boolean } = {}
+  ): Promise<{ ok: boolean; error?: string }> {
+    // 设置快照：宿主不读渲染层 persist，凭据只存在于本地窗口下发的那份快照里。
+    // 因此远程 run 一律**忽略**命令自带的 settings（否则等于让远程端指定上游地址与 Key），
+    // 改用本会话最近一次本地快照；没有快照就明确拒绝，而不是拿远程自带的配置去跑。
+    const cached = this.snapshots.get(s.sessionId)
+    const base = meta.remote ? cached?.settings : (cmd.settings ?? cached?.settings)
+    if (!base) return { ok: false, error: MISSING_SETTINGS }
+    // 远程触发的运行永远按 manual 档门控：危险操作只能由本地窗口批准。
+    // full / auto 档在本地是用户自己的选择，落到远程就变成「持 token 即可以用户身份跑 shell」。
+    const settings: AgentSettings = meta.remote ? { ...base, approvalMode: 'manual' } : base
+    const resolvedCmd: Extract<AgentCommand, { type: 'run' }> = { ...cmd, settings }
+    if (meta.remote && base.approvalMode !== 'manual') {
+      console.log(`[agent-host][audit] remote run downgraded approval ${base.approvalMode} -> manual session=${s.sessionId}`)
+    }
     if (s.run) {
       // 已在跑：按排队语义并入队列，而不是并发两个 run 抢同一会话状态
       this.setQueue(s, [...s.queue, {
@@ -575,8 +604,7 @@ export class AgentSessionManager {
     }
 
     const sessionId = s.sessionId
-    const settings = cmd.settings
-    this.snapshots.set(sessionId, cmd)
+    this.snapshots.set(sessionId, resolvedCmd)
     const controller = new AbortController()
     const runId = makeId()
     s.run = { runId, controller, startedAt: Date.now() }
@@ -606,10 +634,10 @@ export class AgentSessionManager {
     // addMessage 落库是异步的，刚写入的这条通常还查不到；按 id 判定而不是全表去重
     const history = await this.loadMessages(sessionId)
     const initialMessages = history.some((m) => m.id === userMsg.id) ? history : [...history, userMsg]
-    const ports = this.buildPorts(s, cmd, settings)
+    const ports = this.buildPorts(s, resolvedCmd, settings)
 
     try {
-      await runReactLoop(ports, ctx, initialMessages, controller, cmd.taskMode, cmd.skillReminder)
+      await runReactLoop(ports, ctx, initialMessages, controller, resolvedCmd.taskMode, resolvedCmd.skillReminder)
       return { ok: true }
     } catch (err) {
       if (controller.signal.aborted) return { ok: true }
@@ -762,6 +790,24 @@ export class AgentSessionManager {
   /** 单测注入：观察某会话的事件环 */
   peekRing(sessionId: string): AgentEvent[] {
     return (this.sessions.get(sessionId)?.ring ?? []).map((item) => item.event)
+  }
+
+  /** 单测与诊断用：本会话最近一次运行实际生效的设置快照 */
+  peekRunSettings(sessionId: string): AgentSettings | undefined {
+    return this.snapshots.get(sessionId)?.settings
+  }
+}
+
+/**
+ * 宿主事件的额外出口：WebUI 的 SSE 通道由 main.ts 注册进来，
+ * 让远程订阅者与本地窗口收到同一份有序事件流（同一 seq 序列，不去重就靠客户端 seq 闸门）。
+ */
+const eventSinks = new Set<(payload: { seq: number; event: AgentEvent }) => void>()
+
+export function registerAgentEventSink(sink: (payload: { seq: number; event: AgentEvent }) => void): () => void {
+  eventSinks.add(sink)
+  return () => {
+    eventSinks.delete(sink)
   }
 }
 

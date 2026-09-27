@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { Ban, Check, ChevronDown, ChevronUp, Clock, ShieldAlert, ShieldCheck, ShieldQuestion } from 'lucide-react'
 import { useChatStore } from '../../stores/chat-store'
 import { agentClient } from '../../lib/agent-client'
+import { isWebUIMode } from '../../lib/ipc-client'
 import { usePermissionStore, type HostPermission } from '../../stores/permission-store'
 import { makeId } from '../../agent-core/loop'
 import {
@@ -182,6 +183,7 @@ export function PermissionCard({ request, onResolve, interactive = true, vibe = 
 const NO_PENDING: HostPermission[] = []
 
 function HostPermissionCard({ request, vibe }: { request: HostPermission; vibe: boolean }) {
+  const { t } = useTranslation()
   const preview = useMemo(
     () => buildPermissionPreview(request.tool, request.args, { workingDir: request.workingDir }),
     [request.tool, request.args, request.workingDir]
@@ -210,6 +212,19 @@ function HostPermissionCard({ request, vibe }: { request: HostPermission; vibe: 
     })
     // 乐观收尾；宿主的 permission.settled 到达时再 settle 一次是幂等的
     usePermissionStore.getState().settle(request.sessionId, request.requestId)
+  }
+
+  // 远程视图（WebUI）只读：宿主侧 permission.resolve 对远程命令一律拒绝，
+  // 这里把按钮画出来就是骗人——点下去卡片乐观收尾，宿主那边却在等 120s 超时。
+  if (isWebUIMode) {
+    return (
+      <div className="space-y-1.5">
+        <p className={`text-[11px] ${vibe ? 'text-white/55' : 'text-dark-onSurfaceVariant/70'}`}>
+          {t('agent.approvalLocalOnly')}
+        </p>
+        <PermissionCard request={view} interactive={false} vibe={vibe} />
+      </div>
+    )
   }
 
   return <PermissionCard request={view} onResolve={(_id, decision) => resolve(decision)} interactive vibe={vibe} />

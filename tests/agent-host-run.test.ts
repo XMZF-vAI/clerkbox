@@ -9,18 +9,18 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ChatStore } from '../electron/db'
 
 /** 记录被发出的 SSE 分片请求，并按脚本回吐分片 */
-const streamCalls: Array<{ requestId: string; body: unknown }> = []
+const streamCalls: Array<{ requestId: string; cfg: unknown; body: unknown }> = []
 let script: Array<{ chunk?: string; done?: boolean; error?: string }> = []
 
 vi.mock('../electron/api-proxy', () => ({
   startChatStream: (_cfg: unknown, _body: unknown, requestId: string, send: (p: Record<string, unknown>) => void) => {
-    streamCalls.push({ requestId, body: _body })
+    streamCalls.push({ requestId, cfg: _cfg, body: _body })
     for (const payload of script) send({ requestId, ...payload })
   },
   abortChatStream: vi.fn(),
 }))
 
-import { AgentSessionManager, installAgentHostBridge } from '../electron/agent-host'
+import { AgentSessionManager, installAgentHostBridge, registerAgentEventSink } from '../electron/agent-host'
 import type { AgentEvent } from '../src/agent-core/protocol'
 import type { AgentSettings } from '../src/agent-core/ports'
 
@@ -175,5 +175,61 @@ describe('宿主侧中断与排队', () => {
     expect(m.inspect()[0].queued).toBe(0)
     const userRows = rows.filter((r) => r.role === 'user').map((r) => r.content)
     expect(userRows).toEqual(['第一条', '第二条'])
+  })
+})
+
+// ═══════════════ 远程通道（WebUI）的宿主侧规则 ═══════════════
+
+describe('宿主对远程命令的策略', () => {
+  it('远程 run 忽略命令自带的凭据，改用本地窗口下发过的快照，并把审批档降到 manual', async () => {
+    script = textStream('第一段')
+    const m = new AgentSessionManager(fakeStore().store)
+    await m.handleCommand({ type: 'run', sessionId: 's1', content: '本地起一轮', settings })
+
+    script = textStream('第二段')
+    const remoteSettings = { ...settings, apiKey: 'sk-attacker', baseUrl: 'https://attacker.test/v1', approvalMode: 'full' as const }
+    const res = await m.handleCommand({ type: 'run', sessionId: 's1', content: '远程触发', settings: remoteSettings }, { remote: true })
+    expect(res.ok).toBe(true)
+
+    // 上游连接参数取自本地快照：远程自带的那份被整段丢弃，否则等于让远程端指定端点与 Key
+    const conn = streamCalls[1]!.cfg as { apiKey: string; baseUrl: string }
+    expect(conn.apiKey).toBe('sk-test')
+    expect(conn.baseUrl).toBe('https://api.invalid.test/v1')
+    // 危险操作门控留在本地：远程触发的运行不可能带 full 档跑
+    expect(m.peekRunSettings('s1')).toMatchObject({ approvalMode: 'manual' })
+  })
+
+  it('本地从未跑过就没有快照可用：远程 run 明确拒绝，不拿远程自带配置去试', async () => {
+    script = textStream('不该发生')
+    const m = new AgentSessionManager(fakeStore().store)
+    const res = await m.handleCommand(
+      { type: 'run', sessionId: 's1', content: '远程首发', settings: { ...settings, apiKey: 'sk-attacker' } },
+      { remote: true }
+    )
+    expect(res).toEqual({ ok: false, error: 'run-command-missing-settings' })
+    expect(streamCalls.length).toBe(0)
+  })
+
+  it('危险操作的放行回执只认本地窗口', async () => {
+    const m = new AgentSessionManager(fakeStore().store)
+    const res = await m.handleCommand(
+      { type: 'permission.resolve', sessionId: 's1', requestId: 'r1', approved: true },
+      { remote: true }
+    )
+    expect(res).toEqual({ ok: false, error: 'approval-local-only' })
+  })
+
+  it('注册的事件出口与本地窗口同源同序（WebUI 的 SSE 靠它回放）', async () => {
+    script = textStream('同步给我看')
+    const m = new AgentSessionManager(fakeStore().store)
+    const seen: Array<{ seq: number; event: AgentEvent }> = []
+    const unsub = registerAgentEventSink((payload) => seen.push(payload))
+    try {
+      await m.handleCommand({ type: 'run', sessionId: 's1', content: '说句话', settings })
+    } finally {
+      unsub()
+    }
+    expect(seen.length).toBe(m.peekRing('s1').length)
+    expect(seen.map((p) => p.seq)).toEqual(seen.map((_, i) => i + 1))
   })
 })
