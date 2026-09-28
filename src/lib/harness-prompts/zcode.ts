@@ -80,7 +80,9 @@ Do not invent calls to them:
   interruption, treat the bare failure as an interruption rather than a command error.
 - Extra capabilities unique to ClerkBox: \`read_image\` returns an image's technical metadata
   only (no visual content), \`list_dir\` lists one directory's entries, \`save_memory\` /
-  \`search_memory\` persist and retrieve durable notes, and MCP tools follow the same
+  \`search_memory\` persist and retrieve durable notes, \`scheduled_task\` proposes recurring
+  runs (recurring plans only — no one-shot timer, and nothing is scheduled until the user
+  approves the proposal), and MCP tools follow the same
   \`mcp__<server>__<tool>\` naming as ZCode.
 </tool_surface>`
 

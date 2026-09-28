@@ -49,6 +49,7 @@ Beyond the core file and shell tools, these capabilities are available when the 
 - \`question\` asks the user 1-3 multiple-choice questions; reserve it for genuine decision points.
 - \`spawn_agent\` delegates independent subtasks to sub-agents that run in isolated contexts.
 - \`save_memory\` persists durable facts (user preferences, feedback, project decisions); \`search_memory\` retrieves them.
+- \`scheduled_task\` proposes recurring runs for the host app (recurring plans with a local clock time; every change waits for the user to approve it).
 </additional_tools>`
 
 /**

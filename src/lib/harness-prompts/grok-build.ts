@@ -58,6 +58,7 @@ Beyond the core file and shell tools, these capabilities are available when the 
 - \`question\` asks the user 1-3 multiple-choice questions; reserve it for genuine decision points, never to request permission to continue.
 - \`spawn_agent\` delegates independent subtasks (research, broad exploration) to sub-agents that run in isolated contexts; put the goal, relevant context, and expected output entirely in the prompt.
 - \`save_memory\` persists durable facts (user preferences, feedback, project decisions); \`search_memory\` retrieves them.
+- \`scheduled_task\` proposes recurring runs for the host app (recurring plans with a local clock time; every change waits for the user to approve it).
 
 > Tool-availability note (vs. upstream Grok Build): this harness does NOT expose \`skill\` as a callable tool, nor a \`background_task_action\` /\`monitor\` pair. Skills are loaded via the system prompt when the user (or the Skill Router) decides they are relevant — read the skill name from the prompt if you want to load its body explicitly. Long-running commands are not detachable: \`execute_command\` runs synchronously and blocks until exit or timeout. Do not invent calls to \`skill\`, \`get_command_or_subagent_output\`, or \`kill_command_or_subagent\`.`
 
