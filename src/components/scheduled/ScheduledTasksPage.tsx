@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertTriangle,
   ArrowUpDown,
+  Bot,
   CalendarClock,
   CheckCircle2,
   ChevronDown,
@@ -22,7 +23,7 @@ import {
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useShallow } from 'zustand/react/shallow'
-import { useScheduledTasksStore, checkScheduledTasksNow } from '../../stores/scheduled-tasks-store'
+import { useScheduledTasksStore, checkScheduledTasksNow, isProposalApplicable } from '../../stores/scheduled-tasks-store'
 import { useChatStore, getSessionAbortController } from '../../stores/chat-store'
 import { useSettingsStore } from '../../stores/settings-store'
 import { useUIStore } from '../../stores/ui-store'
@@ -39,8 +40,10 @@ import ConfirmDialog from '../ui/ConfirmDialog'
 import type {
   ScheduledTask,
   ScheduledTaskDraft,
+  ScheduledTaskProposal,
   ScheduledTaskRun,
   TaskModelOverride,
+  TaskProposalAction,
   TaskScheduleKind,
 } from '../../types/scheduled-task'
 
@@ -607,6 +610,127 @@ function RunRow({
 }
 
 
+// ── 智能体提案卡片 ───────────────────────────────────────────────────────────
+
+/** 提案动作文案与配色：删除用警示色，其余走中性/主色 */
+const PROPOSAL_ACTION_LABEL_KEY: Record<TaskProposalAction, string> = {
+  create: 'scheduledTasks.proposal.actionCreate',
+  update: 'scheduledTasks.proposal.actionUpdate',
+  delete: 'scheduledTasks.proposal.actionDelete',
+  set_enabled: 'scheduledTasks.proposal.actionSetEnabled',
+}
+
+const PROPOSAL_ACTION_STYLE: Record<TaskProposalAction, string> = {
+  create: 'bg-md-primary/15 text-md-primary',
+  update: 'bg-md-info/15 text-md-info',
+  delete: 'bg-md-error/15 text-md-error',
+  set_enabled: 'bg-md-warning/15 text-md-warning',
+}
+
+function ProposalCard({
+  proposal,
+  targetMissing,
+  sessionTitle,
+  onAccept,
+  onReject,
+  onViewSession,
+}: {
+  proposal: ScheduledTaskProposal
+  /** update/delete/set_enabled 的目标任务已不在任务表里：只能忽略，不能确认 */
+  targetMissing: boolean
+  sessionTitle?: string
+  onAccept: () => void
+  onReject: () => void
+  onViewSession: (sessionId: string) => void
+}) {
+  const { t } = useTranslation()
+  const remaining = proposal.expiresAt - Date.now()
+
+  return (
+    <div className="rounded-md3-lg border border-dark-onSurfaceVariant/10 bg-dark-surfaceContainer p-4">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span
+          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md3-sm text-[11px] font-medium ${PROPOSAL_ACTION_STYLE[proposal.action]}`}
+        >
+          <Bot size={12} />
+          {t(PROPOSAL_ACTION_LABEL_KEY[proposal.action])}
+        </span>
+        <h3 className="min-w-0 flex-1 truncate text-[15px] font-medium text-dark-onSurface">
+          {proposal.draft?.name ?? proposal.taskName ?? proposal.id}
+        </h3>
+        <span className="text-[11px] text-dark-onSurfaceVariant/50 flex-shrink-0">
+          {t('scheduledTasks.proposal.expiresIn', { time: formatDuration(remaining) })}
+        </span>
+      </div>
+
+      {/* 改/删既有任务时说明动的是哪一个：任务名快照，任务被删后仍读得懂 */}
+      {proposal.taskId && (
+        <p className="mt-1.5 text-xs text-dark-onSurfaceVariant/70">
+          {t('scheduledTasks.proposal.targetTask', { name: proposal.taskName ?? proposal.taskId })}
+          {proposal.action === 'set_enabled' &&
+            ` ${t('scheduledTasks.proposal.enabledTo', {
+              state: t(proposal.enabled ? 'scheduledTasks.proposal.enabledOn' : 'scheduledTasks.proposal.enabledOff'),
+            })}`}
+        </p>
+      )}
+
+      {proposal.draft && (
+        <div className="mt-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md3-sm bg-dark-surfaceContainerHigh text-xs text-dark-onSurfaceVariant">
+          <Clock size={12} />
+          {scheduleLabelText(proposal.draft.schedule, t)}
+        </div>
+      )}
+
+      {proposal.draft?.prompt && (
+        <p className="mt-2 text-xs leading-relaxed text-dark-onSurfaceVariant/70 line-clamp-2 whitespace-pre-line">
+          {proposal.draft.prompt}
+        </p>
+      )}
+
+      {proposal.rationale && (
+        <p className="mt-2 text-xs leading-relaxed text-dark-onSurface/80">
+          {t('scheduledTasks.proposal.reason', { text: proposal.rationale })}
+        </p>
+      )}
+
+      <div className="mt-3 pt-2.5 border-t border-dashed border-dark-onSurfaceVariant/15 flex items-center gap-2">
+        {proposal.sessionId && (
+          <button
+            type="button"
+            onClick={() => onViewSession(proposal.sessionId as string)}
+            className="text-xs text-dark-onSurfaceVariant/70 hover:text-dark-onSurface hover:underline truncate"
+            title={sessionTitle ?? proposal.sessionId}
+          >
+            {t('scheduledTasks.proposal.viewSession')}
+          </button>
+        )}
+        <div className="flex-1" />
+        {targetMissing ? (
+          <span className="text-[11px] text-md-warning">{t('scheduledTasks.proposal.taskMissing')}</span>
+        ) : (
+          <button
+            type="button"
+            onClick={onAccept}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md3-md bg-md-primary text-md-onPrimary text-xs font-medium hover:opacity-90 transition-opacity"
+          >
+            <CheckCircle2 size={13} />
+            {t('scheduledTasks.proposal.accept')}
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={onReject}
+          className="flex items-center gap-1 px-3 py-1.5 rounded-md3-md text-xs text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh hover:text-dark-onSurface transition-colors"
+        >
+          <X size={13} />
+          {t('scheduledTasks.proposal.reject')}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+
 // ── 页面 ─────────────────────────────────────────────────────────────────────
 
 export default function ScheduledTasksPage() {
@@ -615,23 +739,31 @@ export default function ScheduledTasksPage() {
     tasks,
     runs,
     keepAwake,
+    proposals,
     setKeepAwake,
     setTaskEnabled,
     removeTask,
     duplicateTask,
     enqueueRun,
     clearRuns,
+    acceptProposal,
+    rejectProposal,
+    refreshProposals,
   } = useScheduledTasksStore(
     useShallow((s) => ({
       tasks: s.tasks,
       runs: s.runs,
       keepAwake: s.keepAwake,
+      proposals: s.proposals,
       setKeepAwake: s.setKeepAwake,
       setTaskEnabled: s.setTaskEnabled,
       removeTask: s.removeTask,
       duplicateTask: s.duplicateTask,
       enqueueRun: s.enqueueRun,
       clearRuns: s.clearRuns,
+      acceptProposal: s.acceptProposal,
+      rejectProposal: s.rejectProposal,
+      refreshProposals: s.refreshProposals,
     })),
   )
   const runningByTask = useRunningByTask()
@@ -654,6 +786,11 @@ export default function ScheduledTasksPage() {
   useEffect(() => () => {
     if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current)
   }, [])
+
+  // 进页面即重读提案：跨进程写入靠心跳兜底（约 60s），用户不该等下一拍
+  useEffect(() => {
+    void refreshProposals()
+  }, [refreshProposals])
 
   const taskNameOf = (taskId: string): string =>
     tasks.find((task) => task.id === taskId)?.name ?? t('scheduledTasks.runs.deletedTask')
@@ -697,7 +834,7 @@ export default function ScheduledTasksPage() {
     getSessionAbortController(sessionId)?.abort()
   }
 
-  /** 刷新：立即跑一次到点检查（数据本身是实时的，按钮给出明确反馈） */
+  /** 刷新：立即跑一次到点检查 + 重读提案（数据本身是实时的，按钮给出明确反馈） */
   const handleRefresh = () => {
     if (refreshing) return
     setRefreshing(true)
@@ -705,6 +842,10 @@ export default function ScheduledTasksPage() {
     if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current)
     refreshTimerRef.current = setTimeout(() => setRefreshing(false), 600)
   }
+
+  /** 提案来源会话标题：只在卡片上做一次展示用查询，不为它订阅整个会话列表 */
+  const sessionTitleOf = (sessionId: string): string | undefined =>
+    useChatStore.getState().sessions.find((session) => session.id === sessionId)?.title
 
 
   return (
@@ -838,6 +979,34 @@ export default function ScheduledTasksPage() {
             )}
           </div>
 
+
+          {/* 智能体提交的待确认提案：确认后才进任务表 */}
+          {tab === 'tasks' && proposals.length > 0 && (
+            <section className="mt-4">
+              <div className="flex items-center gap-2">
+                <h2 className="text-sm font-medium text-dark-onSurface">
+                  {t('scheduledTasks.proposal.sectionTitle')}
+                </h2>
+                <span className="px-1.5 py-0.5 rounded-md3-sm bg-md-primary/15 text-[11px] font-medium text-md-primary">
+                  {proposals.length}
+                </span>
+              </div>
+              <p className="mt-1 text-xs text-dark-onSurfaceVariant/60">{t('scheduledTasks.proposal.sectionHint')}</p>
+              <div className="mt-3 space-y-3">
+                {proposals.map((proposal) => (
+                  <ProposalCard
+                    key={proposal.id}
+                    proposal={proposal}
+                    targetMissing={!!proposal.taskId && !isProposalApplicable(proposal, tasks)}
+                    sessionTitle={proposal.sessionId ? sessionTitleOf(proposal.sessionId) : undefined}
+                    onAccept={() => acceptProposal(proposal.id)}
+                    onReject={() => rejectProposal(proposal.id)}
+                    onViewSession={handleViewSession}
+                  />
+                ))}
+              </div>
+            </section>
+          )}
 
           {/* 内容区 */}
           {tab === 'tasks' ? (

@@ -31,6 +31,7 @@ import APP_ICON from '../../assets/icon.png'
 import { useShallow } from 'zustand/react/shallow'
 import { useSettingsStore } from '../../stores/settings-store'
 import { useUIStore } from '../../stores/ui-store'
+import { useScheduledTasksStore } from '../../stores/scheduled-tasks-store'
 import { useAccountStore, avatarColorFor, initialOf } from '../../stores/account-store'
 import { useIsMobile } from '../../hooks/use-mobile'
 
@@ -52,6 +53,8 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
       deleteSession: s.deleteSession,
     }))
   )
+  // 智能体提交的定时任务提案：确认入口在定时任务页，这里只做计数提醒
+  const pendingProposals = useScheduledTasksStore((s) => s.proposals.length)
   // 订阅 sessionStatus 变化以触发 loading 圈重渲染
   const sessionStatus = useChatStore((s) => s.sessionStatus)
   const { showSkillStore, setShowSkillStore, showScheduledTasks, setShowScheduledTasks } = useUIStore()
@@ -230,14 +233,23 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
         <button
           type="button"
           onClick={() => { setShowSkillStore(false); setShowScheduledTasks(!showScheduledTasks) }}
-          className={`w-8 h-8 flex items-center justify-center rounded-md3-sm transition-colors mb-2 ${
+          className={`relative w-8 h-8 flex items-center justify-center rounded-md3-sm transition-colors mb-2 ${
             showScheduledTasks ? 'bg-md-primary/15 text-md-primary' : 'hover:bg-dark-surfaceContainerHigh'
           }`}
           title={t('scheduledTasks.title')}
-          aria-label={t('scheduledTasks.title')}
+          aria-label={
+            pendingProposals > 0
+              ? `${t('scheduledTasks.title')} (${t('scheduledTasks.proposal.sectionTitle')}: ${pendingProposals})`
+              : t('scheduledTasks.title')
+          }
           aria-expanded={showScheduledTasks}
         >
           <CalendarClock size={18} />
+          {pendingProposals > 0 && (
+            <span className="absolute -top-1 -right-1 min-w-[15px] h-[15px] px-1 rounded-full bg-md-primary text-[9px] leading-[15px] text-center text-md-onPrimary font-medium">
+              {pendingProposals > 9 ? '9+' : pendingProposals}
+            </span>
+          )}
         </button>
         <div className="flex-1" />
         {!isWebUIMode && (
@@ -344,6 +356,11 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
         >
           <CalendarClock size={16} />
           <span>{t('scheduledTasks.title')}</span>
+          {pendingProposals > 0 && (
+            <span className="ml-auto min-w-[18px] h-[18px] px-1.5 rounded-full bg-md-primary text-[10px] leading-[18px] text-center text-md-onPrimary font-medium">
+              {pendingProposals > 9 ? '9+' : pendingProposals}
+            </span>
+          )}
         </button>
       </div>
 
