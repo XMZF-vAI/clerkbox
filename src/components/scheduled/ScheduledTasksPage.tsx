@@ -613,6 +613,9 @@ function RunRow({
 // ── 智能体提案卡片 ───────────────────────────────────────────────────────────
 
 /** 提案动作文案与配色：删除用警示色，其余走中性/主色 */
+/** prompt 折叠阈值（字符数）：约合三行。低于它的人不会去点展开，给按钮只是噪声 */
+const PROMPT_CLAMP_CHARS = 160
+
 const PROPOSAL_ACTION_LABEL_KEY: Record<TaskProposalAction, string> = {
   create: 'scheduledTasks.proposal.actionCreate',
   update: 'scheduledTasks.proposal.actionUpdate',
@@ -645,6 +648,9 @@ function ProposalCard({
 }) {
   const { t } = useTranslation()
   const remaining = proposal.expiresAt - Date.now()
+  const [promptExpanded, setPromptExpanded] = useState(false)
+  // 阈值取「三行」的量级：低于它的人根本不会去点展开，给了按钮只是噪声
+  const promptOverflows = (proposal.draft?.prompt.length ?? 0) > PROMPT_CLAMP_CHARS
 
   return (
     <div className="rounded-md3-lg border border-dark-onSurfaceVariant/10 bg-dark-surfaceContainer p-4">
@@ -682,8 +688,47 @@ function ProposalCard({
       )}
 
       {proposal.draft?.prompt && (
-        <p className="mt-2 text-xs leading-relaxed text-dark-onSurfaceVariant/70 line-clamp-2 whitespace-pre-line">
-          {proposal.draft.prompt}
+        <>
+          <p
+            className={`mt-2 text-xs leading-relaxed text-dark-onSurfaceVariant/70 whitespace-pre-line ${
+              promptExpanded ? '' : 'line-clamp-2'
+            }`}
+          >
+            {proposal.draft.prompt}
+          </p>
+          {/* prompt 最长 4000 字符。折叠时必须让人知道「后面还有」并且能展开——
+              否则用户点下接受时批准的并不是他看到的那段文字。 */}
+          {promptOverflows && (
+            <button
+              type="button"
+              onClick={() => setPromptExpanded((v) => !v)}
+              aria-expanded={promptExpanded}
+              className="mt-1 inline-flex items-center gap-1 text-[11px] text-dark-onSurfaceVariant/70 hover:text-dark-onSurface"
+            >
+              <ChevronDown
+                size={12}
+                className={promptExpanded ? 'rotate-180 transition-transform' : 'transition-transform'}
+              />
+              {promptExpanded
+                ? t('scheduledTasks.proposal.promptCollapse')
+                : t('scheduledTasks.proposal.promptExpand', { count: proposal.draft.prompt.length })}
+            </button>
+          )}
+        </>
+      )}
+
+      {/* create 提案的工作目录是新任务将来执行的位置：必须显式展示，用户无从从别处看到 */}
+      {proposal.action === 'create' && proposal.draft?.workingDir && (
+        <p className="mt-2 flex items-start gap-1.5 text-[11px] text-dark-onSurfaceVariant/70">
+          <FolderOpen size={12} className="mt-0.5 shrink-0" />
+          <span className="min-w-0 break-all">
+            {t('scheduledTasks.proposal.workDir', { dir: proposal.draft.workingDir })}
+          </span>
+        </p>
+      )}
+      {proposal.action === 'update' && (
+        <p className="mt-2 text-[11px] text-dark-onSurfaceVariant/60">
+          {t('scheduledTasks.proposal.workDirKept')}
         </p>
       )}
 

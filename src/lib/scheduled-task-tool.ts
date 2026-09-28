@@ -51,7 +51,7 @@ export const SCHEDULE_TOOLS: ToolDefinition[] = [
       '- Schedule = a recurring period plus a local clock time: kind "daily" | "weekdays" | "weekly" (needs weekday 0=Sunday…6=Saturday) | "monthly" (needs month_day 1-28), with hour 0-23 and minute 0-59. One-off runs ("in 20 minutes", "tomorrow 09:00") do not exist here: tell the user that plainly instead of inventing a plan.\n' +
       '- Always call action="list" before create (to avoid a duplicate plan) and before update/delete/set_enabled (it is the only source of task_id).\n' +
       '- prompt is what the future run receives verbatim, in a fresh session with no memory of this conversation: write it self-contained (goal, paths, expected output).\n' +
-      '- update replaces the whole task content, so pass the complete new name, prompt and schedule (keep the unchanged fields as they were). It does not change the enabled switch or the model override — use set_enabled for that; to keep the task\'s working directory, echo the dir= value from action="list".\n' +
+      '- update replaces the whole task content, so pass the complete new name, prompt and schedule. It changes nothing else: the enabled switch, the model override and the working directory all stay as they are (passing working_dir on update is ignored). Use set_enabled to toggle the switch.\n' +
       '- At most ' + MAX_PENDING_PROPOSALS + ' proposals can wait at a time; the user must clear them before more are accepted.',
     parameters: {
       type: 'object',
@@ -80,7 +80,8 @@ export const SCHEDULE_TOOLS: ToolDefinition[] = [
         },
         working_dir: {
           type: 'string',
-          description: 'Directory the run works in (optional; omit to use the session default)',
+          description:
+            'Directory the run works in (required for create, optional otherwise; ignored on update — the task keeps the directory it already has). Up to 500 characters, no line breaks.',
         },
         task_id: { type: 'string', description: 'Target task id from action="list" (required for update/delete/set_enabled)' },
         enabled: { type: 'boolean', description: 'Desired enabled state (required for set_enabled)' },
@@ -164,32 +165,37 @@ export async function executeScheduledTaskTool(
     )
   }
 
-  if (action === 'update') {
-    const missing = needsTaskId('update', taskId)
-    if (missing) return missing
-    const current = tasks.find((task) => task.id === taskId)
-    if (!current) return unknownTask(taskId)
-    const draft = parseTaskDraft(args)
-    if (!draft.ok) {
-      return `${draft.error} (update replaces the whole task content: pass the complete new name, prompt and schedule)`
+    if (action === 'update') {
+      const missing = needsTaskId('update', taskId)
+      if (missing) return missing
+      const current = tasks.find((task) => task.id === taskId)
+      if (!current) return unknownTask(taskId)
+      const draft = parseTaskDraft(args)
+      if (!draft.ok) {
+        return `${draft.error} (update replaces the whole task content: pass the complete new name, prompt and schedule)`
+      }
+      if (args.working_dir !== undefined) {
+        console.warn('[scheduled_task] update 提案忽略了 working_dir，确认时一律沿用任务当前目录:', taskId)
+      }
+      const added = await appendProposal({
+        action: 'update',
+        // 只带内容：启用状态、模型与工作目录确认时沿用任务当时的值（见 store 的
+        // acceptProposal），否则「先批停用、再批修改」会把任务悄悄重新启用，
+        // 而一个只改措辞的提案就能把任务搬到任意目录
+        draft: draft.value,
+        taskId,
+        taskName: current.name,
+        rationale,
+        sessionId: ctx?.sessionId,
+      })
+      if ('error' in added) return added.error
+      return (
+        `✅ Proposal ${added.id} submitted (update) for “${current.name}” (id=${taskId}): ` +
+        `now “${draft.value.name}” — ${scheduleForModel(draft.value.schedule)}. ` +
+        'Nothing changed yet; the user has to approve it on the Scheduled Tasks page. ' +
+        'The enabled switch, model and working directory are untouched.'
+      )
     }
-    const added = await appendProposal({
-      action: 'update',
-      // 只带内容：启用状态、模型与工作目录沿用任务当时的值（见 store 的 acceptProposal），
-      // 否则「先批停用、再批修改」会被修改提案里的 enabled 悄悄重新启用
-      draft: draft.value,
-      taskId,
-      taskName: current.name,
-      rationale,
-      sessionId: ctx?.sessionId,
-    })
-    if ('error' in added) return added.error
-    return (
-      `✅ Proposal ${added.id} submitted (update) for “${current.name}” (id=${taskId}): ` +
-      `now “${draft.value.name}” — ${scheduleForModel(draft.value.schedule)}. ` +
-      'Nothing changed yet; the user has to approve it on the Scheduled Tasks page.'
-    )
-  }
 
   if (action === 'delete') {
     const missing = needsTaskId('delete', taskId)

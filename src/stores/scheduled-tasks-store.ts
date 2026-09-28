@@ -238,14 +238,17 @@ export const useScheduledTasksStore = create<ScheduledTasksState>()(
         if (proposal.action === 'create' && proposal.draft) {
           state.addTask(proposal.draft)
         } else if (proposal.action === 'update' && proposal.draft && proposal.taskId) {
-          // 只改内容：启用状态、模型、工作目录沿用任务当前值（提案不带这几项的意图）
+          // 只改内容：启用状态、模型、工作目录一律沿用任务当前值（提案不带这几项的意图）。
+          // enabled / model 靠显式覆盖；workingDir 必须显式给 current——draft 里一定有值
+          // （parseTaskDraft 给了默认值），用 ?? 兜底等于让它悄悄生效，agent 就能
+          // 在一个「只改措辞」的提案里把任务搬到任意目录。
           const current = state.tasks.find((task) => task.id === proposal.taskId)
           if (!current) return false
           state.updateTask(proposal.taskId, {
             ...proposal.draft,
             enabled: current.enabled,
             model: current.model ?? null,
-            workingDir: proposal.draft.workingDir ?? current.workingDir,
+            workingDir: current.workingDir,
           })
         } else if (proposal.action === 'delete' && proposal.taskId) {
           state.removeTask(proposal.taskId)

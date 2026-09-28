@@ -178,13 +178,50 @@ function toProposals(raw: unknown): ScheduledTaskProposal[] {
   })
 }
 
-/** 进程内互斥：把「读—改—写」串成一条链，避免并发 run 互盖提案数组 */
+/** 进程内互斥：把「读—改—写」串成一条链，降低同进程并发 run 互盖提案数组的概率 */
 let proposalsLock: Promise<unknown> = Promise.resolve()
 
 function withProposalsLock<T>(job: () => Promise<T>): Promise<T> {
   const run = proposalsLock.then(job)
   proposalsLock = run.catch(() => undefined)
   return run
+}
+
+/**
+ * 写一条提案并确认它真的在。
+ *
+ * withProposalsLock 只是**进程内**互斥，而 agent 可能同时跑在渲染进程与主进程
+ * （AGENT_RUNTIME_MIGRATION_PLAN 的 P3 双宿主），两个进程各有一把锁、互不可见。
+ * KV 是单键覆盖、没有 CAS，跨进程互斥做不出来；这里退一步用「写后回读 + 重试」：
+ * 自己的提案不在回读结果里，就说明被另一个进程的写覆盖了，重读 kept 再写一次。
+ * 冲突窗口只有一次 kvSet 的往返，重试即可收敛；仍失败则明确报错，让模型知道
+ * 提案没提交成功，而不是让用户以为提交了却永远看不到。
+ */
+const PROPOSAL_WRITE_ATTEMPTS = 3
+
+async function writeProposalWithVerify(
+  proposal: ScheduledTaskProposal,
+  seedKept: ScheduledTaskProposal[],
+): Promise<{ ok: true } | { error: string }> {
+  let kept = seedKept
+  let lastError = ''
+  for (let attempt = 0; attempt < PROPOSAL_WRITE_ATTEMPTS; attempt++) {
+    try {
+      await ipc.kvSet(PROPOSALS_KV_KEY, JSON.stringify([proposal, ...kept]))
+    } catch (e) {
+      return { error: `Error: could not store the proposal - ${e instanceof Error ? e.message : String(e)}` }
+    }
+    // 回读确认：并发写覆盖时自己的提案会凭空消失
+    const stored = await readProposalRecords()
+    if (stored.some((item) => item.id === proposal.id)) return { ok: true }
+    kept = stored.filter((item) => item.expiresAt > proposal.createdAt)
+    lastError = `another process wrote the proposal list at the same time (attempt ${attempt + 1})`
+  }
+  return {
+    error:
+      `Error: the proposal could not be stored - ${lastError}. ` +
+      'Tell the user the scheduled-task change did NOT get submitted and ask them to try again.',
+  }
 }
 
 /** 读提案原始记录（不做过期/裁决过滤）；KV 不可用时返回空表 */
@@ -257,11 +294,14 @@ export async function appendProposal(input: {
 }): Promise<{ id: string } | { error: string }> {
   return withProposalsLock(async () => {
     const now = Date.now()
-    const kept = (await readProposalRecords()).filter((proposal) => proposal.expiresAt > now)
-    if (kept.length >= MAX_PENDING_PROPOSALS) {
+    const [records, snapshot] = await Promise.all([readProposalRecords(), readTaskStoreSnapshot()])
+    // 上限按「仍待用户裁决」计数，而不是「未过期」：已裁决的记录只剩墓碑作用，
+    // 继续占名额会让用户批量批准之后 agent 在 24 小时内一条都提交不进来
+    const pending = records.filter((proposal) => isProposalPending(proposal, snapshot.decided, now))
+    if (pending.length >= MAX_PENDING_PROPOSALS) {
       return {
         error:
-          `Error: ${kept.length} proposals are already waiting for the user to approve them ` +
+          `Error: ${pending.length} proposals are already waiting for the user to approve them ` +
           `(max ${MAX_PENDING_PROPOSALS}). Ask the user to review the Scheduled Tasks page first.`,
       }
     }
@@ -277,11 +317,11 @@ export async function appendProposal(input: {
       createdAt: now,
       expiresAt: now + PROPOSAL_TTL_MS,
     }
-    try {
-      await ipc.kvSet(PROPOSALS_KV_KEY, JSON.stringify([proposal, ...kept]))
-    } catch (e) {
-      return { error: `Error: could not store the proposal - ${e instanceof Error ? e.message : String(e)}` }
-    }
+    // kept 仍带已裁决的记录：它们是墓碑之外的原始条目，留着不影响展示
+    // （isProposalPending 会过滤掉），但会随 TTL 自然过期清理
+    const kept = records.filter((proposal) => proposal.expiresAt > now)
+    const written = await writeProposalWithVerify(proposal, kept)
+    if ('error' in written) return written
     notifyProposalsChanged()
     return { id: proposal.id }
   })
