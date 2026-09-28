@@ -1737,7 +1737,8 @@ export async function runReactLoop(
 
     // Preserve model order for side-effecting tools; read-only calls can still run concurrently.
     // MCP 工具（mcp__ 前缀）可能带副作用，统一按顺序执行
-    const sideEffectingTools = new Set(['write_file', 'search_replace', 'execute_command', 'save_memory', 'spawn_agent', 'question', 'todowrite'])
+    // scheduled_task 也在此列：它写提案 KV，并发调用会互相盖同一份数组
+    const sideEffectingTools = new Set(['write_file', 'search_replace', 'execute_command', 'save_memory', 'spawn_agent', 'question', 'todowrite', 'scheduled_task'])
     const isSideEffecting = (toolName: string) =>
       sideEffectingTools.has(toolName) || toolName.startsWith('mcp__')
     const orderedResults: Array<ToolResult | undefined> = Array.from({ length: toolCalls.length })

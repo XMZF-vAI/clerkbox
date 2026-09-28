@@ -2,6 +2,7 @@ import { ipc } from './ipc-client'
 import { slugify } from './memory'
 import { HARNESS_MODE_CONTENT } from './harness-modes'
 import { APP_TOOLS, executeAppTool } from './app-tools'
+import { SCHEDULE_TOOLS, SCHEDULE_TOOL_NAME, executeScheduledTaskTool } from './scheduled-task-tool'
 import type { ToolDefinition, MemoryEntry, TodoItem, UserQuestion, ReadFileSnapshot, HarnessMode } from '../types/agent'
 import type { McpToolInfo } from '../types/ipc'
 
@@ -676,8 +677,9 @@ class ToolRegistry {
 
   constructor() {
     // appTools 放在最后：自我管控工具与内建文件/命令工具语义不同（只读、宿主内生），
-    // 排末尾让模型先按能力族浏览，最后才是「问宿主自己」的辅助能力
-    this.builtinDefinitions = [...fileTools, ...shellTools, ...webTools, ...memoryTools, ...agentTools, ...interactiveTools, ...APP_TOOLS]
+    // 排末尾让模型先按能力族浏览，最后才是「问宿主自己」的辅助能力。
+    // 定时任务工具排在交互工具之后：它写的是宿主应用的状态，且落点同样是「待用户确认」。
+    this.builtinDefinitions = [...fileTools, ...shellTools, ...webTools, ...memoryTools, ...agentTools, ...interactiveTools, ...SCHEDULE_TOOLS, ...APP_TOOLS]
   }
 
   /** 注入当前已连接 MCP 服务器提供的工具（mcp-store 同步后调用） */
@@ -1174,6 +1176,9 @@ class ToolRegistry {
         }).slice(0, 50)
         ctx.updateTodoList(items)
         return JSON.stringify({ items })
+      }
+      case SCHEDULE_TOOL_NAME: {
+        return executeScheduledTaskTool(SCHEDULE_TOOL_NAME, args, ctx)
       }
       default: {
         // 自我管控工具（app_*）：全部只读，实现在 app-tools.ts。这里不占 switch case 位，

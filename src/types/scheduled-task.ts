@@ -87,3 +87,39 @@ export interface ScheduledTaskDraft {
   model?: TaskModelOverride | null
   enabled: boolean
 }
+
+/** 提案要做的动作：新建 / 改内容 / 删除 / 改启用状态 */
+export type TaskProposalAction = 'create' | 'update' | 'delete' | 'set_enabled'
+
+/**
+ * 智能体提交的任务变更提案，用户在定时任务页确认后才落到任务表。
+ *
+ * 写入方是提交侧（工具，跑在主进程或渲染层都可能），落点是独立 KV key
+ * `clerkbox-scheduled-task-proposals`；裁决结果记在任务 store 里（唯一写者是渲染层）。
+ * 两个 key 各自单写，渲染层的整表覆盖不会把新提案冲掉，反之亦然。
+ */
+export interface ScheduledTaskProposal {
+  id: string
+  action: TaskProposalAction
+  /**
+   * create = 完整的新任务内容；update = 只带新内容（名称/提示词/计划，可选工作目录）。
+   * update 不改启用状态与模型覆盖，那两项在确认时沿用任务当前值（set_enabled 另有专门的提案）。
+   */
+  draft?: ScheduledTaskDraft
+  /** 目标任务 id（update/delete/set_enabled） */
+  taskId?: string
+  /** 目标任务名快照：任务随后被删也读得懂这张卡片 */
+  taskName?: string
+  /** set_enabled 的目标状态 */
+  enabled?: boolean
+  /** 智能体自述的提交理由（卡片上给用户看） */
+  rationale?: string
+  /** 提交提案的会话 id：点卡片可回去看上下文 */
+  sessionId?: string
+  createdAt: number
+  /** 过期即从待确认列表消失（用户不理睬时不积累垃圾） */
+  expiresAt: number
+}
+
+/** 用户对提案的裁决 */
+export type TaskProposalDecision = 'accepted' | 'rejected'

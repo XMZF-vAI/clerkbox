@@ -3,12 +3,15 @@ import { persist } from 'zustand/middleware'
 import { sharedStorage } from '../lib/shared-storage'
 import { ipc } from '../lib/ipc-client'
 import { TRIGGER_TOLERANCE_MS, previousTriggerAt, summarizeAssistantReply } from '../lib/scheduled-task'
+import { DECISION_RETENTION_MS, onProposalsChanged, readPendingProposals } from '../lib/scheduled-task-proposal'
 import { useChatStore } from './chat-store'
 import type {
   ScheduledTask,
   ScheduledTaskDraft,
+  ScheduledTaskProposal,
   ScheduledTaskRun,
   TaskModelOverride,
+  TaskProposalDecision,
   TaskRunNote,
   TaskRunStatus,
   TaskRunTrigger,
@@ -23,6 +26,9 @@ import type {
  *   心跳每 20s 检查一次，到点且落在容差窗口内才启动，落后太久只抬高水位线不补跑。
  * - 真正的执行由 `TaskRunHost` 承担（挂载 useAgent 并发出提示词），
  *   本 store 只负责「排队 → 建会话 → 记录状态」，避免把 React hooks 拉进 store。
+ * - 智能体提交的任务变更先停在「待确认提案」里：提案本体存在独立 KV key（提交侧单写），
+ *   这里只读不写；用户裁决记在本 store（渲染层单写）。两个 key 各自单写，
+ *   不会出现整表覆盖把对方的数据冲掉。
  */
 
 /** 执行记录上限：避免 KV 无限膨胀 */
@@ -43,6 +49,46 @@ export interface QueuedTaskRun {
   model?: TaskModelOverride | null
 }
 
+/** 用户对提案的裁决留痕（随任务表持久化：渲染层是这张表的唯一写者） */
+export interface ProposalDecisionRecord {
+  decision: TaskProposalDecision
+  at: number
+}
+
+/** 只保留还在保留期内的裁决记录（防止 tombstone 无限增长） */
+function pruneProposalDecisions(
+  records: Record<string, ProposalDecisionRecord>,
+  now: number,
+): Record<string, ProposalDecisionRecord> {
+  const next: Record<string, ProposalDecisionRecord> = {}
+  for (const [id, record] of Object.entries(records)) {
+    if (record && now - record.at <= DECISION_RETENTION_MS) next[id] = record
+  }
+  return next
+}
+
+/**
+ * 提案能否落到任务表：载荷残缺或目标任务已被删除时不能，
+ * 界面据此禁用「确认」，用户仍可以「忽略」把卡片清掉。
+ */
+export function isProposalApplicable(
+  proposal: ScheduledTaskProposal,
+  tasks: readonly ScheduledTask[],
+): boolean {
+  const targetExists = (id?: string) => !!id && tasks.some((task) => task.id === id)
+  switch (proposal.action) {
+    case 'create':
+      return !!proposal.draft?.name.trim() && !!proposal.draft?.prompt.trim()
+    case 'update':
+      return !!proposal.draft?.name.trim() && targetExists(proposal.taskId)
+    case 'delete':
+    case 'set_enabled':
+      return targetExists(proposal.taskId)
+    default:
+      return false
+  }
+}
+
 interface ScheduledTasksState {
   tasks: ScheduledTask[]
   /** 执行记录（倒序，最多 MAX_RUN_RECORDS 条） */
@@ -51,12 +97,22 @@ interface ScheduledTasksState {
   keepAwake: boolean
   /** 待执行队列：队首 = 正在执行的任务（内存态，不持久化） */
   queue: QueuedTaskRun[]
+  /** 待确认的智能体提案（内存态：本体存在提交侧的独立 KV key，这里只读） */
+  proposals: ScheduledTaskProposal[]
+  /** 已裁决提案的留痕：用于把已处理过的提案从待确认列表里滤掉 */
+  proposalDecisions: Record<string, ProposalDecisionRecord>
   setKeepAwake: (value: boolean) => void
   addTask: (draft: ScheduledTaskDraft) => string
   updateTask: (id: string, draft: ScheduledTaskDraft) => void
   removeTask: (id: string) => void
   setTaskEnabled: (id: string, enabled: boolean) => void
   duplicateTask: (id: string) => string | null
+  /** 从 KV 重读待确认提案（已过滤过期与已裁决） */
+  refreshProposals: () => Promise<void>
+  /** 用户确认提案：应用到任务表并留痕。无法落地时返回 false 且不改任何状态 */
+  acceptProposal: (id: string) => boolean
+  /** 用户忽略提案：只留痕，不动任务表 */
+  rejectProposal: (id: string) => void
   /** 抬高水位线（错过窗口、避免重复触发时使用） */
   markTriggered: (taskId: string, at: number) => void
   /**
@@ -91,6 +147,8 @@ export const useScheduledTasksStore = create<ScheduledTasksState>()(
       runs: [],
       keepAwake: false,
       queue: [],
+      proposals: [],
+      proposalDecisions: {},
 
       setKeepAwake: (value) => {
         set({ keepAwake: value })
@@ -155,6 +213,64 @@ export const useScheduledTasksStore = create<ScheduledTasksState>()(
         }
         set((state) => ({ tasks: [copy, ...state.tasks] }))
         return copy.id
+      },
+
+      refreshProposals: async () => {
+        const pending = await readPendingProposals().catch((e) => {
+          console.error('[scheduled-tasks] refreshProposals failed:', e)
+          return null
+        })
+        if (!pending) return
+        set((state) => {
+          // 内容与顺序都没变就保持原数组引用，避免每次心跳都让页面重渲染
+          const unchanged =
+            state.proposals.length === pending.length &&
+            state.proposals.every((item, index) => item.id === pending[index]?.id)
+          return unchanged ? {} : { proposals: pending }
+        })
+      },
+
+      acceptProposal: (id) => {
+        const state = get()
+        const proposal = state.proposals.find((item) => item.id === id)
+        if (!proposal || !isProposalApplicable(proposal, state.tasks)) return false
+        const now = Date.now()
+        if (proposal.action === 'create' && proposal.draft) {
+          state.addTask(proposal.draft)
+        } else if (proposal.action === 'update' && proposal.draft && proposal.taskId) {
+          // 只改内容：启用状态、模型、工作目录沿用任务当前值（提案不带这几项的意图）
+          const current = state.tasks.find((task) => task.id === proposal.taskId)
+          if (!current) return false
+          state.updateTask(proposal.taskId, {
+            ...proposal.draft,
+            enabled: current.enabled,
+            model: current.model ?? null,
+            workingDir: proposal.draft.workingDir ?? current.workingDir,
+          })
+        } else if (proposal.action === 'delete' && proposal.taskId) {
+          state.removeTask(proposal.taskId)
+        } else if (proposal.action === 'set_enabled' && proposal.taskId) {
+          state.setTaskEnabled(proposal.taskId, proposal.enabled === true)
+        }
+        set((prev) => ({
+          proposals: prev.proposals.filter((item) => item.id !== id),
+          proposalDecisions: pruneProposalDecisions(
+            { ...prev.proposalDecisions, [id]: { decision: 'accepted' as TaskProposalDecision, at: now } },
+            now,
+          ),
+        }))
+        return true
+      },
+
+      rejectProposal: (id) => {
+        const now = Date.now()
+        set((prev) => ({
+          proposals: prev.proposals.filter((item) => item.id !== id),
+          proposalDecisions: pruneProposalDecisions(
+            { ...prev.proposalDecisions, [id]: { decision: 'rejected' as TaskProposalDecision, at: now } },
+            now,
+          ),
+        }))
       },
 
       markTriggered: (taskId, at) => {
@@ -226,6 +342,7 @@ export const useScheduledTasksStore = create<ScheduledTasksState>()(
         tasks: state.tasks,
         runs: state.runs,
         keepAwake: state.keepAwake,
+        proposalDecisions: state.proposalDecisions,
       }),
       merge: (persisted, current) => {
         const stored = (persisted ?? {}) as Partial<ScheduledTasksState>
@@ -246,13 +363,22 @@ export const useScheduledTasksStore = create<ScheduledTasksState>()(
           tasks,
           runs,
           keepAwake: stored.keepAwake === true,
-          // 队列是内存态：重启后为空
+          // 队列与提案列表是内存态：提案本体在独立 KV key，水合后由心跳/订阅重读
           queue: [],
+          proposals: [],
+          proposalDecisions: pruneProposalDecisions(
+            (stored.proposalDecisions ?? {}) as Record<string, ProposalDecisionRecord>,
+            Date.now(),
+          ),
         }
       },
     },
   ),
 )
+
+/** 提案刷新间隔（拍）：一次刷新要读整份 KV 文件，不必跟着 20s 心跳跑 */
+const PROPOSAL_REFRESH_EVERY_TICKS = 3
+let scheduleTickCount = 0
 
 /** 心跳：到点检查 + 入队。落后超过容差窗口只抬高水位线（不补跑历史任务） */
 function runScheduleTick(): void {
@@ -270,6 +396,9 @@ function runScheduleTick(): void {
     store.enqueueRun(task.id, 'schedule')
   }
   reconcileStuckHeadRun()
+  // 提案由另一个进程（宿主模式的工具）或另一个窗口写入，跨进程没有推送可用，靠这里定期重读
+  scheduleTickCount += 1
+  if (scheduleTickCount % PROPOSAL_REFRESH_EVERY_TICKS === 0) void store.refreshProposals()
 }
 
 /**
@@ -301,6 +430,7 @@ let schedulerTimer: ReturnType<typeof setInterval> | null = null
 /** 手动触发一次到点检查（页面「刷新」按钮用）：与心跳逻辑完全一致 */
 export function checkScheduledTasksNow(): void {
   runScheduleTick()
+  void useScheduledTasksStore.getState().refreshProposals()
 }
 
 /**
@@ -321,12 +451,19 @@ export function initScheduledTasks(): () => void {
   const onHydrated = () => {
     applyKeepAwake()
     runScheduleTick()
+    // 裁决留痕要水合完才准，否则第一次刷新会把已确认过的提案重新列出来
+    void useScheduledTasksStore.getState().refreshProposals()
   }
   const unsub = useScheduledTasksStore.persist.onFinishHydration(onHydrated)
   if (useScheduledTasksStore.persist.hasHydrated()) onHydrated()
+  // 同进程提交提案（渲染层跑循环时的工具调用）即时刷新；跨进程靠心跳
+  const unsubProposals = onProposalsChanged(() => {
+    void useScheduledTasksStore.getState().refreshProposals()
+  })
 
   return () => {
     unsub()
+    unsubProposals()
     if (schedulerTimer) {
       clearInterval(schedulerTimer)
       schedulerTimer = null
