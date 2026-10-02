@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, memo } from 'react'
+﻿import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, memo } from 'react'
 import { ChevronDown, ChevronUp, Wrench } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { defaultRangeExtractor, useVirtualizer, type Range } from '@tanstack/react-virtual'
 import type { Message } from '../../types/agent'
+import { lastRewindableTurnIndex } from '../../lib/rewind'
 import MessageItem from './MessageItem'
 import AgentStatusIndicator from './AgentStatusIndicator'
+import RewindActions from './RewindActions'
 import {
   VIRTUALIZE_MIN_TURNS,
   VIRTUAL_OVERSCAN,
@@ -35,6 +37,8 @@ interface MessageListProps {
   /** 滚动记忆按会话隔离，必须由调用方显式下发（同排组件同一约定） */
   sessionId: string
   vibe?: boolean
+  /** 编辑重发：撤回成功后由 ChatPage 用既有的 sendMessage 发新文本 */
+  onResend: (content: string, anchor: Message) => void
 }
 
 /** A "turn" = user message + all AI messages until the next user message or end */
@@ -101,13 +105,25 @@ function countMsgToolCalls(msg: Message): number {
 }
 
 /** Turn panel - 只保留一个回合级折叠按钮：折叠时只显示最终回复，展开时按自然顺序显示所有中间步骤 */
-type TurnPanelProps = { turn: Turn; isLastTurn: boolean; isStreaming: boolean; vibe?: boolean }
+type TurnPanelProps = {
+  turn: Turn
+  isLastTurn: boolean
+  isStreaming: boolean
+  vibe?: boolean
+  sessionId: string
+  /** 这一轮是不是「最后一条可撤回的用户消息」——撤回/编辑的唯一合法锚点 */
+  canRewindAnchor: boolean
+  onResend: (content: string, anchor: Message) => void
+}
 
 function areTurnPanelPropsEqual(previous: TurnPanelProps, next: TurnPanelProps): boolean {
   if (
     previous.isLastTurn !== next.isLastTurn ||
     previous.isStreaming !== next.isStreaming ||
     previous.vibe !== next.vibe ||
+    previous.sessionId !== next.sessionId ||
+    previous.canRewindAnchor !== next.canRewindAnchor ||
+    previous.onResend !== next.onResend ||
     previous.turn.turnId !== next.turn.turnId ||
     previous.turn.userMsg !== next.turn.userMsg ||
     previous.turn.aiMessages.length !== next.turn.aiMessages.length
@@ -119,7 +135,7 @@ function areTurnPanelPropsEqual(previous: TurnPanelProps, next: TurnPanelProps):
   return previous.turn.aiMessages.every((message, index) => message === next.turn.aiMessages[index])
 }
 
-const TurnPanel = memo(function TurnPanel({ turn, isLastTurn, isStreaming, vibe }: TurnPanelProps) {
+const TurnPanel = memo(function TurnPanel({ turn, isLastTurn, isStreaming, vibe, sessionId, canRewindAnchor, onResend }: TurnPanelProps) {
   const { t } = useTranslation()
   const [stepsExpanded, setStepsExpanded] = useState(false)
 
@@ -152,11 +168,38 @@ const TurnPanel = memo(function TurnPanel({ turn, isLastTurn, isStreaming, vibe 
   // 折叠条件：非流式 + 中间有可折叠步骤 + 最终消息已是总结（无工具调用）
   const shouldFold = hasFoldableSteps && !isActiveTurn && !finalHasTools && stepCount > 0
 
+  /**
+   * 「复制」的复制范围（对标 ZCode：轮尾复制的是整轮，不是最后一段）。
+   *
+   * 一轮里模型可能分几段说话（边干活边汇报），只复制最后一段会丢掉它前面的说明。
+   * 只有一轮确实说了多段时才改语义，单段情形保持「复制这条」的直觉。
+   */
+  const turnText = useMemo(
+    () => turn.aiMessages
+      .filter((m) => m.role === 'assistant' && !m.isSubAgentCard && !!m.content.trim())
+      .map((m) => m.content.trim())
+      .join('\n\n'),
+    [turn.aiMessages]
+  )
+  const mergedIsMoreThanFinal = !!finalMsg && turnText.trim() !== finalMsg.content.trim()
+
   return (
     <div className="space-y-3">
-      {/* User message */}
-      <MessageItem message={turn.userMsg} vibe={vibe} />
-
+      {/* User message（动作条里的 编辑 / 撤回 / 撤销文件 由 RewindActions 提供，仅最后一轮出现） */}
+      <MessageItem
+        message={turn.userMsg}
+        vibe={vibe}
+        extraActions={canRewindAnchor ? (
+          <RewindActions
+            sessionId={sessionId}
+            anchor={turn.userMsg}
+            canRewindAnchor={canRewindAnchor}
+            isStreaming={isStreaming}
+            vibe={vibe}
+            onResend={onResend}
+          />
+        ) : undefined}
+      />
       {/* 折叠按钮 —— 一个回合只显示一个 */}
       {shouldFold && (
         <div className="pl-2">
@@ -191,8 +234,15 @@ const TurnPanel = memo(function TurnPanel({ turn, isLastTurn, isStreaming, vibe 
         <MessageItem key={msg.id} message={msg} vibe={vibe} isIntermediate />
       ))}
 
-      {/* 最终回复（含 thinking + content） */}
-      {finalMsg && <MessageItem message={finalMsg} vibe={vibe} />}
+      {/* 最终回复（含 thinking + content）；复制按钮在整轮多段时复制整轮 */}
+      {finalMsg && (
+        <MessageItem
+          message={finalMsg}
+          vibe={vibe}
+          copyText={mergedIsMoreThanFinal ? turnText : undefined}
+          copyTitle={mergedIsMoreThanFinal ? t('chat.copyTurn') : undefined}
+        />
+      )}
     </div>
   )
 }, areTurnPanelPropsEqual)
@@ -261,7 +311,7 @@ function estimateOffsetFor(decision: ScrollRestoreDecision, sizes: number[]): nu
   return estimateStartPx(sizes, decision.index) + decision.offsetWithinTurn
 }
 
-export default function MessageList({ messages, isStreaming, sessionId, vibe }: MessageListProps) {
+export default function MessageList({ messages, isStreaming, sessionId, vibe, onResend }: MessageListProps) {
   const { t } = useTranslation()
   const scrollRef = useRef<HTMLDivElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
@@ -390,15 +440,26 @@ export default function MessageList({ messages, isStreaming, sessionId, vibe }: 
     scrollToEnd('smooth')
   }
 
-  if (messages.length === 0) {
-    return null
-  }
+// 空对话**也必须渲染这个 flex-1 容器**，不能 return null。
+// 它是消息区撑满剩余高度的唯一依据：少了它，整列就没有任何可伸展的元素，
+// 输入框会紧跟在顶部那几行后面浮在半空，底下留一大片死区 ——
+// 消息越多它越往下走，看起来像「输入框能被人拖着换位置」。
+// 空态下面就是没有内容，容器本身不可见，所以视觉上与原来一致。
+if (messages.length === 0) {
+  return <div className="relative flex-1 min-h-0 flex flex-col" aria-hidden />
+}
 
   const lastTurnIndex = turns.length - 1
+  // 撤回/编辑的锚点判定用「最后一条可撤回的用户消息」而不是「最后一个 turn」：
+  // 只撤销文件时会在尾部多出一条合成回执 turn，按后者算会让上一轮的两个按钮凭空消失。
+  const rewindAnchorIndex = lastRewindableTurnIndex(messages)
+  const rewindAnchorId = rewindAnchorIndex >= 0 ? (messages[rewindAnchorIndex]?.id ?? null) : null
   const rows = useVirtual ? selectTurnRows(turns, virtualizer.getVirtualItems()) : []
 
+  // overflow-clip：根自身不可滚，且不再把内层 scroller 的内容高度传播给祖先
+  // （传播会让外层 overflow-hidden 祖先也获得假 scrollHeight，bug 换层复发）
   return (
-    <div className="relative flex-1 min-h-0 flex flex-col">
+    <div className="relative flex-1 min-h-0 flex flex-col overflow-clip">
       <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-4 pb-6">
         {/* 行距由每行自身的 pt-6 承载（rem，随字号缩放），两条分支共用，切换时总高不变 */}
         <div
@@ -419,6 +480,9 @@ export default function MessageList({ messages, isStreaming, sessionId, vibe }: 
                     isLastTurn={row.index === lastTurnIndex}
                     isStreaming={isStreaming}
                     vibe={vibe}
+                    sessionId={sessionId}
+                    canRewindAnchor={turn.userMsg.id === rewindAnchorId}
+                    onResend={onResend}
                   />
                 </div>
               ))
@@ -429,6 +493,9 @@ export default function MessageList({ messages, isStreaming, sessionId, vibe }: 
                     isLastTurn={index === lastTurnIndex}
                     isStreaming={isStreaming}
                     vibe={vibe}
+                    sessionId={sessionId}
+                    canRewindAnchor={turn.userMsg.id === rewindAnchorId}
+                    onResend={onResend}
                   />
                 </div>
               ))}

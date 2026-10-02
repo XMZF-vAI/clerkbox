@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useChatStore, getSessionAbortController } from '../../stores/chat-store'
 import { useAgent } from '../../hooks/use-agent'
 import { useSkillsStore } from '../../stores/skills-store'
-import { ipc } from '../../lib/ipc-client'
+import { useSettingsStore } from '../../stores/settings-store'
+import { ipc, isWebUIMode } from '../../lib/ipc-client'
 import type { Message, MessageAttachment, MessageSkillSnapshot, TaskMode } from '../../types/agent'
 import MessageList from './MessageList'
 import ChatInput from './ChatInput'
@@ -13,6 +14,7 @@ import QuestionCard from './QuestionCard'
 import TodoListCard from './TodoListCard'
 import GoalBanner from './GoalBanner'
 import ChatErrorBanner from './ChatErrorBanner'
+import RewindDialog from './RewindDialog'
 import { PermissionApprovalCard } from './PermissionCard'
 
 interface ChatPageProps {
@@ -26,6 +28,8 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
   const activeSessionId = useChatStore((s) => s.activeSessionId)
   const streamingSessionIds = useChatStore((s) => s.streamingSessionIds)
   const createSession = useChatStore((s) => s.createSession)
+  // 界面模式：编程=按时段问候原文案；通用=固定一条工作导向问候
+  const interfaceMode = useSettingsStore((s) => s.interfaceMode)
   const initialized = useChatStore((s) => s.initialized)
   const loadFromDb = useChatStore((s) => s.loadFromDb)
   const sessionId = activeSessionId || ''
@@ -95,11 +99,13 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
     await sendMessage(content, attachments, taskMode, skills)
   }
 
-  // 重试：走 sendMessage 现有导出面重发最后一条用户消息（不新增 useAgent 接口）
+  // 重试：先按 ZCode 的 retryTurn 语义「截断这一轮再原样重发」，而不是在原地叠一份重复提问。
+  // 是否连带回滚文件由对话框里的复选框决定 —— 失败的那一轮可能已经写坏了文件。
   const lastUserMessage = useMemo<Message | undefined>(
     () => [...messages].reverse().find((m) => m.role === 'user'),
     [messages]
   )
+  const [rewindRetry, setRewindRetry] = useState(false)
   // 会话仍在运行 / 正在压缩 / 无用户消息时不提供重发，避免重复入队与并发发送
   const canRetry =
     !!lastUserMessage &&
@@ -108,13 +114,18 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
     !getSessionAbortController(sessionId)
   const handleRetry = useCallback(() => {
     if (!sessionId || !lastUserMessage || !canRetry) return
-    void sendMessage(
-      lastUserMessage.content,
-      lastUserMessage.attachments,
-      lastUserMessage.taskMode,
-      lastUserMessage.skills
-    )
+    if (isWebUIMode) {
+      // 远程视图不做截断（撤回是本地专属动作），退化成原来的原地重发
+      void sendMessage(lastUserMessage.content, lastUserMessage.attachments, lastUserMessage.taskMode, lastUserMessage.skills)
+      return
+    }
+    setRewindRetry(true)
   }, [sessionId, lastUserMessage, canRetry, sendMessage])
+
+  /** 编辑重发：撤回成功后用既有的发送路径发出新文本（附件/任务档/技能沿用原那条） */
+  const handleResend = useCallback((content: string, anchor: Message) => {
+    void sendMessage(content, anchor.attachments, anchor.taskMode, anchor.skills)
+  }, [sendMessage])
 
   const errorBanner = error ? (
     <ChatErrorBanner
@@ -144,7 +155,7 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
                     className="w-14 h-14 rounded-md3-lg object-cover"
                   />
                   <span className="text-xl font-medium text-dark-onSurface">
-                    {t('chat.emptyWelcome')}
+                    {t(interfaceMode === 'general' ? 'chat.emptyWelcomeGeneral' : 'chat.emptyWelcome')}
                   </span>
                 </div>
               </>
@@ -174,9 +185,12 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
   // Normal layout: message list + input at bottom, with optional detail panel on the right
   return (
     <div className={`relative flex h-full ${vibe ? 'bg-transparent' : 'bg-dark-surface'}`}>
-      <div className="flex flex-1 flex-col min-h-0 min-w-0 overflow-x-hidden">
+      {/* overflow-clip：此列绝不可滚。若用 hidden/auto，MessageList 内层滚动内容的高度会
+          穿透成列的 scrollHeight，列就变成滚动容器 —— 滚轮/选区自动滚动落在输入框上时，
+          消息+输入框会作为刚体被一起卷走（看起来像输入框被拖走且停住）。 */}
+      <div className="flex flex-1 flex-col min-h-0 min-w-0 overflow-clip">
         {/* key=会话 id：切会话强制重挂载，重置滚动粘底状态并回到最新消息 */}
-        <MessageList key={sessionId} sessionId={sessionId} messages={messages} isStreaming={isCurrentSessionStreaming} vibe={vibe} />
+        <MessageList key={sessionId} sessionId={sessionId} messages={messages} isStreaming={isCurrentSessionStreaming} vibe={vibe} onResend={handleResend} />
         <GoalBanner sessionId={sessionId} vibe={vibe} />
         <TodoListCard sessionId={sessionId} vibe={vibe} />
         <QuestionCard sessionId={sessionId} vibe={vibe} />
@@ -184,6 +198,15 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
         {errorBanner}
         <ChatInput onSend={handleSend} onStop={abort} onManualCompact={manualCompact} isCompacting={isCompacting} isStreaming={isCurrentSessionStreaming} onSendNow={sendQueuedNow} onEnqueueQueued={requestQueuedFlush} vibe={vibe} />
       </div>
+      {rewindRetry && lastUserMessage && (
+        <RewindDialog
+          sessionId={sessionId}
+          anchor={lastUserMessage}
+          mode="retry"
+          onClose={() => setRewindRetry(false)}
+          onResend={handleResend}
+        />
+      )}
     </div>
   )
 }
