@@ -25,6 +25,7 @@ import { useTranslation } from 'react-i18next'
 import { useChatStore } from '../../stores/chat-store'
 import ConfirmDialog from '../ui/ConfirmDialog'
 import QrCode from '../ui/QrCode'
+import ModeToggle from './ModeToggle'
 import { ipc, isWebUIMode } from '../../lib/ipc-client'
 
 import APP_ICON from '../../assets/icon.png'
@@ -304,9 +305,9 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
     <div className="w-64 max-md:w-full flex flex-col bg-dark-surfaceDim border-r border-dark-onSurfaceVariant/10">
       <div className="flex items-center justify-between px-4 py-3">
         <div className="flex items-center gap-2.5">
-          <img src={APP_ICON} alt="ClerkBox" className="w-8 h-8 rounded" />
+          <img src={APP_ICON} alt="ClerkBox" className="w-7 h-7 rounded" />
           <div className="flex items-center gap-2">
-            <span className="text-base font-semibold tracking-wide text-dark-onSurfaceVariant">ClerkBox</span>
+            <span className="text-sm font-semibold tracking-wide text-dark-onSurfaceVariant">ClerkBox</span>
             {isWebUIMode && (
               <span className="px-1.5 py-0.5 rounded-md3-xs bg-md-tertiary/15 text-md-tertiary text-[10px] font-medium whitespace-nowrap">
                 Web UI [BETA]
@@ -314,6 +315,8 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
             )}
           </div>
         </div>
+        {/* 界面模式切换（编程/通用）：折叠态无品牌条不渲染；WebUI 品牌条要容纳 BETA 徽标，空间不足故隐藏 */}
+        {!isWebUIMode && <ModeToggle />}
         {/* 移动端抽屉关闭按钮 */}
         <button
           type="button"

@@ -37,6 +37,7 @@ const defaultSettings: AppSettings = {
   colorScheme: 'classic',
   customSeedColor: '#F4A7B9',
   language: 'zh-CN',
+  interfaceMode: 'coding',
   approvalMode: 'auto',
   enableThinking: false,
   thinkingBudget: undefined,
@@ -52,6 +53,10 @@ const defaultSettings: AppSettings = {
   agentsMdEnabled: true,
   claudeMdCompat: true,
   webuiLanAccess: false,
+  // Agent 动作能力默认全关（fail-closed）：浏览器能访问外部网页，桌面能合成真实键鼠事件，
+  // 两者都必须由用户在设置里显式打开，不能靠「上次开着」延续
+  browserUseEnabled: false,
+  computerUseEnabled: false,
   // 默认"关闭到托盘"：agent loop 与定时任务调度都在渲染进程，收进托盘才能继续后台工作
   closeBehavior: 'tray',
   recentSessionsLimit: 5,
@@ -239,6 +244,13 @@ export const useSettingsStore = create<SettingsState>()(
           approvalMode: p.approvalMode ?? (_legacyMode ? 'manual' : current.approvalMode),
           // 旧版本持久化数据没有 appFont 字段，回落出厂黑体系
           appFont: p.appFont ?? defaultSettings.appFont,
+          // 旧版本没有界面模式字段，回落编程模式
+          interfaceMode: p.interfaceMode ?? defaultSettings.interfaceMode,
+          // Agent 动作能力：老用户没有这两个字段，一律按关闭处理。
+          // 这里必须用 ?? false 而不是透传：undefined 会被工具注册表当成「没配置」，
+          // 语义上等价于开启，与 fail-closed 相悖。
+          browserUseEnabled: p.browserUseEnabled ?? defaultSettings.browserUseEnabled,
+          computerUseEnabled: p.computerUseEnabled ?? defaultSettings.computerUseEnabled,
         }
       },
     }
