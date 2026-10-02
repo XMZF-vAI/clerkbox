@@ -77,6 +77,10 @@ export interface ChatStore {
   ): Promise<void>
   getMessages(sessionId: string): Promise<Row[]>
   deleteMessagesBefore(sessionId: string, beforeId: string): Promise<void>
+  /** 截断：删除 fromId **及其之后**的全部消息（消息撤回的落库原语，与 deleteMessagesBefore 方向相反） */
+  deleteMessagesFrom(sessionId: string, fromId: string): Promise<void>
+  /** 增量合并消息行的任意列（回滚快照三列走这条，不动 content 等既有字段） */
+  patchMessage(id: string, patch: Row): Promise<void>
   clearMessages(sessionId: string): Promise<void>
   compactMessages(sessionId: string, rows: Row[]): Promise<void>
   getRecentSessions(): Promise<TraySessionItem[]>
@@ -507,6 +511,50 @@ class SqliteChatStore implements ChatStore {
     this.afterMutation()
   }
 
+  /**
+   * 截断到点：删掉 fromId 及其之后的所有消息。
+   * 按 rowid 而不是 timestamp —— 插入序才是对话序，时间戳在同毫秒写入时会打乱分支。
+   */
+  async deleteMessagesFrom(sessionId: string, fromId: string): Promise<void> {
+    const found = this.queryRows('SELECT rowid FROM messages WHERE session_id = ? AND id = ?', [
+      sessionId,
+      fromId,
+    ])
+    if (found.length === 0 || !found[0]) return
+    this.db.run('BEGIN')
+    try {
+      this.db.run('DELETE FROM messages WHERE session_id = ? AND rowid >= ?', [
+        sessionId,
+        asNumber(found[0].rowid),
+      ])
+      this.touchSession(sessionId, Date.now())
+      this.db.run('COMMIT')
+    } catch (error) {
+      this.db.run('ROLLBACK')
+      throw error
+    }
+    this.afterMutation()
+  }
+
+  /** 合并写入消息行的指定列（未出现在 patch 里的键保持原值） */
+  async patchMessage(id: string, patch: Row): Promise<void> {
+    if (!isRecord(patch)) return
+    const rows = this.queryDataRows('SELECT data FROM messages WHERE id = ?', [id])
+    if (rows.length === 0 || !rows[0]) return
+    const row = { ...rows[0], ...patch }
+
+    this.db.run('BEGIN')
+    try {
+      this.db.run('UPDATE messages SET data = ? WHERE id = ?', [JSON.stringify(row), id])
+      this.touchSession(asString(row.session_id), Date.now())
+      this.db.run('COMMIT')
+    } catch (error) {
+      this.db.run('ROLLBACK')
+      throw error
+    }
+    this.afterMutation()
+  }
+
   /** 原子压缩：事务内整体替换该会话消息（对应旧引擎借 writeDb 原子性的语义） */
   async compactMessages(sessionId: string, rows: Row[]): Promise<void> {
     if (typeof sessionId !== 'string' || !sessionId || !Array.isArray(rows)) {
@@ -740,6 +788,35 @@ class JsonChatStore implements ChatStore {
     })
   }
 
+  async deleteMessagesFrom(sessionId: string, fromId: string): Promise<void> {
+    await this.enqueue(() => {
+      const db = this.readDb()
+      const msgs = db.messages[sessionId]
+      if (!msgs) return
+      const idx = msgs.findIndex((m) => m.id === fromId)
+      if (idx === -1) return
+      db.messages[sessionId] = msgs.slice(0, idx)
+      this.touch(db, sessionId, Date.now())
+      this.writeDb(db)
+    })
+  }
+
+  async patchMessage(id: string, patch: Row): Promise<void> {
+    await this.enqueue(() => {
+      if (!isRecord(patch)) return
+      const db = this.readDb()
+      for (const [sessionId, msgs] of Object.entries(db.messages)) {
+        const msg = msgs.find((m) => m.id === id)
+        if (msg) {
+          db.messages[sessionId] = msgs.map((m) => (m.id === id ? { ...m, ...patch } : m))
+          this.touch(db, sessionId, Date.now())
+          this.writeDb(db)
+          return
+        }
+      }
+    })
+  }
+
   async compactMessages(sessionId: string, rows: Row[]): Promise<void> {
     await this.enqueue(() => {
       if (typeof sessionId !== 'string' || !sessionId || !Array.isArray(rows)) {
@@ -926,5 +1003,12 @@ export function registerDbIpcHandlers(store: ChatStore): void {
   ipcMain.handle('dbCompactMessages', (_e, sessionId: string, rows: Row[]) =>
     store.compactMessages(sessionId, rows),
   )
+  // ── 消息撤回 / 改动回滚 ──
+  // 两条都是「改写既有对话历史」的原语，只在本地窗口与宿主内部使用；
+  // 远程 /api/invoke 一律 403（见 webui-server.ts 的 REMOTE_INVOKE_BLOCKLIST）。
+  ipcMain.handle('dbDeleteMessagesFrom', (_e, sessionId: string, fromId: string) =>
+    store.deleteMessagesFrom(sessionId, fromId),
+  )
+  ipcMain.handle('dbPatchMessage', (_e, id: string, patch: Row) => store.patchMessage(id, patch))
 }
 

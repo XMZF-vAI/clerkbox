@@ -75,6 +75,112 @@ export interface MessageSkillSnapshot {
   slug?: string
 }
 
+/**
+ * 一次写文件成功后的「变更前快照」索引（对标 ZCode workspace checkpoint）。
+ *
+ * 正文不落消息，只落盘（userData/checkpoints/<sessionId>/<beforeRef>），
+ * 消息里带这份索引就足够算出回滚计划：sql.js 是内存库 + 每次变更全量落盘，
+ * 把几 MB 的文件正文塞进 data 列会让之后每一次写库都重写整个库文件。
+ */
+export interface FileCheckpoint {
+  /** ck_<随机>，同时是磁盘 artifact 的文件名主干 */
+  id: string
+  toolCallId: string
+  /** write_file | search_replace */
+  toolName: string
+  /** 绝对路径（已经过 loop 的 resolveToolPath 归一） */
+  path: string
+  /** 变更前该文件是否存在：false ⇒ 回滚动作是删除该文件 */
+  existedBefore: boolean
+  /** 变更前正文的落盘文件名；existedBefore 为 false 时是 null */
+  beforeRef: string | null
+  /**
+   * 变更后正文的 sha256。回滚前拿当前文件哈希和它比：不等就是「用户手改过」，
+   * 必须拒绝自动回滚（乐观并发检测）。读不到当前内容时是 'missing'。
+   */
+  afterHash: string
+  /** 变更前正文字节数（GC 与统计用） */
+  beforeBytes: number
+  createdAt: number
+}
+
+/**
+ * 本轮无法用快照回滚的文件改动数（execute_command / MCP / 未知副作用工具）。
+ * 与 ZCode 的 ignoredFiles 同语义：非零就必须对「回滚文件」fail-closed。
+ */
+export interface FileMutationGap {
+  toolName: string
+  path?: string
+  reason: 'shell' | 'untracked-tool' | 'oversized' | 'binary' | 'unreadable'
+}
+
+/**
+ * 一次写文件工具调用成功后的变更事实。
+ * `before` 必须是**写盘前的原始字节**（含 BOM 与原行尾），不是模型看到的归一化文本——
+ * 回滚要还原的正是这个。
+ */
+export interface FileMutation {
+  toolCallId: string
+  toolName: string
+  /** 绝对路径（loop 已按工作目录归一） */
+  path: string
+  existedBefore: boolean
+  /** 变更前正文；existedBefore=false 时为 null */
+  before: string | null
+  /** 变更后正文 */
+  after: string
+}
+
+/**
+ * 回滚范围（对标 ZCode RewindScope）：
+ * - conversation：只截断对话，文件保持现状（不可逆，撤回即真删）
+ * - workspace：只把文件恢复原状，不动对话，并给模型补一条 notice
+ * - both：先恢复文件再截断对话（编辑重发的「回滚文件」档走这条）
+ */
+export type RewindScope = 'conversation' | 'workspace' | 'both'
+
+/** 回滚计划里的单个文件条目 */
+export interface RewindPlanFile {
+  path: string
+  /** existedBefore=false ⇒ delete（本轮新建的文件直接删掉），否则写回变更前正文 */
+  action: 'restore' | 'delete'
+  checkpointId: string
+  toolName: string
+  /** 变更前正文的落盘引用；action=delete 时为 null（删除不需要读快照） */
+  beforeRef: string | null
+  /** 将被写回的字节数（delete 为 0） */
+  bytes: number
+  /** 不可自动应用的原因；只在 unsafe 条目上出现 */
+  reason?: 'external_modified' | 'missing-snapshot' | 'unreadable'
+  /** 快照记录的变更后哈希 vs 当前实际哈希，供界面说明「你手改过这个文件」 */
+  expectedHash?: string
+  currentHash?: string
+}
+
+/** dry-run 出来的回滚计划：canApply 是 all-or-nothing 的（照抄 ZCode） */
+export interface RewindPlan {
+  canApply: boolean
+  safeFiles: RewindPlanFile[]
+  unsafeFiles: RewindPlanFile[]
+  gaps: FileMutationGap[]
+  /** conversation/both 范围下会被删除的消息条数 */
+  removedMessages: number
+}
+
+/** 回滚执行结果 */
+export interface RewindOutcome {
+  ok: boolean
+  /**
+   * 失败原因；ok=true 时省略。
+   * truncate-failed 是半程状态：文件已经回滚、消息还在，必须让用户看见并自己核对。
+   */
+  error?: 'cancelled' | 'plan-blocked' | 'write-failed' | 'truncate-failed' | 'no-checkpoint' | 'session-busy'
+  restored: Array<{ path: string; action: 'restore' | 'delete' }>
+  /** 写入中途失败时按 journal 逆序补偿的结果 */
+  compensated: boolean
+  removedMessages: number
+}
+
 export interface Message {
   id: string
   role: 'user' | 'assistant' | 'system' | 'tool'
@@ -106,6 +212,21 @@ export interface Message {
   _retrying?: { attempt: number }  // Transient: 请求失败后正在重试（第 attempt 次），用于 UI 展示
   subAgentId?: string        // 标记此消息属于哪个子 agent（主对话消息不带此字段）
   isSubAgentCard?: boolean   // 标记此消息是子 agent 卡片占位（用于 UI 渲染）
+  /**
+   * 本轮（该用户消息触发的整段运行，含子 agent）写文件前的快照索引；挂在用户消息上，
+   * 因为撤回/编辑的截断点永远是用户消息边界，回滚单位也就是「这一轮」。
+   */
+  fileCheckpoints?: FileCheckpoint[]
+  /** 本轮里无法回滚的改动（shell / 未跟踪工具 / 超限文件）；非空即禁止带文件回滚 */
+  mutationGaps?: FileMutationGap[]
+  /** 本轮的文件改动已被撤销：Undo 按钮与编辑的「回滚文件」档都要置灰（对标 fileChanges.state=reverted） */
+  filesReverted?: boolean
+  /**
+   * 合成的「文件已撤销」回执。刻意用 user 角色承载：loop 会把历史里的 system 消息
+   * 整条跳过（只保留最前面那条 system prompt），用 system 就传不到模型；
+   * 而 UI 按这个标记把它渲染成居中的灰色回执条，不是用户气泡。
+   */
+  isRewindNotice?: boolean
 }
 
 export interface ToolCall {
@@ -114,10 +235,31 @@ export interface ToolCall {
   arguments: Record<string, unknown>
 }
 
+/**
+ * 工具结果附带的图像观测（Browser Use / Computer Use 的截图）。
+ *
+ * 刻意只存**磁盘引用**而不是 base64：ToolResult 随消息一起落库（sqlite / JSON），
+ * 一张 200KB 的截图存成 data URL 就足以让单个会话膨胀到不可接受。
+ * 发请求前由 buildAPIMessages 按 path 读回并转成 data URL（带进程内 LRU，避免每轮重复读盘）。
+ * 顺带的好处：用户点开路径就能看到模型当时看到的那一帧。
+ */
+export interface ToolResultImage {
+  /** 绝对路径（~/.clerkbox/tmp/ 下的一次性产物） */
+  path: string
+  mimeType: string
+  /** raster 像素宽高——坐标只对本帧有效，这是模型判断坐标是否越界的唯一依据 */
+  width: number
+  height: number
+  /** true=全屏，false=区域截图 */
+  fullScreen?: boolean
+}
+
 export interface ToolResult {
   toolCallId: string
   content: string
   isError?: boolean
+  /** 视觉观测；协议层按 compat 翻译成 image block（OpenAI 侧展开为紧随其后的 user 图像消息） */
+  images?: ToolResultImage[]
 }
 
 export interface StreamingToolCall {
@@ -258,6 +400,13 @@ export interface ModelProvider {
   collapsed?: boolean
 }
 
+/**
+ * 界面模式：coding=编程（展示命令、代码、diff 等技术细节）；
+ * general=通用（呈现进度与结果摘要）。
+ * 纯展示层偏好，不改变 Agent 权限与执行能力。
+ */
+export type InterfaceMode = 'coding' | 'general'
+
 export interface AppSettings {
   apiKey: string
   baseUrl: string
@@ -277,6 +426,8 @@ export interface AppSettings {
   /** 自定义种子色（colorScheme 为 'custom' 时生效） */
   customSeedColor: string
   language: string
+  /** 界面模式：编程/通用，决定问候语、占位符等技术细节的呈现粒度 */
+  interfaceMode: InterfaceMode
   /** Agent 操作审批档位：manual=每个重要操作弹窗确认；auto=AI 审核并自动批准（系统目录写入仍确认）；full=无需询问直接执行 */
   approvalMode: 'manual' | 'auto' | 'full'
   enableThinking: boolean
@@ -306,6 +457,16 @@ export interface AppSettings {
   claudeMdCompat: boolean
   /** WebUI 是否绑定 0.0.0.0 允许局域网访问（默认 false 仅本机 127.0.0.1） */
   webuiLanAccess: boolean
+  /**
+   * 是否允许 AI 驱动内置浏览器（Browser Use）。
+   * 默认 false：它能让模型访问并操作网页，是外部输入面，必须由用户显式打开。
+   */
+  browserUseEnabled: boolean
+  /**
+   * 是否允许 AI 操控本机桌面（Computer Use）。
+   * 默认 false：它合成的是用户真实桌面上的鼠标键盘事件，误操作代价最高的一档。
+   */
+  computerUseEnabled: boolean
   /** 窗口关闭按钮行为：tray=收进系统托盘继续后台运行（默认，AI/定时任务不中断）；quit=直接退出 */
   closeBehavior: 'tray' | 'quit'
   /** 托盘菜单"对话记录"最多展示几条（3~8） */

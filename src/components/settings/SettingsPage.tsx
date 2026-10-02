@@ -1,5 +1,5 @@
 import { useState, useEffect, useId, useRef } from 'react'
-import { Cpu, Palette, RotateCcw, Check, AlertCircle, Info, X, Plus, Pencil, Trash2, Sparkles, Languages, FileText, Settings, User, LogOut, Upload, Download, Loader2, RefreshCw, Plug, KeyRound, Monitor } from 'lucide-react'
+import { Cpu, Palette, RotateCcw, Check, AlertCircle, Info, X, Plus, Pencil, Trash2, Sparkles, Languages, FileText, Settings, User, LogOut, Upload, Download, Loader2, RefreshCw, Plug, KeyRound, Monitor, Globe, MonitorSmartphone } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useSettingsStore } from '../../stores/settings-store'
 import { useAccountStore, avatarColorFor, initialOf } from '../../stores/account-store'
@@ -314,6 +314,56 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                     </label>
                   )}
                 </div>
+
+                {/* Agent 动作能力：浏览器控制 + 电脑操控。
+                    两张卡都默认关闭，且各自独立 —— 浏览器是「访问外部网页」，
+                    桌面是「动你的鼠标键盘」，风险量级不同，不该被一个开关绑在一起。 */}
+                {!isWebUIMode && (
+                  <>
+                    <div className="space-y-3 p-4 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10">
+                      <div className="flex items-center gap-2">
+                        <Globe size={14} className="text-md-primary flex-shrink-0" />
+                        <span className="text-sm font-medium text-dark-onSurface">{t('settings.general.browserUseTitle')}</span>
+                      </div>
+                      <p className="text-xs text-dark-onSurfaceVariant/70 leading-relaxed">
+                        {t('settings.general.browserUseDesc')}
+                      </p>
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={settings.browserUseEnabled}
+                          onChange={(e) => settings.updateSettings({ browserUseEnabled: e.target.checked })}
+                          className="accent-md-primary"
+                        />
+                        <span className="text-xs text-dark-onSurfaceVariant">{t('settings.general.browserUseToggle')}</span>
+                      </label>
+                    </div>
+
+                    <div className="space-y-3 p-4 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10">
+                      <div className="flex items-center gap-2">
+                        <MonitorSmartphone size={14} className="text-md-primary flex-shrink-0" />
+                        <span className="text-sm font-medium text-dark-onSurface">{t('settings.general.computerUseTitle')}</span>
+                      </div>
+                      <p className="text-xs text-dark-onSurfaceVariant/70 leading-relaxed">
+                        {t('settings.general.computerUseDesc')}
+                      </p>
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={settings.computerUseEnabled}
+                          onChange={(e) => settings.updateSettings({ computerUseEnabled: e.target.checked })}
+                          className="accent-md-primary"
+                        />
+                        <span className="text-xs text-dark-onSurfaceVariant">{t('settings.general.computerUseToggle')}</span>
+                      </label>
+                      {settings.computerUseEnabled && (
+                        <p className="text-ui-xs text-dark-onSurfaceVariant/60 leading-relaxed">
+                          {t('settings.general.computerUseNotice')}
+                        </p>
+                      )}
+                    </div>
+                  </>
+                )}
 
                 {/* 窗口与托盘（桌面端专属；WebUI 浏览器模式无托盘概念） */}
                 {!isWebUIMode && (

@@ -2,7 +2,7 @@ import { Minus, Square, X, Sparkles, Copy, PanelLeft, PanelRight } from 'lucide-
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useVibeStore } from '../../stores/vibe-store'
-import { useWorkbenchStore } from '../../stores/workbench-store'
+import { useWorkbench } from '../../stores/workbench-store'
 import ContextUsageIndicator from '../chat/ContextUsageIndicator'
 import UpdateBadge from './UpdateBadge'
 import { isWebUIMode } from '../../lib/ipc-client'
@@ -17,8 +17,7 @@ export default function TitleBar({ onToggleSidebar, sidebarVisible }: TitleBarPr
   const vibeMode = useVibeStore((s) => s.isVibeMode)
   const toggleVibeMode = useVibeStore((s) => s.toggleVibeMode)
   // 工作台面板显隐：激活态高亮按钮
-  const workbenchVisible = useWorkbenchStore((s) => s.visible)
-  const toggleWorkbench = useWorkbenchStore((s) => s.toggleVisible)
+  const { visible: workbenchVisible, toggleVisible: toggleWorkbench } = useWorkbench()
   // mac：窗口控制走系统红绿灯（左上角），自绘三键隐藏，左侧为红绿灯留位
   const isMac = window.clerkbox?.platform === 'darwin'
 

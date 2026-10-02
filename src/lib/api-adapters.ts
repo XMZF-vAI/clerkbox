@@ -132,9 +132,9 @@ export function buildRequestBody(compat: ApiCompat, o: BuildBodyOptions): Record
 }
 
 function buildOpenAIBody(o: BuildBodyOptions): Record<string, unknown> {
-  const body: Record<string, unknown> = {
+  const   body: Record<string, unknown> = {
     model: o.model,
-    messages: o.messages.map(toOpenAIMessage),
+    messages: toOpenAIMessages(o.messages),
     temperature: o.temperature,
     max_tokens: o.maxTokens,
   }
@@ -182,20 +182,52 @@ function buildOpenAIBody(o: BuildBodyOptions): Record<string, unknown> {
   return body
 }
 
+/** OpenAI 多模态 content part */
+type OpenAIContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } }
+
+/** 中立消息 → OpenAI 请求体消息：正文 + 图片拼成一个 content part 数组。 */
+function buildOpenAIContentParts(content: string, images: NeutralMessage['images']): OpenAIContentPart[] {
+  const parts: OpenAIContentPart[] = []
+  if (content) parts.push({ type: 'text', text: content })
+  for (const img of images ?? []) parts.push({ type: 'image_url', image_url: { url: img.dataUrl } })
+  return parts
+}
+
 /**
- * 中立消息 → OpenAI 请求体消息。
- * 去掉只在前端流转的内部字段（_msgId / _cacheControl / images），别发给服务端；
- * 带图片的消息 content 转为多模态数组：text part（正文非空时）+ 每张图一个 image_url part。
+ * 中立消息列表 → OpenAI messages。
+ *
+ * 带图工具结果必须拆开：`role:'tool'` 的 content 在 OpenAI 协议里只能是字符串，
+ * 图像只能走 user 消息。但整条工具结果序列又必须**连续紧跟**在带 tool_calls 的
+ * assistant 之后（协议硬要求），中间插一条 user 消息会让整轮请求 400。
+ * 所以做法是：工具结果全部按序发完，把这一串里积攒的图合成**一条** user 消息追加在末尾 ——
+ * 顺序与工具结果的先后一致，模型仍能把图和它上方的文字结果对上。
  */
-function toOpenAIMessage(m: NeutralMessage): Record<string, unknown> {
-  const { _msgId: _, _cacheControl: __, images, ...rest } = m
-  if (!images || images.length === 0) return rest
-  const parts: Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }> = []
-  if (rest.content) parts.push({ type: 'text', text: rest.content })
-  for (const img of images) {
-    parts.push({ type: 'image_url', image_url: { url: img.dataUrl } })
+function toOpenAIMessages(msgs: NeutralMessage[]): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = []
+  let pendingToolImages: NeutralMessage['images'] = []
+
+  const flushToolImages = () => {
+    if (!pendingToolImages || pendingToolImages.length === 0) return
+    out.push({ role: 'user', content: pendingToolImages.map((img) => ({ type: 'image_url', image_url: { url: img.dataUrl } })) })
+    pendingToolImages = []
   }
-  return { ...rest, content: parts }
+
+  for (const m of msgs) {
+    // _msgId / _cacheControl 只在前端流转，别发给服务端
+    const { _msgId: _, _cacheControl: __, images, ...rest } = m
+    if (m.role === 'tool') {
+      out.push(rest)
+      if (images && images.length > 0) pendingToolImages.push(...images)
+      continue
+    }
+    flushToolImages()
+    out.push(images && images.length > 0 ? { ...rest, content: buildOpenAIContentParts(rest.content, images) } : rest)
+  }
+  flushToolImages()
+
+  return out
 }
 
 /** Anthropic content block（请求侧） */
@@ -204,7 +236,7 @@ type AnthropicTextBlock = { type: 'text'; text: string; cache_control?: Anthropi
 type AnthropicBlock =
   | AnthropicTextBlock
   | { type: 'tool_use'; id: string; name: string; input: unknown; cache_control?: AnthropicCacheControl }
-  | { type: 'tool_result'; tool_use_id: string; content: string; cache_control?: AnthropicCacheControl }
+  | { type: 'tool_result'; tool_use_id: string; content: string | AnthropicBlock[]; cache_control?: AnthropicCacheControl }
   | { type: 'image'; source: { type: 'base64'; media_type: string; data: string }; cache_control?: AnthropicCacheControl }
   | AnthropicThinkingBlock
 
@@ -273,6 +305,30 @@ function buildAnthropicBody(o: BuildBodyOptions): Record<string, unknown> {
 }
 
 /**
+ * tool_result 的 content：字符串，或 image block 在前 / text block 在后的数组。
+ *
+ * **image 必须在 text 之前**：Anthropic 兼容网关只解析开头连续出现的 image block，
+ * 一旦先遇到 text 就把后面的图整段丢弃（ZCode 为此把 image 排到 content[0] 起连续排列，
+ * 见其 node-repl-host/src/result.ts 的 image-first 注释）。这是踩过的坑，不是风格偏好。
+ */
+function buildAnthropicToolResultContent(m: NeutralMessage): string | AnthropicBlock[] {
+  if (!m.images || m.images.length === 0) return m.content || '(empty)'
+  const blocks: AnthropicBlock[] = []
+  for (const img of m.images) {
+    const match = /^data:([^;]+);base64,(.*)$/.exec(img.dataUrl)
+    if (!match) continue
+    blocks.push({
+      type: 'image',
+      source: { type: 'base64', media_type: img.mimeType || match[1], data: match[2] },
+    })
+  }
+  // dataUrl 解析失败的图直接丢弃，blocks 为空时退化成纯文本，不发空 content
+  if (blocks.length === 0) return m.content || '(empty)'
+  blocks.push({ type: 'text', text: m.content || '(empty)' })
+  return blocks
+}
+
+/**
  * 中立消息 → Anthropic messages。
  *
  * 处理四件 Anthropic 的硬性约束：
@@ -310,7 +366,7 @@ export function toAnthropicMessages(
         type: 'tool_result',
         tool_use_id: m.tool_call_id || '',
         // 空内容也要给个占位，否则部分实现会报错
-        content: m.content || '(empty)',
+        content: buildAnthropicToolResultContent(m),
       }])
       continue
     }

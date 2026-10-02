@@ -14,6 +14,9 @@ import type {
   Message,
   MessageAttachment,
   MessageSkillSnapshot,
+  RewindOutcome,
+  RewindPlan,
+  RewindScope,
   SessionGoal,
   SubAgentRun,
   TaskMode,
@@ -42,6 +45,22 @@ export type AgentCommand =
       scope?: 'once' | 'session' }
   | { type: 'question.resolve'; sessionId: string; requestId: string; payload: unknown }
   | { type: 'manual.compact'; sessionId: string; instructions?: string }
+  /**
+   * 消息撤回 / 改动回滚。两种宿主模式都只有宿主能提交截断：渲染层本地删消息，
+   * 宿主的 messages 镜像与事件环会立刻长出游离条目，重连时又把它们回放回来。
+   * - preview：dry-run，只算计划不产生任何副作用（读文件 + 读快照 + 比对指纹）
+   * - apply：按 plan 执行；scope=conversation 时不碰文件
+   */
+  | { type: 'rewind.preview'; sessionId: string; anchorMessageId: string; scope: RewindScope }
+  | { type: 'rewind.apply'; sessionId: string; anchorMessageId: string; scope: RewindScope }
+
+/** rewind 两条命令的回执：受理状态 + 计划 / 执行结果（其余命令仍只有 ok/error） */
+export interface AgentCommandResult {
+  ok: boolean
+  error?: string
+  plan?: RewindPlan
+  outcome?: RewindOutcome
+}
 
 // ── 宿主 → 渲染层（push 'agent:event'，带单调 seq）──
 

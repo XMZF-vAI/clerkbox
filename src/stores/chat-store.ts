@@ -2,7 +2,8 @@ import { create } from 'zustand'
 import { ipc } from '../lib/ipc-client'
 import type { HarnessMode, Message, MessageAttachment, MessageSkillSnapshot, Session, TaskMode, ToolCall, ToolResult } from '../types/agent'
 import { normalizeHarnessMode } from '../lib/harness-modes'
-import { deriveSessionTitle, mapMessageRows, messageToRow, messageUpdateArgs, NEW_SESSION_TITLE } from '../lib/chat-row'
+import { deriveSessionTitle, mapMessageRows, messageRewindPatch, messageToRow, messageUpdateArgs, NEW_SESSION_TITLE } from '../lib/chat-row'
+import { dropSessionSnapshots } from '../lib/checkpoint-recorder'
 import type { SessionRow } from '../types/ipc'
 import { useInteractiveStore } from './interactive-store'
 
@@ -23,6 +24,10 @@ const pendingMessageWrites = new Map<string, { sessionId: string; timer: ReturnT
 
 function persistMessageUpdate(message: Message): void {
   logPersistenceFailure('update message', ipc.dbUpdateMessage(...messageUpdateArgs(message)))
+  // 回滚快照三列不在 dbUpdateMessage 的位置参数签名里，走增量补丁通道。
+  // 只在消息确实带这几列时才发：普通流式更新一条都不多写。
+  const patch = messageRewindPatch(message)
+  if (patch) logPersistenceFailure('patch message rewind', ipc.dbPatchMessage(message.id, patch))
 }
 
 function scheduleMessagePersistence(sessionId: string, message: Message, immediately: boolean): void {
@@ -633,6 +638,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       cancelPendingMessageWrites(id)
       const filtered = state.sessions.filter((s) => s.id !== id)
       logPersistenceFailure('delete session', ipc.dbDeleteSession(id))
+      // 会话没了，它的变更前快照就成了没人引用的孤儿文件 —— 一起回收，不然只增不减地吃磁盘
+      void dropSessionSnapshots(id)
       // 中止并清理该会话的 AbortController，防止泄漏与僵尸 ReAct 循环
       const ctrl = sessionAbortControllers.get(id)
       if (ctrl) {

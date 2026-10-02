@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef, useMemo, memo, Suspense } from 'react'
+import { useState, useEffect, useRef, useMemo, memo, Suspense, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { Copy, Check, Terminal, FileText, FolderOpen, AlertTriangle, ChevronDown, ChevronUp, Wrench, FilePen, Globe, Pencil, Archive, Loader2, BookOpen, GitBranch, Target, CircleHelp, ListTodo, Sparkles, LayoutGrid } from 'lucide-react'
+import { Check, Terminal, FileText, FolderOpen, AlertTriangle, ChevronDown, ChevronUp, Wrench, FilePen, Globe, Pencil, Archive, Loader2, BookOpen, GitBranch, Target, CircleHelp, ListTodo, Sparkles, LayoutGrid, MonitorSmartphone, MousePointerClick } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { Message, StreamingToolCall } from '../../types/agent'
 import { useChatStore } from '../../stores/chat-store'
@@ -9,6 +9,7 @@ import { parsePermissionAudit } from '../../lib/permission-preview'
 // 于是「规范文件」的修补到不了真正在跑的那条路径——现在只留一处。
 import { renderMarkdown } from '../../lib/markdown'
 import { PermissionAuditRow } from './PermissionCard'
+import { CopyButton, MessageActions } from './MessageActions'
 import { isRenderedByUnifiedEntry, resolveRenderer } from './tool-renderers/resolveRenderer'
 import { ToolDetailLines, ToolShell, ToolSkeleton, noteToolRunning } from './tool-renderers/ToolShell'
 import { parseEditDiff, stripEditDiff, type EditDiffMetaView } from './tool-renderers/shared'
@@ -20,6 +21,12 @@ interface MessageItemProps {
   sessionId?: string
   /** 中间过程消息（非最终回复），隐藏时间戳和缓存统计 */
   isIntermediate?: boolean
+  /** 追加在这一行动作条里的按钮（撤回/编辑等），由父级按 turn 语义下发 */
+  extraActions?: ReactNode
+  /** 复制按钮要复制的正文；父级可下发「整轮合并文本」而不是这一条的内容 */
+  copyText?: string
+  /** 复制按钮的 tooltip；整轮复制要写清楚复制范围 */
+  copyTitle?: string
 }
 
 /** Extract path and content from partial JSON args for write_file preview */
@@ -80,6 +87,10 @@ function toolRowIcon(name: string) {
   // app_* 自我管控工具要在关键词规则之前拦：app_list_sessions 会被 includes('list') 抓去
   // FolderOpen、app_read_session 被 includes('read') 抓去 FileText，语义都不对
   if (name.startsWith('app_')) return <LayoutGrid size={13} />
+  // Agent 动作同理：browser_click 含 'click' 不会被下面的规则抓走，但
+  // computer_wait / browser_snapshot 这类会掉进 read/list 的关键词规则，图标完全不对
+  if (name.startsWith('computer_')) return <MonitorSmartphone size={13} />
+  if (name.startsWith('browser_')) return <MousePointerClick size={13} />
   if (name === 'question') return <CircleHelp size={13} />
   if (name === 'todowrite') return <ListTodo size={13} />
   if (name === 'search_replace' || name === 'edit_file') return <Pencil size={13} />
@@ -95,6 +106,19 @@ function chipTextFor(name: string, args: Record<string, unknown>, t: ReturnType<
   // 自我管控工具没有单一目标参数，用工具自身的短标签做 chip 比截断 JSON 可读；
   // i18n 的 tools.app_* 补齐前会回落到英文工具名（defaultValue 兜底，与既有写法一致）
   if (name.startsWith('app_')) return t(`tools.${name}`, { defaultValue: name })
+  // Agent 动作：展示目标而不是 JSON 片段。坐标/URL/元素 ref 是用户唯一关心的信息，
+  // 摊开 args 只会把它们淹没在默认值里
+  if (name.startsWith('browser_') || name.startsWith('computer_')) {
+    if (name === 'browser_navigate') return String(args.url || args.action || '')
+    if (name === 'computer_drag') return `${args.from_x},${args.from_y} → ${args.to_x},${args.to_y}`
+    if (args.x !== undefined && args.y !== undefined) return `${args.x}, ${args.y}`
+    if (args.ref) return String(args.ref)
+    if (args.key) return String(args.key)
+    if (args.name) return String(args.name)
+    if (args.text) return String(args.text).slice(0, 40)
+    if (args.selector) return String(args.selector)
+    return ''
+  }
   if (name === 'write_file' || name === 'search_replace' || name === 'edit_file' ||
       name === 'read_file' || name === 'read_image' || name === 'list_dir') {
     return fileBase(String(args.path || ''))
@@ -512,9 +536,8 @@ const MarkdownContent = memo(function MarkdownContent({ content, vibe }: { conte
   return <div className={`markdown-body${vibe ? ' md-vibe' : ''}`} dangerouslySetInnerHTML={{ __html: html }} />
 })
 
-function MessageItem({ message, vibe = false, sessionId, isIntermediate = false }: MessageItemProps) {
+function MessageItem({ message, vibe = false, sessionId, isIntermediate = false, extraActions, copyText, copyTitle }: MessageItemProps) {
   const { t } = useTranslation()
-  const [copied, setCopied] = useState(false)
   const [thinkingExpanded, setThinkingExpanded] = useState(false)
   const [collapsedExpanded, setCollapsedExpanded] = useState(false)
   const [summaryExpanded, setSummaryExpanded] = useState(false)
@@ -532,16 +555,6 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false 
     : message.usage?.prompt_tokens
       ? Math.round(cacheReadTokens / message.usage.prompt_tokens * 100)
       : 0
-
-  const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(message.content)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    } catch (error) {
-      console.error('Failed to copy message:', error)
-    }
-  }
 
   // Compact boundary message — render as a divider card
   if (message.role === 'system' && message.isCompactSummary) {
@@ -679,6 +692,22 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false 
     )
   }
 
+  // 文件已撤销的合成回执：它是 user 角色（system 消息不会进模型上下文），
+  // 但必须画成居中的回执条而不是用户气泡，否则看起来像用户自己说了一句话。
+  if (message.isRewindNotice) {
+    return (
+      <div className="flex justify-center animate-slide-up my-1">
+        <div className={`max-w-[560px] w-full px-3 py-2 rounded-md3-md text-[11px] leading-relaxed whitespace-pre-line ${
+          vibe
+            ? 'bg-white/5 border border-white/[0.03] text-white/55'
+            : 'bg-dark-surfaceContainer/40 border border-dark-onSurfaceVariant/[0.04] text-dark-onSurfaceVariant/65'
+        }`}>
+          {message.content}
+        </div>
+      </div>
+    )
+  }
+
   // Tool result messages are hidden (displayed inside ToolCallBar)
   if (isToolResult) return null
 
@@ -796,7 +825,7 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false 
   const loadedSkills = !isUser ? (message.loadedSkills || []) : []
 
   return (
-    <div className={`animate-slide-up ${isUser ? 'flex justify-end' : 'flex justify-start'}`}>
+    <div className={`animate-slide-up group/msg ${isUser ? 'flex justify-end' : 'flex justify-start'}`}>
       <div className={`flex flex-col ${isUser ? 'items-end max-w-[85%] max-md:max-w-[92%]' : 'items-start max-w-[90%] max-md:max-w-[94%]'}`}>
 
         {/* User message attachments - above the content bubble */}
@@ -881,19 +910,6 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false 
                   : 'bg-dark-surfaceContainerHigh text-dark-onSurface'
             }`}
           >
-            {!isUser && (
-              <button
-                type="button"
-                onClick={handleCopy}
-                aria-label={t('common.copy')}
-                title={t('common.copy')}
-                className={`absolute top-2 right-2 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 max-md:opacity-100 transition-opacity w-6 h-6 max-md:w-8 max-md:h-8 flex items-center justify-center rounded-md3-xs ${
-                  vibe ? 'hover:bg-white/15' : 'hover:bg-dark-surfaceContainer'
-                }`}
-              >
-                {copied ? <Check size={12} className="text-md-success" /> : <Copy size={12} className={vibe ? 'text-white/70' : ''} />}
-              </button>
-            )}
             {isUser ? (
               <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                 {taskModeMeta && TaskModeIcon && (
@@ -974,6 +990,14 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false 
           <span className={`text-[10px] mt-1 px-1 ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/30'}`}>
             {new Date(message.timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
           </span>
+        )}
+
+        {/* 动作条：复制 + 父级按 turn 语义下发的按钮（编辑/撤回/撤销文件） */}
+        {(!!copyText?.trim() || !!message.content.trim() || !!extraActions) && (
+          <MessageActions vibe={vibe}>
+            <CopyButton text={copyText ?? message.content} title={copyTitle} vibe={vibe} />
+            {extraActions}
+          </MessageActions>
         )}
       </div>
     </div>

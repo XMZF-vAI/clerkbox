@@ -16,6 +16,9 @@ import type { SessionStatus } from '../stores/chat-store'
 import type {
   AgentDefinition,
   AppSettings,
+  FileCheckpoint,
+  FileMutation,
+  FileMutationGap,
   HarnessMode,
   Message,
   ReadFileSnapshot,
@@ -36,6 +39,7 @@ export type AgentSettings = Pick<
   | 'temperature' | 'maxTokens' | 'reasoningEffort' | 'enableThinking' | 'thinkingBudget'
   | 'approvalMode' | 'baseUrl' | 'apiKey' | 'directFetch' | 'maxInputTokens'
   | 'agentsMdEnabled' | 'claudeMdCompat'
+  | 'browserUseEnabled' | 'computerUseEnabled'
 >
 
 /** 模型流式调用：装配层负责 openChatStream（或 P3 主进程内直调 api-proxy）与传输配置。 */
@@ -64,7 +68,13 @@ export interface AgentStorePort {
  * 需要人工确认的四种场景。UI 侧据此选文案与风险档，宿主据此决定是否进会话级放行集合。
  * 语义与 loop 里的分支一一对应，不额外放宽任何拦截。
  */
-export type PermissionReason = 'dangerous-command' | 'outside-cwd' | 'system-dir' | 'outside-write'
+export type PermissionReason =
+  | 'dangerous-command'
+  | 'outside-cwd'
+  | 'system-dir'
+  | 'outside-write'
+  | 'browser-control'
+  | 'computer-control'
 
 /**
  * 审批请求的结构化入参。
@@ -79,16 +89,32 @@ export interface AgentPermissionRequest {
   reason: PermissionReason
   /** loop 侧已解析好的工作目录：预览的目标路径必须与它判定过的同一个值 */
   workingDir: string
-  /** 危险命令 / 系统目录 = dangerous，越界写入 / 越界执行 = normal */
+  /** 危险命令 / 系统目录 / 浏览器与桌面操控 = dangerous，越界写入 / 越界执行 = normal */
   risk: 'dangerous' | 'normal'
   /** 渲染层与原生对话框共用的文案（同一套 i18n，两种模式观感一致） */
   title: string
   body: string
 }
 
+/** 授权范围：once=只放行这一次；session=本会话内同类操作免打扰 */
+export type PermissionScope = 'once' | 'session'
+
+/**
+ * 审批结果。
+ *
+ * 刻意不是裸 boolean：Agent 动作（浏览器 / 桌面）在一个任务里要连续做几十个写动作，
+ * 每次都弹一次确认框等于功能不可用 —— 用户既没法批量同意，也没有「以后都别问」的选项。
+ * 带上 scope 之后，用户可以在**第一次**弹窗时选「本会话始终允许」，
+ * loop 记下能力级放行，后续整个任务静默通过。
+ */
+export interface PermissionApproval {
+  approved: boolean
+  scope: PermissionScope
+}
+
 /** 权限审批（P1 = Electron 原生确认框；P3 起宿主侧 fail-closed：超时/UI 离线默认拒绝）。 */
 export interface AgentPermissionPort {
-  confirm(request: AgentPermissionRequest): Promise<boolean>
+  confirm(request: AgentPermissionRequest): Promise<PermissionApproval>
 }
 
 /** UI 耦合回执：提问/待办/通知/用量统计/子 agent 运行态/记忆捕获。 */
@@ -122,6 +148,25 @@ export interface AgentSkillsPort {
   catalog(): SkillCatalogEntry[]
 }
 
+/**
+ * 变更前快照的落存端口（消息撤回 / 改动回滚）。
+ *
+ * 正文落在宿主侧的 checkpoint 目录，返回值只有索引 —— 消息行里存不下几 MB 源文件，
+ * 而 sql.js 每写一条消息都要全库导出，把正文塞进 data 列会让之后每次写库重写整个库。
+ *
+ * 分类规则也在这里（而不是调用方）：体积上限与「读回来的正文是不是被截断过的」
+ * 都只有落存侧能可靠判断，两处判定散开就会一边肯拍、一边不肯恢复。
+ */
+export interface AgentCheckpointPort {
+  /**
+   * 记录一次成功的文件写入。二者必居其一：
+   * - checkpoint 非空：这份快照可用于回滚。
+   * - gap 非空：本轮存在无法回滚的改动，带文件的撤回必须 fail-closed，
+   *   而不是假装本轮没动过文件。
+   */
+  save(sessionId: string, mutation: FileMutation): Promise<{ checkpoint: FileCheckpoint | null; gap: FileMutationGap | null }>
+}
+
 /** 进程环境（渲染层由 navigator/window 提供；主进程由 os 模块提供）。 */
 export interface AgentEnvPort {
   platform: string
@@ -134,6 +179,12 @@ export interface AgentEnvPort {
   isDev: boolean
   homeDir(): string
   readFile(path: string): Promise<string>
+  /**
+   * 把磁盘上的图片产物读成 data URL 交给模型（Browser/Computer Use 截图）。
+   * ToolResult 只存路径不存 base64（会随消息落库），发请求前才在这里还原成模型能吃的形态。
+   * 读不到返回 null —— 调用方退化为纯文本观测，不因此中断整轮请求。
+   */
+  readImageAsDataUrl(path: string, mimeType: string): Promise<string | null>
   /** git 仓库探测专用（execute_commandWithShell 语义：exitCode + stdout） */
   runShell(command: string, cwd: string): Promise<{ exitCode: number; stdout: string }>
   buildMemoryPrompt(workingDir: string, homeDir: string): Promise<string>
@@ -151,6 +202,11 @@ export interface AgentPorts {
   goal: AgentGoalPort
   skills: AgentSkillsPort
   env: AgentEnvPort
+  /**
+   * 变更前快照落存。可选：测试与不支持回滚的宿主不装配时，写文件照常工作，
+   * loop 会把该轮标成「无法回滚」，界面上的「回滚文件」档随之置灰而不是静默失效。
+   */
+  checkpoint?: AgentCheckpointPort
   /** 事件出口：P1 渲染层宿主为 no-op；P3 起接 'agent:event' 通道（带 seq）。 */
   emit(event: AgentEvent): void
 }

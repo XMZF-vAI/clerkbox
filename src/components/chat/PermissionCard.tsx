@@ -61,8 +61,95 @@ function toneFor(risk: PermissionRiskLevel, vibe: boolean): ToneSet {
   return risk === 'dangerous' ? PERMISSION_TONES.confirmation : PERMISSION_TONES.ask
 }
 
-const BUTTON_BASE =
-  'inline-flex items-center gap-1 rounded-md3-xs px-2.5 py-1.5 text-xs font-medium transition-opacity hover:opacity-80'
+/** 三个选项的固定顺序。序号即键盘快捷键（1/2/3 直接提交），顺序本身就是语义。 */
+const APPROVAL_OPTIONS: Array<{ decision: PermissionDecision; labelKey: string; Icon: typeof Check }> = [
+  { decision: 'allow_once', labelKey: 'chat.permission.allowOnce', Icon: Check },
+  { decision: 'allow_session', labelKey: 'chat.permission.allowAlways', Icon: ShieldCheck },
+  { decision: 'deny', labelKey: 'chat.permission.deny', Icon: Ban },
+]
+
+/**
+ * 审批选项：**编号单选列表**，不是并排按钮。
+ *
+ * 为什么不是三个按钮：这是用户在做风险决策，不是填表。编号列表把
+ * 「允许多久」和「允不允许」排在同一个可扫读的序列里，用户能在动作之前
+ * 看清全部后果；三个并排按钮则把「允许一次」和「本会话始终允许」做成同权重的邻居，
+ * 点错的代价不对称却看不出来。
+ *
+ * 交互：点一次选中，再点一次提交；1/2/3 直接提交；上下键移动；回车确认。
+ * 默认停在「允许一次」—— 这是唯一无副作用的那个选项。
+ */
+function ApprovalOptionList({
+  vibe,
+  onResolve,
+  allowSessionLabel,
+}: {
+  vibe: boolean
+  onResolve: (decision: PermissionDecision) => () => void
+  allowSessionLabel: string
+}) {
+  const { t } = useTranslation()
+  const [selected, setSelected] = useState<PermissionDecision>('allow_once')
+  const options = useMemo(
+    () => APPROVAL_OPTIONS.map((option) => (option.decision === 'allow_session' ? { ...option, label: allowSessionLabel } : { ...option, label: t(option.labelKey) })),
+    [t, allowSessionLabel]
+  )
+
+  const commit = (decision: PermissionDecision) => onResolve(decision)()
+
+  return (
+    <div
+      role="listbox"
+      aria-label={t('chat.permission.title')}
+      className="border-t border-current/10 px-4 py-3"
+      onKeyDown={(e) => {
+        if (e.key === '1' || e.key === '2' || e.key === '3') {
+          e.preventDefault()
+          commit(options[Number(e.key) - 1]!.decision)
+          return
+        }
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          e.preventDefault()
+          const delta = e.key === 'ArrowDown' ? 1 : -1
+          setSelected((current) => {
+            const index = options.findIndex((option) => option.decision === current)
+            const next = (index + delta + options.length) % options.length
+            return options[next]!.decision
+          })
+          return
+        }
+        if (e.key === 'Enter') {
+          e.preventDefault()
+          commit(selected)
+        }
+      }}
+    >
+      {options.map((option, index) => {
+        const isSelected = option.decision === selected
+        const Icon = option.Icon
+        return (
+          <button
+            key={option.decision}
+            type="button"
+            role="option"
+            aria-selected={isSelected}
+            onClick={() => (isSelected ? commit(option.decision) : setSelected(option.decision))}
+            className={`flex w-full items-center gap-3 rounded-md3-sm px-3 py-2 text-left transition-colors focus-visible:outline-none ${
+              isSelected
+                ? vibe ? 'bg-white/15' : 'bg-dark-surfaceContainerHigh'
+                : vibe ? 'hover:bg-white/8' : 'hover:bg-dark-surfaceContainerHigh/60'
+            }`}
+          >
+            <span className={`w-4 shrink-0 self-center text-xs font-medium ${isSelected ? '' : 'opacity-55'}`}>{index + 1}</span>
+            <Icon size={13} className="shrink-0 opacity-70" />
+            <span className={`min-w-0 text-xs font-medium ${isSelected ? '' : 'opacity-75'}`}>{option.label}</span>
+          </button>
+        )
+      })}
+      <div className={`mt-2 text-xs opacity-70 ${vibe ? '' : ''}`}>{t('chat.permission.hint')}</div>
+    </div>
+  )
+}
 
 export interface PermissionRequestView {
   /** 阶段一 = `${sessionId}:${toolCallId}`；阶段二 = permission.requested 的请求 id */
@@ -138,21 +225,11 @@ export function PermissionCard({ request, onResolve, interactive = true, vibe = 
       </div>
 
       {showActions ? (
-        <div className="flex flex-wrap items-center gap-2 border-t border-current/10 px-4 py-3">
-          <button type="button" onClick={resolve('deny')} className={`${BUTTON_BASE} border border-current/25`}>
-            <Ban size={12} />
-            {t('chat.permission.deny')}
-          </button>
-          <button type="button" onClick={resolve('allow_once')} className={`${BUTTON_BASE} ${tone.accent}`}>
-            <Check size={12} />
-            {t('chat.permission.allowOnce')}
-          </button>
-          <button type="button" onClick={resolve('allow_session')} className={`${BUTTON_BASE} ${tone.accent}`}>
-            <ShieldCheck size={12} />
-            {t('chat.permission.allowAlways')}
-          </button>
-          <span className="ml-auto text-xs opacity-70">{t('chat.permission.hint')}</span>
-        </div>
+        <ApprovalOptionList
+          vibe={vibe}
+          onResolve={resolve}
+          allowSessionLabel={t('chat.permission.allowAlways')}
+        />
       ) : status === 'pending' ? (
         <div className="flex items-center gap-2 border-t border-current/10 px-4 py-2 text-xs">
           <Clock size={12} className="shrink-0" />

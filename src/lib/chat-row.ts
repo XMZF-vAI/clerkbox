@@ -5,7 +5,7 @@
  * 独占：两侧若各写一份 JSON 编码与列名映射，字段漂移只会在用户重启后暴露。
  * 渲染层与宿主都从这里取同一份实现。
  */
-import type { Message, MessageAttachment, ToolCall, ToolResult } from '../types/agent'
+import type { FileCheckpoint, FileMutationGap, Message, MessageAttachment, ToolCall, ToolResult } from '../types/agent'
 import type { MessageRow } from '../types/ipc'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -93,6 +93,72 @@ export function parseMessageSkills(value: string | null | undefined): Message['s
   }
 }
 
+const GAP_REASONS: FileMutationGap['reason'][] = ['shell', 'untracked-tool', 'oversized', 'binary', 'unreadable']
+
+/**
+ * 解析回滚快照索引（FileCheckpoint[] 的 JSON 序列化）。
+ * 逐字段校验而不是断言：这一列决定「要不要删用户的文件」，
+ * 一条被写坏的历史记录绝不能被解读成一次删除指令。
+ */
+export function parseFileCheckpoints(value: string | null | undefined): FileCheckpoint[] | undefined {
+  if (!value) return undefined
+  try {
+    const parsed: unknown = JSON.parse(value)
+    if (!Array.isArray(parsed)) return undefined
+    const items = parsed.flatMap((item): FileCheckpoint[] => {
+      if (!isRecord(item)) return []
+      if (typeof item.id !== 'string' || !item.id) return []
+      if (typeof item.path !== 'string' || !item.path) return []
+      if (typeof item.toolName !== 'string' || typeof item.toolCallId !== 'string') return []
+      if (typeof item.existedBefore !== 'boolean') return []
+      // existedBefore=true 必须有正文引用，否则「恢复」就没有恢复的目标 —— 这条直接丢。
+      // 反之 existedBefore=false（回滚动作是删除）时多余带上的 beforeRef 归一成 null 保留记录：
+      // 丢弃会让本轮新建的文件在回滚时漏删，留着垃圾比多一个无用字段更糟。
+      const ref = item.beforeRef
+      if (item.existedBefore && (typeof ref !== 'string' || !ref)) return []
+      if (typeof item.afterHash !== 'string' || !item.afterHash) return []
+      return [{
+        id: item.id,
+        toolCallId: item.toolCallId,
+        toolName: item.toolName,
+        path: item.path,
+        existedBefore: item.existedBefore,
+        beforeRef: item.existedBefore ? (ref as string) : null,
+        afterHash: item.afterHash,
+        beforeBytes: typeof item.beforeBytes === 'number' && item.beforeBytes >= 0 ? item.beforeBytes : 0,
+        createdAt: typeof item.createdAt === 'number' ? item.createdAt : 0,
+      }]
+    })
+    return items.length > 0 ? items : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** 解析无法回滚的改动清单（与快照索引同源同一条校验纪律） */
+export function parseMutationGaps(value: string | null | undefined): FileMutationGap[] | undefined {
+  if (!value) return undefined
+  try {
+    const parsed: unknown = JSON.parse(value)
+    if (!Array.isArray(parsed)) return undefined
+    const items = parsed.flatMap((item): FileMutationGap[] => {
+      if (!isRecord(item) || typeof item.toolName !== 'string') return []
+      const reason = GAP_REASONS.includes(item.reason as FileMutationGap['reason'])
+        ? (item.reason as FileMutationGap['reason'])
+        : undefined
+      if (!reason) return []
+      return [{
+        toolName: item.toolName,
+        reason,
+        ...(typeof item.path === 'string' ? { path: item.path } : {}),
+      }]
+    })
+    return items.length > 0 ? items : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /** 把 DB 消息行映射为内存 Message 结构（loadFromDb / syncFromDb / 宿主读历史共用） */
 export function mapMessageRows(msgRows: MessageRow[]): Message[] {
   return msgRows.map((m) => ({
@@ -111,6 +177,10 @@ export function mapMessageRows(msgRows: MessageRow[]): Message[] {
     isSubAgentCard: m.is_sub_agent_card === 1 ? true : undefined,
     subAgentId: m.sub_agent_id || undefined,
     taskMode: m.task_mode === 'spec' || m.task_mode === 'plan' || m.task_mode === 'goal' ? m.task_mode : undefined,
+    fileCheckpoints: parseFileCheckpoints(m.file_checkpoints),
+    mutationGaps: parseMutationGaps(m.mutation_gaps),
+    filesReverted: m.files_reverted === 1 ? true : undefined,
+    isRewindNotice: m.is_rewind_notice === 1 ? true : undefined,
   }))
 }
 
@@ -136,6 +206,27 @@ export function messageToRow(message: Message, sessionId: string): MessageRow {
     sub_agent_id: message.subAgentId || null,
     task_mode: message.taskMode || null,
     skills: message.skills ? JSON.stringify(message.skills) : null,
+    file_checkpoints: message.fileCheckpoints ? JSON.stringify(message.fileCheckpoints) : null,
+    mutation_gaps: message.mutationGaps ? JSON.stringify(message.mutationGaps) : null,
+    files_reverted: message.filesReverted ? 1 : 0,
+    is_rewind_notice: message.isRewindNotice ? 1 : 0,
+  }
+}
+
+/**
+ * 回滚相关列的独立补丁通道。
+ *
+ * dbUpdateMessage 是位置参数签名（id/content/toolCalls/toolResults/thinking/finishReason），
+ * 快照索引挤不进去；而快照是在一轮跑到一半时增量挂到用户消息上的，必须能单独落库。
+ * 增量更新走这条，其余字段一律不碰。
+ */
+export function messageRewindPatch(message: Message): Record<string, unknown> | null {
+  if (!message.fileCheckpoints && !message.mutationGaps && !message.filesReverted && !message.isRewindNotice) return null
+  return {
+    file_checkpoints: message.fileCheckpoints ? JSON.stringify(message.fileCheckpoints) : null,
+    mutation_gaps: message.mutationGaps ? JSON.stringify(message.mutationGaps) : null,
+    files_reverted: message.filesReverted ? 1 : 0,
+    is_rewind_notice: message.isRewindNotice ? 1 : 0,
   }
 }
 

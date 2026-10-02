@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Agent 编排核心（批次 B · P1 抽核）
  *
  * 从 use-agent.ts 抽出的、与 React/进程无关的 ReAct 编排逻辑：
@@ -30,6 +30,7 @@ import { TokenTracker } from '../lib/token-tracker'
 import { estimateTokensForText } from '../lib/token-estimate'
 import type {
   ApiCompat,
+  FileMutation,
   GoalVerdict,
   HarnessMode,
   Message,
@@ -37,11 +38,14 @@ import type {
   TaskMode,
   ToolCall,
   ToolResult,
+  ToolResultImage,
   StreamingToolCall,
   TokenUsage,
 } from '../types/agent'
 import type { AgentPorts, AgentSettings } from './ports'
 import type { SessionContext } from './session-context'
+import { gapFromToolCall, isRewindableUserMessage } from '../lib/rewind'
+import { agentActionFamily, agentActionGrantKey, isAgentActionToolReadOnly } from '../lib/agent-actions'
 
 export const makeId = (): string => `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
@@ -51,6 +55,43 @@ const IMAGE_TOKEN_ESTIMATE = 1000
 /** 从 data URL 前缀解析 MIME 类型（如 image/png）；非 data URL 形式返回 undefined */
 function mimeFromDataUrl(dataUrl: string): string | undefined {
   return /^data:([^;,]+)/.exec(dataUrl)?.[1]
+}
+
+/**
+ * 历史里最多回传几张工具结果截图。
+ * 只取最近几张不是省 token 的权宜之计：一轮浏览器任务动辄产出几十张截图，
+ * 全塞回上下文既贵又会把「当前这一帧」淹掉。更早的截图文本里已经写明了落盘路径，
+ * 模型真要回看可以自己 read_file。
+ */
+const TOOL_RESULT_IMAGES_MAX = 2
+/** 截图 data URL 的进程内缓存：同一张图在后续每一轮都会被重新求值，不能每轮读一次盘 */
+const TOOL_IMAGE_CACHE_MAX = 6
+const toolImageDataUrlCache = new Map<string, string | null>()
+
+async function resolveToolResultImages(
+  ports: AgentPorts,
+  results: ToolResult[] | undefined,
+): Promise<Array<{ dataUrl: string; mimeType: string }> | undefined> {
+  if (!results || results.length === 0) return undefined
+  const out: Array<{ dataUrl: string; mimeType: string }> = []
+  for (const result of results) {
+    if (!result.images || result.images.length === 0) continue
+    for (const img of result.images) {
+      const cacheKey = `${img.path}\u0000${img.mimeType}`
+      let dataUrl = toolImageDataUrlCache.get(cacheKey)
+      if (dataUrl === undefined) {
+        dataUrl = await ports.env.readImageAsDataUrl(img.path, img.mimeType)
+        // Map 按插入序迭代，超量时淘汰最旧的一条
+        if (toolImageDataUrlCache.size >= TOOL_IMAGE_CACHE_MAX) {
+          const oldest = toolImageDataUrlCache.keys().next().value
+          if (oldest !== undefined) toolImageDataUrlCache.delete(oldest)
+        }
+        toolImageDataUrlCache.set(cacheKey, dataUrl)
+      }
+      if (dataUrl) out.push({ dataUrl, mimeType: img.mimeType })
+    }
+  }
+  return out.length > 0 ? out : undefined
 }
 
 /** 轻量字符串哈希（djb2）—— dev 下校验静态 system 段是否跨请求字节一致 */
@@ -82,7 +123,19 @@ function combineAbortSignals(signals: AbortSignal[]): { signal: AbortSignal; dis
   }
 }
 
-const MAX_REACT_ITERATIONS = 100 // Loop exits when model stops calling tools or hits this cap
+/**
+ * 单次 run 允许的工具执行轮数上限。
+ *
+ * **别再往回调。** 旧值 100 在「模型能力较弱 + 任务粒度粗」的年代是合理护栏，
+ * 现在两个前提都反了：
+ *   1. 模型变强 → 能自己拆出更细的步骤、一步一个工具调用，而不是一口气干完；
+ *   2. **有些任务天生一轮一步** —— computer use 的「截图 → 点击 → 截图 → 点击」，
+ *      每次就是一个批次 = 一轮。100 轮只够点一百次，对付一个来回几十次的界面根本不够。
+ *
+ * 一轮 = 一次 LLM 请求，成本早已被 abort 按钮和自动压缩兜住，
+ * 卡在一个明显不够的数上换来的不是安全，是「AI 干到一半被系统按停」。
+ */
+const MAX_REACT_ITERATIONS = 500 // Loop exits when model stops calling tools or hits this cap
 
 /** 最后一轮注入的收尾指令（参考 opencode MAX_STEPS_PROMPT）：工具停用，强制文字总结 */
 const MAX_STEPS_MESSAGE = `⚠️ Maximum tool-call turns reached for this run. Tool calls are no longer executed. Reply NOW with a final text summary: what was accomplished, key results and file paths, and what remains unfinished. Do not attempt any more tool calls.`
@@ -526,7 +579,7 @@ function truncateMessages(settings: AgentSettings, msgs: NeutralMessage[]): Neut
 
 /** Build API-compatible message array from our Message[].
  *  opts.extraSystemPrompt: 子 agent 模式下覆盖系统提示；不传则走主 agent 逻辑。 */
-function buildAPIMessages(
+async function buildAPIMessages(
   ports: AgentPorts,
   ctx: SessionContext,
   msgs: Message[],
@@ -552,7 +605,7 @@ function buildAPIMessages(
      *  只减 token 不动 UI/DB 历史。启用后清理集合只增不减，前缀保持稳定。 */
     clearOldToolResults?: boolean
   } = {}
-): NeutralMessage[] {
+): Promise<NeutralMessage[]> {
   const settings = ports.settings
   const {
     memoryPrompt = '',
@@ -707,6 +760,22 @@ function buildAPIMessages(
     }
   }
 
+  // ── 工具结果截图：只回传最近几张，且模型必须支持视觉输入 ──
+  // 非视觉模型带图会让整轮请求直接 400，所以这道判断与用户附件那条走同一个 supportsImages 口径。
+  const toolResultImageIds = new Set<string>()
+  if (supportsImages) {
+    const imageCallIds: string[] = []
+    for (const m of visibleMsgs) {
+      if (m.role !== 'tool') continue
+      const results = m.toolResults
+      if (results?.some((r) => r.images && r.images.length > 0)) {
+        const callId = results?.[0]?.toolCallId || ''
+        if (callId) imageCallIds.push(callId)
+      }
+    }
+    for (const callId of imageCallIds.slice(-TOOL_RESULT_IMAGES_MAX)) toolResultImageIds.add(callId)
+  }
+
   for (const m of visibleMsgs) {
     if (m.role === 'system') continue // We already added system prompt
     // 跳过 UI 占位消息（子 agent 卡片），它们不是真实对话内容，会破坏 tool_calls ↔ tool 配对
@@ -719,13 +788,19 @@ function buildAPIMessages(
       // Tool result message（剥离 UI 专用 __EDIT_DIFF__ 元数据，不发给模型）
       const toolCallId = m.toolResults?.[0]?.toolCallId || ''
       // microcompact：被清理的老工具输出替换为占位符（UI/DB 历史不受影响）
-      const toolContent = clearedToolIds.has(toolCallId)
+      const cleared = clearedToolIds.has(toolCallId)
+      const toolContent = cleared
         ? CLEARED_TOOL_RESULT_PLACEHOLDER
         : m.content.replace(/\n__EDIT_DIFF__:.*$/s, '')
+      // 被清理的老输出连同它的截图一起失效：图本来就是那次观察的产物，留着只会自相矛盾
+      const images = !cleared && supportsImages && toolResultImageIds.has(toolCallId)
+        ? await resolveToolResultImages(ports, m.toolResults)
+        : undefined
       result.push({
         role: 'tool',
         content: toolContent,
         tool_call_id: toolCallId,
+        ...(images ? { images } : {}),
       })
     } else if (m.role === 'assistant' && m.toolCalls && m.toolCalls.length > 0) {
       // Assistant message with tool calls
@@ -930,6 +1005,55 @@ async function checkToolPermission(
     return { allowed: false, reason: i18n.t('agent.specReadOnly', { label }) }
   }
 
+  // ── Agent 动作（Browser Use / Computer Use）门禁 ──
+  // 三道，顺序即 fail-closed 的强度：
+  //   1. 能力开关关 → 直接拒（设置里没开，模型看到什么、点了什么都不算数）
+  //   2. 子 agent → 一律拒（子 agent 没有用户在场，也没有审批弹窗能被应答；
+  //      让它去动浏览器/桌面，等于把最高风险的动作交给最不可见的执行者）
+  //   3. 写操作 → **每个能力每会话问一次**（读页面/截屏不动任何状态，永远放行）
+  //
+  // 第 3 条的粒度是这个设计里最容易做错的地方。按「每个动作」问，一次浏览任务
+  // 要打断用户十几次，功能等于不存在；按「每个动作但记住」也不够，记忆键是动作级的话
+  // 下一个不同动作照样再问。正确形态是**能力级 + 会话级**：用户在第一次弹窗时选
+  // 「本会话始终允许」，整个任务后续静默通过，需要收回时关掉设置里的开关即可。
+  const agentAction = agentActionFamily(toolName)
+  if (agentAction) {
+    if (agentAction === 'browser' && ports.settings.browserUseEnabled !== true) {
+      return { allowed: false, reason: i18n.t('agent.browserUseDisabled') }
+    }
+    if (agentAction === 'computer' && ports.settings.computerUseEnabled !== true) {
+      return { allowed: false, reason: i18n.t('agent.computerUseDisabled') }
+    }
+    if (allowedTools === undefined && disallowedTools === undefined) {
+      // 两个都不传 = 来自主循环；子 agent 一定会传其中之一，据此判定是否在子 agent 里
+    } else {
+      return { allowed: false, reason: i18n.t('agent.agentActionSubagentBlocked') }
+    }
+    // full 档：用户已声明「完全信任」，与写文件/执行命令的既有语义一致
+    if (approvalMode === 'full') return { allowed: true }
+    // 只读动作不改任何状态，不该为了看一眼页面就打断用户
+    if (isAgentActionToolReadOnly(toolName, args)) return { allowed: true }
+    const grantKey = agentActionGrantKey(agentAction)
+    if (ctx.grantedAgentActions.has(grantKey)) return { allowed: true }
+
+    const approval = await ports.permission.confirm({
+      tool: toolName,
+      args,
+      reason: agentAction === 'computer' ? 'computer-control' : 'browser-control',
+      workingDir: getWorkingDir(ports, ctx) || '',
+      risk: 'dangerous',
+      title: i18n.t(agentAction === 'computer' ? 'agent.confirmComputerUseTitle' : 'agent.confirmBrowserUseTitle'),
+      body: i18n.t(agentAction === 'computer' ? 'agent.confirmComputerUseBody' : 'agent.confirmBrowserUseBody', {
+        tool: i18n.t(`tools.${toolName}`),
+      }),
+    })
+    if (!approval.approved) {
+      return { allowed: false, reason: i18n.t('agent.deniedCancelAgentAction') }
+    }
+    if (approval.scope === 'session') ctx.grantedAgentActions.add(grantKey)
+    return { allowed: true }
+  }
+
   // ── 审批档位：命令执行确认（full 档全部免询问） ──
   if (toolName === 'execute_command' && approvalMode !== 'full') {
     const cmd = String(args.command || '')
@@ -940,7 +1064,7 @@ async function checkToolPermission(
       // 危险命令确认前：标记 confirm-danger + 通知（仅当用户不在此会话时）
       ports.store.setStatus(sessionId, 'confirm-danger')
       ports.ui.notify(sessionId, 'confirm-danger', i18n.t('agent.notifyDangerCommand', { command: cmd.slice(0, 100) }))
-      const confirmed = await ports.permission.confirm({
+      const { approved: confirmed } = await ports.permission.confirm({
         tool: toolName,
         args,
         reason: 'dangerous-command',
@@ -957,7 +1081,7 @@ async function checkToolPermission(
     }
     // auto 档：AI 已自审该操作，目录外执行免确认；manual 档仍弹窗
     if (approvalMode === 'manual' && workingDir && commandCwd && !isPathInside(commandCwd, workingDir)) {
-      const confirmed = await ports.permission.confirm({
+      const { approved: confirmed } = await ports.permission.confirm({
         tool: toolName,
         args,
         reason: 'outside-cwd',
@@ -976,7 +1100,7 @@ async function checkToolPermission(
     const path = resolveToolPath(workingDir, args.path)
     // 系统目录写入：manual/auto 都弹窗（最后一道防线，仅 full 档放行）
     if (isSystemPath(path)) {
-      const confirmed = await ports.permission.confirm({
+      const { approved: confirmed } = await ports.permission.confirm({
         tool: toolName,
         args,
         reason: 'system-dir',
@@ -994,7 +1118,7 @@ async function checkToolPermission(
     if (approvalMode === 'manual' && workingDir) {
       const isOutside = !isPathInside(path, workingDir)
       if (isOutside) {
-        const confirmed = await ports.permission.confirm({
+        const { approved: confirmed } = await ports.permission.confirm({
           tool: toolName,
           args,
           reason: 'outside-write',
@@ -1037,6 +1161,61 @@ function collapseIntermediateMessages(ports: AgentPorts, sid: string, finalMsgId
 }
 
 /** ReAct loop: think → act → observe → repeat */
+// ── 消息撤回 / 改动回滚：采集侧 ──
+
+/**
+ * 把本轮采集到的快照与缺口写回锚点用户消息。
+ *
+ * 每个工具批次后增量刷一次，而不是等整轮跑完再落：中途用户按停止、或模型报错退出时，
+ * 已经写到磁盘的文件必须已经有对应的快照。攒到最后一步等于「崩一次就永久无法回滚」。
+ */
+function flushRewindAnchor(ports: AgentPorts, ctx: SessionContext): void {
+  const anchor = ctx.rewindAnchorMessageId
+  if (!anchor) return
+  ports.store.updateMessage(ports.sessionId, anchor, {
+    fileCheckpoints: [...ctx.turnCheckpoints],
+    mutationGaps: [...ctx.turnGaps],
+  })
+}
+
+function pushTurnGap(ctx: SessionContext, gap: { toolName: string; path?: string; reason: 'shell' | 'untracked-tool' | 'oversized' | 'binary' | 'unreadable' }): void {
+  const key = `${gap.reason}:${gap.toolName}:${gap.path ?? ''}`
+  if (ctx.turnGaps.some((g) => `${g.reason}:${g.toolName}:${g.path ?? ''}` === key)) return
+  ctx.turnGaps.push(gap)
+}
+
+/**
+ * 采集一次成功的文件写入：把变更前正文交给宿主落盘，换回索引挂到本轮锚点消息上。
+ *
+ * 宿主没装配 checkpoint 端口时记一条缺口而不是静默跳过 —— 静默跳过会让界面以为
+ * 「本轮没有文件改动」，用户点撤回时文件被留在改动后的状态却毫无提示。
+ */
+async function recordFileMutation(ports: AgentPorts, ctx: SessionContext, mutation: FileMutation): Promise<void> {
+  if (!ctx.rewindAnchorMessageId) return
+  if (!ports.checkpoint) {
+    pushTurnGap(ctx, { toolName: mutation.toolName, path: mutation.path, reason: 'untracked-tool' })
+    flushRewindAnchor(ports, ctx)
+    return
+  }
+  try {
+    const saved = await ports.checkpoint.save(ports.sessionId, mutation)
+    if (saved.checkpoint) ctx.turnCheckpoints.push(saved.checkpoint)
+    if (saved.gap) pushTurnGap(ctx, saved.gap)
+  } catch (err) {
+    pushTurnGap(ctx, { toolName: mutation.toolName, path: mutation.path, reason: 'unreadable' })
+    console.error('[loop] checkpoint save failed:', err)
+  }
+  flushRewindAnchor(ports, ctx)
+}
+
+/** 由工具名推断无法回滚的改动（shell / MCP / 未知工具）；快照覆盖不到的都在这里挡掉 */
+function recordToolGap(ports: AgentPorts, ctx: SessionContext, toolName: string, path?: string): void {
+  const gap = gapFromToolCall(toolName)
+  if (!gap) return
+  pushTurnGap(ctx, { ...gap, ...(path ? { path } : {}) })
+  flushRewindAnchor(ports, ctx)
+}
+
 export async function runReactLoop(
   ports: AgentPorts,
   ctx: SessionContext,
@@ -1049,6 +1228,14 @@ export async function runReactLoop(
   const sessionId = ports.sessionId
   const settings = ports.settings
   let conversationMessages = [...initialMessages]
+
+  // 撤回锚点 = 本次运行的最后一条真实用户消息；本轮所有文件快照都挂在它身上。
+  // 每次运行都重新开账：上一轮的快照不能算进这一轮的回滚范围。
+  const anchorIndex = initialMessages.reduce(
+    (last, message, index) => (isRewindableUserMessage(message) ? index : last),
+    -1
+  )
+  ctx.beginRewindTurn(anchorIndex >= 0 ? (initialMessages[anchorIndex]?.id ?? null) : null)
 
   // 本会话锁定的 harness 兼容模式（首条消息后不可变更，循环开始时读一次即可）。
   // 子 agent 与 goal 评估器不继承：它们有独立的提示词与工具语境。
@@ -1282,7 +1469,7 @@ export async function runReactLoop(
     if (currentTokenCount > Math.floor(autoCompactThreshold * 0.85)) microCompactEnabled = true
 
     // Build API messages from conversation history (with auto-truncation for long conversations)
-    const apiMessages = truncateMessages(settings, buildAPIMessages(ports, ctx, conversationMessages, { memoryPrompt, agentsMdContent, taskMode: effectiveTaskMode, goalCondition, isGitRepo, skillReminder, harnessMode, clearOldToolResults: microCompactEnabled }))
+    const apiMessages = truncateMessages(settings, await buildAPIMessages(ports, ctx, conversationMessages, { memoryPrompt, agentsMdContent, taskMode: effectiveTaskMode, goalCondition, isGitRepo, skillReminder, harnessMode, clearOldToolResults: microCompactEnabled }))
 
     // Parse streaming response
     let content = ''
@@ -1610,9 +1797,9 @@ export async function runReactLoop(
       continue
     }
 
-    // ── 轮次上限收尾：工具执行轮数用尽后不再执行工具，注入收尾指令让模型文字总结
-    //（参考 opencode MAX_STEPS：硬停会丢掉整个 run 的总结）。
-    // 收尾轮若仍坚持调用工具 → 全部拒绝并退出循环，走兜底提示。 ──
+// ── 轮次上限收尾：工具执行轮数用尽后不再执行工具，给模型一次文字总结的机会
+//（参考 opencode MAX_STEPS：硬停会丢掉整个 run 的总结）。
+// 收尾轮若仍坚持调用工具 → 全部拒绝并退出循环，走兜底提示。 ──
     if (toolExecutionTurns >= MAX_REACT_ITERATIONS || wrapUpInjected) {
       const refused: ToolResult[] = toolCalls.map((tc) => ({
         toolCallId: tc.id,
@@ -1629,9 +1816,21 @@ export async function runReactLoop(
       }
       if (wrapUpInjected) break
       wrapUpInjected = true
-      const wrapMsg: Message = { id: makeId(), role: 'user', content: MAX_STEPS_MESSAGE, timestamp: Date.now() }
-      ports.store.addMessage(sessionId, wrapMsg)
-      conversationMessages.push(wrapMsg)
+      // 收尾指令**只进本轮内存，不落库**。
+      // 曾经 `ports.store.addMessage(sessionId, wrapMsg)` 把它当成一条 role:'user' 的
+      // 真实用户消息持久化了，代价有两层：
+      //   1. 用户在对话记录里看到一条自己没发过的「⚠️ 已达上限，立刻交总结」；
+      //   2. 更糟的是**下一次运行**会把这坨历史从库里读出来喂给模型 ——
+      //      模型读到的是「用户刚要求我立刻总结、不要调工具」，于是后续每轮都被这条
+      //      幽灵指令压着不干活。一次到限额会持续污染这个会话的之后所有轮次。
+      // 参照同文件 goal 模式的做法（addGoalCard + collapseIntermediateMessages + return）：
+      // 终止状态该走 UI 状态，不该伪装成用户输入。
+      conversationMessages.push({
+        id: makeId(),
+        role: 'user',
+        content: MAX_STEPS_MESSAGE,
+        timestamp: Date.now(),
+      })
       continue
     }
 
@@ -1649,8 +1848,10 @@ export async function runReactLoop(
         }
       }
       // doom-loop 检测：连续多次完全相同的调用直接拒绝（放在权限检查前，避免重复弹确认框）
+      // Agent 动作工具豁免：连续点同一个坐标、连续按同一个键，本来就是「确认这一步生效了吗」
+      // 的正常交互节奏，被当成死循环拦下会让这类任务根本做不下去。
       const callSig = `${tc.name}\u0000${JSON.stringify(tc.arguments ?? {})}`
-      if (isDoomLoopSig(recentToolSignatures, callSig)) {
+      if (!agentActionFamily(tc.name) && isDoomLoopSig(recentToolSignatures, callSig)) {
         return {
           toolCallId: tc.id,
           content: toolCallRefusal(tc.name, DOOM_LOOP_REFUSAL),
@@ -1682,11 +1883,18 @@ export async function runReactLoop(
       }
 
       try {
+        // 视觉观测走旁路：工具仍只回字符串，这里收集它顺手上报的截图
+        const capturedImages: ToolResultImage[] = []
         const result = await ports.tools.execute(tc.name, argsWithCwd, {
           workingDir,
           homeDir: ports.env.homeDir(),
           sessionId,
+          // 浮层副标题要显示「哪个对话在动手」：AI 操控用户桌面时用户需要能追责
+          sessionLabel: ctx.sessionTitle ?? undefined,
           readFileState: ctx.readFiles,
+          toolCallId: tc.id,
+          recordFileMutation: (mutation) => recordFileMutation(ports, ctx, mutation),
+          recordImage: (image) => { capturedImages.push(image) },
           requestUserInput: (questions) => ports.ui.askQuestion(sessionId, questions),
           updateTodoList: (items) => ports.ui.setTodos(sessionId, items),
           spawnSubAgent: async (agentType: string, subPrompt: string) => {
@@ -1716,6 +1924,9 @@ export async function runReactLoop(
         // 记录已执行调用的签名（含失败结果），供 doom-loop 连续性判定
         recentToolSignatures.push(callSig)
         const isError = result.startsWith('Error') || result.startsWith('❌')
+        // 快照覆盖不到的工具（shell / MCP / 未知副作用）只要成功就可能动过文件，
+        // 标成缺口：带文件的撤回必须 fail-closed，不能假装本轮没改过东西。
+        if (!isError) recordToolGap(ports, ctx, tc.name)
         // AI 自主加载感知：read_file 命中技能 SKILL.md → 记录快照（本轮展示芯片）
         if (tc.name === 'read_file' && !isError) {
           const hit = skillPathMap.get(normalizePathForComparison(String(argsWithCwd.path || '')))
@@ -1725,6 +1936,8 @@ export async function runReactLoop(
           toolCallId: tc.id,
           content: result,
           isError,
+          // 失败的截图不外发：失败原因的文字说明已经足够，一张半渲染的图只会误导模型
+          ...(!isError && capturedImages.length > 0 ? { images: capturedImages } : {}),
         }
       } catch (err) {
         return {
@@ -1858,7 +2071,10 @@ export async function runSubAgentLoop(
   })
 
   try {
-    const maxTurns = agent.maxTurns || 50
+    // 子 Agent 默认额度。与主 loop 同理由上调（旧的 50 同样是「一轮一步」任务的重灾区）：
+  // 子 Agent 常被派去做检索/批量核对这类需要反复调工具的活，50 轮经常在半路被掐断。
+  // agent 预设里显式写了 maxTurns 的仍然以预设为准。
+  const maxTurns = agent.maxTurns || 200
     // 子 agent 独立的 thinking 签名缓存，与主 agent 互不干扰
     const thinkingBlocks = new Map<string, AnthropicThinkingBlock[]>()
     // 运行时防护状态（与主 agent 一致）：doom-loop 签名 / 工具执行轮计数 / 收尾注入标记
@@ -1910,7 +2126,7 @@ export async function runSubAgentLoop(
       if (tokenCount > Math.floor(subAutoCompactThreshold * 0.85)) subMicroCompactEnabled = true
 
       // 构建 API 消息（用子 agent 的 systemPrompt 覆盖；子 agent 不带任务工作流提示词与技能目录）
-      const apiMessages = truncateMessages(settings, buildAPIMessages(ports, ctx, conversationMessages, {
+      const apiMessages = truncateMessages(settings, await buildAPIMessages(ports, ctx, conversationMessages, {
         workingDir,
         memoryPrompt: '',
         taskMode: undefined,
@@ -2089,9 +2305,14 @@ export async function runSubAgentLoop(
         }
         if (wrapUpInjected) break
         wrapUpInjected = true
-        const wrapMsg: Message = { id: makeId(), role: 'user', content: MAX_STEPS_MESSAGE, timestamp: Date.now() }
-        ports.ui.appendSubAgentMessage(sessionId, subAgentId, wrapMsg)
-        conversationMessages.push(wrapMsg)
+        // 同主 agent：收尾指令只进本轮内存，不 appendSubAgentMessage。
+        // 落库会让它变成子 Agent 卡片里一条真实的用户消息，并被后续轮次当成人话读回去
+        conversationMessages.push({
+          id: makeId(),
+          role: 'user',
+          content: MAX_STEPS_MESSAGE,
+          timestamp: Date.now(),
+        })
         continue
       }
 
@@ -2133,10 +2354,16 @@ export async function runSubAgentLoop(
             homeDir,
             sessionId,
             readFileState: subReadFileState,
+            toolCallId: tc.id,
+            // 子 agent 的写文件同样要拍快照：父轮撤回时把这些一并滚掉，
+            // 否则「撤这一轮」会留下子 agent 写出的文件残骸。
+            recordFileMutation: (mutation) => recordFileMutation(ports, ctx, mutation),
           })
           // 记录已执行调用的签名（含失败结果），供 doom-loop 连续性判定
           recentToolSignatures.push(callSig)
-          results.push({ toolCallId: tc.id, content: result, isError: result.startsWith('Error') || result.startsWith('❌') })
+          const failed = result.startsWith('Error') || result.startsWith('❌')
+          if (!failed) recordToolGap(ports, ctx, tc.name)
+          results.push({ toolCallId: tc.id, content: result, isError: failed })
         } catch (err) {
           results.push({ toolCallId: tc.id, content: i18n.t('agent.toolExecFailed', { message: err instanceof Error ? err.message : String(err) }), isError: true })
         }

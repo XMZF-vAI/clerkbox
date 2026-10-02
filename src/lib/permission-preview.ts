@@ -8,15 +8,16 @@
  */
 import { isDangerousCommand } from './permission-engine'
 import { isPathInside, isSystemPath, resolveToolPath } from './path-safety'
+import { agentActionFamily, isAgentActionToolReadOnly } from './agent-actions'
 import type { Message } from '../types/agent'
 
 export type PermissionRiskLevel = 'dangerous' | 'warning' | 'info'
-export type PermissionPreviewKind = 'command' | 'file' | 'network' | 'mcp' | 'generic'
+export type PermissionPreviewKind = 'command' | 'file' | 'network' | 'mcp' | 'browser' | 'computer' | 'generic'
 export type PermissionDecision = 'deny' | 'allow_once' | 'allow_session'
 /** 审批请求生命周期：待批准 / 已批准或已拒绝 / 已超时（阶段二宿主 fail-closed 时用） */
 export type PermissionRequestStatus = 'pending' | 'resolved' | 'expired'
 
-/** 会触发审批确认的工具（agent-core 的弹窗分支只覆盖命令执行与文件写入） */
+/** 会触发审批确认的工具（agent-core 的弹窗分支只覆盖命令执行、文件写入与 Agent 动作） */
 export const APPROVAL_GATED_TOOLS = ['execute_command', 'write_file', 'search_replace', 'edit_file'] as const
 
 /** MCP 工具命名约定：mcp__<server>__<tool> */
@@ -61,7 +62,15 @@ export function parseMcpToolName(name: string): { server: string; tool: string }
 /** 工具是否属于「需要审批」的那一类（决定卡片是否出现） */
 export function isApprovalGatedTool(name: string): boolean {
   if ((APPROVAL_GATED_TOOLS as readonly string[]).includes(name)) return true
-  return name.startsWith(MCP_PREFIX)
+  if (name.startsWith(MCP_PREFIX)) return true
+  // Agent 动作按「这次调用是否只读」判定：截图、读页面不必打断用户，点击和按键要
+  return isAgentActionGated(name, {})
+}
+
+/** 门控工具名（不带入参）：用于无法拿到 args 的场景（列表渲染、审计解码） */
+export function isAgentActionGated(name: string, args: Record<string, unknown>): boolean {
+  if (!agentActionFamily(name)) return false
+  return !isAgentActionToolReadOnly(name, args)
 }
 
 function stringifyArgs(args: Record<string, unknown>): string {
@@ -168,6 +177,24 @@ export function buildPermissionPreview(
     }
   }
 
+  // Agent 动作：等宽区展示真正会被执行的那几个参数（坐标/URL/文本/键位），
+  // 而不是把整个 args 摊开 —— 摊开会让「点了哪里」这件唯一重要的事淹没在默认值里
+  const family = agentActionFamily(tool)
+  if (family) {
+    const monospace = renderAgentActionArgs(args)
+    return {
+      ...base,
+      kind: family,
+      risk: 'dangerous',
+      ...truncate(monospace),
+      reasonKeys: [family === 'computer' ? 'chat.permission.reasonComputerUse' : 'chat.permission.reasonBrowserUse'],
+      target: monospace.split('\n')[0] || tool,
+      // 会话级放行按「族 + 动作」归并：允许一次点击不该顺带允许下一次导航
+      grantKey: `${tool}:${agentActionGrantScope(args)}`,
+      serverName: undefined,
+    }
+  }
+
   const monospace = stringifyArgs(args)
   return {
     ...base,
@@ -179,6 +206,47 @@ export function buildPermissionPreview(
     grantKey: `${tool}:${monospace}`,
     serverName: undefined,
   }
+}
+
+/**
+ * Agent 动作的审批等宽区：只列会被执行的关键参数。
+ * 顺序按「人最需要确认的那个」排：坐标 > 目标 > 内容。
+ */
+function renderAgentActionArgs(args: Record<string, unknown>): string {
+  const lines: string[] = []
+  const push = (label: string, value: unknown) => {
+    if (value === undefined || value === null || value === '') return
+    lines.push(`${label}: ${String(value)}`)
+  }
+  if (args.x !== undefined || args.y !== undefined) push('at', `(${args.x}, ${args.y})`)
+  if (args.from_x !== undefined) push('from', `(${args.from_x}, ${args.from_y}) → (${args.to_x}, ${args.to_y})`)
+  if (args.ref) push('ref', args.ref)
+  if (args.url) push('url', args.url)
+  if (args.selector) push('selector', args.selector)
+  if (args.name) push('application', args.name)
+  if (args.key) push('key', args.key)
+  if (args.button) push('button', args.button)
+  if (args.action) push('action', args.action)
+  if (args.text !== undefined) {
+    const text = String(args.text)
+    lines.push(`text: ${text.length > 120 ? `${text.slice(0, 120)}… (${text.length} chars)` : text}`)
+  }
+  if (lines.length === 0) return stringifyArgs(args)
+  return lines.join('\n')
+}
+
+/**
+ * 会话级放行的归并键：同一族的同类动作放行一次。
+ * 刻意不把坐标/文本纳入键 —— 否则「本会话始终允许」几乎永远命中不了，
+ * 用户点了也只放行这一次，等于没有这个选项。
+ */
+function agentActionGrantScope(args: Record<string, unknown>): string {
+  const key = typeof args.key === 'string' ? args.key.split('+').pop() ?? '' : ''
+  return [
+    typeof args.action === 'string' ? args.action : '',
+    typeof args.button === 'string' ? args.button : '',
+    key,
+  ].filter(Boolean).join('|') || '*'
 }
 
 /** 尚未产出结果、且属于审批门控的最后一次工具调用（阶段一卡片的待审数据来源） */
@@ -203,7 +271,10 @@ export function findPendingApprovalCall(messages: Message[]): PendingApprovalCal
     if (!msg || msg.role !== 'assistant' || !msg.toolCalls?.length) continue
     // 同一轮内按声明顺序执行，第一个未收尾的门控调用就是当前等待批准的那个
     for (const call of msg.toolCalls) {
-      if (!call || settled.has(call.id) || !isApprovalGatedTool(call.name)) continue
+      if (!call || settled.has(call.id)) continue
+      // Agent 动作按入参判定门控（只读的截图不必打断用户），所以这里不能复用无参版本
+      const gated = isApprovalGatedTool(call.name) || isAgentActionGated(call.name, call.arguments ?? {})
+      if (!gated) continue
       return { toolCallId: call.id, tool: call.name, args: call.arguments ?? {} }
     }
     // 只在最后一条含工具调用的助手消息里找，更早的调用必然已收尾

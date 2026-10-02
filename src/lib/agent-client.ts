@@ -9,7 +9,7 @@
  * 出现缺口就去要补发，补发失败则按退避重试并挂 reconnecting 状态给 UI 显示。
  */
 import { ipc } from './ipc-client'
-import type { AgentCommand, AgentEvent, AgentSnapshot } from '../agent-core/protocol'
+import type { AgentCommand, AgentCommandResult, AgentEvent, AgentSnapshot } from '../agent-core/protocol'
 
 export type AgentConnection = 'offline' | 'connected' | 'reconnecting'
 
@@ -19,7 +19,7 @@ const PENDING_HOLD_MS = 3_000
 const PENDING_MAX = 2_000
 
 export interface AgentTransport {
-  command(cmd: AgentCommand): Promise<{ ok: boolean; error?: string }>
+  command(cmd: AgentCommand): Promise<AgentCommandResult>
   snapshot(sessionId: string | undefined, sinceSeq: number): Promise<AgentSnapshot>
   onEvent(callback: (payload: { seq: number; event: AgentEvent }) => void): () => void
   mode(): Promise<'main' | 'renderer'>
@@ -48,7 +48,7 @@ export interface AgentClient {
    */
   ensureMode(): Promise<'main' | 'renderer'>
   stop(): void
-  send(cmd: AgentCommand): Promise<{ ok: boolean; error?: string }>
+  send(cmd: AgentCommand): Promise<AgentCommandResult>
   subscribe(listener: (event: AgentEvent, seq: number) => void): () => void
   onConnectionChange(listener: (state: AgentConnection) => void): () => void
   /** 主动请求 sinceSeq 之后的事件补发（宿主直接广播回来） */

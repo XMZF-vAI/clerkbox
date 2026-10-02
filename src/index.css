@@ -244,6 +244,66 @@
   18%, 72% { opacity: 1; }
 }
 
+/* ── Agent 浏览器操作指示：标签与工具条上的指针图标呼吸 ──
+   900ms 周期，同时改透明度与缩放。14px 的图标只改透明度时视觉上几乎像静止，
+   必须带上 scale 才读得出「在动」；900ms 足够快到有生命感，又不至于晃眼。 */
+@keyframes agent-browser-breathe {
+  0%, 100% { opacity: 0.5; transform: scale(0.9); }
+  50% { opacity: 1; transform: scale(1.08); }
+}
+.agent-browser-breathe {
+  transform-origin: center;
+  animation: agent-browser-breathe 900ms ease-in-out infinite;
+  will-change: opacity, transform;
+}
+@media (prefers-reduced-motion: reduce) {
+  .agent-browser-breathe {
+    animation: none;
+    opacity: 1;
+    transform: none;
+    will-change: auto;
+  }
+}
+
+/* ── Agent 动作工具卡：运行态文案扫光（替代旋转 loading 图标）──
+   toolcall 在流式期间数量多且持续更新，旋转图标会让动画长期占用渲染资源；
+   用一次性、事件驱动的扫光表达「在跑」，成本远低于常驻动画。 */
+@keyframes agent-action-sweep {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+.agent-action-sweep {
+  background: linear-gradient(
+    90deg,
+    currentColor 0%,
+    rgb(var(--shimmer-base-rgb) / 0.9) 45%,
+    currentColor 50%,
+    rgb(var(--shimmer-base-rgb) / 0.9) 55%,
+    currentColor 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: agent-action-sweep 2s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .agent-action-sweep { animation: none; color: inherit; }
+}
+
+/* ── Agent 动作工具卡：目标胶囊 ── */
+.agent-action-target {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-radius: 9999px;
+  border: 1px solid rgb(var(--md-onSurfaceVariant-rgb) / 0.2);
+  padding: 0 6px;
+  line-height: 1.25rem;
+}
+
 /* ── 版本号标签更新光晕：主题色缓慢呼吸（伪元素 opacity 动画，避免 box-shadow 重绘）── */
 @keyframes update-badge-glow {
   0%, 100% { opacity: 0.3; }

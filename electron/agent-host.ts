@@ -31,11 +31,14 @@ import i18n from '../src/i18n'
 import { makeId, runReactLoop } from '../src/agent-core/loop'
 import { SessionContextStore } from '../src/agent-core/session-context'
 import { createSeqCounter } from '../src/agent-core/protocol'
-import type { AgentCommand, AgentEvent, AgentSnapshot } from '../src/agent-core/protocol'
-import type { AgentPermissionRequest, AgentPorts, AgentSettings } from '../src/agent-core/ports'
+import type { AgentCommand, AgentCommandResult, AgentEvent, AgentSnapshot } from '../src/agent-core/protocol'
+import type { AgentPermissionRequest, AgentPorts, AgentSettings, PermissionApproval } from '../src/agent-core/ports'
 import type { MessageRow, SessionRow } from '../src/types/ipc'
-import { deriveSessionTitle, mapMessageRows, messageToRow, messageUpdateArgs, NEW_SESSION_TITLE } from '../src/lib/chat-row'
-import type { Message, Session, SubAgentRun, TodoItem, TokenUsage } from '../src/types/agent'
+import { deriveSessionTitle, mapMessageRows, messageRewindPatch, messageToRow, messageUpdateArgs, NEW_SESSION_TITLE } from '../src/lib/chat-row'
+import type { Message, RewindScope, Session, SubAgentRun, TodoItem, TokenUsage } from '../src/types/agent'
+import { buildRewindPlan } from '../src/lib/rewind'
+import { buildRewindIo, executeRewind } from '../src/lib/rewind-service'
+import { saveFileMutation } from '../src/lib/checkpoint-recorder'
 import type { QueuedMessageItem } from '../src/stores/chat-store'
 
 /** 审批挂起上限（计划 §3.3）：超时即拒绝 */
@@ -96,7 +99,8 @@ interface HostSession {
   error?: string
   queue: QueuedMessageItem[]
   pendingPermissions: Map<string, {
-    resolve: (v: boolean) => void
+    /** 回给 loop 的审批结果：带范围，loop 才知道要不要记会话级放行 */
+    resolve: (v: PermissionApproval) => void
     timer: NodeJS.Timeout
     event: AgentEvent
     /** 审批原文：留痕与「本会话允许」都要用它，光有渲染好的 preview 字符串不够 */
@@ -288,6 +292,13 @@ export class AgentSessionManager {
             void this.store
               .updateMessage(...messageUpdateArgs(next))
               .catch((err) => console.error('[agent-host] updateMessage failed:', err))
+            // 回滚快照三列不在这份编码里（dbUpdateMessage 是位置参数签名），走增量补丁通道
+            const patch = messageRewindPatch(next)
+            if (patch) {
+              void this.store
+                .patchMessage(msgId, patch as never)
+                .catch((err) => console.error('[agent-host] patchMessage(rewind) failed:', err))
+            }
             // 流式正文改走 stream.delta：updateMessage 携带的是「已累计的全文」，
             // 按 20fps 把全文跨进程推一遍是 O(n²) 的字节量（4000 字回答能推到兆级）。
             // 只有纯正文、且确为前缀延长时才发增量；其余（思考块、收尾覆盖、改写）仍走全量，
@@ -381,6 +392,22 @@ export class AgentSessionManager {
       skills: {
         catalog: () => cmd.skillCatalog ?? [],
       },
+      // 变更前快照：正文经 ipc 门面落进 userData/checkpoints（宿主桥接直调 handler，零往返），
+      // 索引回到 loop 挂在本轮锚点用户消息上。分类规则与渲染层共用 checkpoint-recorder。
+      checkpoint: {
+        save: (sid, mutation) => saveFileMutation(sid, mutation),
+      },
+      // Agent 动作能力开关：主进程有一份独立的 toolRegistry 单例，必须在这里同样注入一次，
+      // 否则宿主模式下这些工具对模型不可见，而渲染层那边却是开着的
+      ...(cmd.settings
+        ? (() => {
+            toolRegistry.setAgentActionCapabilities({
+              browser: cmd.settings.browserUseEnabled === true,
+              computer: cmd.settings.computerUseEnabled === true,
+            })
+            return {}
+          })()
+        : {}),
       env: {
         platform: process.platform,
         osDescription: describeOs(),
@@ -388,6 +415,13 @@ export class AgentSessionManager {
         isDev: !isPackaged(),
         homeDir: () => os.homedir(),
         readFile: (path) => fs.readFile(path, 'utf-8'),
+        readImageAsDataUrl: async (path, mimeType) => {
+          try {
+            return `data:${mimeType || 'image/png'};base64,${(await fs.readFile(path)).toString('base64')}`
+          } catch {
+            return null
+          }
+        },
         runShell: (command, cwd) => ipc.executeCommandWithShell(command, cwd, 'cmd'),
         buildMemoryPrompt: (workingDir, homeDir) => buildMemoryPrompt(workingDir, homeDir),
       },
@@ -408,17 +442,17 @@ export class AgentSessionManager {
    * 但"拒绝"不是唯一的静默路径——批过一次的目标进会话放行集合，后续直接批准，
    * 否则无人看管的后台 run 会一次次撞上 120s 超时被拒。
    */
-  private requestPermission(s: HostSession, request: AgentPermissionRequest, mode: AgentSettings['approvalMode']): Promise<boolean> {
+  private requestPermission(s: HostSession, request: AgentPermissionRequest, mode: AgentSettings['approvalMode']): Promise<PermissionApproval> {
     const sessionId = s.sessionId
     const preview = buildPermissionPreview(request.tool, request.args, { workingDir: request.workingDir })
     if (s.sessionGrants.has(preview.grantKey)) {
       console.log(`[agent-host] 会话级放行命中：${request.tool} ${preview.target}`)
-      return Promise.resolve(true)
+      return Promise.resolve({ approved: true, scope: 'session' })
     }
     if (!this.hasLiveWindow()) {
       console.warn('[agent-host] 无可用窗口，危险操作按拒绝处理（fail-closed）:', request.title)
       this.writeAudit(s, request, 'deny')
-      return Promise.resolve(false)
+      return Promise.resolve({ approved: false, scope: 'once' })
     }
     const requestId = makeId()
     const event: AgentEvent = {
@@ -434,7 +468,7 @@ export class AgentSessionManager {
       workingDir: request.workingDir,
     }
     this.emit(s, event)
-    return new Promise<boolean>((resolve) => {
+    return new Promise<PermissionApproval>((resolve) => {
       const timer = setTimeout(() => {
         if (!s.pendingPermissions.has(requestId)) return
         console.warn(`[agent-host] 审批超时 ${Math.round(PERMISSION_TIMEOUT_MS / 1000)}s，按拒绝处理: ${request.title}`)
@@ -456,7 +490,7 @@ export class AgentSessionManager {
     if (!pending) return
     clearTimeout(pending.timer)
     s.pendingPermissions.delete(requestId)
-    pending.resolve(approved)
+    pending.resolve({ approved, scope })
     if (approved && scope === 'session') s.sessionGrants.add(pending.grantKey)
     const decision: PermissionDecision = approved ? (scope === 'session' ? 'allow_session' : 'allow_once') : 'deny'
     this.writeAudit(s, pending.request, decision)
@@ -500,8 +534,8 @@ export class AgentSessionManager {
     })
   }
 
-  /** 渲染层 → 宿主的指令入口。返回值只表示是否受理，运行结果一律走事件。 */
-  async handleCommand(cmd: AgentCommand, meta: { remote?: boolean } = {}): Promise<{ ok: boolean; error?: string }> {
+  /** 渲染层 → 宿主的指令入口。返回值只表示是否受理，运行结果一律走事件（rewind 两条例外：同步回计划/结果）。 */
+  async handleCommand(cmd: AgentCommand, meta: { remote?: boolean } = {}): Promise<AgentCommandResult> {
     // 远程通道（WebUI /api/invoke 传 event=null）可回执提问，必须留痕便于事后追责
     if (meta.remote && cmd.type === 'question.resolve') {
       console.log(`[agent-host][audit] remote question.resolve session=${cmd.sessionId} request=${cmd.requestId}`)
@@ -510,6 +544,11 @@ export class AgentSessionManager {
     // 但不能替本地用户点头——否则 token 泄漏就等同于「攻击者自批自跑」。
     if (meta.remote && cmd.type === 'permission.resolve') {
       return { ok: false, error: 'approval-local-only' }
+    }
+    // 撤回/回滚同样是本地专属：它会删消息、删文件，远程持 token 者不该有这个权力。
+    // agent:command 目前在远程黑名单里，这道门是给「以后有人放开那扇门」准备的第二层。
+    if (meta.remote && (cmd.type === 'rewind.apply' || cmd.type === 'rewind.preview')) {
+      return { ok: false, error: 'rewind-local-only' }
     }
     const s = this.session(cmd.sessionId)
     switch (cmd.type) {
@@ -562,9 +601,73 @@ export class AgentSessionManager {
       case 'manual.compact':
         void this.manualCompact(s, cmd.instructions)
         return { ok: true }
+      case 'rewind.preview':
+        return this.rewind(s, cmd.anchorMessageId, cmd.scope, false)
+      case 'rewind.apply':
+        return this.rewind(s, cmd.anchorMessageId, cmd.scope, true)
       default:
         return { ok: false, error: 'unknown-command' }
     }
+  }
+
+  /**
+   * 消息撤回 / 改动回滚（宿主是唯一写者）。
+   *
+   * 为什么必须走宿主而不是渲染层本地删：宿主持有 messages 镜像与 500 条事件环，
+   * 渲染层直接 dbDeleteMessagesFrom 之后，一次重连就会把已删的消息整批回放回来。
+   * 成功后统一广播 resync，让渲染层整会话重拉 —— 与 compact 同一套收口。
+   */
+  private async rewind(
+    s: HostSession,
+    anchorMessageId: string,
+    scope: RewindScope,
+    apply: boolean
+  ): Promise<AgentCommandResult> {
+    const sessionId = s.sessionId
+    const io = buildRewindIo(sessionId, {
+      addNoticeRow: async (message) => {
+        await this.store.addMessage(messageToRow(message, sessionId) as never)
+        s.messages.set(message.id, message)
+      },
+    })
+
+    if (apply) {
+      const outcome = await executeRewind(io, {
+        // 交给执行器在抢占之后重读：run 收尾时还会落几条消息，截断点必须看得见它们
+        getMessages: () => this.loadMessages(sessionId),
+        anchorMessageId,
+        scope,
+        // 运行中的会话必须先确实停下：截断一个还在被写历史的锚点是未定义行为
+        abortActiveRun: async () => {
+          if (!s.run) return true
+          s.run.controller.abort()
+          void ipc.cancelSessionCommands(sessionId).catch(() => { /* 主进程未注册该 handler 时无害 */ })
+          for (let i = 0; i < 200 && s.run; i++) await new Promise((r) => setTimeout(r, 50))
+          return !s.run
+        },
+      })
+      if (outcome.ok) {
+        if (scope !== 'workspace') s.messages.clear()
+        // 刻意不清 ctx.readFiles：本项目的过期检测是**内容比对**（见 tool-registry 的 staleness 注释），
+        // 回滚把文件还原成正好被读过的那份内容，保留缓存与保留事实是一致的；
+        // 而本轮中途读到的那些版本已经对不上，会被同一条检测正确拒绝。
+        // 渲染层宿主没有这条清理路径，两种模式必须同构，所以两边都不清。
+        this.emit(s, { type: 'resync', sessionId, reason: `rewind:${scope}` })
+      }
+      return { ok: outcome.ok, error: outcome.error, outcome }
+    }
+
+    const messages = await this.loadMessages(sessionId)
+    const fromIndex = messages.findIndex((m) => m.id === anchorMessageId)
+    if (fromIndex < 0) return { ok: false, error: 'no-checkpoint' }
+    const plan = await buildRewindPlan({
+      messages,
+      fromIndex,
+      scope,
+      readFile: io.readFile,
+      readSnapshot: io.readSnapshot,
+    })
+    return { ok: true, plan }
   }
 
   private setQueue(s: HostSession, items: QueuedMessageItem[]): void {

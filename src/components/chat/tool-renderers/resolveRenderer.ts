@@ -30,6 +30,7 @@ const REGISTRY: Record<string, ToolRenderer> = {
   web_fetch: lazy(() => import('./WebFetchRenderer')),
   app: lazy(() => import('./AppRenderer')),
   mcp: lazy(() => import('./McpRenderer')),
+  agentAction: lazy(() => import('./AgentActionRenderer')),
 }
 
 const MCP_PREFIX = 'mcp__'
@@ -41,5 +42,6 @@ export function resolveRenderer(name: string): ToolRenderer | undefined {
   if (isRenderedByUnifiedEntry(name)) return undefined
   if (name.startsWith(MCP_PREFIX)) return REGISTRY.mcp
   if (name.startsWith(APP_PREFIX)) return REGISTRY.app
+  if (name.startsWith('browser_') || name.startsWith('computer_')) return REGISTRY.agentAction
   return REGISTRY[name]
 }

@@ -3,7 +3,10 @@ import { slugify } from './memory'
 import { HARNESS_MODE_CONTENT } from './harness-modes'
 import { APP_TOOLS, executeAppTool } from './app-tools'
 import { SCHEDULE_TOOLS, SCHEDULE_TOOL_NAME, executeScheduledTaskTool } from './scheduled-task-tool'
-import type { ToolDefinition, MemoryEntry, TodoItem, UserQuestion, ReadFileSnapshot, HarnessMode } from '../types/agent'
+import { agentActionFamily } from './agent-actions'
+import { BROWSER_TOOLS, executeBrowserTool } from './browser-tools'
+import { COMPUTER_TOOLS, executeComputerTool } from './computer-tools'
+import type { ToolDefinition, MemoryEntry, TodoItem, UserQuestion, ReadFileSnapshot, HarnessMode, FileMutation, ToolResultImage } from '../types/agent'
 import type { McpToolInfo } from '../types/ipc'
 
 // ── Shared limits（与工具描述中的数值严格一致，改动时两处同步）──
@@ -340,10 +343,32 @@ export interface ToolContext {
   workingDir?: string
   homeDir?: string
   sessionId?: string
+  /**
+   * 正在执行的那个对话的**标题**。给浮层副标题用：
+   * AI 在操控用户桌面时，用户需要能追责「谁在动我的电脑」，而主进程查不到会话标题。
+   */
+  sessionLabel?: string
   readFileState?: Map<string, ReadFileSnapshot>
   spawnSubAgent?: (agentType: string, prompt: string) => Promise<string>
   requestUserInput?: (questions: UserQuestion[]) => Promise<Record<string, string[]>>
   updateTodoList?: (items: TodoItem[]) => void
+  /**
+   * 上报一张视觉观测（Browser / Computer Use 截图）。
+   *
+   * 走旁路而不是改 execute 的返回类型：execute 承诺回 `Promise<string>`，那是给模型看的**文字**答案，
+   * 二十多个既有工具的 return 语句不该为此整体改写成对象。截图是这次调用的**另一路产物**，
+   * 由工具执行时上报、宿主收集，最终挂到 ToolResult.images 上。
+   * 只存磁盘路径不存 base64（ToolResult 会落库），协议层发请求前才读回成 data URL。
+   */
+  recordImage?: (image: ToolResultImage) => void
+  /** 本次调用的 toolCallId：快照索引要按它回溯到具体的工具调用 */
+  toolCallId?: string
+  /**
+   * 写文件成功后的变更前快照回调（消息撤回 / 改动回滚的采集点）。
+   * 只有 write_file / search_replace 会调用；正文不落消息，由宿主落盘并换回索引。
+   * 失败/超限时回调内部自行记缺口，不反过来影响这次写入的结果。
+   */
+  recordFileMutation?: (mutation: FileMutation) => Promise<void>
 }
 
 /** Escape a string for safe interpolation into PowerShell double-quoted strings.
@@ -674,12 +699,23 @@ function computeEditDiff(path: string, oldText: string, newText: string): EditDi
 class ToolRegistry {
   private builtinDefinitions: ToolDefinition[]
   private mcpDefinitions: ToolDefinition[] = []
+  /** 能力开关快照：由 setAgentActionCapabilities 注入。关闭时这些工具不进模型可见列表 */
+  private agentActionsEnabled = { browser: false, computer: false }
 
   constructor() {
     // appTools 放在最后：自我管控工具与内建文件/命令工具语义不同（只读、宿主内生），
     // 排末尾让模型先按能力族浏览，最后才是「问宿主自己」的辅助能力。
     // 定时任务工具排在交互工具之后：它写的是宿主应用的状态，且落点同样是「待用户确认」。
-    this.builtinDefinitions = [...fileTools, ...shellTools, ...webTools, ...memoryTools, ...agentTools, ...interactiveTools, ...SCHEDULE_TOOLS, ...APP_TOOLS]
+    this.builtinDefinitions = [...fileTools, ...shellTools, ...webTools, ...memoryTools, ...agentTools, ...interactiveTools, ...SCHEDULE_TOOLS, ...BROWSER_TOOLS, ...COMPUTER_TOOLS, ...APP_TOOLS]
+  }
+
+  /**
+   * 注入 Browser/Computer Use 能力开关。
+   * 关闭时不是「留着工具、执行时报错」，而是**从定义里摘掉** ——
+   * 模型看不到的工具不会浪费 token，也不会试探性调用；真要用时先在设置里打开。
+   */
+  setAgentActionCapabilities(caps: { browser: boolean; computer: boolean }): void {
+    this.agentActionsEnabled = { ...this.agentActionsEnabled, ...caps }
   }
 
   /** 注入当前已连接 MCP 服务器提供的工具（mcp-store 同步后调用） */
@@ -700,13 +736,27 @@ class ToolRegistry {
    * 按会话锁定的 harness 模式取工具定义：兼容模式对内置工具做过滤/描述覆盖
    * （见 harness-modes.ts，工具名与实现不变）。MCP 工具默认保留；仅
    * dsh-minimal 例外——官方 minimal 组合不挂任何 MCP 插件，故一并裁剪。
+   *
+   * Agent 动作工具（browser_/computer_）在这里统一按开关裁剪。
+   * 放在这一层而不是模型请求前另做一遍，是因为兼容模式的 transformTools 也是
+   * 在这里跑的：两处过滤要共用同一个出口，否则某个 harness 模式会把它们漏回来。
    */
   getDefinitionsForMode(mode: HarnessMode): ToolDefinition[] {
-    if (mode === 'default') return this.definitions
+    const visible = this.builtinDefinitions.filter((t) => this.isAgentActionDefinitionVisible(t.name))
+    if (mode === 'default') {
+      return this.mcpDefinitions.length === 0 ? visible : [...visible, ...this.mcpDefinitions]
+    }
     const content = HARNESS_MODE_CONTENT[mode]
     const transform = content.transformTools
-    const builtins = transform ? transform(this.builtinDefinitions) : this.builtinDefinitions
+    const builtins = transform ? transform(visible) : visible
     return content.includeMcpTools === false ? builtins : [...builtins, ...this.mcpDefinitions]
+  }
+
+  private isAgentActionDefinitionVisible(name: string): boolean {
+    const family = agentActionFamily(name)
+    if (family === 'browser') return this.agentActionsEnabled.browser
+    if (family === 'computer') return this.agentActionsEnabled.computer
+    return true
   }
 
   /** Execute a tool by name */
@@ -753,11 +803,33 @@ class ToolRegistry {
         try {
           // 读取旧内容供 diff 元数据（新文件则为空串）
           let oldContent = ''
-          try { oldContent = await ipc.readFile(path) } catch { /* 新文件 */ }
+          let oldReadable = true
+          try { oldContent = await ipc.readFile(path) } catch { /* 新文件 */ oldReadable = false }
+          // 存在性必须在 writeFile 之前问：写完之后文件当然存在，那一问就把「本轮新建」
+          // 错判成「改过已有文件」，快照侧只能记成 unreadable 缺口 —— 新建文件从此永不可回滚，
+          // 而且整轮的带文件撤回会被静默挡掉。
+          let existedBefore = oldReadable
+          if (!oldReadable) {
+            // 读不出来可能是「本来就没有」也可能是「存在但读不了」；探测也失败时按存在处理，
+            // 宁可记一条缺口也不要把已存在的文件当新建的回删掉。
+            try { existedBefore = await ipc.fileExists(path) } catch { existedBefore = true }
+          }
+          const beforeForSnapshot = existedBefore && oldReadable ? oldContent : null
           await ipc.writeFile(path, content)
           // 写入后同步 read 快照：后续 search_replace 不会误判「文件已被外部修改」
           if (ctx?.readFileState) {
             ctx.readFileState.set(path, { content, timestamp: Date.now() })
+          }
+          // 变更前快照（撤回/回滚的采集点）：写在成功之后，失败的调用不留孤儿正文
+          if (ctx?.recordFileMutation) {
+            await ctx.recordFileMutation({
+              toolCallId: ctx.toolCallId ?? '',
+              toolName: 'write_file',
+              path,
+              existedBefore,
+              before: beforeForSnapshot,
+              after: content,
+            })
           }
           const diffMeta = computeEditDiff(path, oldContent, content)
           const label = oldContent ? 'File written' : 'File created'
@@ -871,6 +943,19 @@ class ToolRegistry {
           // 写入后同步 read 快照，保证连续编辑的过期检测基于最新内容
           if (ctx?.readFileState) {
             ctx.readFileState.set(path, { content: finalResult, timestamp: Date.now() })
+          }
+
+          // 变更前快照：存 rawOriginal（写盘前的原始字节，含 BOM 与原行尾），
+          // 不是归一化后的 normalizedOriginal —— 回滚还原的是磁盘上的原样。
+          if (ctx?.recordFileMutation) {
+            await ctx.recordFileMutation({
+              toolCallId: ctx.toolCallId ?? '',
+              toolName: 'search_replace',
+              path,
+              existedBefore: true,
+              before: rawOriginal,
+              after: finalResult,
+            })
           }
 
           const diff = generateDiff(normalizedOriginal, result)
@@ -1181,6 +1266,25 @@ class ToolRegistry {
         return executeScheduledTaskTool(SCHEDULE_TOOL_NAME, args, ctx)
       }
       default: {
+        // Agent 动作工具（browser_* / computer_*）：同样不占 switch case 位，实现分别在
+        // browser-tools.ts / computer-tools.ts，未命中返回 null 继续往下走。
+        // 执行侧再查一次开关：可见性只挡住「模型主动调用」，挡不住重放旧会话里
+        // 已写好的调用、兼容模式漏网等情况。用户关了就是关了，fail-closed。
+        const family = agentActionFamily(name)
+        if (family === 'browser' && !this.agentActionsEnabled.browser) {
+          return `Error: ${name} is not available. Turn on "Browser use" in Settings to let the agent control the built-in browser.`
+        }
+        if (family === 'computer' && !this.agentActionsEnabled.computer) {
+          return `Error: ${name} is not available. Turn on "Computer use" in Settings to let the agent control this computer.`
+        }
+        if (family === 'browser') {
+          const browserResult = await executeBrowserTool(name, args ?? {}, ctx)
+          if (browserResult !== null) return browserResult
+        }
+        if (family === 'computer') {
+          const computerResult = await executeComputerTool(name, args ?? {}, ctx)
+          if (computerResult !== null) return computerResult
+        }
         // 自我管控工具（app_*）：全部只读，实现在 app-tools.ts。这里不占 switch case 位，
         // 未命中时返回 null，落到下面的 mcp__ / unknown 分支。
         const appResult = await executeAppTool(name, args ?? {}, ctx)

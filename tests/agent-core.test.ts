@@ -1,4 +1,4 @@
-/**
+﻿/**
  * agent-core 假端口测试（批次 B · P2）
  *
  * 用假的 AgentPorts（各端口均为 vi.fn / 内存实现）驱动 runReactLoop /
@@ -30,7 +30,7 @@ import {
 import { createSeqCounter } from '../src/agent-core/protocol'
 import { ZCODE_SYSTEM_PROMPT } from '../src/lib/harness-prompts/zcode'
 import { SessionContext, SessionContextStore } from '../src/agent-core/session-context'
-import type { AgentPorts, AgentSettings, AgentStorePort } from '../src/agent-core/ports'
+import type { AgentPorts, AgentSettings, AgentStorePort, PermissionApproval } from '../src/agent-core/ports'
 import type { SkillCatalogEntry } from '../src/lib/skill-catalog'
 import type {
   AgentDefinition,
@@ -113,6 +113,8 @@ function makeSettings(overrides: Partial<AgentSettings> = {}): AgentSettings {
     maxInputTokens: 184000,
     agentsMdEnabled: false,
     claudeMdCompat: true,
+    browserUseEnabled: false,
+    computerUseEnabled: false,
     ...overrides,
   }
 }
@@ -189,7 +191,7 @@ function makePorts(opts: {
   const ui = makeUiPort()
   // 带形参声明：断言「审批请求长什么样」时要能从 mock 调用记录里取出实参
   const permission = {
-    confirm: vi.fn(async (_request: Parameters<AgentPorts['permission']['confirm']>[0]) => true),
+    confirm: vi.fn(async (_request: Parameters<AgentPorts['permission']['confirm']>[0]): Promise<PermissionApproval> => ({ approved: true, scope: 'once' })),
   }
   const goal = {
     get: vi.fn(() => opts.goalState),
@@ -209,6 +211,7 @@ function makePorts(opts: {
     isDev: false,
     homeDir: () => 'C:\\Users\\tester',
     readFile: vi.fn(async () => ''),
+    readImageAsDataUrl: vi.fn(async () => null),
     runShell: vi.fn(async () => ({ exitCode: 1, stdout: '' })), // git 探测恒为非仓库
     buildMemoryPrompt: vi.fn(async () => '[memory-prompt]'),
   }
@@ -627,7 +630,7 @@ describe('runReactLoop · 权限与运行时防护', () => {
       settings: { approvalMode: 'manual' },
       turns: [toolTurn('execute_command', { command: 'rm -rf /tmp/x' }), textTurn('done')],
     })
-    permission.confirm.mockResolvedValueOnce(false)
+    permission.confirm.mockResolvedValueOnce({ approved: false, scope: 'once' })
     await runLoop(ports)
     expect(permission.confirm).toHaveBeenCalledTimes(1)
     expect(tools.execute).not.toHaveBeenCalled()
@@ -799,19 +802,20 @@ describe('runReactLoop · 权限与运行时防护', () => {
     expect(toolMsgs[2].content).toContain('already been made repeatedly')
   })
 
-  it('轮次上限：工具执行满 100 轮后注入收尾指令并终止', async () => {
+  it('轮次上限：工具执行用尽后注入收尾指令并终止', async () => {
     const capTurn: Turn = (call) =>
       [sse(toolCallDelta(0, `tc${call}`, 'read_file', JSON.stringify({ path: `a${call}.txt` }))), sse(finishChunk('stop'))]
     const { ports, tools, session } = makePorts({ turns: [capTurn] })
     await runLoop(ports)
-    // 每轮参数不同（绕过 doom-loop），恰好执行 100 次
-    expect(tools.execute).toHaveBeenCalledTimes(100)
+    // 恰好执行到上限为止。上限跟 loop.ts 的 MAX_REACT_ITERATIONS 走，
+    // 别把这个数字写死 —— 写死等于把旧上限永久锁进测试
+    expect(tools.execute).toHaveBeenCalledTimes(500)
     // 收尾轮拒绝执行 + 兜底终止消息
     const finalAssistant = session.messages.at(-1)!
     expect(finalAssistant.role).toBe('assistant')
     expect(finalAssistant.content.length).toBeGreaterThan(0)
     expect(finalAssistant.toolCalls).toBeUndefined()
-  })
+  }, 120_000)
 })
 
 // ═══════════════ runReactLoop · 重试与恢复 ═══════════════
@@ -1078,5 +1082,188 @@ describe('runReactLoop · goal 评估闭环', () => {
     const finalAssistant = session.messages.find((m) => m.role === 'assistant')!
     expect(finalAssistant.content).toBe('final report')
     expect(session.messages.some((m) => m.goalEvent?.verdict === 'achieved')).toBe(true)
+  })
+})
+
+/**
+ * Agent 动作的审批打扰次数（端到端跑真循环）。
+ *
+ * 这是用户实际投诉的那件事：「每一步都要弹窗」。一个典型浏览任务是
+ * navigate → snapshot → click → type → click，用真循环跑一遍并数 confirm 调用次数，
+ * 比任何设计注释都有说服力。
+ */
+describe('runReactLoop · Agent 动作审批粒度', () => {
+  const BROWSER_SETTINGS = { browserUseEnabled: true, computerUseEnabled: false, approvalMode: 'auto' } as const
+
+  /** 一次典型任务：3 个写动作 + 2 个只读动作交错 */
+  const browserTask = () => [
+    toolTurn('browser_navigate', { url: 'https://example.com' }, 'c1'),
+    toolTurn('browser_snapshot', {}, 'c2'),
+    toolTurn('browser_click', { ref: 'e1' }, 'c3'),
+    toolTurn('browser_snapshot', {}, 'c4'),
+    toolTurn('browser_type', { ref: 'e2', text: 'hello' }, 'c5'),
+    toolTurn('browser_click', { ref: 'e3' }, 'c6'),
+    textTurn('done'),
+  ]
+
+  it('选「本会话始终允许」→ 整个任务只弹一次，五个动作全部执行', async () => {
+    const { ports, permission, tools } = makePorts({ settings: BROWSER_SETTINGS, turns: browserTask() })
+    permission.confirm.mockResolvedValue({ approved: true, scope: 'session' })
+    await runLoop(ports)
+    expect(permission.confirm).toHaveBeenCalledTimes(1)
+    const executed = vi.mocked(tools.execute).mock.calls.map((c) => c[0])
+    expect(executed).toEqual([
+      'browser_navigate', 'browser_snapshot', 'browser_click', 'browser_snapshot', 'browser_type', 'browser_click',
+    ])
+  })
+
+  it('只读动作一次都不问（截图 / 读页面 / 纯导航）', async () => {
+    const { ports, permission, tools } = makePorts({
+      settings: BROWSER_SETTINGS,
+      turns: [
+        toolTurn('browser_navigate', { url: 'https://example.com' }, 'c1'),
+        toolTurn('browser_snapshot', {}, 'c2'),
+        toolTurn('browser_screenshot', {}, 'c3'),
+        toolTurn('browser_evaluate', { expression: 'document.title' }, 'c4'),
+        toolTurn('browser_wait', { selector: '.done' }, 'c5'),
+        textTurn('done'),
+      ],
+    })
+    await runLoop(ports)
+    // 整个任务零打扰
+    expect(permission.confirm).not.toHaveBeenCalled()
+    expect(vi.mocked(tools.execute)).toHaveBeenCalledTimes(5)
+  })
+
+  it('选「允许一次」→ 只放行那一个动作，下一个写动作重新问（这是用户明确选择的行为）', async () => {
+    const { ports, permission, tools } = makePorts({ settings: BROWSER_SETTINGS, turns: browserTask() })
+    permission.confirm.mockResolvedValue({ approved: true, scope: 'once' })
+    await runLoop(ports)
+    // 3 个写动作 → 3 次询问；2 个只读动作不问
+    expect(permission.confirm).toHaveBeenCalledTimes(3)
+    expect(vi.mocked(tools.execute).mock.calls.map((c) => c[0])).toContain('browser_type')
+  })
+
+  it('拒绝后动作不执行，且不留下会话级放行（下一轮还会再问）', async () => {
+    const { ports, permission, tools } = makePorts({ settings: BROWSER_SETTINGS, turns: browserTask() })
+    permission.confirm.mockResolvedValue({ approved: false, scope: 'once' })
+    await runLoop(ports)
+    const executed = vi.mocked(tools.execute).mock.calls.map((c) => c[0])
+    expect(executed).not.toContain('browser_click')
+    expect(executed).not.toContain('browser_type')
+    // 只读部分照常
+    expect(executed).toContain('browser_snapshot')
+  })
+
+  it('能力开关关着 → 一次都不问，全部拒绝', async () => {
+    const { ports, permission, tools } = makePorts({
+      settings: { browserUseEnabled: false, approvalMode: 'auto' },
+      turns: browserTask(),
+    })
+    await runLoop(ports)
+    expect(permission.confirm).not.toHaveBeenCalled()
+    const executed = vi.mocked(tools.execute).mock.calls.map((c) => c[0])
+    expect(executed).not.toContain('browser_click')
+  })
+
+  it('桌面操控同样只弹一次', async () => {
+    const { ports, permission, tools } = makePorts({
+      settings: { browserUseEnabled: false, computerUseEnabled: true, approvalMode: 'auto' },
+      turns: [
+        toolTurn('computer_screenshot', {}, 'c1'),
+        toolTurn('computer_click', { x: 10, y: 20 }, 'c2'),
+        toolTurn('computer_type', { text: 'hi' }, 'c3'),
+        toolTurn('computer_key', { key: 'Enter' }, 'c4'),
+        textTurn('done'),
+      ],
+    })
+    permission.confirm.mockResolvedValue({ approved: true, scope: 'session' })
+    await runLoop(ports)
+    expect(permission.confirm).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(tools.execute).mock.calls.map((c) => c[0])).toEqual([
+      'computer_screenshot', 'computer_click', 'computer_type', 'computer_key',
+    ])
+  })
+
+  it('审批档位 full → 一次都不问（用户已声明完全信任）', async () => {
+    const { ports, permission, tools } = makePorts({
+      settings: { browserUseEnabled: true, approvalMode: 'full' },
+      turns: browserTask(),
+    })
+    await runLoop(ports)
+    expect(permission.confirm).not.toHaveBeenCalled()
+    expect(vi.mocked(tools.execute).mock.calls.map((c) => c[0])).toContain('browser_type')
+  })
+})
+
+/**
+ * 轮次上限收尾路径（用户实测：「AI 执行到后面，系统突然发条指令让它停下来」）
+ *
+ * 那条指令就是 MAX_STEPS_MESSAGE。问题不在「到限额」本身，而在它被当成一条
+ * role:'user' 的真实用户消息**持久化**了（原 `ports.store.addMessage(sessionId, wrapMsg)`）：
+ *   1. 用户在对话记录里看到一条自己没发过的指令；
+ *   2. 更糟的是下一次运行会把这坨历史从库里读出来喂给模型 —— 模型读到的是
+ *      「用户刚要求我立刻总结、不要调工具」，于是之后每轮都被幽灵指令压着不干活。
+ *      一次到限额会持续污染这个会话的后面所有轮次。
+ *
+ * 正确做法参照同文件 goal 模式（addGoalCard + collapseIntermediateMessages + return）：
+ * 终止状态走 UI 状态，不伪装成用户输入。收尾指令只进本轮内存。
+ */
+describe('runReactLoop · 轮次上限收尾', () => {
+  const MAX_STEPS_MARKER = 'Maximum tool-call turns reached'
+
+  it('跑到上限时，收尾指令绝不进持久化存储', async () => {
+    // 600 轮一直要工具，必然撞上限；第 601 轮给纯文本收尾
+    const turns: Turn[] = Array.from({ length: 600 }, (_, i) => toolTurn('read_file', { path: `f${i}.txt` }, `tc${i}`))
+    turns.push(textTurn('done'))
+    const { ports, addMessage, session } = makePorts({ turns })
+
+    const ctx = new SessionContext(ports.sessionId)
+    await runReactLoop(ports, ctx, [userMsg()], new AbortController(), undefined)
+
+    const polluted = session.messages.filter(
+      (m) => m.role === 'user' && m.content.includes(MAX_STEPS_MARKER),
+    )
+    expect(polluted, '不该有任何假用户消息落库').toEqual([])
+    expect(addMessage).not.toHaveBeenCalledWith('s1', expect.objectContaining({
+      role: 'user',
+      content: expect.stringContaining(MAX_STEPS_MARKER),
+    }))
+  }, 120_000)
+
+  it('收尾指令仍作为「本轮输入」交给模型（不能连总结的机会都不给）', async () => {
+    const turns: Turn[] = Array.from({ length: 600 }, (_, i) => toolTurn('read_file', { path: `f${i}.txt` }, `tc${i}`))
+    turns.push(textTurn('final summary'))
+    const { ports, model } = makePorts({ turns })
+
+    const ctx = new SessionContext(ports.sessionId)
+    await runReactLoop(ports, ctx, [userMsg()], new AbortController(), undefined)
+
+    const bodies = vi.mocked(model.stream).mock.calls.map((c) => c[0] as { messages?: unknown })
+    expect(JSON.stringify(bodies.at(-1)?.messages ?? [])).toContain(MAX_STEPS_MARKER)
+  }, 120_000)
+
+  it('上限足够高：150 轮不会被掐断（旧的 100 正好卡在这类任务上）', async () => {
+    const turns: Turn[] = Array.from({ length: 150 }, (_, i) => toolTurn('read_file', { path: `f${i}.txt` }, `tc${i}`))
+    turns.push(textTurn('still working'))
+    const { ports, tools, model } = makePorts({ turns })
+
+    const ctx = new SessionContext(ports.sessionId)
+    await runReactLoop(ports, ctx, [userMsg()], new AbortController(), undefined)
+
+    expect(vi.mocked(tools.execute), '150 轮都该真的执行').toHaveBeenCalledTimes(150)
+    const bodies = vi.mocked(model.stream).mock.calls.map((c) => c[0] as { messages?: unknown })
+    expect(JSON.stringify(bodies.at(-1)?.messages ?? [])).not.toContain(MAX_STEPS_MARKER)
+  }, 120_000)
+
+  it('源码层面：子 Agent 的收尾指令也不进 appendSubAgentMessage', async () => {
+    const fs = await import('fs')
+    const src = fs.readFileSync(new URL('../src/agent-core/loop.ts', import.meta.url), 'utf8')
+    const block = src.slice(
+      src.indexOf('// ── 轮次上限收尾（与主 agent 一致）'),
+      src.indexOf('const partialResult'),
+    )
+    expect(block).not.toMatch(/appendSubAgentMessage\([^)]*wrapMsg/)
+    expect(block).toContain('MAX_STEPS_MESSAGE')
   })
 })

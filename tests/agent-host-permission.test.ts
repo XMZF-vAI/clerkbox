@@ -31,6 +31,8 @@ vi.mock('../electron/api-proxy', () => ({
 vi.mock('../src/lib/tool-registry', () => ({
   toolRegistry: {
     getDefinitionsForMode: () => [],
+    // 宿主每次 run 都会注入一次 Agent 动作能力开关；这里只需要它存在、不抛
+    setAgentActionCapabilities: () => {},
     execute: vi.fn(async () => 'tool ok'),
     findAgent: async () => null,
   },

@@ -3,6 +3,7 @@ import ChatPage from './components/chat/ChatPage'
 import Sidebar from './components/layout/Sidebar'
 import TitleBar from './components/layout/TitleBar'
 import WorkbenchPanel from './components/workbench/WorkbenchPanel'
+import { AgentActionBridge } from './components/workbench/AgentActionBridge'
 import { useSettingsStore, migrateProvidersIfNeeded, hydrateProviderApiKeys } from './stores/settings-store'
 import { useChatStore } from './stores/chat-store'
 import { initMcp } from './stores/mcp-store'
@@ -172,6 +173,7 @@ export default function App() {
           {/* VIBE 模式下工作台走玻璃拟态皮肤；面板自身控制显隐 */}
           <WorkbenchPanel vibe />
         </main>
+        <AgentActionBridge />
         {/* 就近 Suspense：控件浮层首次挂起不拖垮整屏 */}
         <Suspense fallback={null}><VibeControls /></Suspense>
         {/* 就近 Suspense：设置页懒加载挂起时只缺浮层，主界面不闪白 */}
@@ -233,6 +235,8 @@ export default function App() {
             </div>
           </main>
         </div>
+        {/* Agent 动作桥接（浏览器 / 桌面）：只做主进程与渲染层之间的接线，无 UI */}
+        <AgentActionBridge />
         {/* 就近 Suspense：设置页懒加载挂起时只缺浮层，主界面不闪白 */}
         <Suspense fallback={null}>
           {showSettings && (

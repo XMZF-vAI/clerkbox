@@ -33,6 +33,7 @@ import { useInteractiveStore, useTodoStore } from '../stores/interactive-store'
 import { useGoalStore } from '../stores/goal-store'
 import { buildRelevantSkillReminder } from '../lib/skill-matcher'
 import { makeId, runReactLoop } from '../agent-core/loop'
+import { saveFileMutation } from '../lib/checkpoint-recorder'
 import { SessionContextStore } from '../agent-core/session-context'
 import type { AgentPorts } from '../agent-core/ports'
 
@@ -100,6 +101,8 @@ export function useAgent(sessionId: string) {
     maxInputTokens: s.maxInputTokens,
     agentsMdEnabled: s.agentsMdEnabled,
     claudeMdCompat: s.claudeMdCompat,
+    browserUseEnabled: s.browserUseEnabled,
+    computerUseEnabled: s.computerUseEnabled,
   })))
   // store 动作是稳定引用，逐个 selector 订阅：避免整店订阅导致聊天流式期间
   // （chat-store 每 ~50ms 变更一次）本 hook 及挂载它的 ChatPage 整树重渲染。
@@ -117,6 +120,16 @@ export function useAgent(sessionId: string) {
   /** 手动压缩进行中（/压缩 命令）：输入栏即时反馈 + 锁定，防止压缩期间并发发送 */
   const [isCompacting, setIsCompacting] = useState(false)
   const isCompactingRef = useRef(false)
+
+  // Agent 动作能力（Browser/Computer Use）推给工具注册表：关掉的族不进模型可见的
+  // 工具列表，也进不了执行路径。放 effect 而不是 makePorts 里 —— makePorts 是
+  // useMemo，在渲染期做副作用会破坏 React 的纯渲染假设。
+  useEffect(() => {
+    toolRegistry.setAgentActionCapabilities({
+      browser: settings.browserUseEnabled,
+      computer: settings.computerUseEnabled,
+    })
+  }, [settings.browserUseEnabled, settings.computerUseEnabled])
 
   /** 端口装配：把渲染层的 store / IPC / 工具注册表接成 agent-core 的依赖束。
    *  settings 是本次渲染的快照（与旧实现的闭包捕获语义一致）。 */
@@ -148,8 +161,29 @@ export function useAgent(sessionId: string) {
       compact: (sid, messages, boundaryMessageId) => useChatStore.getState().compactSession(sid, messages, boundaryMessageId),
     },
     permission: {
-      // 渲染层宿主仍走原生确认框：文案由 loop 一并给出，两种模式措辞一致
-      confirm: (request) => ipc.confirmDialog(request.title, request.body),
+      // 渲染层宿主走原生确认框，文案由 loop 一并给出，两种模式措辞一致。
+      confirm: async (request) => {
+        // Agent 动作（浏览器 / 桌面）单独一套三选项：
+        // 一个任务里连续十几个写动作，两按钮框等于每一步都要人点一次，且无处可放
+        // 「以后都别问」。默认项落在「本会话始终允许」上 —— 按一次回车就覆盖整个任务。
+        if (request.reason === 'browser-control' || request.reason === 'computer-control') {
+          const choice = await ipc.confirmDialogWithOptions({
+            title: request.title,
+            message: request.body,
+            buttons: [
+              i18n.t('chat.permission.allowSessionCapability'),
+              i18n.t('chat.permission.allowOnce'),
+              i18n.t('chat.permission.deny'),
+            ],
+            defaultIndex: 0,
+          })
+          if (choice === 0) return { approved: true, scope: 'session' }
+          if (choice === 1) return { approved: true, scope: 'once' }
+          return { approved: false, scope: 'once' }
+        }
+        // 命令执行 / 文件写入：保持既有两按钮语义，不受 Agent 动作需求影响
+        return { approved: await ipc.confirmDialog(request.title, request.body), scope: 'once' }
+      },
     },
     ui: {
       askQuestion: (sid, questions) => useInteractiveStore.getState().requestQuestion(sid, questions),
@@ -172,6 +206,10 @@ export function useAgent(sessionId: string) {
     skills: {
       catalog: () => useSkillsStore.getState().getSkillCatalog(),
     },
+    // 变更前快照：与主进程宿主共用 checkpoint-recorder，分类规则只有一份
+    checkpoint: {
+      save: (sid, mutation) => saveFileMutation(sid, mutation),
+    },
     env: {
       platform: navigator.platform || 'unknown',
       osDescription: getOsDescription(),
@@ -180,6 +218,14 @@ export function useAgent(sessionId: string) {
       isDev: (import.meta as unknown as { env?: { DEV?: boolean } }).env?.DEV ?? false,
       homeDir: () => ipc.homeDir(),
       readFile: (path) => ipc.readFile(path),
+      readImageAsDataUrl: async (path, mimeType) => {
+        try {
+          const { data } = await ipc.readFileBase64(path)
+          return `data:${mimeType || 'image/png'};base64,${data}`
+        } catch {
+          return null
+        }
+      },
       runShell: (command, cwd) => ipc.executeCommandWithShell(command, cwd, 'cmd'),
       buildMemoryPrompt: (workingDir, homeDir) => buildMemoryPrompt(workingDir, homeDir),
     },
@@ -245,6 +291,8 @@ export function useAgent(sessionId: string) {
       const ctx = contextsRef.current.get(sessionId)
       const currentSession = useChatStore.getState().sessions.find((s) => s.id === sessionId)
       ctx.requestWorkingDir = currentSession?.workingDir || currentSession?.defaultWorkDir || ''
+      // 供电脑操控浮层的副标题显示「哪个对话在动手」
+      ctx.sessionTitle = currentSession?.title
       // 记录本次运行的任务工作流模式（/spec /plan /goal；工具权限检查与提示词注入都会读取）。
       // /goal 是会话级目标：设定后跨消息持续生效，后续普通消息也按 goal 模式注入语境。
       if (taskMode === 'goal' && content.trim()) {

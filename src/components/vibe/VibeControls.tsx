@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { LogOut, Settings2, Maximize, Minimize, PanelRight } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useVibeStore } from '../../stores/vibe-store'
-import { useWorkbenchStore } from '../../stores/workbench-store'
+import { useWorkbench } from '../../stores/workbench-store'
 import { useIsMobile } from '../../hooks/use-mobile'
 import VibeMusicPlayer from './VibeMusicPlayer'
 import VibeCustomizeMenu from './VibeCustomizeMenu'
@@ -11,9 +11,7 @@ export default function VibeControls() {
   const { t } = useTranslation()
   const toggleVibeMode = useVibeStore((s) => s.toggleVibeMode)
   // VIBE 模式无标题栏：工作台面板隐藏时提供浮动唤出入口
-  const workbenchVisible = useWorkbenchStore((s) => s.visible)
-  const workbenchWidth = useWorkbenchStore((s) => s.width)
-  const toggleWorkbench = useWorkbenchStore((s) => s.toggleVisible)
+  const { visible: workbenchVisible, width: workbenchWidth, toggleVisible: toggleWorkbench } = useWorkbench()
   const isMobile = useIsMobile()
   // mac：系统红绿灯固定在窗口左上角（trafficLightPosition x:12,y:15，宽约 52px），浮控件需右移避让
   const isMac = window.clerkbox?.platform === 'darwin'

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 宿主运行闭环（批次 B · P4 前置验证）
  *
  * 用真的 AgentSessionManager + 真的 agent-core 循环 + 真的 ipc-client 宿主桥，
@@ -67,6 +67,8 @@ const settings: AgentSettings = {
   activeModelId: undefined,
   agentsMdEnabled: false,
   claudeMdCompat: false,
+  browserUseEnabled: false,
+  computerUseEnabled: false,
 }
 
 function kinds(events: AgentEvent[]): string[] {
