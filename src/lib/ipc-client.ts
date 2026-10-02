@@ -1,4 +1,4 @@
-import type {
+﻿import type {
   AccountStatus,
   AccountSyncDownloadResult,
   AccountSyncKind,
@@ -12,6 +12,15 @@ import type {
   ApiConnConfig,
   FetchedModel,
   FileEntry,
+  GitBranchListResult,
+  GitBranchMutationResult,
+  GitCommitGraphResult,
+  GitCommitResult,
+  GitDiffResult,
+  GitDiffSource,
+  GitIdentity,
+  GitPushResult,
+  GitStatusResult,
   McpServerConfig,
   McpServerStatus,
   McpToolInfo,
@@ -30,7 +39,7 @@ import type {
   WebUIUploadResult,
 } from '../types/ipc'
 import type { MemoryEntry } from '../types/agent'
-import type { AgentCommand, AgentEvent, AgentSnapshot } from '../agent-core/protocol'
+import type { AgentCommand, AgentCommandResult, AgentEvent, AgentSnapshot } from '../agent-core/protocol'
 
 /**
  * 统一 IPC 客户端：双模式运行。
@@ -465,10 +474,17 @@ export const ipc = {
     isElectron ? window.clerkbox.openExternal(url) : (window.open(url, '_blank'), Promise.resolve()),
   confirmDialog: (title: string, message: string): Promise<boolean> =>
     isElectron ? window.clerkbox.confirmDialog(title, message) : Promise.resolve(window.confirm(`${title}\n\n${message}`)),
+  // WebUI 是浏览器页面，没有能力弹三选项的原生框。恒返回 -1（取消）而不是伪造一个
+  // window.confirm 的 Yes/No：宁可让 Agent 动作在远程视图里用不了，也不要给用户
+  // 一个「我以为选的是始终允许、其实是允许一次」的两按钮框
+  confirmDialogWithOptions: (payload: { title: string; message: string; buttons: string[]; defaultIndex: number }): Promise<number> =>
+    isElectron ? window.clerkbox.confirmDialogWithOptions(payload) : Promise.resolve(-1),
   readFile: (path: string): Promise<string> =>
     isElectron ? window.clerkbox.readFile(path) : webInvoke('readFile', [path]),
   writeFile: (path: string, content: string): Promise<void> =>
     isElectron ? window.clerkbox.writeFile(path, content) : webInvoke('writeFile', [path, content]),
+  deleteFile: (path: string): Promise<void> =>
+    isElectron ? window.clerkbox.deleteFile(path) : webInvoke('deleteFile', [path]),
   listDir: (path: string): Promise<FileEntry[]> =>
     isElectron ? window.clerkbox.listDir(path) : webInvoke('listDir', [path]),
   executeCommand: (command: string, cwd?: string, sessionId?: string, timeoutMs?: number): Promise<{ stdout: string; stderr: string; exitCode: number; encodingFallback?: boolean; timedOut?: boolean }> =>
@@ -505,7 +521,7 @@ export const ipc = {
   },
 
   // ── Agent 宿主通道（批次 B · P3 主进程注册，P4 渲染层薄客户端消费）──
-  agentCommand: (cmd: AgentCommand): Promise<{ ok: boolean; error?: string }> =>
+  agentCommand: (cmd: AgentCommand): Promise<AgentCommandResult> =>
     isElectron ? window.clerkbox.agentCommand(cmd) : webInvoke('agent:command', [cmd]),
   agentHostMode: (): Promise<'main' | 'renderer'> =>
     isElectron ? window.clerkbox.agentHostMode() : webInvoke('agent:host-mode'),
@@ -531,6 +547,28 @@ export const ipc = {
   },
   onBrowserNewTab: (callback: (url: string) => void): (() => void) =>
     isElectron ? window.clerkbox.onBrowserNewTab(callback) : () => {},
+
+  // ── Agent 动作通道（Browser Use / Computer Use）──
+  // WebUI 模式下这三条在主进程黑名单里（webui-server 的 REMOTE_INVOKE_BLOCKLIST），
+  // 调用会失败；浏览器/桌面操控本来就是本机能力，远程视图拿不到也不该拿到。
+  agentBrowserCommand: (command: unknown): Promise<unknown> =>
+    isElectron ? window.clerkbox.agentBrowserCommand(command) : webInvoke('agentBrowser:command', [command]),
+  agentBrowserReady: (): Promise<boolean> =>
+    isElectron ? window.clerkbox.agentBrowserReady() : webInvoke('agentBrowser:ready'),
+agentBrowserEnsurePanel: (sessionId?: string): Promise<boolean> =>
+    isElectron ? window.clerkbox.agentBrowserEnsurePanel(sessionId) : webInvoke('agentBrowser:ensurePanel'),
+  onAgentBrowserEnsurePanel: (callback: (sessionId: string | null) => void) =>
+    isElectron ? window.clerkbox.onAgentBrowserEnsurePanel(callback) : () => {},
+  computerUseCommand: (action: unknown, sessionLabel?: string): Promise<unknown> =>
+    isElectron ? window.clerkbox.computerUseCommand(action, sessionLabel) : webInvoke('computerUse:command', [action]),
+  endComputerUseControl: (): Promise<boolean> =>
+    isElectron ? window.clerkbox.endComputerUseControl() : Promise.resolve(false),
+  onComputerUseUserStopped: (callback: () => void) =>
+    isElectron ? window.clerkbox.onComputerUseUserStopped(callback) : () => {},
+  onAgentBrowserOperation: (callback: (event: { tabId: string; generation: number }) => void): (() => void) =>
+    isElectron ? window.clerkbox.onAgentBrowserOperation(callback) : () => {},
+  onComputerUseOperation: (callback: (event: { phase: 'scheduled' | 'active' | 'idle' }) => void): (() => void) =>
+    isElectron ? window.clerkbox.onComputerUseOperation(callback) : () => {},
 
   loadApiKeys: (): Promise<Record<string, string>> =>
     isElectron ? window.clerkbox.loadApiKeys() : webInvoke('loadApiKeys'),
@@ -599,6 +637,45 @@ export const ipc = {
     isElectron ? window.clerkbox.dbClearMessages(sessionId) : webInvoke('dbClearMessages', [sessionId]),
   dbCompactMessages: (sessionId: string, rows: MessageRow[]): Promise<void> =>
     isElectron ? window.clerkbox.dbCompactMessages(sessionId, rows) : webInvoke('dbCompactMessages', [sessionId, rows]),
+  // ── 消息撤回 / 改动回滚 ──
+  dbDeleteMessagesFrom: (sessionId: string, fromId: string): Promise<void> =>
+    isElectron ? window.clerkbox.dbDeleteMessagesFrom(sessionId, fromId) : webInvoke('dbDeleteMessagesFrom', [sessionId, fromId]),
+  dbPatchMessage: (id: string, patch: Record<string, unknown>): Promise<void> =>
+    isElectron ? window.clerkbox.dbPatchMessage(id, patch) : webInvoke('dbPatchMessage', [id, patch]),
+  ckptPut: (sessionId: string, ref: string, content: string): Promise<void> =>
+    isElectron ? window.clerkbox.ckptPut(sessionId, ref, content) : webInvoke('ckptPut', [sessionId, ref, content]),
+  ckptGet: (sessionId: string, ref: string): Promise<string | null> =>
+    isElectron ? window.clerkbox.ckptGet(sessionId, ref) : webInvoke('ckptGet', [sessionId, ref]),
+  ckptRemove: (sessionId: string, refs: string[]): Promise<void> =>
+    isElectron ? window.clerkbox.ckptRemove(sessionId, refs) : webInvoke('ckptRemove', [sessionId, refs]),
+  ckptRemoveSession: (sessionId: string): Promise<void> =>
+    isElectron ? window.clerkbox.ckptRemoveSession(sessionId) : webInvoke('ckptRemoveSession', [sessionId]),
+
+  // ── Git（编程模式：分支/审查/图谱；WebUI 侧全部列入黑名单，走 webInvoke 会被 403 拒绝）──
+  gitGetStatus: (workDir: string): Promise<GitStatusResult> =>
+    isElectron ? window.clerkbox.gitGetStatus(workDir) : webInvoke('gitGetStatus', [workDir]),
+  gitGetDiff: (workDir: string, path: string, source: GitDiffSource): Promise<GitDiffResult> =>
+    isElectron ? window.clerkbox.gitGetDiff(workDir, path, source) : webInvoke('gitGetDiff', [workDir, path, source]),
+  gitGetBranches: (workDir: string): Promise<GitBranchListResult> =>
+    isElectron ? window.clerkbox.gitGetBranches(workDir) : webInvoke('gitGetBranches', [workDir]),
+  gitSwitchBranch: (workDir: string, branchName: string): Promise<GitBranchMutationResult> =>
+    isElectron ? window.clerkbox.gitSwitchBranch(workDir, branchName) : webInvoke('gitSwitchBranch', [workDir, branchName]),
+  gitCreateBranchAndSwitch: (workDir: string, branchName: string): Promise<GitBranchMutationResult> =>
+    isElectron
+      ? window.clerkbox.gitCreateBranchAndSwitch(workDir, branchName)
+      : webInvoke('gitCreateBranchAndSwitch', [workDir, branchName]),
+  gitGetCommitGraph: (workDir: string, maxCount: number, skip: number): Promise<GitCommitGraphResult> =>
+    isElectron
+      ? window.clerkbox.gitGetCommitGraph(workDir, maxCount, skip)
+      : webInvoke('gitGetCommitGraph', [workDir, maxCount, skip]),
+  gitStagePaths: (workDir: string, paths: string[]): Promise<void> =>
+    isElectron ? window.clerkbox.gitStagePaths(workDir, paths) : webInvoke('gitStagePaths', [workDir, paths]),
+  gitCommit: (workDir: string, message: string, paths: string[]): Promise<GitCommitResult> =>
+    isElectron ? window.clerkbox.gitCommit(workDir, message, paths) : webInvoke('gitCommit', [workDir, message, paths]),
+  gitPush: (workDir: string): Promise<GitPushResult> =>
+    isElectron ? window.clerkbox.gitPush(workDir) : webInvoke('gitPush', [workDir]),
+  gitGetIdentity: (workDir: string): Promise<GitIdentity> =>
+    isElectron ? window.clerkbox.gitGetIdentity(workDir) : webInvoke('gitGetIdentity', [workDir]),
 
   // .clerkbox operations
   initClerkbox: (projectDir: string): Promise<void> =>

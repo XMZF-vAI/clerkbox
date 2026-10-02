@@ -1,4 +1,4 @@
-import {
+﻿import {
   app,
   BrowserWindow,
   ipcMain,
@@ -30,7 +30,23 @@ import { registerTerminalHandlers, disposeAllTerminals } from './terminal'
 import { initUpdater, isAgentBusyNow } from './updater'
 import { initMainLogger, registerLogIpcHandlers } from './logger'
 import { createChatStore, registerDbIpcHandlers, type ChatStore } from './db'
+import { registerCheckpointIpcHandlers } from './checkpoint-store'
+import { registerGitIpcHandlers } from './git-service'
 import { registerAgentHostIpc, getAgentSessionManager, registerAgentEventSink } from './agent-host'
+import {
+  AGENT_BROWSER_PARTITION,
+  attachAgentBrowserGuest,
+  detachAgentBrowserGuest,
+  isAgentBrowserReady,
+  runAgentBrowserCommand,
+  setAgentBrowserOperationListener,
+} from './agent-browser'
+import { isBrowserCommand, isComputerAction } from '../src/lib/agent-actions'
+import type { BrowserCommandResult, ComputerActionResult } from '../src/lib/agent-actions'
+import { runComputerAction, resetComputerUseFrame, endComputerUseControl, setUserStoppedNotifier, disposeComputerUseCursors } from './computer-use'
+import { disposeComputerUseIndicator } from './cua-indicator'
+import { disposeScreenAura } from './screen-aura'
+import { disposeDesktopInputBackend } from './computer-input'
 import {
   initTray,
   isTrayAvailable,
@@ -598,6 +614,13 @@ function createWindow() {
       callback(permission === 'fullscreen')
     }
   )
+  // Agent 浏览器分区同档加固。AI 驱动的页面比人手点的页面更不该有摄像头/麦克风：
+  // 一次提示注入就可能让模型在用户不知情时打开摄像头。
+  session.fromPartition(AGENT_BROWSER_PARTITION).setPermissionRequestHandler(
+    (_webContents, permission, callback) => {
+      callback(permission === 'fullscreen')
+    }
+  )
 
   const normalizeHttpUrl = (url: string): string | null => {
     try {
@@ -638,6 +661,19 @@ function createWindow() {
       }
       return { action: 'deny' }
     })
+    // Agent 浏览器用独立分区：cookie / 登录态与人类浏览器隔离，页面里的脚本也认不出彼此。
+    // 分区是判定 guest 归属的唯一依据（webview 标签本身不带可读名字）。
+    try {
+      if (guestContents.session === session.fromPartition(AGENT_BROWSER_PARTITION)) {
+        attachAgentBrowserGuest(guestContents)
+      }
+    } catch (err) {
+      console.error('[agent-browser] guest attach failed:', err)
+    }
+  })
+  // guest 销毁（标签关闭 / 渲染进程崩溃）后作废会话，避免后续命令打在死 webContents 上
+  mainWindow.webContents.on('destroyed', () => {
+    detachAgentBrowserGuest()
   })
 
   const trustedOrigin = devUrl ? new URL(devUrl).origin : null
@@ -1230,6 +1266,36 @@ function registerIpcHandlers(chatStore: ChatStore) {
     return result.response === 1
   })
 
+  /**
+   * 多选项确认框。返回被按下按钮的下标。
+   *
+   * 单独开一条而不是把 confirmDialog 改成带参数：既有命令/写文件的确认必须**原样**保持
+   * 两按钮语义（Cancel / OK），不能被 Agent 动作的三选项需求顺手改掉默认行为。
+   *
+   * Agent 动作用它来给「本会话始终允许」这个选项 —— 没有它，一次浏览任务里
+   * 十几个写动作就要弹十几次框，而且每次都只有 Yes/No 可选。
+   */
+  ipcMain.handle(
+    'confirmDialogWithOptions',
+    async (
+      _event,
+      payload: { title: string; message: string; buttons: string[]; defaultIndex: number },
+    ): Promise<number> => {
+      const buttons = Array.isArray(payload?.buttons) ? payload.buttons : []
+      if (buttons.length === 0) return -1
+      const defaultIndex = Math.min(Math.max(0, Number(payload.defaultIndex) || 0), buttons.length - 1)
+      const result = await showMessageBoxSafe({
+        type: 'question',
+        buttons,
+        defaultId: defaultIndex,
+        cancelId: buttons.length - 1,
+        title: String(payload.title ?? ''),
+        message: String(payload.message ?? ''),
+      })
+      return result.response
+    },
+  )
+
   ipcMain.on('windowAction', (_event, action: 'minimize' | 'maximize' | 'close') => {
     if (!mainWindow) return
     if (action === 'minimize') mainWindow.minimize()
@@ -1318,6 +1384,22 @@ function registerIpcHandlers(chatStore: ChatStore) {
     }
     fs.mkdirSync(path.dirname(safe), { recursive: true })
     fs.writeFileSync(safe, content, 'utf-8')
+  })
+
+  // 改动回滚需要删掉「本轮新建的文件」，所以要有删除原语。
+  // 与 writeFile 同级风险，因此同样只对本机窗口开放（远程走黑名单）。
+  ipcMain.handle('deleteFile', async (_event, filePath: string) => {
+    const safe = assertSafePath(filePath)
+    try {
+      const stat = fs.statSync(safe)
+      // 只删文件：目录可能是用户自己的工程结构，回滚没有权利收走它
+      if (!stat.isFile()) throw new Error(`Not a file: ${safe}`)
+      fs.unlinkSync(safe)
+    } catch (err) {
+      // 已经被用户或工具删掉了：回滚目标已达成，不该算失败
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return
+      throw err
+    }
   })
 
   ipcMain.handle('listDir', async (_event, dirPath: string) => {
@@ -1927,6 +2009,11 @@ function registerIpcHandlers(chatStore: ChatStore) {
   // ── 会话存储（A3：SQLite 主引擎 + 旧 JSON 降级兜底，实现见 electron/db.ts）──
   // IPC 契约（db* handler 名称/参数/返回）与 JSON 时代完全一致，渲染层零感知。
   registerDbIpcHandlers(chatStore)
+  // 文件变更前快照仓库（消息撤回 / 改动回滚）：正文落 userData/checkpoints，
+  // 索引随消息行持久化。必须先于 agent 宿主注册——宿主端口装配会直接取用。
+  registerCheckpointIpcHandlers(app.getPath('userData'))
+  // Git 服务（编程模式：分支/审查/图谱）：只读+写操作两组通道，全部不对 WebUI 放行
+  registerGitIpcHandlers()
   // Agent 宿主（批次 B · P3）：装配主进程端口并注册 agent:command / agent:snapshot 通道。
   // 运行模式默认 renderer（P6 才切 main），故此处只挂通道，不改变现有渲染层驱动路径；
   // 桥接的 handler 查找是惰性的，放在这里不依赖其它 handler 已注册。
@@ -1934,6 +2021,14 @@ function registerIpcHandlers(chatStore: ChatStore) {
   // 批次 B · P5：宿主事件同时推给 WebUI 的 SSE 订阅者；新连接建立时补发整环，
   // 远程视图与本地窗口共用同一 seq 序列（去重与乱序由渲染层薄客户端负责）。
   registerAgentEventSink((payload) => pushAgentEvent(payload))
+  // 用户按 Esc 叫停电脑操控 → 渲染层据此中止当前运行。
+  // 走注入而不是让 computer-use 反向 import mainWindow：本模块已被 main.ts 引用，
+  // 反向 import 会成环。
+  setUserStoppedNotifier(() => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('computerUse:userStopped')
+    }
+  })
   setAgentEventBridge({
     // 返回值刻意丢弃：事件靠 snapshot 内部的 broadcast 走 sink 回流，远程响应只回 ok
     replay: (sinceSeq, sessionId) => {
@@ -2211,6 +2306,66 @@ function registerIpcHandlers(chatStore: ChatStore) {
       if (!fs.existsSync(kvPath)) throw err
     }
   }
+
+  // ── Agent 动作通道（Browser Use / Computer Use）──
+  // 工具层把每个动作归一成一个判别联合命令（src/lib/agent-actions.ts），主进程执行后回同构观测。
+  // 入参只按 method 分派，不透传任意 CDP 方法：模型能构造的命令集合必须等于这里列出的集合。
+  ipcMain.handle('agentBrowser:command', (_event, command: unknown) => {
+    if (!isBrowserCommand(command)) {
+      return {
+        ok: false,
+        error: { code: 'execution_error', message: 'Malformed browser command payload.' },
+        elapsedMs: 0,
+      } satisfies BrowserCommandResult
+    }
+    return runAgentBrowserCommand(command)
+  })
+  ipcMain.handle('agentBrowser:ready', () => isAgentBrowserReady())
+
+  /**
+   * 「AI 要用浏览器了，请把 Agent 浏览器标签打开」。
+   *
+   * 走一条显式请求而不是让渲染层轮询/预开：Agent 浏览器标签是「AI 正在操控浏览器」
+   * 这件事的视觉载体，**没有正在操控就不该出现在面板上**。所以打开的触发点必须是
+   * 工具层真的发出了浏览器命令的那一刻，而不是能力开关被打开的那一刻。
+   *
+   * 主进程只负责把请求转发给渲染层 —— 标签状态在渲染层的 workbench store 里。
+   */
+  ipcMain.handle('agentBrowser:ensurePanel', (_event, sessionId?: string) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return false
+    // 必须原样转发请求方的 sessionId：用户可能正在看别的对话，
+    // 主进程无权替渲染层猜「该开在哪个会话」，那正是跨会话弹出的成因
+    mainWindow.webContents.send('agentBrowser:ensurePanel', sessionId ?? null)
+    return true
+  })
+
+  // Computer Use：以「用户身份」合成真实桌面输入。坐标按上一帧做越界校验，
+  // 入参按动作词表白名单校验，不透传任何自由格式的 shell 片段。
+  ipcMain.handle('computerUse:command', (_event, action: unknown, sessionLabel?: string | null) => {
+    if (!isComputerAction(action)) {
+      return {
+        ok: false,
+        error: { code: 'execution_error', message: 'Malformed computer action payload.' },
+        elapsedMs: 0,
+      } satisfies ComputerActionResult
+    }
+    return runComputerAction(action, sessionLabel ?? undefined)
+  })
+
+  // 一次运行结束 → 浮块退场。浮块在整段操控期内常驻（AI 两次动作之间可能隔着推理与
+  // 审批，逐动作熄灯会让「正在接管我的电脑」看起来像「偶尔动一下」），
+  // 而 run 的生命周期在渲染层，所以由那边在没有任何 run 在跑时下发这个信号。
+  ipcMain.handle('computerUse:endControl', () => {
+    endComputerUseControl()
+    return true
+  })
+
+  // 「Agent 正在操作浏览器」事件：渲染层靠它点亮标签的呼吸图标。
+  // 5s 滑动窗口由渲染层负责，主进程只发「刚刚发生了一次操作」这个事实。
+  setAgentBrowserOperationListener((event) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return
+    mainWindow.webContents.send('agentBrowser:operation', event)
+  })
 
   ipcMain.handle('kvGet', (_event, key: unknown): string | null => {
     if (typeof key !== 'string') return null
@@ -3700,6 +3855,13 @@ app.on('before-quit', (event) => {
   destroyTray()
   winAcrylic.dispose()
   systemMedia.dispose()
+  // 输入合成助手是常驻子进程（Windows 的 PowerShell SendInput），不回收会在退出后残留
+  disposeDesktopInputBackend()
+  detachAgentBrowserGuest()
+  resetComputerUseFrame()
+  disposeComputerUseIndicator()
+  disposeScreenAura()
+  disposeComputerUseCursors()
   disposeAllTerminals()
   // A3：退出前强制落盘会话存储（SQLite 防抖未落的变更在此收口）
   chatStoreRef?.flush()

@@ -12,6 +12,7 @@ import { HARNESS_MODE_METAS, normalizeHarnessMode } from '../../lib/harness-mode
 import type { MessageAttachment, MessageSkillSnapshot, TaskMode, HarnessMode } from '../../types/agent'
 import type { FileEntry, WebUICapabilities } from '../../types/ipc'
 import ConfirmDialog from '../ui/ConfirmDialog'
+import BranchSwitcher from '../git/BranchSwitcher'
 import { useIsMobile } from '../../hooks/use-mobile'
 import { useShallow } from 'zustand/react/shallow'
 import { hostQueue } from '../../lib/host-queue'
@@ -236,6 +237,8 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
     enableThinking: s.enableThinking,
     approvalMode: s.approvalMode,
     model: s.model,
+    // 通用模式下占位符换成工作导向文案
+    interfaceMode: s.interfaceMode,
     updateSettings: s.updateSettings,
     setProviderModels: s.setProviderModels,
     activateModel: s.activateModel,
@@ -1202,13 +1205,19 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
         )}
       </div>
 
-      {/* Working directory indicator - only in default mode */}
-      {!isWelcome && effectiveWorkDir && (
+      {/* Working directory + branch switcher row：空会话也显示（新会话就能看到分支芯片）；
+          芯片仅编程模式渲染，且会话目录不是 git 仓库时自动隐藏 */}
+      {effectiveWorkDir && (
         <div className={`flex items-center gap-1.5 mb-2 px-1 max-w-5xl mx-auto ${vibe ? 'text-white/50' : ''}`}>
           <FolderOpen size={12} className={vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/50'} />
           <span className={`text-[11px] truncate max-w-[400px] ${vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/50'}`}>
             {effectiveWorkDir}{currentSession?.workingDir ? '' : t('chat.defaultWorkDirSuffix')}
           </span>
+          {!vibe && settings.interfaceMode === 'coding' && (
+            <span className="ml-auto inline-flex">
+              <BranchSwitcher workDir={effectiveWorkDir} />
+            </span>
+          )}
         </div>
       )}
 
@@ -1398,7 +1407,9 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
                   ? t('chat.taskPlaceholder')
                   : vibe
                     ? t('chat.placeholderVibe')
-                    : (effectiveWorkDir ? t('chat.placeholderWorkDir', { name: effectiveWorkDir.split(/[/\\]/).pop() }) : t('chat.placeholderDefault'))}
+                    : settings.interfaceMode === 'general'
+                      ? t('chat.placeholderGeneral')
+                      : (effectiveWorkDir ? t('chat.placeholderWorkDir', { name: effectiveWorkDir.split(/[/\\]/).pop() }) : t('chat.placeholderDefault'))}
             rows={1}
             className={`min-w-[96px] flex-1 bg-transparent text-sm max-md:text-base resize-none outline-none min-h-[20px] max-md:min-h-6 max-h-[200px] py-1 ${
               vibe

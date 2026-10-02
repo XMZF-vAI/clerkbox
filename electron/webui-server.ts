@@ -41,6 +41,9 @@ export const REMOTE_INVOKE_BLOCKLIST: readonly string[] = [
   'executeCommand',
   'executeCommandWithShell',
   'cancelSessionCommands',
+  // 文件删除（改动回滚收掉本轮新建的文件）：按调用方给定的路径删本机文件，
+  // 与 executeCommand 同档危险，不对远程暴露。
+  'deleteFile',
   // 伪终端（node-pty）
   'ptyCreate',
   'ptyWrite',
@@ -76,6 +79,41 @@ export const REMOTE_INVOKE_BLOCKLIST: readonly string[] = [
   'getLanAddresses',
   // 诊断导出（弹保存对话框属桌面端交互，远程调用无意义）
   'diagExport',
+  // 消息撤回 / 改动回滚：ckpt* 三个通道能按调用方给定的名字往本机写文件，
+  // dbDeleteMessagesFrom / dbPatchMessage 能截断与改写任意消息行。
+  // 远程视图本来就不能跑 agent（agent:command 在黑名单），也就永远不会产生或消费快照，
+  // 全部拒绝对远程暴露；本地 Electron 渲染层走 ipcRenderer，不受影响。
+  'ckptPut',
+  'ckptGet',
+  'ckptRemove',
+  'ckptRemoveSession',
+  'dbDeleteMessagesFrom',
+  'dbPatchMessage',
+  // Agent 动作通道：agentBrowser:command 能让远程调用方驱动本机 Agent 浏览器
+  // （导航任意 http(s)、点页面、填表单），computerUse:command 更进一步——它合成的是
+  // 用户真实桌面上的鼠标键盘事件，能在任何应用里点击、输入、启动程序。
+  // agentBrowser:ensurePanel 会让渲染层弹出并展开 Agent 浏览器标签，同样不该对远程开放。
+  // 三者都属于「以用户身份操作这台机器」，与 executeCommand 同档，且没有任何正当的远程调用场景。
+  'agentBrowser:command',
+  'agentBrowser:ensurePanel',
+  'computerUse:command',
+  // computerUse:endControl 会把本机「正在操控你的电脑」浮块撤下来。
+  // 看着无害，但它证明远端能指挥本机桌面能力的状态机 —— 与 command 同档，一并挡掉。
+  'computerUse:endControl',
+  // Git 集成（编程模式）：写通道（switch/create/stage/commit/push）能改动本机仓库、
+  // push 更会把内容推到远端；读通道（status/diff/branches/graph/identity）吐出的
+  // status 与 diff 就是本机源码正文。远程视图隐藏 Git 面板（workbench tab desktopOnly），
+  // 这里整组拦住兜底，与「远程不跑 agent（agent:command 在列）」同一条防线。
+  'gitGetStatus',
+  'gitGetDiff',
+  'gitGetBranches',
+  'gitSwitchBranch',
+  'gitCreateBranchAndSwitch',
+  'gitGetCommitGraph',
+  'gitStagePaths',
+  'gitCommit',
+  'gitPush',
+  'gitGetIdentity',
 ]
 
 /**

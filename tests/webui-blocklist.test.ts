@@ -69,6 +69,39 @@ describe('WebUI 远程调用黑名单', () => {
       expect(REMOTE_INVOKE_BLOCKLIST).toContain(channel)
     }
   })
+
+  /**
+   * Agent 动作通道：风险高于 executeCommand。
+   * agentBrowser:command 能让远程调用方驱动本机 Agent 浏览器（导航任意 http(s)、点页面、填表单）；
+   * computerUse:command 更进一步——它合成的是用户真实桌面上的鼠标键盘事件，
+   * 能在任何应用里点击、输入、启动程序。两者都没有正当的远程调用场景。
+   */
+  it('Agent 动作通道被拦下', () => {
+    expect(REMOTE_INVOKE_BLOCKLIST).toContain('agentBrowser:command')
+    expect(REMOTE_INVOKE_BLOCKLIST).toContain('agentBrowser:ensurePanel')
+    expect(REMOTE_INVOKE_BLOCKLIST).toContain('computerUse:command')
+  })
+
+  it('新增的桌面能力通道默认在黑名单里（防止后人加 handler 时忘了同步）', () => {
+    const dir = path.join(process.cwd(), 'electron')
+    const found = new Set<string>()
+    for (const name of fs.readdirSync(dir)) {
+      if (!name.endsWith('.ts')) continue
+      const source = fs.readFileSync(path.join(dir, name), 'utf-8')
+      for (const match of source.matchAll(/ipcMain\.handle\(\s*['"]((?:agentBrowser|computerUse|cua):[^'"]+)['"]/g)) {
+        if (match[1]) found.add(match[1])
+      }
+    }
+    expect(found.size).toBeGreaterThan(0) // 扫描失效时先炸，避免假绿
+    for (const channel of found) {
+      // 零副作用的只读探测（agentBrowser:ready）不在黑名单：它只回一个布尔
+      if (channel === 'agentBrowser:ready') {
+        expect(REMOTE_INVOKE_BLOCKLIST).not.toContain(channel)
+        continue
+      }
+      expect(REMOTE_INVOKE_BLOCKLIST, channel).toContain(channel)
+    }
+  })
 })
 
 describe('WebUI token 恒定时间比对', () => {

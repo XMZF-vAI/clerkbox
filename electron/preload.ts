@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer, webUtils } from 'electron'
+﻿import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type {
   AccountStatus,
   AccountSyncDownloadResult,
@@ -12,6 +12,15 @@ import type {
   ApiChunkPayload,
   ApiConnConfig,
   FetchedModel,
+  GitBranchListResult,
+  GitBranchMutationResult,
+  GitCommitGraphResult,
+  GitCommitResult,
+  GitDiffResult,
+  GitDiffSource,
+  GitIdentity,
+  GitPushResult,
+  GitStatusResult,
   MessageRow,
   SessionRow,
   SyncPassphraseStatus,
@@ -47,9 +56,14 @@ contextBridge.exposeInMainWorld('clerkbox', {
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke('openExternal', url),
   confirmDialog: (title: string, message: string): Promise<boolean> =>
     ipcRenderer.invoke('confirmDialog', title, message),
+  /** 多选项确认框，返回被按下按钮的下标（-1 = 无效 / 已关闭） */
+  confirmDialogWithOptions: (payload: { title: string; message: string; buttons: string[]; defaultIndex: number }): Promise<number> =>
+    ipcRenderer.invoke('confirmDialogWithOptions', payload),
   readFile: (path: string): Promise<string> => ipcRenderer.invoke('readFile', path),
   writeFile: (path: string, content: string): Promise<void> =>
     ipcRenderer.invoke('writeFile', path, content),
+  deleteFile: (path: string): Promise<void> =>
+    ipcRenderer.invoke('deleteFile', path),
   listDir: (path: string): Promise<{ name: string; isDirectory: boolean; isFile: boolean }[]> =>
     ipcRenderer.invoke('listDir', path),
 
@@ -88,6 +102,42 @@ contextBridge.exposeInMainWorld('clerkbox', {
     const listener = (_e: Electron.IpcRendererEvent, url: string) => callback(url)
     ipcRenderer.on('browser:new-tab', listener)
     return () => ipcRenderer.removeListener('browser:new-tab', listener)
+  },
+
+  // ── Agent 动作通道（Browser Use / Computer Use）──
+  // invoke 侧：入参原样透传，形状由主进程 handler 的白名单校验收口（不是靠这里）
+  agentBrowserCommand: (command: unknown): Promise<unknown> =>
+    ipcRenderer.invoke('agentBrowser:command', command),
+  agentBrowserReady: (): Promise<boolean> => ipcRenderer.invoke('agentBrowser:ready'),
+  /** 请渲染层打开 Agent 浏览器标签（只在 AI 真的发出浏览器命令时由工具层发起）。
+   *  sessionId 是**正在执行任务的那个会话** —— 用户可能正看着另一个对话，
+   *  渲染层据此只开在目标分片，不夺取当前视图。 */
+  agentBrowserEnsurePanel: (sessionId?: string): Promise<boolean> => ipcRenderer.invoke('agentBrowser:ensurePanel', sessionId),
+  onAgentBrowserEnsurePanel: (callback: (sessionId: string | null) => void): (() => void) => {
+    const listener = (_e: unknown, sessionId: string | null) => callback(sessionId)
+    ipcRenderer.on('agentBrowser:ensurePanel', listener)
+    return () => ipcRenderer.removeListener('agentBrowser:ensurePanel', listener)
+  },
+  computerUseCommand: (action: unknown, sessionLabel?: string): Promise<unknown> =>
+    ipcRenderer.invoke('computerUse:command', action, sessionLabel ?? null),
+  /** 一次运行结束：让「正在操控你的电脑」浮块退场（浮块在整段操控期内常驻，不逐动作熄） */
+  endComputerUseControl: (): Promise<boolean> => ipcRenderer.invoke('computerUse:endControl'),
+  /** 用户按 Esc 叫停了电脑操控。渲染层据此中止当前运行并让 agent 知道原因 */
+  onComputerUseUserStopped: (callback: () => void): (() => void) => {
+    const listener = () => callback()
+    ipcRenderer.on('computerUse:userStopped', listener)
+    return () => ipcRenderer.removeListener('computerUse:userStopped', listener)
+  },
+  /** Agent 浏览器刚发生了一次操作：渲染层据此点亮标签的呼吸图标（5s 滑动窗口由渲染层管） */
+  onAgentBrowserOperation: (callback: (event: { tabId: string; generation: number }) => void): (() => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, event: { tabId: string; generation: number }) => callback(event)
+    ipcRenderer.on('agentBrowser:operation', listener)
+    return () => ipcRenderer.removeListener('agentBrowser:operation', listener)
+  },
+  onComputerUseOperation: (callback: (event: { phase: 'scheduled' | 'active' | 'idle' }) => void): (() => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, event: { phase: 'scheduled' | 'active' | 'idle' }) => callback(event)
+    ipcRenderer.on('computerUse:operation', listener)
+    return () => ipcRenderer.removeListener('computerUse:operation', listener)
   },
 
   // Shell
@@ -135,7 +185,8 @@ contextBridge.exposeInMainWorld('clerkbox', {
   },
 
   // ── Agent 宿主通道（批次 B · P3）：指令下发 / 事件订阅 / 重连快照 ──
-  agentCommand: (cmd: unknown): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('agent:command', cmd),
+  agentCommand: (cmd: unknown): Promise<{ ok: boolean; error?: string; plan?: unknown; outcome?: unknown }> =>
+    ipcRenderer.invoke('agent:command', cmd),
   agentHostMode: (): Promise<'main' | 'renderer'> => ipcRenderer.invoke('agent:host-mode'),
   agentSnapshot: (sessionId: string | undefined, sinceSeq: number): Promise<unknown> =>
     ipcRenderer.invoke('agent:snapshot', sessionId, sinceSeq),
@@ -212,6 +263,37 @@ contextBridge.exposeInMainWorld('clerkbox', {
     ipcRenderer.invoke('dbClearMessages', sessionId),
   dbCompactMessages: (sessionId: string, rows: MessageRow[]): Promise<void> =>
     ipcRenderer.invoke('dbCompactMessages', sessionId, rows),
+  // ── 消息撤回 / 改动回滚 ──
+  dbDeleteMessagesFrom: (sessionId: string, fromId: string): Promise<void> =>
+    ipcRenderer.invoke('dbDeleteMessagesFrom', sessionId, fromId),
+  dbPatchMessage: (id: string, patch: Record<string, unknown>): Promise<void> =>
+    ipcRenderer.invoke('dbPatchMessage', id, patch),
+  ckptPut: (sessionId: string, ref: string, content: string): Promise<void> =>
+    ipcRenderer.invoke('ckptPut', sessionId, ref, content),
+  ckptGet: (sessionId: string, ref: string): Promise<string | null> =>
+    ipcRenderer.invoke('ckptGet', sessionId, ref),
+  ckptRemove: (sessionId: string, refs: string[]): Promise<void> =>
+    ipcRenderer.invoke('ckptRemove', sessionId, refs),
+  ckptRemoveSession: (sessionId: string): Promise<void> =>
+    ipcRenderer.invoke('ckptRemoveSession', sessionId),
+
+  // ── Git（编程模式：分支/审查/图谱）──
+  gitGetStatus: (workDir: string): Promise<GitStatusResult> => ipcRenderer.invoke('gitGetStatus', workDir),
+  gitGetDiff: (workDir: string, path: string, source: GitDiffSource): Promise<GitDiffResult> =>
+    ipcRenderer.invoke('gitGetDiff', workDir, path, source),
+  gitGetBranches: (workDir: string): Promise<GitBranchListResult> => ipcRenderer.invoke('gitGetBranches', workDir),
+  gitSwitchBranch: (workDir: string, branchName: string): Promise<GitBranchMutationResult> =>
+    ipcRenderer.invoke('gitSwitchBranch', workDir, branchName),
+  gitCreateBranchAndSwitch: (workDir: string, branchName: string): Promise<GitBranchMutationResult> =>
+    ipcRenderer.invoke('gitCreateBranchAndSwitch', workDir, branchName),
+  gitGetCommitGraph: (workDir: string, maxCount: number, skip: number): Promise<GitCommitGraphResult> =>
+    ipcRenderer.invoke('gitGetCommitGraph', workDir, maxCount, skip),
+  gitStagePaths: (workDir: string, paths: string[]): Promise<void> =>
+    ipcRenderer.invoke('gitStagePaths', workDir, paths),
+  gitCommit: (workDir: string, message: string, paths: string[]): Promise<GitCommitResult> =>
+    ipcRenderer.invoke('gitCommit', workDir, message, paths),
+  gitPush: (workDir: string): Promise<GitPushResult> => ipcRenderer.invoke('gitPush', workDir),
+  gitGetIdentity: (workDir: string): Promise<GitIdentity> => ipcRenderer.invoke('gitGetIdentity', workDir),
 
   // Skill operations
   initClerkbox: (projectDir: string): Promise<void> => ipcRenderer.invoke('initClerkbox', projectDir),

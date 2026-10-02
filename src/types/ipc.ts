@@ -1,5 +1,5 @@
-import type { ApiCompat, MemoryEntry, MemoryType } from './agent'
-import type { AgentCommand, AgentEvent, AgentSnapshot } from '../agent-core/protocol'
+﻿import type { ApiCompat, MemoryEntry, MemoryType } from './agent'
+import type { AgentCommand, AgentCommandResult, AgentEvent, AgentSnapshot } from '../agent-core/protocol'
 
 export interface FileEntry {
   name: string
@@ -54,6 +54,14 @@ export interface MessageRow {
   task_mode?: string | null
   /** 发送时选中的 Skill 快照 JSON，仅 user 消息携带 */
   skills?: string | null
+  /** FileCheckpoint[] 的 JSON 序列化：本轮写文件前的快照索引（回滚依据），仅 user 消息携带 */
+  file_checkpoints?: string | null
+  /** FileMutationGap[] 的 JSON 序列化：本轮无法回滚的改动，仅 user 消息携带 */
+  mutation_gaps?: string | null
+  /** 0 or 1 —— 本轮文件改动已被撤销，Undo 与「回滚文件」档置灰 */
+  files_reverted?: number
+  /** 0 or 1 —— 合成的「文件已撤销」回执（user 角色承载，渲染成回执条而非用户气泡） */
+  is_rewind_notice?: number
 }
 
 export interface WebSearchResult {
@@ -306,6 +314,124 @@ export interface TrayConfig {
   recentSessionsLimit?: number
 }
 
+// ── Git 集成（编程模式：分支切换 / 变更审查 / 提交图谱）──
+// 路径约定：workDir 为会话工作目录（仓库根或其子目录）；变更文件路径一律相对仓库根。
+
+/** 仓库 HEAD 状态摘要（一次 getStatus 全带出，分支芯片与审查面板共用） */
+export interface GitStatusSummary {
+  /** 本机装没装 git（探测一次缓存） */
+  isGitAvailable: boolean
+  /** workDir 是否位于 git 仓库内 */
+  isRepository: boolean
+  headRefType: 'branch' | 'detached'
+  branchName: string | null
+  upstreamName: string | null
+  ahead: number
+  behind: number
+  unstagedCount: number
+  stagedCount: number
+}
+
+export type GitFileKind = 'modified' | 'added' | 'deleted' | 'renamed' | 'conflict' | 'untracked'
+
+/** 一条变更文件；added/removed 为 null 表示二进制（numstat 的 "-"） */
+export interface GitFileChange {
+  /** 相对仓库根的路径（POSIX 分隔符） */
+  path: string
+  /** 重命名来源路径（renamed 时有值） */
+  origPath?: string
+  kind: GitFileKind
+  added: number | null
+  removed: number | null
+}
+
+export interface GitStatusResult {
+  summary: GitStatusSummary
+  /** 未暂存（含未跟踪/冲突） */
+  unstaged: GitFileChange[]
+  /** 已暂存 */
+  staged: GitFileChange[]
+}
+
+export type GitDiffSource = 'staged' | 'unstaged'
+
+export interface GitDiffResult {
+  path: string
+  availability: 'patch' | 'binary' | 'unavailable'
+  /** unified patch 正文；binary/unavailable 时为 null */
+  patch: string | null
+}
+
+export interface GitLocalBranch {
+  name: string
+  isCurrent: boolean
+  upstreamName: string | null
+  commitHash: string | null
+  commitTimestampMs: number | null
+}
+
+export interface GitBranchListResult {
+  headRefType: 'branch' | 'detached'
+  currentBranchName: string | null
+  branches: GitLocalBranch[]
+}
+
+/** 切/建分支失败原因的稳定码（git stderr 归一，UI 按 code 出文案） */
+export type GitBranchIssueCode =
+  | 'changes-would-be-overwritten'
+  | 'branch-in-other-worktree'
+  | 'unknown-branch'
+  | 'not-a-repository'
+
+export interface GitBranchMutationResult {
+  ok: boolean
+  action: 'switch' | 'create-and-switch'
+  branchName: string
+  didChange: boolean
+  created: boolean
+  issues: Array<{ code: GitBranchIssueCode; message: string }>
+}
+
+export type GitCommitRefKind = 'branch' | 'remote' | 'tag' | 'head'
+
+export interface GitCommitRef {
+  name: string
+  kind: GitCommitRefKind
+}
+
+export interface GitCommitGraphCommit {
+  hash: string
+  parents: string[]
+  refs: GitCommitRef[]
+  subject: string
+  authorName: string | null
+  authoredAtMs: number | null
+}
+
+export interface GitCommitGraphResult {
+  commits: GitCommitGraphCommit[]
+  hasMore: boolean
+}
+
+export interface GitCommitResult {
+  commitHash: string
+}
+
+export interface GitPushResult {
+  branchName: string
+  remoteName: string
+  /** 本次是否带了 --set-upstream */
+  setUpstream: boolean
+  trackingBranchName: string | null
+  /** 透传给 UI 的输出尾部（进度/错误信息） */
+  output: string
+}
+
+export interface GitIdentity {
+  userName: string | null
+  userEmail: string | null
+}
+
 export interface ClerkBoxAPI {
   selectFolder: () => Promise<string | null>
   selectImageFile: () => Promise<string | null>
@@ -321,6 +447,8 @@ export interface ClerkBoxAPI {
   getPathForFile: (file: File) => string
   openExternal: (url: string) => Promise<void>
   confirmDialog: (title: string, message: string) => Promise<boolean>
+  /** 多选项确认框；返回被按下按钮的下标。WebUI 侧不支持多选，恒返回 -1（= 拒绝） */
+  confirmDialogWithOptions: (payload: { title: string; message: string; buttons: string[]; defaultIndex: number }) => Promise<number>
   windowAction: (action: 'minimize' | 'maximize' | 'close') => void
   isWindowMaximized: boolean
   onWindowStateChange: (callback: (isMaximized: boolean) => void) => () => void
@@ -334,8 +462,29 @@ export interface ClerkBoxAPI {
   notifyTrayReady: () => void
   /** 订阅内嵌浏览器的 target="_blank" / window.open 请求 */
   onBrowserNewTab: (callback: (url: string) => void) => () => void
+  // ── Agent 动作通道（Browser Use / Computer Use）──
+  agentBrowserCommand: (command: unknown) => Promise<unknown>
+  /** Agent 浏览器 guest 是否已挂载（面板是否至少打开过一次） */
+  agentBrowserReady: () => Promise<boolean>
+  /**
+   * 请渲染层打开 Agent 浏览器标签。
+   * 只有 AI 真的发出了浏览器命令时才会走到这里 —— 能力开关打开本身不触发。
+   */
+  agentBrowserEnsurePanel: (sessionId?: string) => Promise<boolean>
+  onAgentBrowserEnsurePanel: (callback: (sessionId: string | null) => void) => () => void
+  computerUseCommand: (action: unknown, sessionLabel?: string) => Promise<unknown>
+  /** 一次运行结束 → 浮块退场 */
+  endComputerUseControl: () => Promise<boolean>
+  /** 用户按 Esc 叫停电脑操控 */
+  onComputerUseUserStopped: (callback: () => void) => () => void
+  /** 订阅「Agent 正在操作浏览器」事件（标签呼吸图标的数据源） */
+  onAgentBrowserOperation: (callback: (event: { tabId: string; generation: number }) => void) => () => void
+  /** 订阅「Agent 正在操控你的电脑」两阶段事件：scheduled → active → idle */
+  onComputerUseOperation: (callback: (event: { phase: 'scheduled' | 'active' | 'idle' }) => void) => () => void
   readFile: (path: string) => Promise<string>
   writeFile: (path: string, content: string) => Promise<void>
+  /** 删除单个文件（改动回滚收掉本轮新建的文件）；目录一律拒绝，不存在视为成功 */
+  deleteFile: (path: string) => Promise<void>
   selectSkillFile: () => Promise<string | null>
   parseSkillFile: (filePath: string) => Promise<ParseSkillFileResult>
   listDir: (path: string) => Promise<FileEntry[]>
@@ -354,7 +503,7 @@ export interface ClerkBoxAPI {
   onApiChunk: (callback: (payload: ApiChunkPayload) => void) => () => void
   // ── Agent 宿主通道（批次 B · P3 注册，P4 渲染层薄客户端使用）──
   /** 渲染层 → 主进程 AgentHost 的指令下发；返回值只表示是否受理，运行结果走事件 */
-  agentCommand: (cmd: AgentCommand) => Promise<{ ok: boolean; error?: string }>
+  agentCommand: (cmd: AgentCommand) => Promise<AgentCommandResult>
   /** 当前运行模式：main = 编排在宿主，renderer = 仍由渲染层自跑（P6 前默认后者） */
   agentHostMode: () => Promise<'main' | 'renderer'>
   /** 重连取回运行态并按 sinceSeq 补发缺口事件 */
@@ -386,6 +535,35 @@ export interface ClerkBoxAPI {
   dbClearMessages: (sessionId: string) => Promise<void>
   /** 原子压缩：单次写入内整体替换该会话的全部消息（compactSession 专用） */
   dbCompactMessages: (sessionId: string, rows: MessageRow[]) => Promise<void>
+  /** 截断：删除 fromId 及其之后的全部消息（消息撤回的落库原语） */
+  dbDeleteMessagesFrom: (sessionId: string, fromId: string) => Promise<void>
+  /** 增量合并消息行指定列（回滚快照三列专用，不碰 content 等既有字段） */
+  dbPatchMessage: (id: string, patch: Record<string, unknown>) => Promise<void>
+  /** 变更前快照正文落盘（<userData>/checkpoints/<sessionId>/<ref>） */
+  ckptPut: (sessionId: string, ref: string, content: string) => Promise<void>
+  /** 读快照正文；不存在返回 null */
+  ckptGet: (sessionId: string, ref: string) => Promise<string | null>
+  ckptRemove: (sessionId: string, refs: string[]) => Promise<void>
+  /** 会话删除时整目录回收 */
+  ckptRemoveSession: (sessionId: string) => Promise<void>
+  // ── Git（编程模式：分支/审查/图谱；写操作通道全部进远程黑名单，见 webui-server.ts）──
+  /** 仓库状态快照（summary + 未暂存/已暂存变更），面板与分支芯片共用 */
+  gitGetStatus: (workDir: string) => Promise<GitStatusResult>
+  /** 单文件 diff（unified patch）；source 区分暂存与未暂存来源 */
+  gitGetDiff: (workDir: string, path: string, source: GitDiffSource) => Promise<GitDiffResult>
+  gitGetBranches: (workDir: string) => Promise<GitBranchListResult>
+  gitSwitchBranch: (workDir: string, branchName: string) => Promise<GitBranchMutationResult>
+  gitCreateBranchAndSwitch: (workDir: string, branchName: string) => Promise<GitBranchMutationResult>
+  /** 提交图谱分页；skip 为已取条数 */
+  gitGetCommitGraph: (workDir: string, maxCount: number, skip: number) => Promise<GitCommitGraphResult>
+  /** 暂存指定文件（提交弹窗「提交所选」的前半步） */
+  gitStagePaths: (workDir: string, paths: string[]) => Promise<void>
+  /** 提交：paths 非空 = 先 add 所选再 `commit -- paths`（排除未选中的已暂存项）；空 = 纯 index 提交 */
+  gitCommit: (workDir: string, message: string, paths: string[]) => Promise<GitCommitResult>
+  /** push；无 upstream 时自动 --set-upstream 到首个远程 */
+  gitPush: (workDir: string) => Promise<GitPushResult>
+  /** 提交身份（commit 前校验 user.name/email 是否已配置） */
+  gitGetIdentity: (workDir: string) => Promise<GitIdentity>
   initClerkbox: (projectDir: string) => Promise<void>
   writeSkillMd: (projectDir: string, slug: string, content: string) => Promise<void>
   writeSkillDir: (projectDir: string, slug: string, files: Array<{ path: string; content: string }>) => Promise<void>
