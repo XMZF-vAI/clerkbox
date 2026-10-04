@@ -57,10 +57,47 @@ export function FeishuChannelIcon({ className }: IconProps) {
   )
 }
 
+/** Telegram 蓝（品牌纸飞机色） */
+const TELEGRAM_BLUE = '#2AABEE'
+
+/** Telegram：纸飞机（官方 logo 的简化几何形） */
+export function TelegramChannelIcon({ className }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} fill="none" aria-hidden="true">
+      <circle cx="12" cy="12" r="10" fill={TELEGRAM_BLUE} />
+      <path
+        d="M5.5 11.7 17.9 7c.6-.2 1.1.3.9.9l-2 9.4c-.1.6-.8.8-1.3.4l-2.9-2.1-1.5 1.5c-.3.3-.8.2-1-.2l-1.3-2.9-3.1-1c-.6-.2-.6-.9-.2-1.3Z"
+        fill="#fff"
+      />
+      <path d="m10.1 13.8 5-4.6-4.2 5.4-.1 1.9-.7-2.7Z" fill={TELEGRAM_BLUE} opacity=".55" />
+    </svg>
+  )
+}
+
+/** 企业微信蓝（官方品牌色） */
+const WECOM_BLUE = '#0082EF'
+
+/** 企业微信：对话气泡 + 星点（官方「企微蓝」气泡的简化形） */
+export function WecomChannelIcon({ className }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} fill="none" aria-hidden="true">
+      <path
+        d="M12 3.2c-5 0-9 3.2-9 7.2 0 2.3 1.3 4.4 3.4 5.7l-.9 2.7 3.1-1.7c1 .3 2.2.5 3.4.5 5 0 9-3.2 9-7.2s-4-7.2-9-7.2Z"
+        fill={WECOM_BLUE}
+      />
+      <circle cx="8.6" cy="9.6" r="1" fill="#fff" />
+      <circle cx="12" cy="9.6" r="1" fill="#fff" />
+      <circle cx="15.4" cy="9.6" r="1" fill="#fff" />
+    </svg>
+  )
+}
+
 /** 渠道 → 图标组件：新增渠道只改这张表 */
 const CHANNEL_ICONS: Record<BotProvider, (props: IconProps) => ReactElement> = {
   weixin: WeixinChannelIcon,
   feishu: FeishuChannelIcon,
+  telegram: TelegramChannelIcon,
+  wecom: WecomChannelIcon,
 }
 
 export function ChannelIcon({

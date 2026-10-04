@@ -17,8 +17,8 @@ import { z } from 'zod'
 // 渠道标识
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** 本期只做这两条通道；群聊一律不收（两家的私聊判定见各自通道实现）。 */
-export const BOT_PROVIDERS = ['weixin', 'feishu'] as const
+/** 本期渠道清单：微信（扫码）、飞书/Telegram/企业微信（手填凭据）；群聊一律不收 */
+export const BOT_PROVIDERS = ['weixin', 'feishu', 'telegram', 'wecom'] as const
 export type BotProvider = (typeof BOT_PROVIDERS)[number]
 
 export function isBotProvider(value: unknown): value is BotProvider {
@@ -204,6 +204,19 @@ export const FeishuSecretSchema = z.strictObject({
 })
 export type FeishuSecret = z.infer<typeof FeishuSecretSchema>
 
+/** Telegram：只有 BotFather 下发的 token */
+export const TelegramSecretSchema = z.strictObject({
+  botToken: z.string().min(1).max(256),
+})
+export type TelegramSecret = z.infer<typeof TelegramSecretSchema>
+
+/** 企业微信智能机器人：长连接 API 模式的 BotID + Secret */
+export const WecomSecretSchema = z.strictObject({
+  botId: z.string().min(1).max(128),
+  secret: z.string().min(1).max(256),
+})
+export type WecomSecret = z.infer<typeof WecomSecretSchema>
+
 export function parseWeixinSecret(raw: string): WeixinSecret | null {
   try {
     return WeixinSecretSchema.parse(JSON.parse(raw))
@@ -215,6 +228,22 @@ export function parseWeixinSecret(raw: string): WeixinSecret | null {
 export function parseFeishuSecret(raw: string): FeishuSecret | null {
   try {
     return FeishuSecretSchema.parse(JSON.parse(raw))
+  } catch {
+    return null
+  }
+}
+
+export function parseTelegramSecret(raw: string): TelegramSecret | null {
+  try {
+    return TelegramSecretSchema.parse(JSON.parse(raw))
+  } catch {
+    return null
+  }
+}
+
+export function parseWecomSecret(raw: string): WecomSecret | null {
+  try {
+    return WecomSecretSchema.parse(JSON.parse(raw))
   } catch {
     return null
   }
@@ -246,20 +275,38 @@ export function simpleHash(input: string): string {
  * 微信不接受手填凭据——token 只能来自扫码确认那一步，放开手填等于开一条绕过登录流程的路，
  * 拿到的还是一个必然失效的 token。
  */
-export const BotCredentialInputSchema = z.strictObject({
-  appId: z.string().min(1).max(128),
-  appSecret: z.string().min(1).max(256),
-})
+/**
+ * bots:setCredential 的入参形状：按渠道三选一（zod union 逐支 strict）。
+ *
+ * 飞书=App ID/Secret；Telegram=BotFather token；企微=智能机器人 BotID/Secret。
+ * 三者都必须「一起给」：分两次写会出现半新半旧的中间态，认证必挂且现场看不出来。
+ * 微信不接受手填凭据——token 只能来自扫码确认那一步，放开手填等于开一条绕过登录流程的路，
+ * 拿到的还是一个必然失效的 token。
+ */
+export const BotCredentialInputSchema = z.union([
+  z.strictObject({ appId: z.string().min(1).max(128), appSecret: z.string().min(1).max(256) }),
+  z.strictObject({ botToken: z.string().min(1).max(256) }),
+  z.strictObject({ botId: z.string().min(1).max(128), secret: z.string().min(1).max(256) }),
+])
 export type BotCredentialInput = z.infer<typeof BotCredentialInputSchema>
 
 /** 该渠道的凭据能不能由界面直接写入（微信＝否，只能扫码） */
 export function providerAcceptsManualCredential(provider: BotProvider): boolean {
-  return provider === 'feishu'
+  return provider !== 'weixin'
 }
 
-/** 凭据写入的唯一序列化点：与 parseFeishuSecret / parseWeixinSecret 对偶 */
-export function serializeFeishuCredential(input: BotCredentialInput): string {
-  return JSON.stringify({ appId: input.appId, appSecret: input.appSecret })
+/** 凭据写入的唯一序列化点：与各 parse*Secret 对偶。渠道与字段形状不匹配时抛错 */
+export function serializeBotCredential(provider: BotProvider, input: BotCredentialInput): string {
+  if (provider === 'feishu' && 'appId' in input && 'appSecret' in input) {
+    return JSON.stringify({ appId: input.appId, appSecret: input.appSecret })
+  }
+  if (provider === 'telegram' && 'botToken' in input) {
+    return JSON.stringify({ botToken: input.botToken })
+  }
+  if (provider === 'wecom' && 'botId' in input && 'secret' in input) {
+    return JSON.stringify({ botId: input.botId, secret: input.secret })
+  }
+  throw new Error(`凭据字段与渠道不匹配：${provider}`)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -314,6 +361,11 @@ export interface ChannelDeps {
   markActivated(): Promise<void>
   /** 该 bot 是否应当继续运行：enabled 被关掉时循环要自己退出 */
   isStopped(): boolean
+  /**
+   * 可注入的 fetch 实现：Telegram 用主进程注入的 Electron net.fetch（走系统网络栈，
+   * 用户开了系统代理即自动生效）；不注入则回退 globalThis.fetch（vitest 直跑也成立）。
+   */
+  fetchImpl?: typeof fetch
   log(...args: unknown[]): void
 }
 

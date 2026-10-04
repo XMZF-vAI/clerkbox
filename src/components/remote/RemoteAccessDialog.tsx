@@ -286,7 +286,14 @@ export default function RemoteAccessDialog({ onClose }: RemoteAccessDialogProps)
             </p>
 
             <div className="space-y-2">
-              {(['weixin', 'feishu'] as BotProvider[]).map((provider) => (
+              {(
+                [
+                  ['weixin', 'remoteAccess.channelWeixin', 'remoteAccess.channelWeixinDesc'],
+                  ['feishu', 'remoteAccess.channelFeishu', 'remoteAccess.channelFeishuDesc'],
+                  ['telegram', 'remoteAccess.channelTelegram', 'remoteAccess.channelTelegramDesc'],
+                  ['wecom', 'remoteAccess.channelWecom', 'remoteAccess.channelWecomDesc'],
+                ] as Array<[BotProvider, string, string]>
+              ).map(([provider, labelKey, descKey]) => (
                 <button
                   key={provider}
                   type="button"
@@ -295,12 +302,8 @@ export default function RemoteAccessDialog({ onClose }: RemoteAccessDialogProps)
                 >
                   <ChannelBadge provider={provider} />
                   <span className="flex-1 min-w-0">
-                    <span className="block text-ui-sm text-dark-onSurface">
-                      {t(provider === 'weixin' ? 'remoteAccess.channelWeixin' : 'remoteAccess.channelFeishu')}
-                    </span>
-                    <span className="block text-ui-xs text-dark-onSurfaceVariant/70 truncate">
-                      {t(provider === 'weixin' ? 'remoteAccess.channelWeixinDesc' : 'remoteAccess.channelFeishuDesc')}
-                    </span>
+                    <span className="block text-ui-sm text-dark-onSurface">{t(labelKey)}</span>
+                    <span className="block text-ui-xs text-dark-onSurfaceVariant/70 truncate">{t(descKey)}</span>
                   </span>
                   <span className="flex-shrink-0 flex items-center gap-0.5 text-ui-xs text-md-primary">
                     <span>{t('remoteAccess.botsOpen')}</span>

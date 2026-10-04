@@ -6,13 +6,15 @@ import ConfirmDialog from '../ui/ConfirmDialog'
 import BindPanel from './BindPanel'
 import FeishuSetupCard from './FeishuSetupCard'
 import WeixinSetupCard from './WeixinSetupCard'
+import TelegramSetupCard from './TelegramSetupCard'
+import WeComSetupCard from './WeComSetupCard'
 import { ChannelBadge } from './channelIcons'
 import { useBots } from './useBots'
 import { ipc } from '../../lib/ipc-client'
 import type { BotListItem, BotProvider } from '../../../electron/im-bots/types'
 
-/** 首发渠道清单：与主进程 BOT_PROVIDERS 同序。渲染层刻意只做 type import，不引运行时值 */
-const PROVIDERS: BotProvider[] = ['weixin', 'feishu']
+/** 渠道清单：与主进程 BOT_PROVIDERS 同序。渲染层刻意只做 type import，不引运行时值 */
+const PROVIDERS: BotProvider[] = ['weixin', 'feishu', 'telegram', 'wecom']
 
 interface BotsDialogProps {
   onClose: () => void
@@ -65,12 +67,26 @@ function StatusDot({ state, pulse }: { state: BotListItem['status']; pulse?: boo
 }
 
 function providerLabelKey(provider: BotProvider): string {
-  return provider === 'weixin' ? 'bots.channel.weixin' : 'bots.channel.feishu'
+  return `bots.channel.${provider}`
 }
 
 /** 一句话渠道说明：键名写成字面量返回，i18n 校验与代码审查都能直接对上 */
 function providerDescKey(provider: BotProvider): string {
-  return provider === 'weixin' ? 'bots.channelDesc.weixin' : 'bots.channelDesc.feishu'
+  return `bots.channelDesc.${provider}`
+}
+
+/** 渠道 → 凭据设置卡：新增渠道只改这张表 */
+function SetupCard({ bot, onChanged }: { bot: BotListItem; onChanged: () => void }) {
+  switch (bot.provider) {
+    case 'weixin':
+      return <WeixinSetupCard bot={bot} onChanged={onChanged} />
+    case 'feishu':
+      return <FeishuSetupCard bot={bot} onChanged={onChanged} />
+    case 'telegram':
+      return <TelegramSetupCard bot={bot} onChanged={onChanged} />
+    case 'wecom':
+      return <WeComSetupCard bot={bot} onChanged={onChanged} />
+  }
 }
 
 /**
@@ -430,11 +446,7 @@ export default function BotsDialog({ onClose, entryProvider }: BotsDialogProps) 
                 </p>
               )}
 
-              {selected.provider === 'weixin' ? (
-                <WeixinSetupCard bot={selected} onChanged={refresh} />
-              ) : (
-                <FeishuSetupCard bot={selected} onChanged={refresh} />
-              )}
+              <SetupCard bot={selected} onChanged={refresh} />
 
               <BindPanel bot={selected} onChanged={refresh} />
 

@@ -16,7 +16,7 @@
  *    地图里的条目只按对象身份退役（retire），否则旧循环会把新循环的条目删掉，
  *    表现为「改了凭据之后机器人再也起不来」。
  */
-import { BrowserWindow, ipcMain } from 'electron'
+import { BrowserWindow, ipcMain, net } from 'electron'
 import os from 'os'
 import i18n from '../../src/i18n'
 import type { ChatStore } from '../db'
@@ -33,9 +33,11 @@ import {
   credentialRefFor,
   emptyBotsConfig,
   parseFeishuSecret,
+  parseTelegramSecret,
   parseWeixinSecret,
+  parseWecomSecret,
   providerAcceptsManualCredential,
-  serializeFeishuCredential,
+  serializeBotCredential,
   type BindCodeResult,
   type BotChannelFactory,
   type BotChannelHandle,
@@ -55,6 +57,8 @@ import { SessionBridge, type BridgeCommand, type BridgePorts, type BridgeSession
 import { BotsCore, type CorePorts, type DeliverInput, makeRandomBindCode } from './core'
 import { weixinChannel, createWeixinQrLogin } from './weixin'
 import { feishuChannel } from './feishu'
+import { telegramChannel } from './telegram'
+import { wecomChannel } from './wecom'
 
 /** 宿主注入的能力：main.ts 在 app ready 之后调 initImBots 时给 */
 export interface ImBotsHost {
@@ -72,6 +76,8 @@ export interface ImBotsHost {
 export const CHANNELS: Record<BotProvider, BotChannelFactory> = {
   weixin: weixinChannel,
   feishu: feishuChannel,
+  telegram: telegramChannel,
+  wecom: wecomChannel,
 }
 
 /** 一个正在跑的通道实例 */
@@ -236,21 +242,37 @@ async function readBotCredential(bot: BotConfig): Promise<string | null> {
   // 进脱敏名单而不是每次出站现读一遍：这条路径正是「本系统实际用过这份凭据」的唯一事实来源
   if (raw) {
     usedSecrets.add(raw)
-    const parsed = bot.provider === 'weixin' ? parseWeixinSecret(raw) : parseFeishuSecret(raw)
+    const parsed = parseSecretByProvider(bot.provider, raw)
     if (parsed && 'token' in parsed) usedSecrets.add(parsed.token)
     if (parsed && 'appSecret' in parsed) usedSecrets.add(parsed.appSecret)
+    if (parsed && 'botToken' in parsed) usedSecrets.add(parsed.botToken)
+    if (parsed && 'secret' in parsed) usedSecrets.add(parsed.secret)
   }
   return raw
 }
 
+/** 按渠道解析凭据结构：四个渠道各一个 schema，无法识别返回 null */
+function parseSecretByProvider(provider: BotProvider, raw: string) {
+  switch (provider) {
+    case 'weixin':
+      return parseWeixinSecret(raw)
+    case 'feishu':
+      return parseFeishuSecret(raw)
+    case 'telegram':
+      return parseTelegramSecret(raw)
+    case 'wecom':
+      return parseWecomSecret(raw)
+  }
+}
+
 /**
- * 凭据是否算「已配好」：微信＝已扫码（有 token + baseUrl），飞书＝App ID/Secret 结构完整。
- * 用它同时决定 hasCredential 与要不要起通道——拿结构不对的 JSON 去连网络，
- * 只会得到一个把用户带偏的协议错误。
+ * 凭据是否算「已配好」：微信＝已扫码（有 token + baseUrl），飞书＝App ID/Secret 结构完整，
+ * Telegram＝botToken，企微＝BotID/Secret。用它同时决定 hasCredential 与要不要起通道——
+ * 拿结构不对的 JSON 去连网络，只会得到一个把用户带偏的协议错误。
  */
 export function credentialIsUsable(provider: BotProvider, raw: string | null): boolean {
   if (!raw) return false
-  return provider === 'weixin' ? parseWeixinSecret(raw) !== null : parseFeishuSecret(raw) !== null
+  return parseSecretByProvider(provider, raw) !== null
 }
 
 async function writeBotCredential(botId: string, provider: BotProvider, value: string): Promise<void> {
@@ -296,6 +318,12 @@ function makeChannelDeps(bot: BotConfig, self: () => Running | undefined): Chann
       // 通道据此可以继续跑下一轮
       return disposed || !current || current.stopping
     },
+    // Telegram 注入 Electron 的 net.fetch：走 Chromium 网络栈，用户开了系统代理即自动
+    // 生效（TUN 模式用 global fetch 也一样通）；其余渠道不注入，回退 globalThis.fetch。
+    // net.fetch 的参数类型比标准 fetch 窄（不含 URL 对象），这里按 ChannelDeps 契约放宽
+    ...(bot.provider === 'telegram' && typeof net?.fetch === 'function'
+      ? { fetchImpl: net.fetch.bind(net) as unknown as typeof fetch }
+      : {}),
     log: (...args) => log(`[${bot.provider}:${bot.id}]`, ...args),
   }
 }
@@ -667,7 +695,7 @@ function registerIpc(): void {
         // 微信只认扫码那一步下发的 token：放开手填等于开一条绕过登录流程的路
         return { ok: false, error: 'weixin-credential-via-qrcode-only' }
       }
-      await writeBotCredential(bot.id, bot.provider, serializeFeishuCredential(parsed.data))
+      await writeBotCredential(bot.id, bot.provider, serializeBotCredential(bot.provider, parsed.data))
       sendToWindows(BOTS_EVENT_CHANNELS.changed)
       await syncChannels()
       return { ok: true }

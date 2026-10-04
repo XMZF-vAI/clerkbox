@@ -18,6 +18,9 @@ vi.mock('electron', () => ({
     },
   },
   BrowserWindow: { getAllWindows: () => [] },
+  // makeChannelDeps 会按渠道访问 net.fetch（Telegram 注入）；node 测试环境没有它，
+  // 显式给 undefined 让通道回退 globalThis.fetch
+  net: undefined,
 }))
 // 宿主事件出口不牵扯本层逻辑，且 api-proxy 会拉进真的 electron 依赖
 vi.mock('../electron/api-proxy', () => ({ startChatStream: vi.fn(), abortChatStream: vi.fn() }))
@@ -280,7 +283,8 @@ describe('bots:upsert 的主键语义', () => {
   it('缺名字 / 渠道不认识的入参一律拒（strict schema 挡住界面漏字段而不是崩在主进程）', async () => {
     initImBots(fakeHost(base))
     expect(await call('upsert', { provider: 'feishu', enabled: true })).toEqual({ ok: false, error: 'invalid-bot-config' })
-    expect(await call('upsert', { provider: 'telegram', name: 'x', enabled: true })).toEqual({
+    // telegram 已是合法渠道（第二轮扩展）；真正不认识的渠道仍然要被 strict 拒掉
+    expect(await call('upsert', { provider: 'dingtalk', name: 'x', enabled: true })).toEqual({
       ok: false,
       error: 'invalid-bot-config',
     })
