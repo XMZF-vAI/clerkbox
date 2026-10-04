@@ -861,7 +861,13 @@ class WeixinChannelHandle implements BotChannelHandle {
         }
         failures += 1
         const delay = weixinBackoffMs(failures)
-        deps.setStatus('error', `微信长轮询失败：${errorText(error)}（${Math.round(delay / 1000)}s 后重试）`)
+        // 第一次失败不报 error：网络抖动会自动恢复，把状态打成「连接异常」会诱导用户
+        // 去重新扫码——那解决不了抖动，还白白丢掉登录态。连续失败才升级为 error。
+        if (failures >= 2) {
+          deps.setStatus('error', `微信长轮询失败：${errorText(error)}（${Math.round(delay / 1000)}s 后重试）`)
+        } else {
+          deps.setStatus('polling', '网络波动，正在重试')
+        }
         deps.log(`[weixin] bot=${bot.id} 轮询失败 attempt=${failures} retryIn=${delay}ms`, errorText(error))
         await cancellableSleep(delay, signal)
       }

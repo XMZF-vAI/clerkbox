@@ -181,11 +181,11 @@ describe('完成感知', () => {
     bridge.watch('s1', 'actorA')
     manager.busy.add('s1')
     manager.emit({ type: 'run.completed', sessionId: 's1', runId: 'r1' })
-    expect(bag.outcomes).toEqual([{ sessionId: 's1', kind: 'completed', actorKeys: ['actorA'] }])
+    expect(bag.outcomes).toEqual([{ sessionId: 's1', kind: 'completed', answerPushed: false, actorKeys: ['actorA'] }])
     // 排队的第二条跑完，仍然要推给同一个人
     bag.outcomes.length = 0
     manager.emit({ type: 'run.completed', sessionId: 's1', runId: 'r2' })
-    expect(bag.outcomes).toEqual([{ sessionId: 's1', kind: 'completed', actorKeys: ['actorA'] }])
+    expect(bag.outcomes).toEqual([{ sessionId: 's1', kind: 'completed', answerPushed: false, actorKeys: ['actorA'] }])
     // 真正解绑要靠显式动作
     bridge.unwatch('s1', 'actorA')
     bag.outcomes.length = 0
@@ -215,9 +215,34 @@ describe('完成感知', () => {
     manager.emit({ type: 'run.status', sessionId: 's1', status: 'idle' })
     manager.emit({ type: 'run.status', sessionId: 's1', status: 'working' })
     manager.emit({ type: 'queue.snapshot', sessionId: 's1', items: [] })
+    // 助手消息 added 只是登记候选（内容非空会作为过程消息推），status(idle) 本身仍不是收尾
     manager.emit({ type: 'message.added', sessionId: 's1', message: { id: 'm', role: 'assistant', content: 'x', timestamp: 1 } })
-    expect(bag.outcomes).toHaveLength(0)
+    expect(bag.outcomes).toEqual([{ sessionId: 's1', kind: 'progress', text: 'x', actorKeys: ['actorA'] }])
+    bag.outcomes.length = 0
     manager.emit({ type: 'run.completed', sessionId: 's1', runId: 'r1' })
+    expect(bag.outcomes).toEqual([{ sessionId: 's1', kind: 'completed', answerPushed: true, actorKeys: ['actorA'] }])
+  })
+
+  it('过程消息：只有收尾覆盖（_isStreaming:false）才推，流式增量与空占位不推，且不重复', async () => {
+    const { bridge, manager } = makeBridge()
+    const bag = collector()
+    bridge.watchRuns(bag.onOutcome)
+    bridge.watch('s1', 'actorA')
+    manager.emit({ type: 'run.started', sessionId: 's1', runId: 'r1', ts: 1 })
+    // 空占位：登记候选但不推
+    manager.emit({ type: 'message.added', sessionId: 's1', message: { id: 'm1', role: 'assistant', content: '', timestamp: 1 } })
+    expect(bag.outcomes).toHaveLength(0)
+    // 流式增量（不带 _isStreaming:false）：不推
+    manager.emit({ type: 'message.updated', sessionId: 's1', messageId: 'm1', updates: { content: '写到一半' } })
+    expect(bag.outcomes).toHaveLength(0)
+    // 收尾覆盖：推一次
+    manager.emit({ type: 'message.updated', sessionId: 's1', messageId: 'm1', updates: { content: '写完了', _isStreaming: false } })
+    expect(bag.outcomes).toEqual([{ sessionId: 's1', kind: 'progress', text: '写完了', actorKeys: ['actorA'] }])
+    // usage 收尾的第二次覆盖：不重复
+    manager.emit({ type: 'message.updated', sessionId: 's1', messageId: 'm1', updates: { content: '写完了', _isStreaming: false } })
+    expect(bag.outcomes).toHaveLength(1)
+    // 用户消息永远不推
+    manager.emit({ type: 'message.added', sessionId: 's1', message: { id: 'u1', role: 'user', content: '问题', timestamp: 2 } })
     expect(bag.outcomes).toHaveLength(1)
   })
 

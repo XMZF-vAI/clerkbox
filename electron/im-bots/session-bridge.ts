@@ -90,12 +90,22 @@ export interface RunOutcome {
    * completed / aborted = 本轮跑完（取答案回推）；
    * awaiting = 撞上了审批挂起。awaiting 一定带 approval：手机上要照着它问用户「确定 / 拒绝」，
    * 只有 sessionId 是没法让人做决定的。
-   * question = 模型在等一道选择题的回答。它和审批同一条道理：老板要求「所有要批准的都这么干」，
-   * 而宿主对提问有 10 分钟计时，人在手机上不答就会收到一个空答案继续往下跑。
+   * question = 模型在等一道选择题的回答。它和审批同一条道理：宿主对提问有 10 分钟计时，
+   * 人在手机上不答就会收到一个空答案继续往下跑。
+   * progress = 一条过程消息写完了（助手正文，不含工具调用噪音）。它不结束本轮，
+   * 只是让手机上「边跑边看」——老行为「只在最后蹦一条」就是被这个能力替代的。
    */
-  kind: 'completed' | 'aborted' | 'awaiting' | 'question'
+  kind: 'completed' | 'aborted' | 'awaiting' | 'question' | 'progress'
   approval?: ApprovalPrompt
   question?: QuestionPrompt
+  /** progress 的正文（已过宿主事件，未分段/脱敏——那两步统一在 outbound 路径做） */
+  text?: string
+  /**
+   * completed 专属：最终答案是否已经以 progress 形式推过。
+   * 推过就不重复发（否则每轮收尾都多一条一模一样的消息）；没推过（比如整轮只有工具调用）
+   * 才回落到「取尾部答案/本轮没有产出」。
+   */
+  answerPushed?: boolean
   /** 该会话当前绑定到的聊天身份（可能没有：桌面自己跑的会话） */
   actorKeys: string[]
 }
@@ -123,6 +133,14 @@ export class SessionBridge {
   private readonly notifiedApprovals = new Set<string>()
   /** 已通知过「等待回答」的 requestId，同上 */
   private readonly notifiedQuestions = new Set<string>()
+  /**
+   * 过程消息推送的记账：
+   * - candidates：本轮里以助手身份 added 过的消息 id（updated 事件不带 role，靠它判定）；
+   * - pushed：已推过正文的助手消息 id（finish 覆盖与 usage 收尾不再重复推）。
+   * 两者都在 run.started 时清空——新一轮的过程消息与上一轮无关。
+   */
+  private readonly assistantCandidates = new Map<string, Set<string>>()
+  private readonly pushedAssistant = new Map<string, Set<string>>()
   private unsubscribe: (() => void) | null = null
   private onOutcome: ((outcome: RunOutcome) => Promise<void> | void) | null = null
   /** 正在脱敏时要一并抹掉的明文（bot 凭据、当前 apiKey） */
@@ -167,6 +185,40 @@ export class SessionBridge {
    * 不去重就会每按一次 F5 给手机多发一条催促。
    */
   private async handleEvent(event: AgentEvent): Promise<void> {
+    // ── 过程消息推送（所有 bot「边跑边看」）────────────────────────────────
+    if (event.type === 'run.started') {
+      this.assistantCandidates.delete(event.sessionId)
+      this.pushedAssistant.delete(event.sessionId)
+      return
+    }
+    if (event.type === 'message.added') {
+      const message = event.message
+      if (message.role !== 'assistant') return
+      const candidates = this.assistantCandidates.get(event.sessionId) ?? new Set<string>()
+      candidates.add(message.id)
+      this.assistantCandidates.set(event.sessionId, candidates)
+      // 助手消息落库时通常还是空占位；带正文落库的（错误回执等）直接推
+      const text = (message.content ?? '').trim()
+      if (text) {
+        this.markAssistantPushed(event.sessionId, message.id)
+        await this.emitProgress(event.sessionId, text)
+      }
+      return
+    }
+    if (event.type === 'message.updated') {
+      // 收尾信号：循环在每轮迭代结束时用「全量消息 + _isStreaming:false」覆盖一次。
+      // 中途的流式增量不带这个标记，跳过——逐帧推到手机上就是刷屏。
+      if (event.updates._isStreaming !== false) return
+      const candidates = this.assistantCandidates.get(event.sessionId)
+      if (!candidates?.has(event.messageId)) return
+      if (this.pushedAssistant.get(event.sessionId)?.has(event.messageId)) return
+      const text = (event.updates.content ?? '').trim()
+      if (!text) return
+      this.markAssistantPushed(event.sessionId, event.messageId)
+      await this.emitProgress(event.sessionId, text)
+      return
+    }
+
     if (event.type === 'permission.requested') {
       if (this.notifiedApprovals.has(event.requestId)) return
       this.notifiedApprovals.add(event.requestId)
@@ -231,7 +283,28 @@ export class SessionBridge {
      * 「还在等这个会话」的唯一事实来源是聊天上下文（mode=task 且 activeSessionId 指向它），
      * 所以解除登记交给上层按上下文判定：/new、/task 切走、解绑、会话删除时才真的不看。
      */
-    await this.onOutcome({ sessionId, kind: event.type === 'run.aborted' ? 'aborted' : 'completed', actorKeys })
+    await this.onOutcome({
+      sessionId,
+      kind: event.type === 'run.aborted' ? 'aborted' : 'completed',
+      // 最终答案已经在过程消息里推过的话，completed 不再重复发同一段文字
+      ...(event.type === 'run.completed' ? { answerPushed: (this.pushedAssistant.get(sessionId)?.size ?? 0) > 0 } : {}),
+      actorKeys,
+    })
+  }
+
+  /** 登记「这条助手消息已经推过」：finish 覆盖与 usage 收尾不会再触发重复推送 */
+  private markAssistantPushed(sessionId: string, messageId: string): void {
+    const pushed = this.pushedAssistant.get(sessionId) ?? new Set<string>()
+    pushed.add(messageId)
+    this.pushedAssistant.set(sessionId, pushed)
+  }
+
+  /** 把一条写完的助手正文作为过程消息推给登记过的聊天身份 */
+  private async emitProgress(sessionId: string, text: string): Promise<void> {
+    if (!this.onOutcome) return
+    const actorKeys = [...(this.watchers.get(sessionId) ?? [])]
+    if (actorKeys.length === 0) return
+    await this.onOutcome({ sessionId, kind: 'progress', text, actorKeys })
   }
 
   // ── 会话创建与运行 ────────────────────────────────────────────────────────

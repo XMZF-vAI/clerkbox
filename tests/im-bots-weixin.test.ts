@@ -533,20 +533,26 @@ describe('长轮询循环', () => {
     await handle.stop()
   })
 
-  it('网络错误转成 error 状态 + 退避重试，start() 不 reject；stop() 立刻打断等待', async () => {
+  it('网络错误：首次保持 polling（网络波动，正在重试），连续失败才升级 error；stop() 立刻打断等待', async () => {
     let attempts = 0
     stubFetch(() => {
       attempts += 1
       throw new Error('ECONNRESET simulated')
     })
-    const { deps, state } = makeDeps()
+    // stopOnPolling: false——首次失败现在就是 polling 状态，不能让测试桩在那时翻停，
+    // 否则「连续失败升级 error」这条路径根本走不到
+    const { deps, state } = makeDeps({ stopOnPolling: false })
     const handle = weixinChannel.create()
     const started = handle.start(BOT, deps)
     await vi.waitFor(() => expect(attempts).toBeGreaterThanOrEqual(1))
+    // 第一次失败：不报 error（瞬时抖动自动恢复，报「连接异常」会诱导用户白扫一次码）
+    expect(state.statuses.at(-1)?.state).toBe('polling')
+    expect(state.statuses.at(-1)?.message).toContain('网络波动')
+    // 第二次失败：升级为 error 并给出退避提示（第二次退避 2s，放宽等待窗口）
+    await vi.waitFor(() => expect(state.statuses.at(-1)?.state).toBe('error'), { timeout: 4000 })
+    expect(state.statuses.at(-1)?.message).toContain('ECONNRESET')
     await handle.stop()
     await expect(started).resolves.toBeUndefined()
-
-    expect(state.statuses.some((s) => s.state === 'error' && s.message?.includes('ECONNRESET'))).toBe(true)
     // stop() 打断的是退避 sleep，所以最后一条状态一定是 idle
     expect(state.statuses.at(-1)?.state).toBe('idle')
     expect(state.statuses.at(-1)?.message).toContain('已停止')

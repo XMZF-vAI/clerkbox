@@ -341,12 +341,18 @@ export class BotsCore {
         text = await this.askApproval(actorKey, outcome)
       } else if (outcome.kind === 'question') {
         text = this.askQuestion(actorKey, outcome)
+      } else if (outcome.kind === 'progress') {
+        // 过程消息：一条写完的助手正文，马上推（不结束本轮，也不清挂起的审批/提问）
+        text = outcome.text ?? ''
       } else if (outcome.kind === 'aborted') {
         text = this.ports.text('bots.reply.aborted')
       } else {
         // 一轮跑完，这个身份挂在这儿的审批与提问也就一并收尾了（超时或被桌面点掉都可能）
         this.pendingApprovals.delete(actorKey)
         this.pendingQuestions.delete(actorKey)
+        // 最终答案已经以过程消息推过的话，不再重复发同一段文字；
+        // 整轮没推过（纯工具调用/中途异常）才回落到「取尾部答案/本轮没有产出」
+        if (outcome.answerPushed) continue
         const answer = await this.ports.bridge.latestAnswer(outcome.sessionId)
         text = answer.trim() ? answer : this.ports.text('bots.reply.emptyResult')
       }
