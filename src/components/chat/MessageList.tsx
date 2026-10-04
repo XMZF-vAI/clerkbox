@@ -1,5 +1,5 @@
 ﻿import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, memo } from 'react'
-import { ChevronDown, ChevronUp, Wrench } from 'lucide-react'
+import { ChevronDown, Wrench } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { defaultRangeExtractor, useVirtualizer, type Range } from '@tanstack/react-virtual'
 import type { Message } from '../../types/agent'
@@ -104,6 +104,43 @@ function countMsgToolCalls(msg: Message): number {
   return msg.toolCalls?.filter((tc) => tc.name !== 'spawn_agent').length || 0
 }
 
+/** 折叠头统计「改了几处文件」用的工具名集合 —— 与 diff chips 的口径一致（能产出 __EDIT_DIFF__ 的那几个） */
+const EDIT_TOOL_NAMES = new Set(['search_replace', 'edit_file', 'write_file'])
+
+/** 折叠头的耗时口径：5 秒以内不显示（一轮本来就该几秒，写出来只是噪声） */
+function formatTurnDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 5000) return ''
+  const s = Math.round(ms / 1000)
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s`
+}
+
+/** 一轮的耗时 = 该轮内所有消息时间戳的跨度；缺时间戳的历史数据按 0 处理，不显示 */
+function turnDurationMs(turn: Turn): number {
+  let min = turn.userMsg.timestamp
+  let max = turn.userMsg.timestamp
+  for (const m of turn.aiMessages) {
+    if (m.timestamp > max) max = m.timestamp
+    if (m.timestamp < min) min = m.timestamp
+  }
+  return Number.isFinite(min) && Number.isFinite(max) ? max - min : 0
+}
+
+/**
+ * 吸顶条的步数：只回扫当前这一轮（遇到上一条用户消息就停）。
+ * 不做 useMemo —— 它每 token 随 messages 求值，但一轮的消息数量是个位数到几十，
+ * 而整列扫描才是长会话里真正会累积的成本。
+ */
+function tailTurnStepCount(messages: Message[]): number {
+  let count = 0
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]
+    if (!m || m.role === 'user') break
+    if (m.isSubAgentCard) count += 1
+    else count += m.toolCalls?.filter((tc) => tc.name !== 'spawn_agent').length ?? 0
+  }
+  return count
+}
+
 /** Turn panel - 只保留一个回合级折叠按钮：折叠时只显示最终回复，展开时按自然顺序显示所有中间步骤 */
 type TurnPanelProps = {
   turn: Turn
@@ -162,6 +199,17 @@ const TurnPanel = memo(function TurnPanel({ turn, isLastTurn, isStreaming, vibe,
     return sum + countMsgToolCalls(m)
   }, 0)
 
+  /**
+   * 折叠头上的另外两项：改了几处文件、这一轮跑了多久。
+   * 不挂 useMemo —— shouldFold 在活动轮恒为 false，而带 shouldFold 的轮被
+   * areTurnPanelPropsEqual 挡在不重渲染那一侧，这两行只在消息数真变了时求值。
+   */
+  const editCount = intermediateMsgs.reduce(
+    (sum, m) => sum + (m.toolCalls?.filter((tc) => EDIT_TOOL_NAMES.has(tc.name)).length ?? 0),
+    0,
+  )
+  const duration = formatTurnDuration(turnDurationMs(turn))
+
   // 最后一条自己若也含 toolCalls（还没出总结），不折叠
   const finalHasTools = !!finalMsg?.toolCalls && finalMsg.toolCalls.length > 0
 
@@ -184,7 +232,7 @@ const TurnPanel = memo(function TurnPanel({ turn, isLastTurn, isStreaming, vibe,
   const mergedIsMoreThanFinal = !!finalMsg && turnText.trim() !== finalMsg.content.trim()
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-1.5">
       {/* User message（动作条里的 编辑 / 撤回 / 撤销文件 由 RewindActions 提供，仅最后一轮出现） */}
       <MessageItem
         message={turn.userMsg}
@@ -200,32 +248,33 @@ const TurnPanel = memo(function TurnPanel({ turn, isLastTurn, isStreaming, vibe,
           />
         ) : undefined}
       />
-      {/* 折叠按钮 —— 一个回合只显示一个 */}
+      {/* 折叠头 —— 一个回合只显示一个。整行可点（不是左边一小块），
+          统计口径直接写在行上：步数 / 改了几处 / 耗时，展开后同一行只翻转箭头。 */}
       {shouldFold && (
-        <div className="pl-2">
-          <button
-            type="button"
-            onClick={() => setStepsExpanded(!stepsExpanded)}
-            aria-expanded={stepsExpanded}
-            className={`flex items-center gap-1.5 text-[11px] transition-colors py-1 ${
-              vibe
-                ? 'text-white/50 hover:text-white/70'
-                : 'text-dark-onSurfaceVariant/40 hover:text-dark-onSurfaceVariant/60'
-            }`}
-          >
-            {stepsExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-            <Wrench size={11} />
-            <span>{stepsExpanded ? t('chat.collapseSteps') : t('chat.expandSteps', { count: stepCount })}</span>
-          </button>
-          {stepsExpanded && (
-            <div className={`mt-1 space-y-2 border-l-2 pl-3 ${
-              vibe ? 'border-white/15' : 'border-dark-onSurfaceVariant/8'
-            }`}>
-              {intermediateMsgs.map((msg) => (
-                <MessageItem key={msg.id} message={msg} vibe={vibe} isIntermediate />
-              ))}
-            </div>
+        <button
+          type="button"
+          onClick={() => setStepsExpanded(!stepsExpanded)}
+          aria-expanded={stepsExpanded}
+          className={`flex h-7 w-full items-center gap-2 rounded-md3-xs px-1.5 text-left text-[12px] transition-colors duration-100 ${
+            vibe
+              ? 'text-white/60 hover:bg-white/10'
+              : 'text-dark-onSurfaceVariant/70 hover:bg-dark-surfaceContainerHigh/40'
+          }`}
+        >
+          <ChevronDown size={12} className={`shrink-0 transition-transform duration-200 ${stepsExpanded ? '' : '-rotate-90'}`} />
+          <Wrench size={12} className="shrink-0 opacity-70" />
+          <span className="shrink-0 tabular-nums">{t('chat.stepCount', { count: stepCount })}</span>
+          {editCount > 0 && (
+            <span className="shrink-0 tabular-nums opacity-70">· {t('chat.stepEdits', { count: editCount })}</span>
           )}
+          {duration && <span className="shrink-0 font-mono text-[11px] tabular-nums opacity-60">· {duration}</span>}
+        </button>
+      )}
+      {shouldFold && stepsExpanded && (
+        <div className="space-y-1">
+          {intermediateMsgs.map((msg) => (
+            <MessageItem key={msg.id} message={msg} vibe={vibe} isIntermediate />
+          ))}
         </div>
       )}
 
@@ -509,6 +558,25 @@ if (messages.length === 0) {
         )}
         <div ref={bottomRef} className="pt-6" />
       </div>
+      {/*
+        流式期间用户上翻时，顶部吸一条工作状态 —— 底部那条指示器已经被滚出视口，
+        没有它就没有任何进度可读。用 absolute 浮层而不是 sticky：sticky 会进滚动流，
+        虚拟列表的行高口径就多算一份。整条只在 isStreaming 期间挂载，
+        于是它的耗时计时器和底部那条同起点（各自 mount 时刻起计），不会报两个数。
+      */}
+      {isStreaming && (
+        <div
+          aria-hidden={!awayFromBottom}
+          className={`pointer-events-none absolute inset-x-0 top-0 z-10 flex items-center gap-2.5 px-4 pb-3 pt-1.5 transition-opacity duration-200 ${
+            awayFromBottom ? 'opacity-100' : 'opacity-0'
+          } ${vibe ? 'bg-gradient-to-b from-black/60 to-transparent' : 'bg-gradient-to-b from-dark-surface/95 to-transparent'}`}
+        >
+          <AgentStatusIndicator messages={messages} vibe={vibe} variant="dots" />
+          <span className={`font-mono text-[11px] tabular-nums ${vibe ? 'text-white/45' : 'text-dark-onSurfaceVariant/55'}`}>
+            {t('chat.stepCount', { count: tailTurnStepCount(messages) })}
+          </span>
+        </div>
+      )}
       {/* 流式期间用户上翻：底部中央悬浮「回到底部」按钮 */}
       {awayFromBottom && isStreaming && (
         <button

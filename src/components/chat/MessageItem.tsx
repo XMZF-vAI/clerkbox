@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo, memo, Suspense, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { Check, Terminal, FileText, FolderOpen, AlertTriangle, ChevronDown, ChevronUp, Wrench, FilePen, Globe, Pencil, Archive, Loader2, BookOpen, GitBranch, Target, CircleHelp, ListTodo, Sparkles, LayoutGrid, MonitorSmartphone, MousePointerClick } from 'lucide-react'
+import { Check, Terminal, FileText, FolderOpen, AlertTriangle, ChevronDown, ChevronUp, Wrench, FilePen, Globe, Pencil, Archive, Loader2, BookOpen, GitBranch, Target, CircleHelp, ListTodo, Sparkles, LayoutGrid, MonitorSmartphone, MousePointerClick, Brain } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { Message, StreamingToolCall } from '../../types/agent'
 import { useChatStore } from '../../stores/chat-store'
@@ -11,7 +11,7 @@ import { renderMarkdown } from '../../lib/markdown'
 import { PermissionAuditRow } from './PermissionCard'
 import { CopyButton, MessageActions } from './MessageActions'
 import { isRenderedByUnifiedEntry, resolveRenderer } from './tool-renderers/resolveRenderer'
-import { ToolDetailLines, ToolShell, ToolSkeleton, noteToolRunning } from './tool-renderers/ToolShell'
+import { ToolDetailLines, ToolDetailPanel, ToolShell, ToolSkeleton, noteToolRunning } from './tool-renderers/ToolShell'
 import { parseEditDiff, stripEditDiff, type EditDiffMetaView } from './tool-renderers/shared'
 import { SubAgentCard } from './SubAgentCard'
 
@@ -181,28 +181,19 @@ function ToolRow({ toolCall, result, vibe }: {
         type="button"
         aria-expanded={open}
         onClick={() => setOpen(!open)}
-        className={`group/row flex h-7 w-full items-center gap-2 rounded-md3-xs px-1.5 text-left transition-colors duration-100 ${
+        className={`flex h-7 w-full items-center gap-2 rounded-md3-xs px-1.5 text-left transition-colors duration-100 ${
           vibe ? 'hover:bg-white/10' : 'hover:bg-dark-surfaceContainerHigh/40'
         }`}
       >
-        <span className="relative flex size-4 shrink-0 items-center justify-center">
-          <span
-            className={`absolute inset-0 flex items-center justify-center transition-opacity duration-150 group-hover/row:opacity-0 ${open ? 'opacity-0' : 'opacity-100'} ${
-              isError ? 'text-md-error' : running ? 'text-md-info' : vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/50'
-            }`}
-          >
-            {isError ? <AlertTriangle size={13} /> : running ? <Loader2 size={13} className="animate-spin" /> : toolRowIcon(toolCall.name)}
-          </span>
-          <ChevronDown
-            size={12}
-            className={`absolute transition-[opacity,transform] duration-150 group-hover/row:opacity-100 ${
-              open ? 'opacity-100' : 'opacity-0 -rotate-90'
-            } ${vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/50'}`}
-          />
+        <span className={`flex size-4 shrink-0 items-center justify-center ${
+          isError ? 'text-md-error' : running ? 'text-md-info' : vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/50'
+        }`}>
+          {isError ? <AlertTriangle size={13} /> : running ? <Loader2 size={13} className="animate-spin" /> : toolRowIcon(toolCall.name)}
         </span>
         <span className={`shrink-0 text-[12px] font-medium ${vibe ? 'text-white/85' : 'text-dark-onSurface/85'}`}>{label}</span>
-        <span className={`inline-flex h-5 min-w-0 flex-1 items-center truncate rounded-md3-xs px-1.5 font-mono text-[11px] ${
-          vibe ? 'bg-white/[0.06] text-white/60' : 'bg-dark-surfaceContainer/60 text-dark-onSurfaceVariant/70'
+        {/* 目标 chip 去底色：底色把一行切成三段，反而比纯文字更挤；参考图里文件名就是普通文字 */}
+        <span className={`min-w-0 flex-1 truncate font-mono text-[11px] ${
+          vibe ? 'text-white/45' : 'text-dark-onSurfaceVariant/55'
         }`}>
           {chip || '…'}
         </span>
@@ -213,6 +204,13 @@ function ToolRow({ toolCall, result, vibe }: {
           <span className="shrink-0 font-mono text-[10px] tabular-nums text-md-error">−{meta.removed}</span>
         )}
         {isError && <span className="shrink-0 text-[10px] text-md-error">{t('toolPreview.executionFailed')}</span>}
+        {/* chevron 常显（原来只在悬停时与图标交叉淡入）：展开与否是这一行的状态，不该靠悬停才看得见 */}
+        <ChevronDown
+          size={12}
+          className={`shrink-0 transition-transform duration-200 ${open ? '' : '-rotate-90'} ${
+            vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/40'
+          }`}
+        />
       </button>
       {/* 展开明细：专属渲染器优先，未注册工具走通用回退（与现状同一份折叠动效与样式） */}
       <ToolShell open={open}>
@@ -257,12 +255,13 @@ function StreamingToolRow({ call, vibe }: { call: StreamingToolCall; vibe?: bool
       <span className={`shrink-0 text-[12px] font-medium ${vibe ? 'text-white/85' : 'text-dark-onSurface/85'}`}>
         {t(`tools.${call.name}`, { defaultValue: call.name })}
       </span>
-      <span className={`inline-flex h-5 min-w-0 flex-1 items-center truncate rounded-md3-xs px-1.5 font-mono text-[11px] ${
-        vibe ? 'bg-white/[0.06] text-white/60' : 'bg-dark-surfaceContainer/60 text-dark-onSurfaceVariant/70'
+      <span className={`min-w-0 flex-1 truncate font-mono text-[11px] ${
+        vibe ? 'text-white/45' : 'text-dark-onSurfaceVariant/55'
       }`}>
         {chip || t('toolPreview.parsing')}
       </span>
-      <span className="ml-auto shrink-0 animate-pulse-soft text-[10px] text-md-info">{t('toolPreview.executing')}</span>
+      {/* 行尾的「执行中」去掉了：行首的 spinner 已经说明这一行在跑，两处报同一件事是纯占位 */}
+      <span className="size-3 shrink-0" aria-hidden />
     </div>
   )
 }
@@ -270,7 +269,7 @@ function StreamingToolRow({ call, vibe }: { call: StreamingToolCall; vibe?: bool
 function StreamingToolRows({ calls, vibe }: { calls: StreamingToolCall[]; vibe?: boolean }) {
   if (!calls.length) return null
   return (
-    <div className="mt-1 flex w-full flex-col gap-0.5">
+    <div className="flex w-full flex-col gap-0.5">
       {calls.map((tc) => <StreamingToolRow key={tc.id} call={tc} vibe={vibe} />)}
     </div>
   )
@@ -429,7 +428,7 @@ function ToolRunGroup({ toolCalls, toolResults, vibe, defaultOpen = false, finis
   )
 }
 
-interface ThinkingHeaderProps {
+interface ThinkingRowProps {
   thinkingContent: string
   isStreaming: boolean
   hasContent: boolean
@@ -439,8 +438,10 @@ interface ThinkingHeaderProps {
   vibe?: boolean
 }
 
-/** Thinking header: shimmer while streaming, summary when done */
-function ThinkingHeader({ thinkingContent, isStreaming, hasContent, finishReason, expanded, onToggle, vibe }: ThinkingHeaderProps) {
+/** 思考行：与工具行同款的 h-7 时间线行（图标 +「深度思考」+ 状态 + 常显 chevron）。
+ *  原来是独立一套「思考中... ⌄」+ 圆角展开框，和下面的动作行不是同一种语言，
+ *  读起来像两条并行的时间线；参考图里思考就是时间线上普通的一行。 */
+function ThinkingRow({ thinkingContent, isStreaming, hasContent, finishReason, expanded, onToggle, vibe }: ThinkingRowProps) {
   const { t } = useTranslation()
   const startRef = useRef<number | null>(null)
   const endRef = useRef<number | null>(null)
@@ -486,46 +487,53 @@ function ThinkingHeader({ thinkingContent, isStreaming, hasContent, finishReason
     return () => clearInterval(id)
   }, [done])
 
-  const summaryText = !done
+  const statusText = !done
     ? t('chat.thinkingInProgress')
-    : t('chat.thinkingDone', { count: elapsed })
+    : t('chat.thinkingElapsed', { n: elapsed })
 
   return (
-    <div className="w-full mb-1.5">
+    <div className="w-full">
       <button
         type="button"
         onClick={onToggle}
         aria-expanded={expanded}
-        className="flex items-center gap-1.5 py-1 group"
+        className={`flex h-7 w-full items-center gap-2 rounded-md3-xs px-1.5 text-left transition-colors duration-100 ${
+          vibe ? 'hover:bg-white/10' : 'hover:bg-dark-surfaceContainerHigh/40'
+        }`}
       >
-        <span
-          className={`text-sm font-medium tracking-wide ${
-            !done ? 'thinking-shimmer' : vibe ? 'text-white/70' : 'text-dark-onSurfaceVariant/60'
-          }`}
-        >
-          {summaryText}
+        <span className={`flex size-4 shrink-0 items-center justify-center ${
+          !done ? 'text-md-info' : vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/50'
+        }`}>
+          <Brain size={13} />
         </span>
-        <span
-          className={`transition-transform ${expanded ? 'rotate-180' : ''} ${
-            vibe
-              ? 'text-white/40 group-hover:text-white/60'
-              : 'text-dark-onSurfaceVariant/30 group-hover:text-dark-onSurfaceVariant/50'
-          }`}
-        >
-          <ChevronDown size={12} />
+        <span className={`shrink-0 text-[12px] font-medium ${vibe ? 'text-white/85' : 'text-dark-onSurface/85'}`}>
+          {t('chat.thinkingRow')}
         </span>
+        <span className={`inline-flex h-5 min-w-0 flex-1 items-center truncate px-1.5 text-[11px] ${
+          !done
+            ? 'thinking-shimmer font-medium'
+            : vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/60'
+        }`}>
+          {statusText}
+        </span>
+        <ChevronDown
+          size={12}
+          className={`shrink-0 transition-transform duration-200 ${expanded ? '' : '-rotate-90'} ${
+            vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/40'
+          }`}
+        />
       </button>
-      {expanded && (
-        <div
-          className={`mt-1 p-3 rounded-md3-sm text-[12px] leading-relaxed whitespace-pre-wrap max-h-[300px] overflow-y-auto ${
-            vibe
-              ? 'liquid-glass-subtle border border-white/20 text-white/80'
-              : 'bg-md-secondary/5 border border-md-secondary/10 text-dark-onSurfaceVariant/60'
-          }`}
-        >
-          {thinkingContent}
-        </div>
-      )}
+      <ToolShell open={expanded}>
+        <ToolDetailPanel vibe={vibe}>
+          <div
+            className={`whitespace-pre-wrap break-words py-1 text-[12px] leading-relaxed max-h-[300px] overflow-y-auto ${
+              vibe ? 'text-white/70' : 'text-dark-onSurfaceVariant/70'
+            }`}
+          >
+            {thinkingContent}
+          </div>
+        </ToolDetailPanel>
+      </ToolShell>
     </div>
   )
 }
@@ -585,7 +593,7 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false,
   if (message.isCompactSummary && message.role !== 'system') {
     return (
       <div className="flex justify-center animate-slide-up my-1 min-w-0 overflow-hidden">
-        <div className="w-full max-w-[90%] min-w-0">
+        <div className="w-full min-w-0">
           <button
             onClick={() => setSummaryExpanded(!summaryExpanded)}
             className={`w-full flex items-center gap-2 px-3 py-1.5 rounded-md3-sm text-[11px] transition-colors ${
@@ -665,7 +673,7 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false,
     const filePath = fileMatch?.[1] || ''
     return (
       <div className="flex justify-center animate-slide-up my-1 min-w-0 overflow-hidden">
-        <div className="w-full max-w-[90%] min-w-0">
+        <div className="w-full min-w-0">
           <button
             onClick={() => setSummaryExpanded(!summaryExpanded)}
             className={`w-full flex items-center gap-2 px-3 py-1.5 rounded-md3-sm text-[11px] transition-colors ${
@@ -761,7 +769,7 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false,
     if (toolCallsCount === 0 && !message.content.trim()) return null
     return (
       <div className="flex justify-start animate-slide-up">
-        <div className="max-w-[90%]">
+        <div className="w-full">
           <button
             onClick={() => setCollapsedExpanded(!collapsedExpanded)}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md3-sm text-[11px] transition-colors ${
@@ -777,10 +785,8 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false,
           {collapsedExpanded && (
             <div className="mt-2 w-full">
               {message.content && (
-                <div className={`relative group px-4 py-2.5 rounded-md3-md text-sm leading-relaxed ${
-                  vibe
-                    ? 'bg-white/10 border border-white/20 text-white/90'
-                    : 'bg-dark-surfaceContainerHigh text-dark-onSurface'
+                <div className={`min-w-0 break-words text-sm leading-relaxed ${
+                  vibe ? 'text-white/80' : 'text-dark-onSurface/85'
                 }`}>
                   <MarkdownContent content={message.content} vibe={vibe} />
                 </div>
@@ -823,14 +829,20 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false,
   const hasUserMetadata = !!taskModeMeta || messageSkills.length > 0
   // AI 自主加载的技能芯片（read_file 命中技能 SKILL.md 时由 agent 循环记录）
   const loadedSkills = !isUser ? (message.loadedSkills || []) : []
+  // 最终回复的正文有 2px 左边框 + 14px 内衬，收尾的元信息（时间戳/缓存/截断）要对齐正文首字，
+  // 否则会贴着列边、和正文错开一条缝。
+  const metaAlign = !isUser && !isIntermediate ? 'pl-3.5' : 'px-1'
 
   return (
     <div className={`animate-slide-up group/msg ${isUser ? 'flex justify-end' : 'flex justify-start'}`}>
-      <div className={`flex flex-col ${isUser ? 'items-end max-w-[85%] max-md:max-w-[92%]' : 'items-start max-w-[90%] max-md:max-w-[94%]'}`}>
+      {/* AI 侧占满整列：叙述文字曾是 `items-start max-w-[90%]` + 按内容收缩的气泡，
+          模型每行写得短一点，整段就贴着左边缩成窄栏、右边空一大片（老板点名的「挤在左边」）。
+          现在改成全宽单列时间线，用户侧仍保留右对齐气泡 —— 它是短输入，靠右是定位手段。 */}
+      <div className={`flex flex-col gap-1 ${isUser ? 'items-end max-w-[85%] max-md:max-w-[92%]' : 'w-full items-stretch'}`}>
 
         {/* User message attachments - above the content bubble */}
         {(userImages.length > 0 || userFiles.length > 0) && (
-          <div className="flex flex-col items-end gap-1.5 mb-1.5">
+          <div className="flex flex-col items-end gap-1.5">
             {userImages.length > 0 && (
               <div className="flex flex-wrap gap-1.5 justify-end">
                 {userImages.map((a) => (
@@ -865,9 +877,9 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false,
           </div>
         )}
 
-        {/* Thinking content - collapsible */}
+        {/* 思考行（时间线第一行，可展开正文） */}
         {hasThinking && !isUser && (
-          <ThinkingHeader
+          <ThinkingRow
             thinkingContent={message.thinkingContent || ''}
             isStreaming={!!message._isStreaming}
             hasContent={!!message.content}
@@ -880,7 +892,7 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false,
 
         {/* AI 自主加载的技能芯片（助手消息，read_file 命中技能 SKILL.md 时展示） */}
         {loadedSkills.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 mb-1.5">
+          <div className="flex flex-wrap gap-1.5">
             {loadedSkills.map((skill) => (
               <span
                 key={`${skill.id}-${skill.slug || skill.name}`}
@@ -897,17 +909,20 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false,
           </div>
         )}
 
-        {/* Message content bubble */}
+        {/* Message content —— 用户侧保持右对齐气泡；AI 侧去底色改全宽纯文本。
+            最终回复用左侧细线与过程叙述区分（对标参考图：正文铺满整行，不靠底色分层）。 */}
         {(message.content.trim() || (isUser && hasUserMetadata)) && (
           <div
-            className={`relative group px-4 py-2.5 rounded-md3-md text-sm leading-relaxed ${
+            className={`relative group min-w-0 break-words text-sm leading-relaxed ${
               isUser
-                ? vibe
-                  ? 'liquid-glass text-white'
-                  : 'bg-md-primaryContainer text-md-onPrimaryContainer'
-                : vibe
-                  ? 'liquid-glass-subtle text-white/90'
-                  : 'bg-dark-surfaceContainerHigh text-dark-onSurface'
+                ? `px-4 py-2.5 rounded-md3-md ${
+                    vibe ? 'liquid-glass text-white' : 'bg-md-primaryContainer text-md-onPrimaryContainer'
+                  }`
+                : isIntermediate
+                  ? `px-0.5 ${vibe ? 'text-white/80' : 'text-dark-onSurface/85'}`
+                  : `border-l-2 py-0.5 pl-3 ${
+                      vibe ? 'border-white/25 text-white/90' : 'border-md-primary/35 text-dark-onSurface'
+                    }`
             }`}
           >
             {isUser ? (
@@ -946,10 +961,12 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false,
           <StreamingToolRows calls={message.streamingToolCalls} vibe={vibe} />
         ) : null}
 
-        {/* 工具运行组：过程消息直接平铺工具行，最终回复保留折叠头部 */}
+        {/* 工具行：过程消息与流式中的回复直接平铺 —— 时间线本体不该被二次折叠头切成两段。
+            已完成的轮尾仍保留「N 个工具调用」折叠头：中止的一轮会以带工具的消息收尾，
+            整轮折叠对那种消息不生效，这道头部是唯一能把几十行收起来的地方。 */}
         {!isUser && message.toolCalls && (
-          isIntermediate ? (
-            <div className="w-full mt-1 flex flex-col gap-0.5">
+          (isIntermediate || !message.finishReason) ? (
+            <div className="w-full flex flex-col gap-0.5">
               {message.toolCalls
                 .filter((tc) => !isRenderedByUnifiedEntry(tc.name))
                 .map((tc) => (
@@ -969,14 +986,14 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false,
 
         {/* Truncation warning */}
         {isTruncated && (
-          <div className="mt-1 flex items-center gap-1 text-[11px] text-md-warning">
+          <div className={`flex items-center gap-1 text-[11px] text-md-warning ${metaAlign}`}>
             <AlertTriangle size={10} />
             {t('chat.truncated')}
           </div>
         )}
 
         {cacheEligibleTokens > 0 && !isUser && !isIntermediate && (
-          <span className={`text-[10px] mt-1 px-1 ${vibe ? 'text-white/45' : 'text-dark-onSurfaceVariant/40'}`}>
+          <span className={`text-[10px] ${metaAlign} ${vibe ? 'text-white/45' : 'text-dark-onSurfaceVariant/40'}`}>
             {t('chat.cacheStats', {
               rate: cacheHitRate,
               read: cacheReadTokens.toLocaleString(),
@@ -987,14 +1004,14 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false,
 
         {/* Timestamp —— 过程消息不显示时间戳，仅在用户消息和最终回复上显示 */}
         {!isIntermediate && (isUser || !!message.content.trim() || hasThinking) && (
-          <span className={`text-[10px] mt-1 px-1 ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/30'}`}>
+          <span className={`text-[10px] ${metaAlign} ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/30'}`}>
             {new Date(message.timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
           </span>
         )}
 
         {/* 动作条：复制 + 父级按 turn 语义下发的按钮（编辑/撤回/撤销文件） */}
         {(!!copyText?.trim() || !!message.content.trim() || !!extraActions) && (
-          <MessageActions vibe={vibe}>
+          <MessageActions vibe={vibe} className={metaAlign}>
             <CopyButton text={copyText ?? message.content} title={copyTitle} vibe={vibe} />
             {extraActions}
           </MessageActions>
