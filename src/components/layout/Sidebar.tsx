@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import {
   MessageSquare,
   Settings,
@@ -11,9 +11,6 @@ import {
   AlertTriangle,
   ShieldAlert,
   Globe,
-  Copy,
-  Check,
-  ExternalLink,
   X,
   User,
   ChevronDown,
@@ -24,9 +21,9 @@ import {
 import { useTranslation } from 'react-i18next'
 import { useChatStore } from '../../stores/chat-store'
 import ConfirmDialog from '../ui/ConfirmDialog'
-import QrCode from '../ui/QrCode'
+import RemoteAccessDialog from '../remote/RemoteAccessDialog'
 import ModeToggle from './ModeToggle'
-import { ipc, isWebUIMode } from '../../lib/ipc-client'
+import { isWebUIMode } from '../../lib/ipc-client'
 
 import APP_ICON from '../../assets/icon.png'
 import { useShallow } from 'zustand/react/shallow'
@@ -70,82 +67,8 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
   // 手机端布局开关：账户入口据此禁用（Hook 必须在组件顶层调用，不能放进事件回调）
   const isMobile = useIsMobile()
 
-  // ── WebUI 控制 ──
-  const [webuiStarting, setWebuiStarting] = useState(false)
-  const [webuiInfo, setWebuiInfo] = useState<{ url: string } | null>(null)
-  const [webuiCopied, setWebuiCopied] = useState(false)
-  const [webuiRestarting, setWebuiRestarting] = useState(false)
-  // 二维码内容：仅在「允许局域网访问」且检测到局域网 IP 时才生成（绝不指向 localhost）
-  const [webuiQrUrl, setWebuiQrUrl] = useState<string | null>(null)
-  // 开启了局域网访问但没探测到可用网卡地址
-  const [webuiLanMissing, setWebuiLanMissing] = useState(false)
-  const webuiLanAccess = useSettingsStore((s) => s.webuiLanAccess)
-  const updateSettings = useSettingsStore((s) => s.updateSettings)
-
-  /** 解析二维码 URL：lanAllowed 时取第一个非内部 IPv4 拼 URL，否则不生成二维码 */
-  const resolveQrUrl = async (result: { port: number; token: string; url: string }, lanAllowed: boolean) => {
-    const ips = await ipc.getLanAddresses().catch(() => [] as string[])
-    const ip = lanAllowed ? ips[0] : undefined
-    setWebuiQrUrl(ip ? `http://${ip}:${result.port}/?token=${result.token}` : null)
-    setWebuiLanMissing(lanAllowed && !ip)
-  }
-
-  const handleStartWebUI = async () => {
-    if (webuiStarting) return
-    setWebuiStarting(true)
-    try {
-      const result = await ipc.startWebUI(webuiLanAccess)
-      if ('error' in result && result.error) {
-        alert(t('sidebar.webuiError'))
-      } else if ('url' in result) {
-        setWebuiInfo({ url: result.url })
-        void resolveQrUrl(result, webuiLanAccess)
-      }
-    } catch {
-      alert(t('sidebar.webuiError'))
-    } finally {
-      setWebuiStarting(false)
-    }
-  }
-
-  // 切换局域网访问：写设置后重启 WebUI 以应用新的绑定范围（127.0.0.1 ↔ 0.0.0.0）
-  const handleToggleLanAccess = async () => {
-    if (webuiRestarting) return
-    setWebuiRestarting(true)
-    const next = !webuiLanAccess
-    updateSettings({ webuiLanAccess: next })
-    try {
-      await ipc.stopWebUI()
-      const result = await ipc.startWebUI(next)
-      if ('url' in result) {
-        setWebuiInfo({ url: result.url })
-        // 用新设置重算二维码（开启局域网后指向 LAN IP，关闭则不显示）
-        void resolveQrUrl(result, next)
-      }
-    } catch {
-      /* 重启失败时保留原弹窗状态，用户可手动重试 */
-    } finally {
-      setWebuiRestarting(false)
-    }
-  }
-
-  const handleStopWebUI = async () => {
-    await ipc.stopWebUI()
-    setWebuiInfo(null)
-    setWebuiQrUrl(null)
-    setWebuiLanMissing(false)
-  }
-
-  const handleCopyWebUIUrl = async () => {
-    if (!webuiInfo) return
-    try {
-      await navigator.clipboard.writeText(webuiInfo.url)
-      setWebuiCopied(true)
-      setTimeout(() => setWebuiCopied(false), 2000)
-    } catch {
-      /* 剪贴板不可用时忽略 */
-    }
-  }
+  // ── 远程访问弹窗（WebUI 与 IM 机器人的入口都搬进了弹窗，侧栏只管开关）──
+  const [remoteAccessOpen, setRemoteAccessOpen] = useState(false)
 
   // 任务列表分组：从 sessions 派生
   //   - 分组键只用 workingDir（用户主动选过的工作目录）
@@ -256,13 +179,12 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
         {!isWebUIMode && (
           <button
             type="button"
-            onClick={handleStartWebUI}
-            disabled={webuiStarting}
-            className="w-8 h-8 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors mb-1 disabled:opacity-50"
-            aria-label={t('sidebar.webuiAria')}
-            title={t('sidebar.webui')}
+            onClick={() => setRemoteAccessOpen(true)}
+            className="w-8 h-8 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors mb-1"
+            aria-label={t('sidebar.remoteAccessAria')}
+            title={t('sidebar.remoteAccess')}
           >
-            {webuiStarting ? <Loader2 size={18} className="animate-spin" /> : <Globe size={18} />}
+            <Globe size={18} />
           </button>
         )}
         <button
@@ -503,13 +425,13 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
       <div className="border-t border-dark-onSurfaceVariant/10 px-3 py-2 max-md:pb-[calc(0.5rem+env(safe-area-inset-bottom))] flex flex-col gap-0.5">
         {!isWebUIMode && (
           <button
-            onClick={handleStartWebUI}
-            disabled={webuiStarting}
-            className="md-focus w-full flex items-center gap-2 px-3 py-2 max-md:py-3 rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-sm max-md:text-base text-dark-onSurfaceVariant disabled:opacity-50"
-            aria-label={t('sidebar.webuiAria')}
+            type="button"
+            onClick={() => setRemoteAccessOpen(true)}
+            className="md-focus w-full flex items-center gap-2 px-3 py-2 max-md:py-3 rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-sm max-md:text-base text-dark-onSurfaceVariant"
+            aria-label={t('sidebar.remoteAccessAria')}
           >
-            {webuiStarting ? <Loader2 size={16} className="animate-spin" /> : <Globe size={16} />}
-            <span>{webuiStarting ? t('sidebar.webuiStarting') : t('sidebar.webui')}</span>
+            <Globe size={16} />
+            <span>{t('sidebar.remoteAccess')}</span>
           </button>
         )}
         <button
@@ -559,109 +481,8 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
         />
       )}
 
-      {/* WebUI info modal */}
-      {webuiInfo && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
-          onMouseDown={(e) => {
-            if (e.target === e.currentTarget) setWebuiInfo(null)
-          }}
-        >
-          <div className="w-[440px] max-w-[90vw] rounded-md3-lg bg-dark-surfaceContainer p-6 shadow-xl">
-            <div className="flex items-start justify-between mb-3">
-              <div className="flex items-center gap-2">
-                <Globe size={20} className="text-md-primary" />
-                <h2 className="text-base font-semibold">{t('sidebar.webuiTitle')}</h2>
-              </div>
-              <button
-                type="button"
-                onClick={() => setWebuiInfo(null)}
-                className="w-7 h-7 max-md:w-9 max-md:h-9 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors"
-                aria-label={t('common.close')}
-              >
-                <X size={16} />
-              </button>
-            </div>
-
-            <p className="text-sm text-dark-onSurfaceVariant mb-3">{t('sidebar.webuiDesc')}</p>
-
-            <div className="flex items-center gap-2 p-2.5 rounded-md3-md bg-dark-surfaceContainerHigh mb-1">
-              <code className="flex-1 text-xs break-all text-dark-onSurfaceVariant select-all">
-                {webuiInfo.url}
-              </code>
-              <button
-                type="button"
-                onClick={handleCopyWebUIUrl}
-                className="flex-shrink-0 w-7 h-7 max-md:w-9 max-md:h-9 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainer transition-colors"
-                aria-label={t('sidebar.webuiCopy')}
-                title={t('sidebar.webuiCopy')}
-              >
-                {webuiCopied ? <Check size={14} className="text-md-primary" /> : <Copy size={14} />}
-              </button>
-            </div>
-            {webuiCopied && (
-              <p className="text-xs text-md-primary mb-1">{t('sidebar.webuiCopied')}</p>
-            )}
-
-            {/* 扫码直达：仅在允许局域网访问且探测到网卡地址时展示 */}
-            {webuiLanAccess && webuiQrUrl && (
-              <div className="flex flex-col items-center gap-1.5 py-3">
-                <QrCode text={webuiQrUrl} size={168} />
-                <p className="text-xs text-dark-onSurfaceVariant/60 text-center">
-                  {t('sidebar.webuiScanHint')}
-                </p>
-                <code className="text-[10px] break-all text-center text-dark-onSurfaceVariant/50 px-4 select-all">
-                  {webuiQrUrl}
-                </code>
-              </div>
-            )}
-            {webuiLanAccess && webuiLanMissing && (
-              <p className="text-xs text-md-warning text-center py-2">
-                {t('sidebar.webuiNoLanIp')}
-              </p>
-            )}
-
-            <p className="text-xs text-dark-onSurfaceVariant/60 mb-3">
-              {t('sidebar.webuiSecurityNote')}
-            </p>
-
-            {/* 局域网访问开关：默认仅本机 127.0.0.1；开启后绑定 0.0.0.0 并重启服务 */}
-            <div className="mb-4 p-2.5 rounded-md3-md bg-dark-surfaceContainerHigh">
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={webuiLanAccess}
-                  onChange={handleToggleLanAccess}
-                  disabled={webuiRestarting}
-                  className="accent-md-primary"
-                />
-                <span className="text-xs text-dark-onSurface">{t('sidebar.webuiLanAccess')}</span>
-              </label>
-              <p className="text-xs text-dark-onSurfaceVariant/60 leading-relaxed mt-1">
-                {t('sidebar.webuiLanHint')}
-              </p>
-            </div>
-
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => ipc.openExternal(webuiInfo.url)}
-                className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-md3-md bg-md-primary text-md-onPrimary hover:opacity-90 transition-opacity text-sm"
-              >
-                <ExternalLink size={15} />
-                <span>{t('sidebar.webuiOpen')}</span>
-              </button>
-              <button
-                type="button"
-                onClick={handleStopWebUI}
-                className="px-3 py-2 rounded-md3-md bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer transition-colors text-sm"
-              >
-                {t('sidebar.webuiStop')}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* 远程访问弹窗：WebUI 的启动/停止/二维码与 IM 机器人管理都搬进了弹窗，侧栏只留开关 */}
+      {remoteAccessOpen && <RemoteAccessDialog onClose={() => setRemoteAccessOpen(false)} />}
     </div>
   )
 }

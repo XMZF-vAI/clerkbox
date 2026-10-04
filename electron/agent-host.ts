@@ -16,11 +16,10 @@ import { ipcMain } from 'electron'
 import type { BrowserWindow } from 'electron'
 import os from 'os'
 import fs from 'fs/promises'
-import { abortChatStream, startChatStream } from './api-proxy'
+import { abortChatStream, startChatStream, type ApiConnConfig } from './api-proxy'
 import { handlerRegistry } from './webui-server'
 import type { ChatStore } from './db'
 import { ipc, setIpcHostBridge } from '../src/lib/ipc-client'
-import { openChatStream } from '../src/lib/api-transport'
 import { toolRegistry } from '../src/lib/tool-registry'
 import { findAgent } from '../src/lib/agent-registry'
 import { buildMemoryPrompt } from '../src/lib/memory'
@@ -88,6 +87,61 @@ export function installAgentHostBridge(): void {
 
 type RunStatus = 'idle' | 'working' | 'awaiting'
 
+/**
+ * 主进程原生的模型流端口：直调 api-proxy 的 startChatStream，与 apiChatStream handler
+ * 是同一条实现，零 IPC。
+ *
+ * 为什么不能用渲染层的 openChatStream：那条路靠 ipcRenderer 订阅 'apiChunk' 事件收分片——
+ * 这段代码跑在主进程时订阅两侧都不成立（invoke 能通是因为宿主桥直调 handlerRegistry，
+ * 但事件永远只推给窗口），于是流静默挂死：占位的 assistant 消息 0 字节、run 永不收尾。
+ * bot 是第一个在 main 宿主里跑模型的角色（P6 前桌面端都是 renderer 宿主），所以只在
+ * 微信遥控链路上暴露。internal 的请求超时与空闲超时都由 startChatStream 自带。
+ */
+function hostModelStream(
+  cfg: { baseUrl: string; apiKey: string; apiCompat: ApiConnConfig['apiCompat'] },
+  body: unknown,
+  signal: AbortSignal
+): Promise<AsyncIterable<string>> {
+  type ChunkPayload = { chunk?: string; done?: boolean; error?: string }
+  const queue: ChunkPayload[] = []
+  let waiter: (() => void) | null = null
+  const enqueue = (payload: ChunkPayload) => {
+    queue.push(payload)
+    const wake = waiter
+    waiter = null
+    wake?.()
+  }
+  const requestId = `host-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+  startChatStream(cfg as ApiConnConfig, body, requestId, enqueue)
+
+  const onAbort = () => {
+    abortChatStream(requestId)
+    enqueue({ done: true })
+  }
+  if (signal.aborted) onAbort()
+  else signal.addEventListener('abort', onAbort, { once: true })
+
+  return Promise.resolve({
+    async *[Symbol.asyncIterator]() {
+      try {
+        while (true) {
+          if (queue.length === 0) {
+            if (signal.aborted) return
+            await new Promise<void>((resolve) => { waiter = resolve })
+            continue
+          }
+          const payload = queue.shift()!
+          if (payload.error) throw new Error(payload.error)
+          if (payload.done) return
+          if (payload.chunk) yield payload.chunk
+        }
+      } finally {
+        signal.removeEventListener('abort', onAbort)
+      }
+    },
+  })
+}
+
 interface HostSession {
   sessionId: string
   seq: ReturnType<typeof createSeqCounter>
@@ -106,6 +160,8 @@ interface HostSession {
     /** 审批原文：留痕与「本会话允许」都要用它，光有渲染好的 preview 字符串不够 */
     request: AgentPermissionRequest
     grantKey: string
+    /** 挂起起点：IM 侧续时会话用它算总上限，不能让一条没人答的审批无限期占着 run */
+    requestedAt: number
   }>
   /** 会话级放行集合（grantKey）：批过一次就不再打扰，无人看管的后台 run 也不会卡到超时 */
   sessionGrants: Set<string>
@@ -127,6 +183,15 @@ export class AgentSessionManager {
   private readonly contexts = new SessionContextStore()
   /** 宿主不读渲染层的 zustand persist（localStorage），故设置与技能目录靠首次 run 下发后复用 */
   private readonly snapshots = new Map<string, Extract<AgentCommand, { type: 'run' }>>()
+  /**
+   * 最近一次「本地窗口」run 实际生效的设置快照（跨会话）。
+   *
+   * 为什么需要它：IM bot 自己从不携带凭据（否则等于让聊天对端指定上游地址与 Key），
+   * 而它新建的会话从来没有本会话快照，于是「桌面无数对话、手机上第一次发任务」必然撞空。
+   * 取全局最近一份本地快照是这里唯一诚实的来源——它一定是用户自己在界面上配过并跑过的。
+   * 只在 !meta.remote 时读写，远程路径一律不看这份，所以不存在「远程换来一个别的上游」。
+   */
+  private lastLocalSettings?: AgentSettings
 
   constructor(private readonly store: ChatStore) {}
 
@@ -263,12 +328,11 @@ export class AgentSessionManager {
       sessionId,
       settings,
       model: {
-        stream: (body, signal) => openChatStream(
+        stream: (body, signal) => hostModelStream(
           {
             baseUrl: settings.baseUrl,
             apiKey: settings.apiKey,
             apiCompat: settings.apiCompat || 'openai',
-            directFetch: settings.directFetch,
           },
           body,
           signal
@@ -474,8 +538,44 @@ export class AgentSessionManager {
         console.warn(`[agent-host] 审批超时 ${Math.round(PERMISSION_TIMEOUT_MS / 1000)}s，按拒绝处理: ${request.title}`)
         this.settlePermission(s, requestId, false, true, 'once')
       }, PERMISSION_TIMEOUT_MS)
-      s.pendingPermissions.set(requestId, { resolve, timer, event, request, grantKey: preview.grantKey })
+      s.pendingPermissions.set(requestId, {
+        resolve,
+        timer,
+        event,
+        request,
+        grantKey: preview.grantKey,
+        requestedAt: Date.now(),
+      })
     })
+  }
+
+  /**
+   * 延长一条挂起审批的等待时间。
+   *
+   * 为什么需要：PERMISSION_TIMEOUT_MS 的 120 秒是按「人坐在电脑前、卡片就在眼前」定的。
+   * 审批改到 IM 里回答之后，用户在手机上看到消息、打字回一句「确定」，往返几十秒是常态，
+   * 按原来的表走就会出现「用户已经点了同意、回来发现早被超时拒绝了」——
+   * 这比不给 IM 审批更糟，因为它静默改变了执行结果。
+   *
+   * 上限 maxWaitMs 是硬闸：延长只能到「首次挂起 + maxWaitMs」为止，
+   * 于是没人回答的审批仍然一定会收尾，绝不会把一轮 run 永久挂住。
+   * 返回 false 表示这条审批已经不在了（批过 / 超时过 / 会话被回收），调用方据此提示用户。
+   */
+  extendPermissionWait(sessionId: string, requestId: string, extendMs: number, maxWaitMs: number): boolean {
+    const s = this.sessions.get(sessionId)
+    const pending = s?.pendingPermissions.get(requestId)
+    if (!s || !pending) return false
+    const deadline = pending.requestedAt + maxWaitMs
+    const remaining = Math.min(Date.now() + extendMs, deadline) - Date.now()
+    if (remaining <= 0) return false
+    clearTimeout(pending.timer)
+    pending.timer = setTimeout(() => {
+      if (!s.pendingPermissions.has(requestId)) return
+      console.warn(`[agent-host] 审批等待 ${Math.round(maxWaitMs / 1000)}s 上限到点，按拒绝处理`)
+      this.settlePermission(s, requestId, false, true, 'once')
+    }, remaining)
+    pending.timer.unref?.()
+    return true
   }
 
   /** 审批的唯一收尾点：解除挂起、留痕、广播 settled、回到 working，四者不允许分头漏 */
@@ -683,13 +783,20 @@ export class AgentSessionManager {
     // 设置快照：宿主不读渲染层 persist，凭据只存在于本地窗口下发的那份快照里。
     // 因此远程 run 一律**忽略**命令自带的 settings（否则等于让远程端指定上游地址与 Key），
     // 改用本会话最近一次本地快照；没有快照就明确拒绝，而不是拿远程自带的配置去跑。
+    // 本地 run 自带 settings 时用自带的；不带（IM bot 就是这种）时先查本会话历史快照，
+    // 再退到全局最近本地快照——bot 新建的会话没有前者，只有后者能让它开箱即用。
     const cached = this.snapshots.get(s.sessionId)
-    const base = meta.remote ? cached?.settings : (cmd.settings ?? cached?.settings)
+    const base = meta.remote
+      ? cached?.settings
+      : (cmd.settings ?? cached?.settings ?? this.lastLocalSettings)
     if (!base) return { ok: false, error: MISSING_SETTINGS }
     // 远程触发的运行永远按 manual 档门控：危险操作只能由本地窗口批准。
     // full / auto 档在本地是用户自己的选择，落到远程就变成「持 token 即可以用户身份跑 shell」。
     const settings: AgentSettings = meta.remote ? { ...base, approvalMode: 'manual' } : base
     const resolvedCmd: Extract<AgentCommand, { type: 'run' }> = { ...cmd, settings }
+    // 本地 run 才是这份全局快照的唯一合法来源：渲染层每次发都带自己的配置，
+    // 于是「桌面换模型」下一步就是 bot 用新模型，不需要重启任何东西。
+    if (!meta.remote) this.lastLocalSettings = settings
     if (meta.remote && base.approvalMode !== 'manual') {
       console.log(`[agent-host][audit] remote run downgraded approval ${base.approvalMode} -> manual session=${s.sessionId}`)
     }
@@ -898,6 +1005,28 @@ export class AgentSessionManager {
   /** 单测与诊断用：本会话最近一次运行实际生效的设置快照 */
   peekRunSettings(sessionId: string): AgentSettings | undefined {
     return this.snapshots.get(sessionId)?.settings
+  }
+
+  /**
+   * IM bot 的可用性判据：本机是否已经有一份能用的模型配置。
+   * bot 自己不带凭据，冷启动时若这里还是 undefined，就应当回「请先在桌面端完成一次对话」，
+   * 而不是发一条必然失败的 run 让用户在手机上看到一堆错误。
+   */
+  get hasLocalSettingsSnapshot(): boolean {
+    return this.lastLocalSettings !== undefined
+  }
+
+  /**
+   * 渲染层主动推送的本地设置快照（'agent:push-settings'，仅本地窗口可调）。
+   *
+   * 为什么需要这条独立通道：P6 之前宿主默认 mode=renderer，桌面上每一次对话都在渲染层
+   * 自跑循环、根本不经过 handleCommand——startRun 里的快照挂载点永远收不到，
+   * IM bot 就会永远卡在「请先在桌面端完成一次对话」。渲染层在设置加载/变更时推一份过来，
+   * 是 renderer 模式下主进程唯一诚实的快照来源；main 模式下 startRun 的挂载点继续兜底，
+   * 两条来源写同一个字段，不冲突。
+   */
+  noteLocalSettings(settings: AgentSettings): void {
+    this.lastLocalSettings = settings
   }
 }
 

@@ -33,6 +33,7 @@ import { createChatStore, registerDbIpcHandlers, type ChatStore } from './db'
 import { registerCheckpointIpcHandlers } from './checkpoint-store'
 import { registerGitIpcHandlers } from './git-service'
 import { registerAgentHostIpc, getAgentSessionManager, registerAgentEventSink } from './agent-host'
+import { initImBots, disposeImBots } from './im-bots'
 import {
   AGENT_BROWSER_PARTITION,
   attachAgentBrowserGuest,
@@ -87,7 +88,8 @@ const MAX_CUSTOM_AGENT_FILES = 100
 const MAX_CUSTOM_AGENT_FILE_BYTES = 512 * 1024
 const MAX_MEMORY_FILE_BYTES = 1024 * 1024
 const MAX_MEMORY_INDEX_BYTES = 25_000
-const MAX_API_KEY_BYTES = 16 * 1024
+/** 单条凭据明文的大小上限：既管 provider 的 API Key，也管 IM 机器人的 bot token / App Secret */
+const MAX_SECRET_BYTES = 16 * 1024
 
 /** Reject archives whose metadata exceeds extraction limits before invoking an OS extractor. */
 function assertSafeSkillArchive(filePath: string): void {
@@ -575,6 +577,47 @@ function assertEncryptionAvailable(): void {
   }
 }
 
+/**
+ * 单条凭据的读 / 写 / 删——safeStorage 加解密的唯一入口。
+ *
+ * 抽出来是为了让「API Key」与「IM 机器人凭据（bot token / 飞书 App Secret）」走同一条
+ * 加密路径。两处各写一份 encryptString 的迟早会有一份忘记 assertCredentialId，
+ * 而那个校验正是防「凭据 id 里塞 ../ 之类」的那道门。
+ * 三个 ipcMain handler（loadApiKeys / saveApiKey / removeApiKey）同样走这里。
+ */
+function secretRead(id: unknown): string | null {
+  const credentialId = assertCredentialId(id)
+  const encrypted = readCredentialStore()[credentialId]
+  if (!encrypted) return null
+  assertEncryptionAvailable()
+  try {
+    return safeStorage.decryptString(Buffer.from(encrypted, 'base64'))
+  } catch {
+    // 为另一个系统账户加密的条目：读不出来不等于要崩，按「未配置」处理
+    return null
+  }
+}
+
+function secretWrite(id: unknown, value: string): void {
+  const credentialId = assertCredentialId(id)
+  if (typeof value !== 'string' || Buffer.byteLength(value, 'utf-8') > MAX_SECRET_BYTES) {
+    throw new Error('Invalid or oversized credential')
+  }
+  assertEncryptionAvailable()
+  const credentials = readCredentialStore()
+  if (value) credentials[credentialId] = safeStorage.encryptString(value).toString('base64')
+  else delete credentials[credentialId]
+  writeCredentialStore(credentials)
+}
+
+function secretRemove(id: unknown): void {
+  const credentialId = assertCredentialId(id)
+  assertEncryptionAvailable()
+  const credentials = readCredentialStore()
+  delete credentials[credentialId]
+  writeCredentialStore(credentials)
+}
+
 function createWindow() {
   const preloadPath = projectRoot('dist-electron/electron/preload.js')
   const devUrl = process.env.VITE_DEV_SERVER_URL
@@ -892,23 +935,14 @@ function registerIpcHandlers(chatStore: ChatStore) {
   })
 
   ipcMain.handle('saveApiKey', async (_event, id: unknown, apiKey: unknown): Promise<void> => {
-    const credentialId = assertCredentialId(id)
-    if (typeof apiKey !== 'string' || Buffer.byteLength(apiKey, 'utf-8') > MAX_API_KEY_BYTES) {
-      throw new Error('Invalid or oversized API key')
-    }
-    assertEncryptionAvailable()
-    const credentials = readCredentialStore()
-    if (apiKey) credentials[credentialId] = safeStorage.encryptString(apiKey).toString('base64')
-    else delete credentials[credentialId]
-    writeCredentialStore(credentials)
+    // 非字符串必须报错，不能归一成空串：空串在 secretWrite 里是「删除」分支，
+    // 归一就等于让一个坏调用静默删掉用户已存的凭据（HEAD 的行为是明确抛错）
+    if (typeof apiKey !== 'string') throw new Error('Invalid or oversized API key')
+    secretWrite(id, apiKey)
   })
 
   ipcMain.handle('removeApiKey', async (_event, id: unknown): Promise<void> => {
-    const credentialId = assertCredentialId(id)
-    assertEncryptionAvailable()
-    const credentials = readCredentialStore()
-    delete credentials[credentialId]
-    writeCredentialStore(credentials)
+    secretRemove(id)
   })
 
   // File system
@@ -2021,6 +2055,34 @@ function registerIpcHandlers(chatStore: ChatStore) {
   // 批次 B · P5：宿主事件同时推给 WebUI 的 SSE 订阅者；新连接建立时补发整环，
   // 远程视图与本地窗口共用同一 seq 序列（去重与乱序由渲染层薄客户端负责）。
   registerAgentEventSink((payload) => pushAgentEvent(payload))
+  // IM 机器人（微信 / 飞书遥控）：装配主进程侧的通道池与会话桥。
+  // 放在宿主之后是因为会话桥要复用同一个 AgentSessionManager 单例与它的事件出口；
+  // 凭据读写复用上面那三个 secret* 函数，于是 bot token 与 API Key 走同一条加密路径。
+  // 两条通道都是出站长连接，不需要任何监听端口，因此不启动也就不会影响应用启动耗时。
+  initImBots({
+    userDataPath: app.getPath('userData'),
+    store: chatStore,
+    manager: getAgentSessionManager(chatStore),
+    readCredential: async (id) => secretRead(id),
+    writeCredential: async (id, value) => secretWrite(id, value),
+    deleteCredential: async (id) => secretRemove(id),
+  })
+  // IM bot 的设置快照来源之二（之三见 agent-host.startRun 的本地挂载点）：
+  // 渲染层宿主模式下本地 run 不经过主进程，由渲染层在设置加载/变更时推一份快照过来。
+  // 远程界面（WebUI /api/invoke 以 event=null 直调 handler）一律拒收——
+  // 否则持 token 者就能指定主进程的上游地址与 API Key；黑名单里另有同名条目双保险。
+  ipcMain.handle('agent:push-settings', (event, settings: unknown) => {
+    if (event === null) return { ok: false as const, error: 'local-only' }
+    const candidate = settings as { model?: unknown } | null
+    // 只校验 model：activeProviderId/activeModelId 在单供应商老配置里是合法的 undefined
+    if (!candidate || typeof candidate !== 'object' || typeof candidate.model !== 'string' || !candidate.model) {
+      return { ok: false as const, error: 'invalid-settings' }
+    }
+    getAgentSessionManager(chatStore).noteLocalSettings(settings as never)
+    const noted = candidate as { model: string; activeProviderId?: string }
+    console.log(`[agent-host] 收到渲染层设置快照: model=${noted.model} provider=${noted.activeProviderId ?? '(未分组)'}`)
+    return { ok: true as const }
+  })
   // 用户按 Esc 叫停电脑操控 → 渲染层据此中止当前运行。
   // 走注入而不是让 computer-use 反向 import mainWindow：本模块已被 main.ts 引用，
   // 反向 import 会成环。
@@ -3863,6 +3925,9 @@ app.on('before-quit', (event) => {
   disposeScreenAura()
   disposeComputerUseCursors()
   disposeAllTerminals()
+  // IM 机器人：断掉长轮询与长连接、回收扫码会话。内部各步都有超时兜底，
+  // 这里 fire-and-forget：真的卡住由末尾的 app.exit 收口，不能拖累退出流程。
+  void disposeImBots()
   // A3：退出前强制落盘会话存储（SQLite 防抖未落的变更在此收口）
   chatStoreRef?.flush()
   void (async () => {

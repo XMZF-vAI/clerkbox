@@ -34,6 +34,18 @@ import type {
 } from '../src/types/ipc'
 import type { MemoryEntry } from '../src/types/agent'
 import type { McpServerConfig, McpServerStatus, McpToolInfo, McpMarketServer } from '../src/types/ipc'
+// IM 机器人的跨进程类型：纯 type import，编译后即被擦除，不给沙箱化 preload 引入任何运行时依赖
+import type {
+  BindCodeResult,
+  BotConfig,
+  BotCredentialInput,
+  NewBot,
+  BotListItem,
+  BotsIpcResult,
+  RuntimeStatus,
+  WeixinQrEvent,
+  WeixinQrSession,
+} from './im-bots/types'
 
 contextBridge.exposeInMainWorld('clerkbox', {
   // File system
@@ -190,6 +202,13 @@ contextBridge.exposeInMainWorld('clerkbox', {
   agentHostMode: (): Promise<'main' | 'renderer'> => ipcRenderer.invoke('agent:host-mode'),
   agentSnapshot: (sessionId: string | undefined, sinceSeq: number): Promise<unknown> =>
     ipcRenderer.invoke('agent:snapshot', sessionId, sinceSeq),
+  /**
+   * 渲染层 → 主进程的设置快照推送：IM bot 的模型配置来源（renderer 宿主模式下
+   * 本地 run 不经过主进程）。主进程只认本地窗口（event===null 拒收），远程不可达
+   * （webui 黑名单 + handler 双保险）。失败静默：推送失败只影响 bot，不影响本地对话。
+   */
+  pushAgentSettings: (settings: Record<string, unknown>): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('agent:push-settings', settings),
   /** 会话被删除时通知宿主回收运行态（环、消息镜像、含 apiKey 的设置快照） */
   agentDropSession: (sessionId: string): void => ipcRenderer.send('agent:drop-session', sessionId),
   /** 订阅宿主事件流；返回退订函数。payload 带单调 seq，缺口即需重连补发 */
@@ -322,6 +341,43 @@ contextBridge.exposeInMainWorld('clerkbox', {
   stopWebUI: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('stopWebUI'),
   getWebUIStatus: (): Promise<{ running: boolean; url?: string }> => ipcRenderer.invoke('getWebUIStatus'),
   getLanAddresses: (): Promise<string[]> => ipcRenderer.invoke('getLanAddresses'),
+
+  // ── IM 机器人（微信 / 飞书遥控）──
+  // 这一组全部是桌面专属管理面：bots:upsert 改配置、bots:generateBindCode 签发绑定凭据，
+  // 因此整组在 WebUI 的 /api/invoke 黑名单里（见 electron/webui-server.ts）。
+  // 渲染层拿不到凭据明文：主进程只回 hasCredential 这类布尔与脱敏后的状态。
+  botsList: (): Promise<BotListItem[]> => ipcRenderer.invoke('bots:list'),
+  botsUpsert: (bot: NewBot): Promise<BotsIpcResult<BotConfig>> => ipcRenderer.invoke('bots:upsert', bot),
+  botsRemove: (id: string): Promise<BotsIpcResult> => ipcRenderer.invoke('bots:remove', id),
+  botsSetEnabled: (id: string, enabled: boolean): Promise<BotsIpcResult> =>
+    ipcRenderer.invoke('bots:setEnabled', id, enabled),
+  botsRuntimeStatus: (): Promise<RuntimeStatus[]> => ipcRenderer.invoke('bots:runtimeStatus'),
+  botsSetCredential: (botId: string, credential: BotCredentialInput): Promise<BotsIpcResult> =>
+    ipcRenderer.invoke('bots:setCredential', botId, credential),
+  botsResetBot: (botId: string): Promise<BotsIpcResult> => ipcRenderer.invoke('bots:resetBot', botId),
+  botsGenerateBindCode: (id: string): Promise<BindCodeResult> => ipcRenderer.invoke('bots:generateBindCode', id),
+  botsUnbindActor: (actorKey: string): Promise<BotsIpcResult> => ipcRenderer.invoke('bots:unbindActor', actorKey),
+  botsResetActor: (actorKey: string): Promise<BotsIpcResult> => ipcRenderer.invoke('bots:resetActor', actorKey),
+  botsWeixinQrStart: (botId: string): Promise<{ ok: true; session: WeixinQrSession } | { ok: false; error: string }> =>
+    ipcRenderer.invoke('bots:weixinQrStart', botId),
+  botsWeixinQrPoll: (sessionId: string): Promise<WeixinQrSession | null> =>
+    ipcRenderer.invoke('bots:weixinQrPoll', sessionId),
+  botsWeixinQrStop: (sessionId: string): Promise<void> => ipcRenderer.invoke('bots:weixinQrStop', sessionId),
+  onBotsChanged: (callback: () => void): (() => void) => {
+    const listener = () => callback()
+    ipcRenderer.on('bots:changed', listener)
+    return () => ipcRenderer.removeListener('bots:changed', listener)
+  },
+  onBotsStatus: (callback: (status: RuntimeStatus[]) => void): (() => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, status: RuntimeStatus[]) => callback(status)
+    ipcRenderer.on('bots:status', listener)
+    return () => ipcRenderer.removeListener('bots:status', listener)
+  },
+  onBotsWeixinQr: (callback: (event: WeixinQrEvent) => void): (() => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, event: WeixinQrEvent) => callback(event)
+    ipcRenderer.on('bots:weixinQr', listener)
+    return () => ipcRenderer.removeListener('bots:weixinQr', listener)
+  },
 
   // 共享 KV 存储（Electron 与 WebUI 双模式同步持久化）
   kvGet: (key: string): Promise<string | null> => ipcRenderer.invoke('kvGet', key),

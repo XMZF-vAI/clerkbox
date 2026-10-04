@@ -6,6 +6,7 @@ import * as path from 'path'
 vi.mock('electron', () => ({ app: { getPath: () => '' } }))
 
 import { REMOTE_INVOKE_BLOCKLIST, safeTokenEquals } from '../electron/webui-server'
+import { BOTS_IPC_CHANNELS } from '../electron/im-bots/types'
 
 /**
  * 唯一刻意放行的 agent 通道。
@@ -100,6 +101,78 @@ describe('WebUI 远程调用黑名单', () => {
         continue
       }
       expect(REMOTE_INVOKE_BLOCKLIST, channel).toContain(channel)
+    }
+  })
+})
+
+/**
+ * IM 机器人管理通道（bots:*）：整组桌面专属，一条都不许对远程可达。
+ *
+ * 三条断言各管一种腐坏方向：
+ * 1. 注册了 handler 却没进黑名单 → 局域网能生成绑定码 / 改机器人配置；
+ * 2. 黑名单里写了不存在的通道 → 后人以为防过了，其实那条通道另有注册写法；
+ * 3. 常量表里有但没人注册 → WebUI/preload 侧调过去只会拿到「unknown handler」。
+ */
+describe('IM 机器人远程调用守卫', () => {
+  /**
+   * 扫出 bots:* 的真实注册。
+   * 两种写法都要认：字符串字面量（`ipcMain.handle('bots:list', ...)`）与常量表引用
+   * （`ipcMain.handle(BOTS_IPC_CHANNELS.list, ...)`）。只认前者的话，用常量表注册的
+   * 全部通道都会被扫成 0 条，测试反而「绿」得什么都不校验——那比没有测试更糟。
+   */
+  const scanBotsChannels = (): Set<string> => {
+    const dir = path.join(process.cwd(), 'electron')
+    const found = new Set<string>()
+    const literal = /ipcMain\.handle\(\s*['"](bots:[^'"]+)['"]/g
+    // 常量表成员名 → 通道值（成员名与值一一对应，见 im-bots/types.ts 的 BOTS_IPC_CHANNELS）
+    const byMember = new Map(Object.entries(BOTS_IPC_CHANNELS).map(([name, value]) => [name, String(value)]))
+    const constant = /ipcMain\.handle\(\s*BOTS_IPC_CHANNELS\.([A-Za-z0-9_]+)/g
+    const walk = (current: string): void => {
+      for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+        const full = path.join(current, entry.name)
+        if (entry.isDirectory()) {
+          walk(full)
+          continue
+        }
+        if (!entry.name.endsWith('.ts')) continue
+        const source = fs.readFileSync(full, 'utf-8')
+        for (const match of source.matchAll(literal)) if (match[1]) found.add(match[1])
+        for (const match of source.matchAll(constant)) {
+          const channel = match[1] ? byMember.get(match[1]) : undefined
+          if (channel) found.add(channel)
+        }
+      }
+    }
+    walk(dir)
+    return found
+  }
+
+  const declaredBotsChannels = Object.values(BOTS_IPC_CHANNELS)
+
+  it('electron/ 下每个 bots:* 通道都在黑名单里（无任何例外）', () => {
+    const registered = scanBotsChannels()
+    expect(registered.size).toBeGreaterThan(0) // 扫描失效（写法变化）时先炸，避免假绿
+    for (const channel of registered) {
+      expect(REMOTE_INVOKE_BLOCKLIST, channel).toContain(channel)
+    }
+  })
+
+  it('黑名单里的每条 bots:* 都对应真实注册或常量表条目（不留骗人的死条目）', () => {
+    const registered = scanBotsChannels()
+    for (const channel of REMOTE_INVOKE_BLOCKLIST.filter((item) => item.startsWith('bots:'))) {
+      expect(registered.has(channel) || (declaredBotsChannels as string[]).includes(channel), channel).toBe(true)
+    }
+  })
+
+  it('常量表与真实注册的通道一一对应（加 handler 必进常量表，进常量表必落实现）', () => {
+    expect([...scanBotsChannels()].sort()).toEqual([...declaredBotsChannels].map(String).sort())
+  })
+
+  it('事件推送通道不进黑名单也无害：它们只由主进程单向 send，不经 /api/invoke 受理', () => {
+    // 这里只是把设计写下来：/api/invoke 只能命中 handlerRegistry，
+    // webContents.send 的通道名（bots:changed / bots:status / bots:weixinQr）不在其中。
+    for (const event of ['bots:changed', 'bots:status', 'bots:weixinQr']) {
+      expect(REMOTE_INVOKE_BLOCKLIST.includes(event)).toBe(false)
     }
   })
 })

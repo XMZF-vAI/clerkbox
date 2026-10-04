@@ -410,3 +410,56 @@ export async function hydrateProviderApiKeys(): Promise<void> {
     customModels: latest.customModels.map((model) => ({ ...model, apiKey: '' })),
   })
 }
+
+// ── IM bot 的设置快照推送 ────────────────────────────────────────────────────
+// 渲染层宿主模式（P6 前的默认）下，桌面端本地 run 不经过主进程，IM bot 桥在主进程里
+// 永远看不到模型配置——渲染层在设置加载/变更时主动推一份快照过去
+// （agent:push-settings，仅本地窗口可推；远程推送会被黑名单与 handler 双重拒收）。
+
+/** AgentSettings 子集（src/agent-core/ports.ts 的 Pick）在本店的取值，与 use-agent.ts 的挑选同口径 */
+function agentSettingsSnapshot(state: ReturnType<typeof useSettingsStore.getState>): Record<string, unknown> {
+  return {
+    model: state.model,
+    apiCompat: state.apiCompat,
+    activeProviderId: state.activeProviderId,
+    activeModelId: state.activeModelId,
+    providers: state.providers,
+    temperature: state.temperature,
+    maxTokens: state.maxTokens,
+    reasoningEffort: state.reasoningEffort,
+    enableThinking: state.enableThinking,
+    thinkingBudget: state.thinkingBudget,
+    approvalMode: state.approvalMode,
+    baseUrl: state.baseUrl,
+    apiKey: state.apiKey,
+    directFetch: state.directFetch,
+    maxInputTokens: state.maxInputTokens,
+    agentsMdEnabled: state.agentsMdEnabled,
+    claudeMdCompat: state.claudeMdCompat,
+    browserUseEnabled: state.browserUseEnabled,
+    computerUseEnabled: state.computerUseEnabled,
+  }
+}
+
+let lastPushedSettingsSignature = ''
+
+/** 把当前设置快照推给主进程；内容没变的重复变更不推（设置页里翻主题这类高频无关变更） */
+export function pushAgentSettingsSnapshot(): void {
+  const snapshot = agentSettingsSnapshot(useSettingsStore.getState())
+  // 只把 model 当作「值得推」的下限。activeProviderId 是按 baseUrl 分组派生的字段，
+  // 单供应商老配置（只有 model/baseUrl/apiKey）里它是 undefined——拿它当门槛会把
+  // 恰恰是这批用户的快照拦在门外，bot 侧表现为「明明配好了却说没有模型配置」
+  if (!snapshot.model) return
+  const signature = JSON.stringify(snapshot)
+  if (signature === lastPushedSettingsSignature) return
+  lastPushedSettingsSignature = signature
+  void ipc
+    .pushAgentSettings(snapshot)
+    .catch(() => {
+      // 推送失败只影响 IM bot 拿配置，本地对话不受影响；允许下次变更重试
+      lastPushedSettingsSignature = ''
+    })
+}
+
+// 任何设置变更（含凭据水合完成的那次 setState）都触发一次重推
+useSettingsStore.subscribe(() => pushAgentSettingsSnapshot())

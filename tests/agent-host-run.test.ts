@@ -235,3 +235,29 @@ describe('宿主对远程命令的策略', () => {
     expect(seen.map((p) => p.seq)).toEqual(seen.map((_, i) => i + 1))
   })
 })
+
+/**
+ * IM bot 的设置快照回退：renderer 宿主模式下本地 run 不经过主进程，
+ * 渲染层经 'agent:push-settings'（noteLocalSettings）推快照，bot 的 run 不带 settings
+ * 也能落到这份上。没有快照时必须仍然明确拒绝——那是 bot 冷启动提示的判据。
+ */
+describe('IM bot 的设置快照回退', () => {
+  it('noteLocalSettings 之后，不带 settings 的本地 run 能跑通', async () => {
+    script = textStream('收到')
+    const m = new AgentSessionManager(fakeStore().store)
+    expect(m.hasLocalSettingsSnapshot).toBe(false)
+    m.noteLocalSettings(settings)
+    expect(m.hasLocalSettingsSnapshot).toBe(true)
+    const res = await m.handleCommand({ type: 'run', sessionId: 's1', content: '手机来的任务' })
+    expect(res.ok).toBe(true)
+    const ring = m.peekRing('s1')
+    expect(ring[ring.length - 1]?.type).toBe('run.status')
+  })
+
+  it('没有快照时仍然明确拒绝，而不是拿空配置硬跑', async () => {
+    const m = new AgentSessionManager(fakeStore().store)
+    const res = await m.handleCommand({ type: 'run', sessionId: 's1', content: 'x' })
+    expect(res.ok).toBe(false)
+    expect(res.error).toBeTruthy()
+  })
+})

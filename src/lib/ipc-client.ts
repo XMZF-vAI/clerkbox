@@ -40,6 +40,18 @@
 } from '../types/ipc'
 import type { MemoryEntry } from '../types/agent'
 import type { AgentCommand, AgentCommandResult, AgentEvent, AgentSnapshot } from '../agent-core/protocol'
+// IM 机器人管理面：与主进程共用一份类型（纯 type import，编译后擦除）
+import type {
+  BindCodeResult,
+  BotConfig,
+  BotCredentialInput,
+  NewBot,
+  BotListItem,
+  BotsIpcResult,
+  RuntimeStatus,
+  WeixinQrEvent,
+  WeixinQrSession,
+} from '../../electron/im-bots/types'
 
 /**
  * 统一 IPC 客户端：双模式运行。
@@ -420,6 +432,9 @@ async function requestAgentResync(sessionId: string | undefined, sinceSeq: numbe
 
 // ── 统一 ipc 对象 ──
 // Electron 模式直接委托 window.clerkbox；WebUI 模式走 HTTP。
+/** WebUI（非 Electron）模式下 bots:* 的统一回执：这组管理面只在本机桌面可达 */
+const BOTS_DESKTOP_ONLY = { ok: false, error: 'desktop-only' } as const
+
 export const ipc = {
   getWebUICapabilities: (): Promise<WebUICapabilities> => {
     if (isElectron) {
@@ -525,6 +540,14 @@ export const ipc = {
     isElectron ? window.clerkbox.agentCommand(cmd) : webInvoke('agent:command', [cmd]),
   agentHostMode: (): Promise<'main' | 'renderer'> =>
     isElectron ? window.clerkbox.agentHostMode() : webInvoke('agent:host-mode'),
+  // 设置快照推送：只有桌面渲染层有资格喂主进程（WebUI 手里没有 Key，主进程也拒收远程推送），
+  // 远程分支静默 no-op——调用方是 fire-and-forget 的，不需要错误语义。
+  // 可选链兜底：dev 模式下渲染层比主进程新（preload 还没重编）时，旧 preload 上没有这个方法，
+  // 直接调会在推送侧抛 TypeError；推送失败只影响 bot，不该惊动本地对话。
+  pushAgentSettings: (settings: Record<string, unknown>): Promise<{ ok: boolean; error?: string }> =>
+    isElectron
+      ? (window.clerkbox.pushAgentSettings?.(settings) ?? Promise.resolve({ ok: false, error: 'stale-preload' }))
+      : Promise.resolve({ ok: false, error: 'desktop-only' }),
   agentSnapshot: (sessionId: string | undefined, sinceSeq: number): Promise<AgentSnapshot> =>
     isElectron ? window.clerkbox.agentSnapshot(sessionId, sinceSeq) : requestAgentResync(sessionId, sinceSeq),
   /**
@@ -739,6 +762,50 @@ agentBrowserEnsurePanel: (sessionId?: string): Promise<boolean> =>
     isElectron ? window.clerkbox.getWebUIStatus() : Promise.resolve({ running: true, url: window.location.href }),
   getLanAddresses: (): Promise<string[]> =>
     isElectron ? window.clerkbox.getLanAddresses() : Promise.resolve([]),
+
+  /**
+   * IM 机器人（微信 / 飞书遥控）管理面。
+   *
+   * 只在桌面模式可用：bots:* 整组在 WebUI 的 /api/invoke 黑名单里（生成绑定码、
+   * 改机器人配置都属于「拿到 token 就能接管这台机器」的能力），所以远程模式一律走
+   * 降级分支返回 desktop-only，连请求都不发——发出去只会得到一个语义模糊的 403，
+   * 而界面需要的是明确一句「请在桌面端管理机器人」。
+   * 订阅函数在非 Electron 环境返回空的退订函数，调用方不必再判空。
+   */
+  bots: {
+    list: (): Promise<BotListItem[]> =>
+      isElectron ? window.clerkbox.botsList() : Promise.resolve([]),
+    upsert: (bot: NewBot): Promise<BotsIpcResult<BotConfig>> =>
+      isElectron ? window.clerkbox.botsUpsert(bot) : Promise.resolve(BOTS_DESKTOP_ONLY),
+    remove: (id: string): Promise<BotsIpcResult> =>
+      isElectron ? window.clerkbox.botsRemove(id) : Promise.resolve(BOTS_DESKTOP_ONLY),
+    setEnabled: (id: string, enabled: boolean): Promise<BotsIpcResult> =>
+      isElectron ? window.clerkbox.botsSetEnabled(id, enabled) : Promise.resolve(BOTS_DESKTOP_ONLY),
+    runtimeStatus: (): Promise<RuntimeStatus[]> =>
+      isElectron ? window.clerkbox.botsRuntimeStatus() : Promise.resolve([]),
+    setCredential: (botId: string, credential: BotCredentialInput): Promise<BotsIpcResult> =>
+      isElectron ? window.clerkbox.botsSetCredential(botId, credential) : Promise.resolve(BOTS_DESKTOP_ONLY),
+    resetBot: (botId: string): Promise<BotsIpcResult> =>
+      isElectron ? window.clerkbox.botsResetBot(botId) : Promise.resolve(BOTS_DESKTOP_ONLY),
+    generateBindCode: (id: string): Promise<BindCodeResult> =>
+      isElectron ? window.clerkbox.botsGenerateBindCode(id) : Promise.resolve({ ok: false }),
+    unbindActor: (actorKey: string): Promise<BotsIpcResult> =>
+      isElectron ? window.clerkbox.botsUnbindActor(actorKey) : Promise.resolve(BOTS_DESKTOP_ONLY),
+    resetActor: (actorKey: string): Promise<BotsIpcResult> =>
+      isElectron ? window.clerkbox.botsResetActor(actorKey) : Promise.resolve(BOTS_DESKTOP_ONLY),
+    weixinQrStart: (botId: string): Promise<{ ok: true; session: WeixinQrSession } | { ok: false; error: string }> =>
+      isElectron ? window.clerkbox.botsWeixinQrStart(botId) : Promise.resolve(BOTS_DESKTOP_ONLY),
+    weixinQrPoll: (sessionId: string): Promise<WeixinQrSession | null> =>
+      isElectron ? window.clerkbox.botsWeixinQrPoll(sessionId) : Promise.resolve(null),
+    weixinQrStop: (sessionId: string): Promise<void> =>
+      isElectron ? window.clerkbox.botsWeixinQrStop(sessionId) : Promise.resolve(),
+    onChanged: (callback: () => void): (() => void) =>
+      isElectron ? window.clerkbox.onBotsChanged(callback) : () => {},
+    onStatus: (callback: (statuses: RuntimeStatus[]) => void): (() => void) =>
+      isElectron ? window.clerkbox.onBotsStatus(callback) : () => {},
+    onWeixinQr: (callback: (event: WeixinQrEvent) => void): (() => void) =>
+      isElectron ? window.clerkbox.onBotsWeixinQr(callback) : () => {},
+  },
 
   // 共享 KV 存储：双模式读写主进程同一份文件，实现设置/技能等跨模式同步
   kvGet: (key: string): Promise<string | null> =>

@@ -1,5 +1,21 @@
 ﻿import type { ApiCompat, MemoryEntry, MemoryType } from './agent'
 import type { AgentCommand, AgentCommandResult, AgentEvent, AgentSnapshot } from '../agent-core/protocol'
+/**
+ * IM 机器人的跨进程类型与主进程共用一份定义（该模块只依赖 zod，且这里全是 type import，
+ * 编译后即被擦除，不会把主进程代码或 zod 打进渲染层包）。
+ * 复制一份到渲染层正是本项目一直在消灭的那类问题：两侧字段各长一半，错只在真机上暴露。
+ */
+import type {
+  BindCodeResult,
+  BotConfig,
+  BotCredentialInput,
+  NewBot,
+  BotListItem,
+  BotsIpcResult,
+  RuntimeStatus,
+  WeixinQrEvent,
+  WeixinQrSession,
+} from '../../electron/im-bots/types'
 
 export interface FileEntry {
   name: string
@@ -506,6 +522,12 @@ export interface ClerkBoxAPI {
   agentCommand: (cmd: AgentCommand) => Promise<AgentCommandResult>
   /** 当前运行模式：main = 编排在宿主，renderer = 仍由渲染层自跑（P6 前默认后者） */
   agentHostMode: () => Promise<'main' | 'renderer'>
+  /**
+   * 渲染层 → 主进程的设置快照推送（IM bot 的模型配置来源）。
+   * 仅桌面模式可用：远程界面推送等于让持 token 者指定上游与 Key，主进程拒收，
+   * 这里在 WebUI 分支直接不发（与 agent:push-settings 黑名单条目三层防御）。
+   */
+  pushAgentSettings: (settings: Record<string, unknown>) => Promise<{ ok: boolean; error?: string }>
   /** 重连取回运行态并按 sinceSeq 补发缺口事件 */
   agentSnapshot: (sessionId: string | undefined, sinceSeq: number) => Promise<AgentSnapshot>
   /** 会话删除时回收宿主运行态（fire-and-forget） */
@@ -579,6 +601,29 @@ export interface ClerkBoxAPI {
   stopWebUI: () => Promise<{ ok: boolean }>
   getWebUIStatus: () => Promise<{ running: boolean; url?: string }>
   getLanAddresses: () => Promise<string[]>
+  // IM 机器人（微信 / 飞书遥控）：整组桌面专属，WebUI 远程模式一律不可达（见 webui-server 黑名单）。
+  // 凭据明文永不出主进程：列表只带 hasCredential 这类布尔与脱敏后的运行状态。
+  botsList: () => Promise<BotListItem[]>
+  botsUpsert: (bot: NewBot) => Promise<BotsIpcResult<BotConfig>>
+  botsRemove: (id: string) => Promise<BotsIpcResult>
+  botsSetEnabled: (id: string, enabled: boolean) => Promise<BotsIpcResult>
+  botsRuntimeStatus: () => Promise<RuntimeStatus[]>
+  /** 写入飞书应用凭据（微信不接受手填，只能扫码；主进程按渠道拒绝） */
+  botsSetCredential: (botId: string, credential: BotCredentialInput) => Promise<BotsIpcResult>
+  /** 清空该 bot 的聊天状态与绑定关系，保留配置与凭据 */
+  botsResetBot: (botId: string) => Promise<BotsIpcResult>
+  botsGenerateBindCode: (id: string) => Promise<BindCodeResult>
+  botsUnbindActor: (actorKey: string) => Promise<BotsIpcResult>
+  botsResetActor: (actorKey: string) => Promise<BotsIpcResult>
+  botsWeixinQrStart: (botId: string) => Promise<{ ok: true; session: WeixinQrSession } | { ok: false; error: string }>
+  botsWeixinQrPoll: (sessionId: string) => Promise<WeixinQrSession | null>
+  botsWeixinQrStop: (sessionId: string) => Promise<void>
+  /** 配置（机器人列表 / 绑定关系）变化；返回退订函数 */
+  onBotsChanged: (callback: () => void) => () => void
+  /** 运行状态全量快照；返回退订函数 */
+  onBotsStatus: (callback: (statuses: RuntimeStatus[]) => void) => () => void
+  /** 微信扫码登录状态机；返回退订函数 */
+  onBotsWeixinQr: (callback: (event: WeixinQrEvent) => void) => () => void
   // 共享 KV 存储（Electron 与 WebUI 双模式同步持久化）
   kvGet: (key: string) => Promise<string | null>
   kvSet: (key: string, value: string) => Promise<void>

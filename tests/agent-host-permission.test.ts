@@ -194,3 +194,66 @@ it('无窗口即 fail-closed：不广播待批事件，直接拒绝并留痕（U
   expect(audits(rows)[0]).toMatchObject({ decision: 'deny', tool: 'execute_command' })
   expect(toolRegistry.execute).not.toHaveBeenCalled()
 })
+
+/**
+ * IM 审批改到手机上回答之后需要的唯一宿主改动：延长一条挂起审批的等待时间。
+ * 120 秒那张表是按「人坐在电脑前、卡片就在眼前」定的，聊天往返几十秒是常态。
+ * 这两条守住它的边界：能续、答复仍然生效，但总上限必须真的能把没人答的审批收尾——
+ * 「fail-closed」是宿主的三条红线之一，不能因为加了续时而被削弱。
+ */
+describe('extendPermissionWait（IM 审批续时）', () => {
+  async function askOnce(store: ChatStore): Promise<{ m: AgentSessionManager; running: Promise<unknown>; requestId: string }> {
+    h.turns = [toolTurn('execute_command', DANGER), textTurn('收尾')]
+    const m = new AgentSessionManager(store)
+    const running = m.handleCommand({ type: 'run', sessionId: 's1', content: '跑一下', settings })
+    await vi.waitFor(() => expect(requested()).toHaveLength(1))
+    const [req] = requested() as Array<Extract<AgentEvent, { type: 'permission.requested' }>>
+    return { m, running, requestId: req.requestId }
+  }
+
+  const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+  it('续时之后仍然挂起，答复照常生效', async () => {
+    const store = fakeStore(workDir)
+    const { m, running, requestId } = await askOnce(store)
+    expect(m.extendPermissionWait('s1', requestId, 5_000, 10_000)).toBe(true)
+    await wait(200)
+    // 没有被原来的 120s 表之外的任何路径提前收尾
+    expect(settled()).toHaveLength(0)
+    await m.handleCommand({ type: 'permission.resolve', sessionId: 's1', requestId, approved: true })
+    await running
+    expect(settled()[0]).toMatchObject({ approved: true, timedOut: false })
+    expect(toolRegistry.execute).toHaveBeenCalledTimes(1)
+  })
+
+  it('总上限到点必定按拒绝收尾：续时不能把 run 永久挂住', async () => {
+    const store = fakeStore(workDir)
+    const { m, running, requestId } = await askOnce(store)
+    // 每次都想再续 5s，但总上限只有 120ms：deadline 之后 extend 一律返回 false
+    m.extendPermissionWait('s1', requestId, 5_000, 120)
+    await wait(200)
+    expect(m.extendPermissionWait('s1', requestId, 5_000, 120)).toBe(false)
+    await running
+    expect(settled()[0]).toMatchObject({ approved: false, timedOut: true })
+    expect(toolRegistry.execute).not.toHaveBeenCalled()
+    const rows = (store.addMessage as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.map((c) => c[0])
+    expect(audits(rows)[0]).toMatchObject({ decision: 'deny' })
+  })
+
+  it('会话或 requestId 不存在时返回 false（调用方据此提示「这条审批已收尾」）', async () => {
+    const store = fakeStore(workDir)
+    const m = new AgentSessionManager(store)
+    expect(m.extendPermissionWait('nope', 'nope', 1_000, 2_000)).toBe(false)
+  })
+
+  it('不调它的时候，原有 120s 语义一分不变（IM 之外的路径零影响）', async () => {
+    const store = fakeStore(workDir)
+    const { m, running, requestId } = await askOnce(store)
+    await wait(300)
+    expect(settled()).toHaveLength(0)
+    await m.handleCommand({ type: 'permission.resolve', sessionId: 's1', requestId, approved: false })
+    await running
+    expect(settled()[0]).toMatchObject({ timedOut: false, approved: false })
+    expect(m).toBeDefined()
+  })
+})

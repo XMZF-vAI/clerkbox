@@ -6,6 +6,7 @@ import * as os from 'os'
 import * as dgram from 'dgram'
 import { isIPv4 } from 'net'
 import { app } from 'electron'
+import { BOTS_IPC_CHANNELS } from './im-bots/types'
 
 /**
  * WebUI 服务器：把 ClerkBox 的完整界面通过 HTTP 暴露给浏览器。
@@ -114,6 +115,20 @@ export const REMOTE_INVOKE_BLOCKLIST: readonly string[] = [
   'gitCommit',
   'gitPush',
   'gitGetIdentity',
+  // IM 机器人管理面（bots:*）：整组桌面专属，一条都不放。
+  // main.ts 把每个 ipcMain.handle 同步进 handlerRegistry（见 patchedHandle），所以「在
+  // im-bots/index.ts 里加一个 handler」等于「顺手把这条通道开放给局域网 /api/invoke」。
+  // 这里的危害比 agent:command 更直接：bots:generateBindCode 被远程调一次，攻击者就拿到
+  // 一个能把 IM 账号绑到本机上的绑定码——之后所有任务与结果都从他的聊天账号进出；
+  // bots:upsert / bots:remove / bots:setEnabled 能改机器人配置与凭据引用，
+  // bots:weixinQrStart 能把扫码登录流程弹到用户屏幕上骗他扫。
+  // 名单由 im-bots/types.ts 的 BOTS_IPC_CHANNELS 展开，新增通道自动进黑名单
+  // （tests/webui-blocklist.test.ts 会双向锁住：漏一条即红，写死一条不存在的也红）。
+  ...Object.values(BOTS_IPC_CHANNELS),
+  // agent:push-settings：远程界面不得给主进程喂设置快照——那等于让持 token 者指定
+  // 上游地址与 API Key（IM bot 会照着这份快照跑任务）。只有本地窗口可推，
+  // handler 内还有一道 event===null 拒收，这里拦在 /api/invoke 入口更早。
+  'agent:push-settings',
 ]
 
 /**
