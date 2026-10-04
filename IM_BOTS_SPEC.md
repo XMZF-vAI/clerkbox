@@ -162,3 +162,13 @@ BotsStateFile = { version: 1, contexts: ChatContext[], pendingBinds: BindCode[],
 | D7 | 全量检查 | `tsc` 0 错、`npm run build` 通过、既有测试全绿 |
 
 **风险**：微信 iLink 无公开协议文档，跟随 ZCode 实现但存在腾讯单方变更风险（置 error 提示重扫即可恢复）；飞书长连接每应用 50 连接上限（单用户无碍）；`@larksuiteoapi/node-sdk` 与 Electron 打包兼容性需 D4 首验（external 处理，参考既有 node-pty 配置）。
+
+## 13. 通道扩展：Telegram / 企业微信（2026-10-04 已实施）
+
+框架改动四处：`BOT_PROVIDERS` 枚举 +4 渠道中的两个、`BotCredentialInputSchema` 改为按渠道的三支 union（serializeBotCredential 校验渠道与字段形状匹配）、`CHANNELS` 工厂表、`ChannelDeps.fetchImpl` 可注入。绑定/命令/会话桥/凭据加密/文件锁零改动。
+
+**Telegram（`telegram.ts`）**：getUpdates 长轮询（服务端挂 50s、硬超时 70s），offset 游标复用通用游标槽位；首次连接先 `offset=-1` 排空历史积压（防重放）；只收私聊文本；空批退避 1s（防微任务热循环）。401=Token 无效、409=被其他轮询客户端占用、429=按 retry_after 退避。出站 sendMessage，单聊 1 msg/s 漏桶（分段间隔 1.1s）。**网络**：主进程注入 Electron `net.fetch`（走 Chromium 网络栈，系统代理自动生效，TUN 兼容），刻意不做应用内代理配置——TG 用户自备网络环境。
+
+**企业微信（`wecom.ts`）**：官方 `@wecom/aibot-node-sdk`（WSClient 长连接，maxReconnectAttempts=-1 无限重连 + 本通道 30s 建连看门狗：启动超阈值且从未收到消息且期间报过错 → 判死交宿主重建）。只收单聊文本；出站走 `sendMessage`（markdown，主动推送无 5s 被动窗口），**官方限频 30 条/分钟 → ≥2.1s 漏桶**。
+
+测试：`im-bots-telegram.test.ts`（8 用例：游标语义/私聊过滤/401/429/网络错误/send 形状/指纹变更）、`im-bots-wecom.test.ts`（4 用例：单聊过滤/send 形状/断开/凭据缺失）。
