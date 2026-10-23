@@ -41,26 +41,15 @@ export type ProviderGroup = 'official' | 'international' | 'china' | 'aggregator
 export const PROVIDER_GROUPS: ProviderGroup[] = ['official', 'international', 'china', 'aggregator', 'local', 'custom']
 
 export const PROVIDER_PRESETS: ProviderPreset[] = [
-  // ── 官方 ──
+  // ── 官方（Joule = ClerkBox 唯一内置默认供应商）──
   {
-    id: 'lunora',
-    name: 'Lunora API',
+    id: 'joule',
+    name: 'Joule',
     group: 'official',
     apiCompat: 'openai',
-    baseUrl: 'https://api.uselunora.com/v1',
-    apiKeyUrl: 'https://www.uselunora.com/register?aff=CGNEDZYS9KB7',
-    thinking: {
-      thinkingStyle: 'enable',
-      // Lunora 聚合多厂商模型（Claude / OpenAI o 系 / DeepSeek / 通义 / Gemini / Grok 等）
-      efforts: ['low', 'medium', 'high'],
-      effortKeywords: [
-        'claude', 'sonnet', 'opus', 'haiku',
-        'o1', 'o3', 'o4', 'gpt-5',
-        'reasoning', 'thinking', 'reasoner',
-        'deepseek', 'qwen',
-        'gemini', 'grok',
-      ],
-    },
+    baseUrl: 'https://joule.xmzf.space/v1',
+    apiKeyUrl: 'https://clerkbox.xmzf.space/dashboard',
+    // Joule 的思考协议与档位由服务端模型目录下发，客户端不按模型名硬编码
   },
 
   // ── 国际 ──

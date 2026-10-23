@@ -33,6 +33,7 @@ import type {
   WebSearchResult,
 } from '../src/types/ipc'
 import type { MemoryEntry } from '../src/types/agent'
+import type { JouleLoginResult, JouleStateSnapshot } from '../src/types/joule'
 import type { McpServerConfig, McpServerStatus, McpToolInfo, McpMarketServer } from '../src/types/ipc'
 // IM 机器人的跨进程类型：纯 type import，编译后即被擦除，不给沙箱化 preload 引入任何运行时依赖
 import type {
@@ -224,6 +225,19 @@ contextBridge.exposeInMainWorld('clerkbox', {
   loadApiKeys: (): Promise<Record<string, string>> => ipcRenderer.invoke('loadApiKeys'),
   saveApiKey: (id: string, apiKey: string): Promise<void> => ipcRenderer.invoke('saveApiKey', id, apiKey),
   removeApiKey: (id: string): Promise<void> => ipcRenderer.invoke('removeApiKey', id),
+
+  // Joule 账号（设备码授权）。Key 只在登录完成时随结果返回一次，主进程另存 safeStorage。
+  jouleStartLogin: (): Promise<JouleLoginResult> => ipcRenderer.invoke('jouleStartLogin'),
+  jouleCancelLogin: (): Promise<void> => ipcRenderer.invoke('jouleCancelLogin'),
+  jouleLogout: (): Promise<void> => ipcRenderer.invoke('jouleLogout'),
+  jouleGetState: (): Promise<JouleStateSnapshot> => ipcRenderer.invoke('jouleGetState'),
+  jouleRefresh: (): Promise<JouleStateSnapshot> => ipcRenderer.invoke('jouleRefresh'),
+  jouleOpenDashboard: (section?: string): Promise<void> => ipcRenderer.invoke('jouleOpenDashboard', section),
+  onJouleState: (callback: (snapshot: JouleStateSnapshot) => void): (() => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, snapshot: JouleStateSnapshot) => callback(snapshot)
+    ipcRenderer.on('joule:state', listener)
+    return () => ipcRenderer.removeListener('joule:state', listener)
+  },
 
   // MCP servers
   mcpSync: (servers: McpServerConfig[]): Promise<McpServerStatus[]> =>

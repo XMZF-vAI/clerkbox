@@ -341,10 +341,13 @@ export const REASONING_EFFORTS: readonly ReasoningEffort[] = [
 /** 思考档位在请求体中的表达方式（协议相关，模型级声明） */
 export type ThinkingStyle =
   | 'auto'     // 模型自行决定，无需额外参数（如 DeepSeek Reasoner）
-  | 'effort'   // OpenAI reasoning_effort（如 OpenAI o 系）
+  | 'effort'   // OpenAI reasoning_effort（如 OpenAI o 系 / Kimi K3 / GLM-5.3）
   | 'enable'   // enable_thinking[+thinking_budget]（如 DashScope/Qwen）
-  | 'glm'      // thinking:{type:enabled,clear_thinking:false}（智谱 GLM）
+  | 'glm'      // thinking:{type:enabled,clear_thinking:false}（智谱 GLM 旧版）
   | 'budget'   // Anthropic thinking:{type:enabled,budget_tokens}
+  | 'kimi'     // thinking:{type:enabled|disabled}（Kimi K2.6）
+  | 'minimax'  // thinking:{type:adaptive|disabled}（MiniMax M3）
+  | 'deepseek' // reasoning_effort；关闭时 thinking:{type:disabled}（DeepSeek V4）
 
 /** 按 apiCompat / 预设推断默认思考风格 */
 export const DEFAULT_THINKING_STYLE: Record<ApiCompat, ThinkingStyle> = {
@@ -365,6 +368,8 @@ export interface ProviderModel {
   label?: string
   /** 是否支持思考；未设按全局开关兼容 */
   supportsThinking?: boolean
+  /** 思考无法关闭（Kimi K3 / GLM-5.3 / MiniMax M3.1 Flash） */
+  thinkingAlwaysOn?: boolean
   /** 是否支持图片输入 */
   supportsImages?: boolean
   /** 思考在请求体里的表达方式（协议相关）；未设则按 apiCompat/预设推断 */

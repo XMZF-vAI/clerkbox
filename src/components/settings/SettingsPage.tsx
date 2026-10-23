@@ -3,6 +3,7 @@ import { Cpu, Palette, RotateCcw, Check, AlertCircle, Info, X, Plus, Pencil, Tra
 import { useTranslation } from 'react-i18next'
 import { useSettingsStore } from '../../stores/settings-store'
 import { useAccountStore, avatarColorFor, initialOf } from '../../stores/account-store'
+import JouleAccountCard from './JouleAccountCard'
 import { useVibeStore } from '../../stores/vibe-store'
 import { MACARON_PRESETS, schemeSwatches, UI_SCALE_OPTIONS } from '../../lib/theme-engine'
 import { SUPPORTED_LANGUAGES } from '../../i18n'
@@ -610,6 +611,9 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                         <span className="break-all">{account.lastError}</span>
                       </p>
                     )}
+
+                    {/* Joule 账号（与热土账号独立） */}
+                    <JouleAccountCard />
                   </>
                 ) : (
                   <>
@@ -648,6 +652,9 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                         <span>{t('account.logout')}</span>
                       </button>
                     </div>
+
+                    {/* Joule 账号（与热土账号独立，位于热土卡与同步卡之间） */}
+                    <JouleAccountCard />
 
                     {/* 同步设置卡 */}
                     <div className="space-y-3 p-4 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10">

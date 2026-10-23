@@ -1,10 +1,11 @@
 import { useState, useEffect, useId, useRef } from 'react'
 import {
   Cpu, Palette, RotateCcw, Check, AlertCircle, Info, ChevronRight, Settings as SettingsIcon,
-  User, Languages, FileText, Plug, ArrowLeft, Smartphone, Monitor,
+  User, Languages, FileText, Plug, ArrowLeft, Smartphone, Monitor, LogIn, ExternalLink,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useSettingsStore } from '../../stores/settings-store'
+import { useJouleStore } from '../../stores/joule-store'
 import { useVibeStore } from '../../stores/vibe-store'
 import { MACARON_PRESETS, schemeSwatches, UI_SCALE_OPTIONS } from '../../lib/theme-engine'
 import { SUPPORTED_LANGUAGES } from '../../i18n'
@@ -15,6 +16,7 @@ import ConfirmDialog from '../ui/ConfirmDialog'
 import { ipc } from '../../lib/ipc-client'
 
 import APP_ICON from '../../assets/icon.png'
+import JOULE_MARK from '../../assets/joule-mark.png'
 
 type Tab = 'api' | 'mcp' | 'general' | 'appearance' | 'account' | 'about'
 
@@ -44,6 +46,13 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
   )
   const [tabStack, setTabStack] = useState<Tab[]>([]) // history for back button
   const settings = useSettingsStore()
+  // Joule 账号：移动端只做状态展示与仪表盘入口；设备码登录仍走桌面端（WebUI 远程不接触本机凭据）
+  const jouleStatus = useJouleStore((s) => s.status)
+  const jouleUser = useJouleStore((s) => s.user)
+  const joulePlan = useJouleStore((s) => s.plan)
+  const jouleLoggingIn = useJouleStore((s) => s.loggingIn)
+  const jouleError = useJouleStore((s) => s.error)
+  const jouleLogin = useJouleStore((s) => s.login)
   const isVibeMode = useVibeStore((s) => s.isVibeMode)
   // 托盘是桌面端专属：本页可能同时服务窄屏桌面窗口（有托盘）与 WebUI 浏览器（无托盘）
   const isElectronMode = typeof window !== 'undefined' && !!window.clerkbox
@@ -542,16 +551,64 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
             )}
 
             {activeTab === 'account' && (
-              <div className="flex flex-col items-center justify-center text-center py-12 px-4 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10">
-                <div className="w-14 h-14 rounded-full bg-dark-surfaceContainerHigh flex items-center justify-center mb-4">
-                  <User size={26} className="text-md-primary" />
+              <div className="space-y-4">
+                {/* Joule 账号：紧凑状态卡 + 仪表盘入口 */}
+                <div className="space-y-3 p-4 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10">
+                  <div className="flex items-center gap-2">
+                    <img src={JOULE_MARK} alt="" className="w-[15px] h-[15px] rounded-[4px] flex-shrink-0" />
+                    <span className="text-sm font-medium text-dark-onSurface">{t('joule.accountTitle')}</span>
+                    <span className="px-1.5 py-0.5 rounded-md3-xs bg-dark-surfaceContainerHigh text-dark-onSurfaceVariant text-[10px] font-medium whitespace-nowrap">
+                      {t(
+                        jouleStatus === 'connected' ? 'joule.statusConnected'
+                          : jouleStatus === 'expired' ? 'joule.statusExpired'
+                            : jouleStatus === 'needs_reauth' ? 'joule.statusNeedsReauth'
+                              : jouleStatus === 'error' ? 'joule.statusError'
+                                : 'joule.statusUnlinked'
+                      )}
+                    </span>
+                  </div>
+                  <p className="text-xs text-dark-onSurfaceVariant/70 leading-relaxed">
+                    {jouleUser
+                      ? `${jouleUser.username || jouleUser.email || ''}${joulePlan ? ` · ${joulePlan.label}` : ''}`
+                      : t('joule.accountDesc')}
+                  </p>
+                  {jouleLoggingIn && (
+                    <p className="text-[11px] text-md-primary">{t('joule.loggingIn')}</p>
+                  )}
+                  {jouleError && !jouleLoggingIn && (
+                    <p role="alert" className="text-[11px] text-md-error break-all">{jouleError}</p>
+                  )}
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={() => void ipc.jouleOpenDashboard()}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-md3-sm bg-md-primary text-md-onPrimary hover:bg-md-primary/90 transition-colors text-xs font-medium"
+                    >
+                      <ExternalLink size={12} /> {t('joule.openDashboard')}
+                    </button>
+                    {isElectronMode && !jouleLoggingIn && (jouleStatus === 'unlinked' || jouleStatus === 'needs_reauth') && (
+                      <button
+                        type="button"
+                        onClick={() => void jouleLogin()}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-md3-sm bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer transition-colors text-xs font-medium text-dark-onSurfaceVariant"
+                      >
+                        <LogIn size={12} /> {t('joule.login')}
+                      </button>
+                    )}
+                  </div>
                 </div>
-                <p className="text-base font-medium text-dark-onSurface mb-1">
-                  {t('settings.accountMobileOnlyTitle')}
-                </p>
-                <p className="text-sm text-dark-onSurfaceVariant/70 leading-relaxed max-w-xs">
-                  {t('settings.accountMobileOnlyDesc')}
-                </p>
+
+                <div className="flex flex-col items-center justify-center text-center py-8 px-4 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10">
+                  <div className="w-14 h-14 rounded-full bg-dark-surfaceContainerHigh flex items-center justify-center mb-4">
+                    <User size={26} className="text-md-primary" />
+                  </div>
+                  <p className="text-base font-medium text-dark-onSurface mb-1">
+                    {t('settings.accountMobileOnlyTitle')}
+                  </p>
+                  <p className="text-sm text-dark-onSurfaceVariant/70 leading-relaxed max-w-xs">
+                    {t('settings.accountMobileOnlyDesc')}
+                  </p>
+                </div>
               </div>
             )}
 

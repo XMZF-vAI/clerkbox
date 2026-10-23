@@ -39,6 +39,7 @@
   WebUIUploadResult,
 } from '../types/ipc'
 import type { MemoryEntry } from '../types/agent'
+import type { JouleLoginResult, JouleStateSnapshot } from '../types/joule'
 import type { AgentCommand, AgentCommandResult, AgentEvent, AgentSnapshot } from '../agent-core/protocol'
 // IM 机器人管理面：与主进程共用一份类型（纯 type import，编译后擦除）
 import type {
@@ -599,6 +600,27 @@ agentBrowserEnsurePanel: (sessionId?: string): Promise<boolean> =>
     isElectron ? window.clerkbox.saveApiKey(id, apiKey) : webInvoke('saveApiKey', [id, apiKey]),
   removeApiKey: (id: string): Promise<void> =>
     isElectron ? window.clerkbox.removeApiKey(id) : webInvoke('removeApiKey', [id]),
+
+  // ── Joule 账号 ──
+  // 设备码登录只在桌面端可用；WebUI 远程视图不接触本机凭据（主进程黑名单也会拒绝）。
+  jouleStartLogin: (): Promise<JouleLoginResult> =>
+    isElectron ? window.clerkbox.jouleStartLogin() : Promise.resolve({ error: 'Joule 登录需在桌面端完成' }),
+  jouleCancelLogin: (): Promise<void> =>
+    isElectron ? window.clerkbox.jouleCancelLogin() : Promise.resolve(),
+  jouleLogout: (): Promise<void> =>
+    isElectron ? window.clerkbox.jouleLogout() : Promise.resolve(),
+  jouleGetState: (): Promise<JouleStateSnapshot> =>
+    isElectron ? window.clerkbox.jouleGetState() : Promise.reject(new Error('Joule 账号仅支持桌面端')),
+  jouleRefresh: (): Promise<JouleStateSnapshot> =>
+    isElectron ? window.clerkbox.jouleRefresh() : Promise.reject(new Error('Joule 账号仅支持桌面端')),
+  jouleOpenDashboard: (section?: string): Promise<void> => {
+    if (isElectron) return window.clerkbox.jouleOpenDashboard(section)
+    const query = section ? `?section=${encodeURIComponent(section)}` : ''
+    window.open(`https://clerkbox.xmzf.space/dashboard/${query}`, '_blank', 'noopener')
+    return Promise.resolve()
+  },
+  onJouleState: (callback: (snapshot: JouleStateSnapshot) => void): (() => void) =>
+    isElectron ? window.clerkbox.onJouleState(callback) : () => {},
 
   // MCP 服务器（Model Context Protocol）
   // WebUI 模式无事件推送，onMcpStatus 返回空退订函数（状态靠拉取）

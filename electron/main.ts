@@ -22,6 +22,7 @@ import * as yaml from 'js-yaml'
 import { registerApiProxyHandlers, bindApiProxyCleanup, startChatStream, abortChatStream, type ApiConnConfig } from './api-proxy'
 import { handlerRegistry, setStreamHandlers, startWebUI, stopWebUI, getWebUIStatus, getLanAddresses, pushAgentEvent, setAgentEventBridge } from './webui-server'
 import * as rtAccount from './rt-account'
+import * as jouleAccount from './joule-account'
 import * as agentMemory from './agent-memory'
 import { mcpManager } from './mcp-manager'
 import { winAcrylic } from './win-acrylic'
@@ -944,6 +945,15 @@ function registerIpcHandlers(chatStore: ChatStore) {
   ipcMain.handle('removeApiKey', async (_event, id: unknown): Promise<void> => {
     secretRemove(id)
   })
+
+  // ── Joule 账号（设备码授权）──
+  // Key 由主进程在设备码轮询成功时直接写 safeStorage；本组通道在 WebUI 远程黑名单里。
+  ipcMain.handle('jouleStartLogin', () => jouleAccount.startLogin())
+  ipcMain.handle('jouleCancelLogin', () => jouleAccount.cancelLogin())
+  ipcMain.handle('jouleLogout', () => jouleAccount.logout())
+  ipcMain.handle('jouleGetState', () => jouleAccount.getState())
+  ipcMain.handle('jouleRefresh', () => jouleAccount.refresh({ manual: true }))
+  ipcMain.handle('jouleOpenDashboard', (_event, section: unknown) => jouleAccount.openDashboard(section))
 
   // File system
   ipcMain.handle('selectFolder', async () => {
@@ -3815,6 +3825,29 @@ app.whenReady().then(async () => {
 
   registerIpcHandlers(chatStore)
   createWindow()
+
+  // Joule 账号：有 Key 时启动即刷一次模型+额度，之后 5 分钟刷额度、每小时刷模型
+  jouleAccount.initJouleAccount({
+    readKey: () => {
+      try {
+        return secretRead('joule')
+      } catch {
+        return null
+      }
+    },
+    writeKey: (key) => secretWrite('joule', key),
+    clearKey: () => secretRemove('joule'),
+    notify: (snapshot) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('joule:state', snapshot)
+      }
+    },
+    openExternal: async (url) => {
+      const parsed = new URL(url)
+      if (parsed.protocol !== 'https:') throw new Error('Invalid Joule URL')
+      await shell.openExternal(url)
+    },
+  })
 
   // ── 系统托盘（三段式菜单：显示窗口 / 对话记录 / 退出）──
   // 托盘通道一律用 ipcMain.on：ipcMain.handle 已被 patchedHandle 劫持并注册进 WebUI 的

@@ -38,6 +38,13 @@ export const REMOTE_INVOKE_BLOCKLIST: readonly string[] = [
   'loadApiKeys',
   'saveApiKey',
   'removeApiKey',
+  // Joule 账号：设备码流程与凭据写入属于本机能力，远程视图不接触
+  'jouleStartLogin',
+  'jouleCancelLogin',
+  'jouleLogout',
+  'jouleGetState',
+  'jouleRefresh',
+  'jouleOpenDashboard',
   // 命令执行与进程控制
   'executeCommand',
   'executeCommandWithShell',

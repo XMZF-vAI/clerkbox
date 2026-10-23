@@ -450,7 +450,9 @@ async function callAPI(
     tools,
     temperature,
     maxTokens,
-    thinking: settings.enableThinking && thinkingOk,
+    // 始终开启思考的模型（Kimi K3 / GLM-5.3 / M3.1 Flash）不受全局开关影响，
+    // 否则用户选了档位却因为开关关闭而发不出 reasoning_effort
+    thinking: (settings.enableThinking || activeModel?.thinkingAlwaysOn === true) && thinkingOk,
     thinkingBudget: settings.thinkingBudget,
     reasoningEffort: effort,
     thinkingStyle: compat === 'anthropic' ? 'budget' : (activeModel?.thinkingStyle ?? undefined),

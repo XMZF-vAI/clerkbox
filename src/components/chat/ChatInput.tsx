@@ -1,13 +1,15 @@
 import { useState, useRef, type KeyboardEvent as ReactKeyboardEvent, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type ChangeEvent as ReactChangeEvent, useEffect, useLayoutEffect } from 'react'
-import { Send, Brain, FolderOpen, ChevronDown, Square, Check, X, Store, Plus, FolderPlus, Paperclip, FileText, ShieldCheck, Hand, TriangleAlert, Slash, BookOpen, GitBranch, Target, Plug, Settings2, FoldVertical, Loader2, Layers, Lock, Clock3, Pencil, SendHorizontal, type LucideIcon } from 'lucide-react'
+import { Send, Brain, FolderOpen, ChevronDown, ChevronRight, ArrowLeft, Square, Check, X, Store, Plus, FolderPlus, Paperclip, FileText, ShieldCheck, Hand, TriangleAlert, Slash, BookOpen, GitBranch, Target, Plug, Settings2, FoldVertical, Loader2, Layers, Lock, Clock3, Pencil, SendHorizontal, type LucideIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useSettingsStore } from '../../stores/settings-store'
+import { useJouleStore } from '../../stores/joule-store'
 import { useChatStore, type QueuedMessageItem } from '../../stores/chat-store'
 import { useSkillsStore } from '../../stores/skills-store'
 import { useMcpStore } from '../../stores/mcp-store'
 import { useGoalStore } from '../../stores/goal-store'
 import { useUIStore } from '../../stores/ui-store'
 import { ipc, isWebUIMode } from '../../lib/ipc-client'
+import JOULE_MARK from '../../assets/joule-mark.png'
 import { HARNESS_MODE_METAS, normalizeHarnessMode } from '../../lib/harness-modes'
 import type { MessageAttachment, MessageSkillSnapshot, TaskMode, HarnessMode } from '../../types/agent'
 import type { FileEntry, WebUICapabilities } from '../../types/ipc'
@@ -243,6 +245,13 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
     setProviderModels: s.setProviderModels,
     activateModel: s.activateModel,
   })))
+  // Joule 账号：只取模型菜单与一次性提示需要的字段
+  const jouleStatus = useJouleStore((s) => s.status)
+  const joulePlan = useJouleStore((s) => s.plan)
+  const jouleSubscription = useJouleStore((s) => s.subscription)
+  const jouleNotice = useJouleStore((s) => s.notice)
+  const dismissJouleNotice = useJouleStore((s) => s.dismissNotice)
+  const jouleUnlocked = !!joulePlan && (jouleSubscription?.expiresAt ?? 0) > Date.now() && jouleStatus !== 'needs_reauth'
   const { sessions, activeSessionId, createSession, updateSessionWorkingDir, setSessionHarnessMode, recentsFolders, pushRecentFolder } = useChatStore(
     useShallow((s) => ({
       sessions: s.sessions,
@@ -291,8 +300,8 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
 
   // Model dropdown state
   const [showModelMenu, setShowModelMenu] = useState(false)
-  // 折叠的提供商 id 集合（默认当前生效的提供商展开，其余折叠）
-  const [collapsedProviders, setCollapsedProviders] = useState<Set<string>>(new Set())
+  // 模型菜单三级导航：root（Joule + 自定义入口）→ providers（供应商列表）→ 具体供应商
+  const [modelMenuLevel, setModelMenuLevel] = useState<'root' | 'providers' | string>('root')
   const modelMenuRef = useRef<HTMLDivElement>(null)
   const modelTriggerRef = useRef<HTMLButtonElement>(null)
 
@@ -916,6 +925,9 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
   const activeProvider = settings.providers.find((p) => p.id === settings.activeProviderId)
   const activeModel = activeProvider?.models.find((m) => m.id === settings.activeModelId)
   const thinkingSupported = activeModel?.supportsThinking ?? false
+  const thinkingAlwaysOn = activeModel?.thinkingAlwaysOn ?? false
+  // 始终开启思考的模型不受全局开关影响，档位按钮保持可用
+  const thinkingActive = thinkingSupported && (settings.enableThinking || thinkingAlwaysOn)
   const imageSupported = activeModel?.supportsImages ?? false
   const reasoningEfforts = activeModel?.reasoningEfforts ?? []
   const hasReasoningLevels = reasoningEfforts.length > 0
@@ -923,7 +935,7 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
   const currentEffortIndex = Math.max(0, selectedReasoningEffort ? reasoningEfforts.indexOf(selectedReasoningEffort) : 0)
 
   const toggleThinking = () => {
-    if (!thinkingSupported) return
+    if (!thinkingSupported || thinkingAlwaysOn) return
     settings.updateSettings({ enableThinking: !settings.enableThinking })
   }
 
@@ -936,23 +948,38 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
   }
 
   const handleSelectModel = (providerId: string, modelId: string) => {
+    // 未订阅/过期时 Joule 模型保持可见但锁定：点击引导订阅，不切换
+    if (providerId === 'joule' && !jouleUnlocked) {
+      void ipc.openExternal('https://joule.xmzf.space/console#subscribe')
+      return
+    }
     settings.activateModel(providerId, modelId)
     setShowModelMenu(false)
-    setCollapsedProviders(new Set())
+    setModelMenuLevel('root')
   }
 
-  // 切换某提供商的折叠状态
-  const toggleProviderCollapse = (providerId: string) => {
-    setCollapsedProviders((prev) => {
-      const next = new Set(prev)
-      if (next.has(providerId)) next.delete(providerId)
-      else next.add(providerId)
-      return next
-    })
+  const openJouleSubscribe = () => {
+    setShowModelMenu(false)
+    void ipc.openExternal('https://joule.xmzf.space/console#subscribe')
+  }
+
+  const openJouleAccount = () => {
+    setShowModelMenu(false)
+    settings.updateSettings({ showSettings: true, pendingSettingsTab: 'account' })
+    // 未连接时直接发起设备授权，少一次进设置页再点登录
+    if (useJouleStore.getState().status !== 'connected') {
+      void useJouleStore.getState().login()
+    }
+  }
+
+  const manageProviders = () => {
+    setShowModelMenu(false)
+    settings.updateSettings({ showSettings: true, pendingSettingsTab: 'api' })
   }
 
   const handleAddCustomModel = () => {
     setShowModelMenu(false)
+    setModelMenuLevel('root')
     settings.updateSettings({ showSettings: true })
   }
 
@@ -1048,12 +1075,13 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
     return m?.label || m?.id || settings.model || t('chat.noModelActive')
   })()
 
-  // 只显示有模型的提供商，避免下拉里出现空组
-  // Lunora 永远是第一位（按 presetId 识别，与用户添加顺序无关）
+  // 只显示有模型的提供商，避免下拉里出现空组；Joule 恒为第一组
   const providersWithModels = settings.providers
     .filter((p) => p.models.length > 0)
     .slice()
-    .sort((a, b) => (a.presetId === 'lunora' ? -1 : b.presetId === 'lunora' ? 1 : 0))
+    .sort((a, b) => (a.id === 'joule' ? -1 : b.id === 'joule' ? 1 : 0))
+  const jouleProvider = providersWithModels.find((p) => p.id === 'joule')
+  const customProviders = providersWithModels.filter((p) => p.id !== 'joule')
 
   const isWelcome = variant === 'welcome'
 
@@ -1268,6 +1296,22 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
               </button>
             </div>
           ))}
+        </div>
+      )}
+
+      {jouleNotice && (
+        <div className={`mb-2 px-1 max-w-5xl mx-auto flex items-center gap-2 text-[11px] ${vibe ? 'text-white/75' : 'text-dark-onSurfaceVariant'}`}>
+          <TriangleAlert size={12} className="flex-shrink-0 text-md-tertiary" />
+          <span className="flex-1 min-w-0">{t(jouleNotice)}</span>
+          <button
+            type="button"
+            onClick={dismissJouleNotice}
+            aria-label={t('joule.dismiss')}
+            title={t('joule.dismiss')}
+            className={`w-5 h-5 flex items-center justify-center rounded-md3-xs flex-shrink-0 ${vibe ? 'hover:bg-white/10' : 'hover:bg-dark-surfaceContainer'}`}
+          >
+            <X size={11} />
+          </button>
         </div>
       )}
 
@@ -1823,9 +1867,9 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
             <button
               type="button"
               onClick={toggleThinking}
-              disabled={!thinkingSupported}
+              disabled={!thinkingSupported || thinkingAlwaysOn}
               className={`h-8 max-md:h-11 flex items-center gap-1 px-2 flex-shrink-0 rounded-l-md3-sm transition-colors ${
-                settings.enableThinking && thinkingSupported
+                thinkingActive
                   ? vibe
                     ? 'bg-md-tertiary/30 text-md-tertiary'
                     : 'bg-md-tertiary/20 text-md-tertiary'
@@ -1833,9 +1877,9 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
                     ? 'hover:bg-white/15 text-white/70 disabled:opacity-30'
                     : 'hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant disabled:opacity-30'
               }`}
-              title={thinkingSupported ? t('chat.thinkingToggle') : t('chat.thinkingUnsupported')}
-              aria-pressed={settings.enableThinking && thinkingSupported}
-              aria-label={t('chat.thinkingToggle')}
+              title={thinkingAlwaysOn ? t('chat.thinkingAlwaysOn') : thinkingSupported ? t('chat.thinkingToggle') : t('chat.thinkingUnsupported')}
+              aria-pressed={thinkingActive}
+              aria-label={thinkingAlwaysOn ? t('chat.thinkingAlwaysOn') : t('chat.thinkingToggle')}
             >
               <Brain size={16} />
             </button>
@@ -1846,7 +1890,7 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
                 onClick={() => setShowThinkingMenu((v) => !v)}
                 disabled={!thinkingSupported}
                 className={`chat-toolbar-thinking-level h-8 max-md:h-11 flex items-center gap-1 px-1.5 flex-shrink-0 rounded-r-md3-sm transition-colors ${
-                  settings.enableThinking && thinkingSupported
+                  thinkingActive
                     ? vibe
                       ? 'bg-md-tertiary/30 text-md-tertiary'
                       : 'bg-md-tertiary/20 text-md-tertiary'
@@ -1880,13 +1924,19 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
                   </div>
                   <div className="flex items-center justify-between mb-2 text-xs max-md:text-sm">
                     <span>{t('chat.thinkingLevel')}</span>
-                    <button
-                      type="button"
-                      onClick={toggleThinking}
-                      className={`px-2 py-0.5 max-md:py-1.5 max-md:px-3 rounded-full text-[10px] max-md:text-xs ${settings.enableThinking ? 'bg-md-tertiary/20 text-md-tertiary' : 'bg-dark-surfaceContainer text-dark-onSurfaceVariant'}`}
-                    >
-                      {settings.enableThinking ? t('chat.thinkingOn') : t('chat.thinkingOff')}
-                    </button>
+                    {thinkingAlwaysOn ? (
+                      <span className="px-2 py-0.5 max-md:py-1.5 max-md:px-3 rounded-full text-[10px] max-md:text-xs bg-md-tertiary/20 text-md-tertiary">
+                        {t('chat.thinkingAlwaysOn')}
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={toggleThinking}
+                        className={`px-2 py-0.5 max-md:py-1.5 max-md:px-3 rounded-full text-[10px] max-md:text-xs ${settings.enableThinking ? 'bg-md-tertiary/20 text-md-tertiary' : 'bg-dark-surfaceContainer text-dark-onSurfaceVariant'}`}
+                      >
+                        {settings.enableThinking ? t('chat.thinkingOn') : t('chat.thinkingOff')}
+                      </button>
+                    )}
                   </div>
                   <input
                     type="range"
@@ -1911,7 +1961,12 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
             <button
               ref={modelTriggerRef}
               type="button"
-              onClick={() => setShowModelMenu(!showModelMenu)}
+              onClick={() => {
+                setShowModelMenu((open) => {
+                  if (!open) setModelMenuLevel('root')
+                  return !open
+                })
+              }}
               className={`h-8 max-md:h-11 max-md:px-3 flex items-center gap-1 px-2 flex-shrink-0 rounded-md3-sm transition-colors ${
                 vibe ? 'hover:bg-white/15 text-white/70' : 'hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant'
               }`}
@@ -1931,7 +1986,7 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
                   onClick={() => setShowModelMenu(false)}
                   aria-hidden
                 />
-                <div id="chat-model-menu" className={`absolute bottom-full mb-1 left-0 w-56 rounded-md3-md overflow-hidden z-50 py-1 max-h-64 overflow-y-auto
+                <div id="chat-model-menu" className={`absolute bottom-full mb-1 left-0 w-60 rounded-md3-md overflow-hidden z-50 py-1 max-h-72 overflow-y-auto
                   max-md:fixed max-md:inset-x-0 max-md:bottom-0 max-md:left-auto max-md:mb-0 max-md:w-full max-md:max-h-[72dvh]
                   max-md:rounded-t-2xl max-md:rounded-b-none max-md:border-t max-md:border-dark-onSurfaceVariant/15
                   max-md:z-[66] max-md:pb-[calc(env(safe-area-inset-bottom)+8px)] ${
@@ -1943,55 +1998,49 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
                   <div className="hidden max-md:flex justify-center pt-2 pb-1 flex-shrink-0" aria-hidden>
                     <div className={`w-10 h-1 rounded-full ${vibe ? 'bg-white/25' : 'bg-dark-onSurfaceVariant/25'}`} />
                   </div>
-                  {providersWithModels.length === 0 ? (
-                  <div className={`px-3 py-3 text-xs ${vibe ? 'text-white/60' : 'text-dark-onSurfaceVariant'}`}>
-                    {t('chat.noModels')}
-                  </div>
-                ) : (
-                  providersWithModels.map((p) => {
-                    const collapsed = collapsedProviders.has(p.id)
-                    const hasActive = p.id === settings.activeProviderId
-                    // 当前生效的提供商默认展开
-                    const isExpanded = !collapsed || hasActive
-                    return (
-                      <div key={p.id}>
-                        {/* 提供商分组标题：可点击折叠 */}
-                        <button
-                          type="button"
-                          onClick={() => toggleProviderCollapse(p.id)}
-                          className={`sticky top-0 z-10 w-full flex items-center gap-1.5 px-3 py-1.5 max-md:py-3 text-[10px] max-md:text-xs font-semibold uppercase tracking-wide backdrop-blur-sm transition-colors ${
-                            vibe
-                              ? 'text-white/60 bg-black/25 hover:bg-black/35'
-                              : 'text-dark-onSurfaceVariant/70 bg-dark-surfaceContainerHighest/95 hover:bg-dark-surfaceContainerHighest'
-                          }`}
-                        >
-                          <ChevronDown
-                            size={10}
-                            className={`flex-shrink-0 transition-transform ${isExpanded ? '' : '-rotate-90'}`}
-                          />
-                          <span className="truncate flex-1 text-left">{p.name}</span>
-                          <span
-                            className={`px-1 py-px rounded text-[9px] normal-case font-medium flex-shrink-0 ${
-                              vibe ? 'bg-white/15 text-white/70' : 'bg-dark-surfaceContainer text-dark-onSurfaceVariant'
-                            }`}
-                          >
-                            {p.apiCompat === 'anthropic' ? 'Anthropic' : 'OpenAI'}
+
+                  {modelMenuLevel === 'root' && (
+                    jouleProvider ? (
+                      <>
+                        <div className={`sticky top-0 z-10 w-full flex items-center gap-1.5 px-3 py-1.5 max-md:py-3 text-[10px] max-md:text-xs font-semibold uppercase tracking-wide backdrop-blur-sm ${
+                          vibe ? 'text-white/60 bg-black/25' : 'text-dark-onSurfaceVariant/70 bg-dark-surfaceContainerHighest/95'
+                        }`}>
+                          <img src={JOULE_MARK} alt="" className="w-4 h-4 rounded-[4px] flex-shrink-0" />
+                          <span className="truncate flex-1 text-left">Joule</span>
+                          <span className={`px-1.5 py-px rounded text-[9px] normal-case font-medium flex-shrink-0 ${
+                            jouleUnlocked
+                              ? 'bg-md-primary/15 text-md-primary'
+                              : 'bg-md-error/15 text-md-error'
+                          }`}>
+                            {jouleUnlocked ? (joulePlan?.label ?? t('joule.statusConnected')) : t('joule.modelsLocked')}
                           </span>
-                        </button>
-                        {isExpanded && p.models.map((m) => {
-                          const active = p.id === settings.activeProviderId && m.id === settings.activeModelId
+                        </div>
+                        {jouleProvider.models.length === 0 ? (
+                          <div className={`px-3 py-3 text-xs ${vibe ? 'text-white/60' : 'text-dark-onSurfaceVariant'}`}>
+                            {t('common.loading')}
+                          </div>
+                        ) : jouleProvider.models.map((m) => {
+                          const active = settings.activeProviderId === 'joule' && settings.activeModelId === m.id
                           return (
                             <button
                               type="button"
                               key={m.id}
-                              onClick={() => handleSelectModel(p.id, m.id)}
-                              className={`w-full text-left pl-7 pr-3 py-2 max-md:py-3.5 max-md:pl-5 transition-colors ${
-                                active
-                                  ? vibe ? 'text-md-primary bg-md-primary/10' : 'text-md-primary bg-md-primary/5'
-                                  : vibe ? 'text-white/90 hover:bg-white/10' : 'text-dark-onSurface hover:bg-dark-surfaceContainer'
+                              onClick={() => handleSelectModel('joule', m.id)}
+                              disabled={!jouleUnlocked}
+                              title={jouleUnlocked ? undefined : t('joule.modelsLocked')}
+                              className={`w-full text-left pl-5 pr-3 py-2 max-md:py-3.5 transition-colors ${
+                                !jouleUnlocked
+                                  ? 'opacity-45 cursor-not-allowed'
+                                  : active
+                                    ? vibe ? 'text-md-primary bg-md-primary/10' : 'text-md-primary bg-md-primary/5'
+                                    : vibe ? 'text-white/90 hover:bg-white/10' : 'text-dark-onSurface hover:bg-dark-surfaceContainer'
                               }`}
                             >
-                              <div className="text-xs max-md:text-[15px] font-medium truncate">{m.label || m.id}</div>
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-xs max-md:text-[15px] font-medium truncate flex-1">{m.label || m.id}</span>
+                                {!jouleUnlocked && <Lock size={11} className="flex-shrink-0 opacity-70" />}
+                                {active && jouleUnlocked && <Check size={12} className="flex-shrink-0" />}
+                              </div>
                               {m.label && (
                                 <div className={`text-[10px] max-md:text-xs truncate mt-0.5 ${active ? 'text-md-primary/70' : vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/70'}`}>
                                   {m.id}
@@ -2000,20 +2049,175 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
                             </button>
                           )
                         })}
-                      </div>
+                        {!jouleUnlocked && (
+                          <button
+                            type="button"
+                            onClick={openJouleSubscribe}
+                            className={`w-full flex items-center gap-2 pl-5 pr-3 py-2 max-md:py-3.5 text-xs max-md:text-sm font-medium transition-colors ${
+                              vibe ? 'text-md-primary hover:bg-white/10' : 'text-md-primary hover:bg-md-primary/10'
+                            }`}
+                          >
+                            <Lock size={12} /> {t('joule.viewSubscription')}
+                          </button>
+                        )}
+                        <div className={`my-1 border-t ${vibe ? 'border-white/15' : 'border-dark-onSurfaceVariant/10'}`} />
+                        <button
+                          type="button"
+                          onClick={() => setModelMenuLevel('providers')}
+                          className={`w-full flex items-center gap-2 px-3 py-2 max-md:py-3.5 text-xs max-md:text-sm transition-colors ${
+                            vibe ? 'text-dark-onSurface hover:bg-white/10' : 'text-dark-onSurface hover:bg-dark-surfaceContainer'
+                          }`}
+                        >
+                          <Layers size={13} className="opacity-70" />
+                          <span className="flex-1 text-left">{t('joule.customModels')}</span>
+                          <span className={`text-[10px] ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/60'}`}>{customProviders.length}</span>
+                          <ChevronRight size={13} className="opacity-50" />
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          onClick={openJouleAccount}
+                          className={`w-full flex items-center gap-2 px-3 py-2.5 max-md:py-3.5 text-xs max-md:text-sm transition-colors ${
+                            vibe ? 'text-md-primary hover:bg-white/10' : 'text-md-primary hover:bg-md-primary/10'
+                          }`}
+                        >
+                          <img src={JOULE_MARK} alt="" className="w-5 h-5 rounded-md3-xs flex-shrink-0" />
+                          <span className="flex-1 text-left">{t('joule.loginToJoule')}</span>
+                          <ChevronRight size={13} className="opacity-50" />
+                        </button>
+                        <div className={`my-1 border-t ${vibe ? 'border-white/15' : 'border-dark-onSurfaceVariant/10'}`} />
+                        <button
+                          type="button"
+                          onClick={() => setModelMenuLevel('providers')}
+                          className={`w-full flex items-center gap-2 px-3 py-2 max-md:py-3.5 text-xs max-md:text-sm transition-colors ${
+                            vibe ? 'text-dark-onSurface hover:bg-white/10' : 'text-dark-onSurface hover:bg-dark-surfaceContainer'
+                          }`}
+                        >
+                          <Layers size={13} className="opacity-70" />
+                          <span className="flex-1 text-left">{t('joule.customModels')}</span>
+                          <span className={`text-[10px] ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/60'}`}>{customProviders.length}</span>
+                          <ChevronRight size={13} className="opacity-50" />
+                        </button>
+                      </>
                     )
-                  })
-                )}
-                <div className={`my-1 border-t ${vibe ? 'border-white/15' : 'border-dark-onSurfaceVariant/10'}`} />
-                <button
-                  type="button"
-                  onClick={handleAddCustomModel}
-                  className={`w-full flex items-center gap-2 px-3 py-2 max-md:py-3.5 text-xs max-md:text-sm transition-colors ${
-                    vibe ? 'text-md-primary hover:bg-white/10' : 'text-md-primary hover:bg-md-primary/10'
-                  }`}
-                >
-                  <Plus size={13} /> {t('chat.customModel')}
-                </button>
+                  )}
+
+                  {modelMenuLevel === 'providers' && (
+                    <>
+                      <div className={`flex items-center gap-1.5 px-2 py-1.5 max-md:py-2.5 border-b ${vibe ? 'border-white/15' : 'border-dark-onSurfaceVariant/10'}`}>
+                        <button
+                          type="button"
+                          onClick={() => setModelMenuLevel('root')}
+                          aria-label={t('common.back')}
+                          className={`w-6 h-6 max-md:w-8 max-md:h-8 flex items-center justify-center rounded-md3-sm ${
+                            vibe ? 'hover:bg-white/10 text-white/70' : 'hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant'
+                          }`}
+                        >
+                          <ArrowLeft size={14} />
+                        </button>
+                        <span className="text-[11px] max-md:text-xs font-semibold uppercase tracking-wide truncate">{t('joule.customModels')}</span>
+                      </div>
+                      {customProviders.length === 0 ? (
+                        <div className={`px-3 py-3 text-xs ${vibe ? 'text-white/60' : 'text-dark-onSurfaceVariant'}`}>
+                          {t('chat.noModels')}
+                        </div>
+                      ) : customProviders.map((p) => {
+                        const hasActive = p.id === settings.activeProviderId
+                        return (
+                          <button
+                            type="button"
+                            key={p.id}
+                            onClick={() => setModelMenuLevel(p.id)}
+                            className={`w-full flex items-center gap-2 px-3 py-2.5 max-md:py-3.5 text-left transition-colors ${
+                              vibe ? 'text-white/90 hover:bg-white/10' : 'text-dark-onSurface hover:bg-dark-surfaceContainer'
+                            }`}
+                          >
+                            <span className="flex-1 min-w-0">
+                              <span className="flex items-center gap-1.5">
+                                <span className="text-xs max-md:text-[15px] font-medium truncate">{p.name}</span>
+                                {hasActive && <span className="w-1.5 h-1.5 rounded-full bg-md-primary flex-shrink-0" />}
+                              </span>
+                              <span className={`block text-[10px] truncate mt-0.5 ${vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/70'}`}>
+                                {t('joule.modelCount', { n: p.models.length })} · {p.apiCompat === 'anthropic' ? 'Anthropic' : 'OpenAI'}
+                              </span>
+                            </span>
+                            <ChevronRight size={13} className="opacity-50 flex-shrink-0" />
+                          </button>
+                        )
+                      })}
+                      <div className={`my-1 border-t ${vibe ? 'border-white/15' : 'border-dark-onSurfaceVariant/10'}`} />
+                      <button
+                        type="button"
+                        onClick={handleAddCustomModel}
+                        className={`w-full flex items-center gap-2 px-3 py-2 max-md:py-3.5 text-xs max-md:text-sm transition-colors ${
+                          vibe ? 'text-md-primary hover:bg-white/10' : 'text-md-primary hover:bg-md-primary/10'
+                        }`}
+                      >
+                        <Plus size={13} /> {t('joule.addCustomModel')}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={manageProviders}
+                        className={`w-full flex items-center gap-2 px-3 py-2 max-md:py-3.5 text-xs max-md:text-sm transition-colors ${
+                          vibe ? 'text-white/70 hover:bg-white/10' : 'text-dark-onSurfaceVariant hover:bg-dark-surfaceContainer'
+                        }`}
+                      >
+                        <Settings2 size={13} /> {t('joule.manageProviders')}
+                      </button>
+                    </>
+                  )}
+
+                  {modelMenuLevel !== 'root' && modelMenuLevel !== 'providers' && (() => {
+                    const provider = providersWithModels.find((p) => p.id === modelMenuLevel)
+                    return (
+                      <>
+                        <div className={`flex items-center gap-1.5 px-2 py-1.5 max-md:py-2.5 border-b ${vibe ? 'border-white/15' : 'border-dark-onSurfaceVariant/10'}`}>
+                          <button
+                            type="button"
+                            onClick={() => setModelMenuLevel('providers')}
+                            aria-label={t('common.back')}
+                            className={`w-6 h-6 max-md:w-8 max-md:h-8 flex items-center justify-center rounded-md3-sm ${
+                              vibe ? 'hover:bg-white/10 text-white/70' : 'hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant'
+                            }`}
+                          >
+                            <ArrowLeft size={14} />
+                          </button>
+                          <span className="text-[11px] max-md:text-xs font-semibold uppercase tracking-wide truncate">{provider?.name ?? t('joule.customModels')}</span>
+                        </div>
+                        {!provider || provider.models.length === 0 ? (
+                          <div className={`px-3 py-3 text-xs ${vibe ? 'text-white/60' : 'text-dark-onSurfaceVariant'}`}>
+                            {t('chat.noModels')}
+                          </div>
+                        ) : provider.models.map((m) => {
+                          const active = provider.id === settings.activeProviderId && m.id === settings.activeModelId
+                          return (
+                            <button
+                              type="button"
+                              key={m.id}
+                              onClick={() => handleSelectModel(provider.id, m.id)}
+                              className={`w-full text-left px-3 py-2 max-md:py-3.5 transition-colors ${
+                                active
+                                  ? vibe ? 'text-md-primary bg-md-primary/10' : 'text-md-primary bg-md-primary/5'
+                                  : vibe ? 'text-white/90 hover:bg-white/10' : 'text-dark-onSurface hover:bg-dark-surfaceContainer'
+                              }`}
+                            >
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-xs max-md:text-[15px] font-medium truncate flex-1">{m.label || m.id}</span>
+                                {active && <Check size={12} className="flex-shrink-0" />}
+                              </div>
+                              {m.label && (
+                                <div className={`text-[10px] max-md:text-xs truncate mt-0.5 ${active ? 'text-md-primary/70' : vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/70'}`}>
+                                  {m.id}
+                                </div>
+                              )}
+                            </button>
+                          )
+                        })}
+                      </>
+                    )
+                  })()}
                 </div>
               </>
             )}

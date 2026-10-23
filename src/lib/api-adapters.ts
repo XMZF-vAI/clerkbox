@@ -154,12 +154,22 @@ function buildOpenAIBody(o: BuildBodyOptions): Record<string, unknown> {
 
   // 思考开关 —— 各家 OpenAI 兼容实现参数不统一，由模型级声明（thinkingStyle）决定，
   // 不再用模型名字符串猜测。未声明时按协议回退默认。
+  const thinkingStyle = o.thinkingStyle ?? DEFAULT_THINKING_STYLE.openai
   if (o.thinking) {
-    const style = o.thinkingStyle ?? DEFAULT_THINKING_STYLE.openai
-    switch (style) {
+    switch (thinkingStyle) {
       case 'effort':
-        // OpenAI 推理模型：只发 reasoning_effort，绝不混发 enable_thinking
+      case 'deepseek':
+        // OpenAI 推理模型 / Kimi K3 / GLM-5.3 / DeepSeek V4 / MiniMax M3.1：
+        // 只发 reasoning_effort，绝不混发 enable_thinking
         if (o.reasoningEffort) body.reasoning_effort = o.reasoningEffort
+        break
+      case 'kimi':
+        // Kimi K2.6：thinking.type 控制开关
+        body.thinking = { type: 'enabled' }
+        break
+      case 'minimax':
+        // MiniMax M3：adaptive 由模型决定何时深入思考
+        body.thinking = { type: 'adaptive' }
         break
       case 'glm':
         // 智谱 GLM：thinking 对象；clear_thinking=false 保留推理内容以延续上下文
@@ -177,6 +187,9 @@ function buildOpenAIBody(o: BuildBodyOptions): Record<string, unknown> {
           if (budget) body.thinking_budget = budget
         }
     }
+  } else if (thinkingStyle === 'kimi' || thinkingStyle === 'minimax' || thinkingStyle === 'deepseek') {
+    // 这几类模型默认开启思考：关闭时必须显式发 disabled，否则等同于没关
+    body.thinking = { type: 'disabled' }
   }
 
   return body

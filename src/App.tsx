@@ -9,6 +9,7 @@ import { useChatStore } from './stores/chat-store'
 import { initMcp } from './stores/mcp-store'
 import { useUpdaterStore } from './stores/updater-store'
 import { useAccountStore } from './stores/account-store'
+import { useJouleStore } from './stores/joule-store'
 import { useUIStore } from './stores/ui-store'
 import { useVibeStore } from './stores/vibe-store'
 import { initScheduledTasks, useScheduledTasksStore } from './stores/scheduled-tasks-store'
@@ -107,6 +108,14 @@ export default function App() {
   useEffect(() => window.clerkbox?.onWindowStateChange(setIsMaximized), [])
   useEffect(() => useSettingsStore.persist.onFinishHydration(() => setHydrated(true)), [])
 
+  // 窗口重新聚焦时刷新 Joule 额度/模型（主进程 30 秒节流；WebUI 远程不读本机凭据）
+  useEffect(() => {
+    if (isWebUIMode) return
+    const onFocus = () => { void useJouleStore.getState().refresh() }
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  }, [])
+
   // 启动遮罩退场信号（见 index.html 的 #clerkbox-startup 与 public/startup-init.js）：
   // 设置水合与会话载入都完成才派发，遮罩不会在数据未就绪时提前揭开空列表。
   // 欢迎页不挂载 ChatPage、不会触发 loadFromDb，此时界面本身已可交互，同样视为就绪。
@@ -132,6 +141,8 @@ export default function App() {
     migrateProvidersIfNeeded()
     void hydrateProviderApiKeys()
     void useAccountStore.getState().init()
+    // Joule 账号：订阅主进程快照（模型合并与过期回落都在 store 内）
+    const cleanupJoule = useJouleStore.getState().init()
     // MCP 服务器：首次同步 + 订阅配置变化与主进程状态推送
     const cleanupMcp = initMcp()
     // 自动更新：订阅主进程状态推送 + agent 活跃心跳上报（WebUI 模式内部自动跳过）
@@ -139,6 +150,7 @@ export default function App() {
     // 定时任务：启动 20s 心跳调度 + 恢复「保持系统唤醒」
     const cleanupScheduledTasks = initScheduledTasks()
     return () => {
+      cleanupJoule()
       cleanupMcp()
       cleanupUpdater()
       cleanupScheduledTasks()

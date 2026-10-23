@@ -1,5 +1,6 @@
 ﻿import type { ApiCompat, MemoryEntry, MemoryType } from './agent'
 import type { AgentCommand, AgentCommandResult, AgentEvent, AgentSnapshot } from '../agent-core/protocol'
+import type { JouleLoginResult, JouleStateSnapshot } from './joule'
 /**
  * IM 机器人的跨进程类型与主进程共用一份定义（该模块只依赖 zod，且这里全是 type import，
  * 编译后即被擦除，不会把主进程代码或 zod 打进渲染层包）。
@@ -537,6 +538,15 @@ export interface ClerkBoxAPI {
   loadApiKeys: () => Promise<Record<string, string>>
   saveApiKey: (id: string, apiKey: string) => Promise<void>
   removeApiKey: (id: string) => Promise<void>
+  // ── Joule 账号（设备码登录；Key 只落主进程 safeStorage）──
+  jouleStartLogin: () => Promise<JouleLoginResult>
+  jouleCancelLogin: () => Promise<void>
+  jouleLogout: () => Promise<void>
+  jouleGetState: () => Promise<JouleStateSnapshot>
+  jouleRefresh: () => Promise<JouleStateSnapshot>
+  jouleOpenDashboard: (section?: string) => Promise<void>
+  /** 账号快照推送；返回退订函数 */
+  onJouleState: (callback: (snapshot: JouleStateSnapshot) => void) => () => void
   scanMemory: (workingDir: string) => Promise<MemoryEntry[]>
   scanAgents: (workingDir: string) => Promise<Array<{ filename: string; content: string }>>
   readMemoryIndex: (workingDir: string) => Promise<{ content: string; wasTruncated: boolean; reason?: string }>

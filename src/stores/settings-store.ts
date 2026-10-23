@@ -152,8 +152,11 @@ export const useSettingsStore = create<SettingsState>()(
           // 可能为空——真密钥还在 safeStorage 加密存储里。此时若组件闭包里的
           // stale provider（apiKey=''）触发写入，会把加密存储里的真密钥删掉。
           // 注入完成（credentialStorageReady=true）后才放行空值写入。
+          // 新 Provider + 空 Key：没有已存凭据可删，跳过写入（Joule 登录即属这类：
+          // 先由主进程写 safeStorage，再带 Key 调 upsertProvider）。
           const isBlankDuringHydration = provider.apiKey === '' && !credentialStorageReady
-          if (!isBlankDuringHydration) {
+          const isNewBlankProvider = !previous && provider.apiKey === ''
+          if (!isBlankDuringHydration && !isNewBlankProvider) {
             apiKeyRevisions.set(provider.id, (apiKeyRevisions.get(provider.id) ?? 0) + 1)
             void queueApiKeyWrite(provider.id, provider.apiKey)
               .catch((error) => console.error('[settings-store] save API key failed:', error))

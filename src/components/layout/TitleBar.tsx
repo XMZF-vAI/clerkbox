@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { useVibeStore } from '../../stores/vibe-store'
 import { useWorkbench } from '../../stores/workbench-store'
 import ContextUsageIndicator from '../chat/ContextUsageIndicator'
+import JouleQuotaButton from '../joule/JouleQuotaButton'
 import UpdateBadge from './UpdateBadge'
 import { isWebUIMode } from '../../lib/ipc-client'
 
@@ -73,6 +74,9 @@ export default function TitleBar({ onToggleSidebar, sidebarVisible }: TitleBarPr
 
         {/* Context usage indicator：环形用量 + 统计面板（含手动压缩入口） */}
         <ContextUsageIndicator />
+
+        {/* Joule 5 小时额度：长条用量 + 详情入口（未连接 Joule 时不渲染） */}
+        <JouleQuotaButton />
 
         {/* 工作台面板开关（普通模式；VIBE 模式无标题栏，走 VibeControls 里的入口） */}
         <button
