@@ -18,19 +18,17 @@ import { fileURLToPath } from 'url'
  * 混用会让「AI 正在准备点」被显示成「AI 正在点」。
  */
 
-const aura = readFileSync(
-  fileURLToPath(new URL('../electron/screen-aura.ts', import.meta.url)),
-  'utf8',
-)
-const computerUse = readFileSync(
-  fileURLToPath(new URL('../electron/computer-use.ts', import.meta.url)),
-  'utf8',
-)
-const agentBrowser = readFileSync(
-  fileURLToPath(new URL('../electron/agent-browser.ts', import.meta.url)),
-  'utf8',
-)
-const main = readFileSync(fileURLToPath(new URL('../electron/main.ts', import.meta.url)), 'utf8')
+/**
+ * Windows runner 上 checkout 会把 LF 转成 CRLF，而这里的守卫是**按源码文本**断言的，
+ * 多行匹配（含 '()\n  }, PULSE_MS)' 这类）会直接失配。读入即归一，别让测试依赖工作副本的行尾。
+ */
+const read = (rel: string): string =>
+  readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8').replace(/\r\n/g, '\n')
+
+const aura = read('../electron/screen-aura.ts')
+const computerUse = read('../electron/computer-use.ts')
+const agentBrowser = read('../electron/agent-browser.ts')
+const main = read('../electron/main.ts')
 
 describe('屏幕边框光晕：窗口语义', () => {
   it('不挡鼠标、不抢焦点（提示不得变成障碍）', () => {
@@ -113,10 +111,7 @@ describe('两种操控的时长语义不同', () => {
 describe('浮块卡片不得被窗口切掉圆角', () => {
   it('卡片贴合内容，窗口给足余量', () => {
     // width:100% 会让卡片顶到窗口边缘，右边圆角被裁成直角 —— 用户看到的是「被切了一刀」
-    const indicator = readFileSync(
-      fileURLToPath(new URL('../electron/cua-indicator.ts', import.meta.url)),
-      'utf8',
-    )
+    const indicator = read('../electron/cua-indicator.ts')
     expect(indicator).toMatch(/\.pill \{[\s\S]{0,300}width: auto; max-width: 100%;/)
     // 窗口两侧的余量必须够放下圆角（r=12）
     const inset = indicator.match(/INDICATOR_SHADOW_INSET = \{[^}]+\}/)
