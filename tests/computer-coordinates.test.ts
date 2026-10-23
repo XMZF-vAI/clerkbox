@@ -33,8 +33,25 @@ const { electronMock, backendMock } = vi.hoisted(() => {
     openApp: vi.fn(async () => {}),
     dispose: vi.fn(),
   }
+  // 操控光晕（screen-aura）会在动作期间创建 BrowserWindow。真实运行时有 Electron，
+  // 单测里缺这个导出会让 fire-and-forget 的 showScreenAura 变成未处理拒绝，CI 直接红。
+  class MockBrowserWindow {
+    private destroyed = false
+    constructor(_options?: unknown) {}
+    loadURL = async () => {}
+    setBounds = () => {}
+    setIgnoreMouseEvents = () => {}
+    setContentProtection = () => {}
+    setAlwaysOnTop = () => {}
+    showInactive = () => {}
+    on = () => {}
+    isDestroyed = () => this.destroyed
+    destroy = () => { this.destroyed = true }
+    close = () => { this.destroyed = true }
+  }
   return {
     electronMock: {
+      BrowserWindow: MockBrowserWindow,
       screen: {
         getPrimaryDisplay: () => displays[0],
         getAllDisplays: () => displays,
