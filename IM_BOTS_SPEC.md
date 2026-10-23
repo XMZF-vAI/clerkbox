@@ -85,7 +85,7 @@ BotsStateFile = { version: 1, contexts: ChatContext[], pendingBinds: BindCode[],
 
 - 端点基址 `https://ilinkai.weixin.qq.com`，协议前缀 `/ilink/bot`，`channel_version: '2.0.0'`；媒体 AES-128-ECB/PKCS7（node:crypto）；请求超时 90s。
 - **登录**：`/get_bot_qrcode?bot_type=3` → 展示二维码 → `/get_qrcode_status` 长轮询（wait/scanned/confirmed/expired 四态）→ confirmed 拿 `bot_token` + `baseurl`（登录态可能重定向 baseurl）→ bot_token 存 credential store。
-- **收**：`/getupdates` 长轮询（~35s 服务端挂起），游标 `get_updates_buf` 持久化在 state；`ret:-14` 会话过期 → 置 error 状态提示重新扫码。
+- **收**：`/getupdates` 长轮询（~35s 服务端挂起），游标 `get_updates_buf` 持久化在 state；`ret:-14` 会话过期 → 置 error 状态提示重新扫码。**空批退避 1s**：正常节奏靠服务端挂起，但「秒回空批」的异常服务会把 while 变成纯微任务热循环（既不 yield 也不给 GC 喘息），与 Telegram 通道同一处理。
 - **发**：`/sendmessage`，文本放 `msg.item_list`；**必须原样回传入站消息携带的 `context_token`**；bot 不能主动发起会话（激活=用户发首条消息）。
 - 轮询循环带凭据指纹（provider+token 摘要）变更检测：指纹变了自动重启轮询；多窗口防双跑用进程内单例（CB 主进程唯一）+ 简单文件锁（userData/im-bots/locks/<botId>.lock，PID 存活校验）。
 

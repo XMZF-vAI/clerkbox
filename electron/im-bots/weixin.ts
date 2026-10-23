@@ -954,6 +954,12 @@ class WeixinChannelHandle implements BotChannelHandle {
         }
         // 每轮都报一次 polling：宿主负责去抖与广播，界面才知道循环还活着
         deps.setStatus('polling', MSG_POLLING)
+        // 空批退避：正常长轮询由服务端挂约 35s 自然限速，但「秒回空批」的异常服务
+        // 或测试桩会把这个 while 变成纯微任务热循环（既不 yield 也不给 GC 喘息）。
+        // 与 telegram 通道同一处理：空批一律歇 1s。
+        if (result.messages.length === 0) {
+          await cancellableSleep(1_000, signal)
+        }
       } catch (error) {
         if (signal.aborted || deps.isStopped()) return
         if (error instanceof WeixinApiError && error.sessionExpired) {
