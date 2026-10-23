@@ -9,16 +9,20 @@
  * 改文案不会连带改测试）。
  */
 import {
+  BOT_APPROVAL_MODES,
   makeActorKey,
+  type BotApprovalMode,
   type BotChatType,
   type BotConfig,
   type BotProvider,
+  type ChatContext,
   type InboundMessage,
 } from './types'
 import type { UserQuestion } from '../../src/types/agent'
 import { deriveSessionTitle } from '../../src/lib/chat-row'
+import { comparableFolderPath, isAbsolutePath, isPathInside, joinPath } from '../../src/lib/path-safety'
 import type { BotsStorage } from './storage'
-import type { RunOutcome, SessionBridge } from './session-bridge'
+import type { DispatchOverrides, RunOutcome, SessionBridge } from './session-bridge'
 
 /** 一次出站投递：core 只知道「发给谁」，用哪条通道由 index.ts 解析 */
 export interface DeliverInput {
@@ -29,11 +33,32 @@ export interface DeliverInput {
   text: string
 }
 
-/** 待序号选择的挂问（/workspace、/task 列完之后的那一条数字回复） */
+/** 一次文件投递：core 只定去向与路径，stat / 限长 / 读文件 / 走通道都在 index.ts */
+export interface DeliverFileInput {
+  botId: string
+  provider: BotProvider
+  providerUserId: string
+  contextToken?: string
+  filePath: string
+  filename: string
+}
+
+export type DeliverFileError = 'missing' | 'too-large' | 'unsupported' | 'send-failed'
+
+export interface DeliverFileResult {
+  ok: boolean
+  error?: DeliverFileError
+  /** error='too-large' 时携带的渠道上限（字节），用于生成人话提示 */
+  limitBytes?: number
+}
+
+/** 待序号选择的挂问（/workspace、/task、/permission、/model 列完之后的那一条数字回复） */
 interface PendingChoice {
-  kind: 'workspace' | 'task'
-  /** 序号 → 目标值（目录路径或会话 id） */
+  kind: 'workspace' | 'task' | 'permission' | 'model'
+  /** 序号 → 机器值（目录路径 / 会话 id / 审批档位 / 'providerId\u001fmodelId'） */
   options: string[]
+  /** 序号 → 展示文本；workspace/task 的 options 本身就是展示文本，不填 */
+  labels?: string[]
   askedAt: number
 }
 
@@ -110,6 +135,7 @@ export type BridgeSurface = Pick<
   | 'distinctWorkDirs'
   | 'latestAnswer'
   | 'prepareOutbound'
+  | 'modelOptions'
   | 'watch'
   | 'unwatch'
   | 'unwatchSession'
@@ -138,6 +164,11 @@ export interface CorePorts {
   storage: BotsStorage
   bridge: BridgeSurface
   deliver(input: DeliverInput): Promise<void>
+  /**
+   * 文件投递：stat / 渠道限长 / 读字节 / 路由到通道 sendFile 全在装配层。
+   * core 只负责「这条路径该不该发」（工作目录边界）与「发不成时说什么」。
+   */
+  deliverFile(input: DeliverFileInput): Promise<DeliverFileResult>
   /** 审批答复的去向；没有它时 core 退回「请回电脑端处理」的旧行为 */
   approval?: ApprovalPort
   /** 提问答复的去向；同上，缺它时提问仍然只能回桌面答 */
@@ -170,6 +201,8 @@ export type ParsedCommand =
   | { name: 'new' }
   | { name: 'workspace'; arg?: string }
   | { name: 'task'; arg?: string }
+  | { name: 'permission'; arg?: string }
+  | { name: 'model'; arg?: string }
   | { name: 'unknown'; raw: string }
   | null
 
@@ -180,7 +213,16 @@ export type ParsedCommand =
  * tests/im-bots-replies.test.ts 会把两者钉在一起：加了命令忘了写进 /help，
  * 或者 /help 里吹了一个不存在的命令，都会在测试里炸而不是等用户在手机上试出来。
  */
-export const KNOWN_BOT_COMMANDS = ['/bind', '/help', '/status', '/new', '/workspace', '/task'] as const
+export const KNOWN_BOT_COMMANDS = [
+  '/bind',
+  '/help',
+  '/status',
+  '/new',
+  '/workspace',
+  '/task',
+  '/permission',
+  '/model',
+] as const
 
 /**
  * 命令解析（不区分大小写，见规格 §7.2）。
@@ -208,6 +250,10 @@ export function parseCommand(text: string): ParsedCommand {
       return { name: 'workspace', arg: rest || undefined }
     case '/task':
       return { name: 'task', arg: rest || undefined }
+    case '/permission':
+      return { name: 'permission', arg: rest || undefined }
+    case '/model':
+      return { name: 'model', arg: rest || undefined }
     default:
       return { name: 'unknown', raw: trimmed }
   }
@@ -241,6 +287,59 @@ export function makeRandomBindCode(): string {
   return out
 }
 
+// ── 文件标记（[[file:路径]]）：AI 在回复里写标记，这里兑现成真正的文件推送 ──
+
+/**
+ * AI 侧的约定格式。刻意挑了一个正文几乎不会自然出现的形状：
+ * 中文方括号是常见标点，双方括号 + 「file:」前缀基本只有提示词教过才会出现。
+ */
+const FILE_MARKER_RE = /\[\[file:(.+?)\]\]/g
+
+/** 抽出正文里的全部文件标记（保留原样路径，解析与校验交给发送时逐个做） */
+export function extractFileMarkers(text: string): string[] {
+  const out: string[] = []
+  for (const match of (text ?? '').matchAll(FILE_MARKER_RE)) {
+    const value = (match[1] ?? '').trim()
+    if (value) out.push(value)
+  }
+  return out
+}
+
+/** 剥掉全部标记并收拢剥落后的空行：标记已经变成真文件，正文不该再留一个路径占位 */
+export function stripFileMarkers(text: string): string {
+  return (text ?? '')
+    .replace(FILE_MARKER_RE, '')
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+/** 字节数的人话形式（提示里用）：1 位小数的 MB，不足 1MB 按 KB */
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '?'
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))}KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`
+}
+
+/** 审批档位 → i18n 标签。复用设置页那套「手动审批 / 自动审批 / 完全访问」命名，两侧同一套词 */
+const APPROVAL_MODE_LABEL_KEYS: Record<BotApprovalMode, string> = {
+  manual: 'agent.approvalManualTitle',
+  auto: 'agent.approvalAutoTitle',
+  full: 'agent.approvalFullTitle',
+}
+
+/** 按聊天上下文拼 dispatch 覆盖项：两项都没设就回 undefined（宿主走自己的回退链） */
+export function contextOverrides(ctx: { approvalModeOverride?: BotApprovalMode; modelOverride?: { providerId: string; modelId: string } } | undefined): DispatchOverrides | undefined {
+  if (!ctx) return undefined
+  if (!ctx.approvalModeOverride && !ctx.modelOverride) return undefined
+  return {
+    ...(ctx.approvalModeOverride ? { approvalMode: ctx.approvalModeOverride } : {}),
+    ...(ctx.modelOverride ? { model: ctx.modelOverride } : {}),
+  }
+}
+
 export class BotsCore {
   /** actorKey → 挂问中的序号选择（内存态：丢了最多让用户重发一次 /workspace） */
   private readonly pendingChoices = new Map<string, PendingChoice>()
@@ -250,6 +349,12 @@ export class BotsCore {
   private readonly pendingQuestions = new Map<string, PendingQuestion>()
   /** actorKey → 该身份最后一条入站的处理链（同一身份串行，不同身份并行） */
   private readonly inboundChain = new Map<string, Promise<unknown>>()
+  /**
+   * sessionId → 本轮已发送过的文件（去重键含消息 id 与路径）。
+   * 同一条助手消息的 added 与 completed 收尾只会推一次正文（桥侧已保证），
+   * 这里防的是「同一条消息里写了两个一样的标记」「completed 回落路径与 progress 重复」。
+   */
+  private readonly sentFiles = new Map<string, Set<string>>()
 
   constructor(private readonly ports: CorePorts) {}
 
@@ -343,7 +448,7 @@ export class BotsCore {
         text = this.askQuestion(actorKey, outcome)
       } else if (outcome.kind === 'progress') {
         // 过程消息：一条写完的助手正文，马上推（不结束本轮，也不清挂起的审批/提问）
-        text = outcome.text ?? ''
+        text = await this.deliverMarkedFiles(outcome, actorKey, target, ctx, outcome.text ?? '')
       } else if (outcome.kind === 'aborted') {
         text = this.ports.text('bots.reply.aborted')
       } else {
@@ -354,7 +459,9 @@ export class BotsCore {
         // 整轮没推过（纯工具调用/中途异常）才回落到「取尾部答案/本轮没有产出」
         if (outcome.answerPushed) continue
         const answer = await this.ports.bridge.latestAnswer(outcome.sessionId)
-        text = answer.trim() ? answer : this.ports.text('bots.reply.emptyResult')
+        text = answer.trim()
+          ? await this.deliverMarkedFiles(outcome, actorKey, target, ctx, answer)
+          : this.ports.text('bots.reply.emptyResult')
       }
       for (const chunk of this.ports.bridge.prepareOutbound(text)) {
         await this.deliverSafely({
@@ -580,6 +687,12 @@ export class BotsCore {
       case 'task':
         await this.handleTask(message, actorKey, command.arg)
         return
+      case 'permission':
+        await this.handlePermission(message, actorKey, command.arg)
+        return
+      case 'model':
+        await this.handleModel(message, actorKey, command.arg)
+        return
       case 'unknown':
         await this.reply(message, this.ports.text('bots.reply.unknownCommand', { command: command.raw }))
         return
@@ -596,6 +709,17 @@ export class BotsCore {
     const workDir = ctx?.workDir || bot?.defaultWorkDir
     if (!workDir) return this.ports.text('bots.reply.statusNoWorkDir')
     const lines = [this.ports.text('bots.reply.statusWorkDir', { dir: workDir })]
+    // 覆盖项只在本聊天身份上生效：没设就说「跟随桌面」，让人知道去哪里能改
+    lines.push(
+      ctx?.approvalModeOverride
+        ? this.ports.text('bots.reply.statusApproval', { mode: this.approvalModeLabel(ctx.approvalModeOverride) })
+        : this.ports.text('bots.reply.statusApprovalFollow')
+    )
+    lines.push(
+      ctx?.modelOverride
+        ? this.ports.text('bots.reply.statusModel', { model: ctx.modelOverride.modelId })
+        : this.ports.text('bots.reply.statusModelFollow')
+    )
     if (ctx?.mode === 'task' && ctx.activeSessionId) {
       const session = await this.ports.bridge.findSession(ctx.activeSessionId)
       if (session) {
@@ -728,11 +852,133 @@ export class BotsCore {
     await this.reply(message, this.ports.text('bots.reply.taskSet', { title: session.title }))
   }
 
+  // ── 审批档位与模型（/permission、/model）─────────────────────────────────
+
+  private approvalModeLabel(mode: BotApprovalMode): string {
+    return this.ports.text(APPROVAL_MODE_LABEL_KEYS[mode])
+  }
+
+  /**
+   * /permission：无参列三档并挂问；带参（序号 / 档位名 / 0=恢复跟随桌面）直接切。
+   *
+   * 切的是**这个聊天身份**的覆盖项，不动桌面全局设置——远程的人放松的是 bot 的手，
+   * 不该顺手改掉电脑前的自己那份。落盘在 ChatContext（与 /workspace 选目录同一先例），
+   * 下一次 dispatch 由桥克隆快照时套用。
+   */
+  private async handlePermission(message: InboundMessage, actorKey: string, arg?: string): Promise<void> {
+    const ctx = await this.ports.storage.getContext(actorKey)
+    if (arg === undefined) {
+      const labels = BOT_APPROVAL_MODES.map((mode) => this.approvalModeLabel(mode))
+      const current = ctx?.approvalModeOverride
+        ? this.approvalModeLabel(ctx.approvalModeOverride)
+        : this.ports.text('bots.reply.followDesktop')
+      this.setChoice(actorKey, { kind: 'permission', options: [...BOT_APPROVAL_MODES], askedAt: this.ports.now() })
+      await this.reply(
+        message,
+        `${this.listText(this.ports.text('bots.reply.permissionTitle'), labels, current)}\n${this.ports.text('bots.reply.followHint')}`
+      )
+      return
+    }
+    const picked = this.pickApprovalMode(arg)
+    if (picked === 'invalid') {
+      await this.reply(message, this.ports.text('bots.reply.choiceInvalid', { arg }))
+      return
+    }
+    if (picked === 'follow') {
+      await this.clearApprovalOverride(message, actorKey)
+      return
+    }
+    await this.applyApprovalOverride(message, actorKey, picked)
+  }
+
+  /** /permission 参数 → 档位 / 恢复跟随 / 无效。序号与档位名都认（`/permission full` 也行） */
+  private pickApprovalMode(arg: string): BotApprovalMode | 'follow' | 'invalid' {
+    const numeric = NUMBER_ONLY.exec(arg)
+    if (numeric) {
+      if (Number(numeric[1]) === 0) return 'follow'
+      const mode = BOT_APPROVAL_MODES[Number(numeric[1]) - 1]
+      return mode ?? 'invalid'
+    }
+    const normalized = arg.trim().toLowerCase()
+    if (normalized === '0' || normalized === 'follow') return 'follow'
+    return (BOT_APPROVAL_MODES as readonly string[]).includes(normalized)
+      ? (normalized as BotApprovalMode)
+      : 'invalid'
+  }
+
+  private async applyApprovalOverride(message: InboundMessage, actorKey: string, mode: BotApprovalMode): Promise<void> {
+    this.clearChoice(actorKey)
+    await this.ports.storage.patchContext(actorKey, { approvalModeOverride: mode })
+    await this.reply(message, this.ports.text('bots.reply.choiceAppliedPermission', { mode: this.approvalModeLabel(mode) }))
+  }
+
+  private async clearApprovalOverride(message: InboundMessage, actorKey: string): Promise<void> {
+    this.clearChoice(actorKey)
+    await this.ports.storage.patchContext(actorKey, { approvalModeOverride: undefined })
+    await this.reply(message, this.ports.text('bots.reply.choiceFollowDesktop'))
+  }
+
+  /**
+   * /model：无参列本机全部可用模型并挂问；带序号直接切，0 恢复跟随桌面。
+   * 清单来自宿主的设置快照（与桌面「设置 → 模型」同一份数据），桌面没配置过时如实说没有。
+   */
+  private async handleModel(message: InboundMessage, actorKey: string, arg?: string): Promise<void> {
+    const { keys, labels, currentLabel } = this.ports.bridge.modelOptions(CHOICE_LIMIT)
+    if (arg === undefined) {
+      if (keys.length === 0) {
+        await this.reply(message, this.ports.text('bots.reply.modelListEmpty'))
+        return
+      }
+      this.setChoice(actorKey, { kind: 'model', options: keys, labels, askedAt: this.ports.now() })
+      await this.reply(
+        message,
+        `${this.listText(this.ports.text('bots.reply.modelTitle'), labels, currentLabel)}\n${this.ports.text('bots.reply.followHint')}`
+      )
+      return
+    }
+    const numeric = NUMBER_ONLY.exec(arg)
+    if (!numeric) {
+      await this.reply(message, this.ports.text('bots.reply.choiceInvalid', { arg }))
+      return
+    }
+    if (Number(numeric[1]) === 0) {
+      await this.clearModelOverride(message, actorKey)
+      return
+    }
+    const index = Number(numeric[1]) - 1
+    const key = keys[index]
+    if (!key) {
+      await this.reply(message, this.ports.text('bots.reply.choiceInvalid', { arg }))
+      return
+    }
+    await this.applyModelOverride(message, actorKey, key, labels[index] ?? key)
+  }
+
+  private async applyModelOverride(message: InboundMessage, actorKey: string, key: string, label: string): Promise<void> {
+    const separatorAt = key.indexOf('\u001f')
+    const providerId = key.slice(0, separatorAt)
+    const modelId = key.slice(separatorAt + 1)
+    if (!providerId || !modelId) {
+      await this.reply(message, this.ports.text('bots.reply.choiceInvalid', { arg: label }))
+      return
+    }
+    this.clearChoice(actorKey)
+    await this.ports.storage.patchContext(actorKey, { modelOverride: { providerId, modelId } })
+    await this.reply(message, this.ports.text('bots.reply.choiceAppliedModel', { model: label }))
+  }
+
+  private async clearModelOverride(message: InboundMessage, actorKey: string): Promise<void> {
+    this.clearChoice(actorKey)
+    await this.ports.storage.patchContext(actorKey, { modelOverride: undefined })
+    await this.reply(message, this.ports.text('bots.reply.choiceFollowDesktop'))
+  }
+
   /**
    * 裸数字选择：列完清单后回一个「2」。
    *
    * 只在有挂问且未超时的时候才这么解释，其余一律当普通消息送进会话——
    * 否则「2 + 2 等于几」这种正文会被吃掉。非数字回复顺手作废挂问（用户已经改话题了）。
+   * 「0」在 /permission 与 /model 里是「恢复跟随桌面」：清单挂问和带参命令必须是等价的。
    */
   private async tryResolvePending(message: InboundMessage, actorKey: string, text: string): Promise<boolean> {
     const choice = this.pendingChoices.get(actorKey)
@@ -744,13 +990,21 @@ export class BotsCore {
     }
     this.clearChoice(actorKey)
     if (this.ports.now() - choice.askedAt > PENDING_CHOICE_TTL_MS) return false
-    const value = choice.options[Number(numeric[1]) - 1]
+    const number = Number(numeric[1])
+    if (number === 0 && (choice.kind === 'permission' || choice.kind === 'model')) {
+      if (choice.kind === 'permission') await this.clearApprovalOverride(message, actorKey)
+      else await this.clearModelOverride(message, actorKey)
+      return true
+    }
+    const value = choice.options[number - 1]
     if (!value) {
       await this.reply(message, this.ports.text('bots.reply.choiceInvalid', { arg: text.trim() }))
       return true
     }
     if (choice.kind === 'workspace') await this.applyWorkspace(message, actorKey, value)
-    else await this.applyTask(message, actorKey, value)
+    else if (choice.kind === 'task') await this.applyTask(message, actorKey, value)
+    else if (choice.kind === 'permission') await this.applyApprovalOverride(message, actorKey, value as BotApprovalMode)
+    else await this.applyModelOverride(message, actorKey, value, choice.labels?.[number - 1] ?? value)
     return true
   }
 
@@ -773,6 +1027,7 @@ export class BotsCore {
     )
     const ctx = await this.ports.storage.getContext(actorKey)
     const target = ctx?.mode === 'task' && ctx.activeSessionId ? await this.ports.bridge.findSession(ctx.activeSessionId) : null
+    const overrides = contextOverrides(ctx)
 
     if (!target) {
       const workDir = ctx?.workDir || bot?.defaultWorkDir
@@ -788,7 +1043,8 @@ export class BotsCore {
       })
       let outcome: Awaited<ReturnType<BridgeSurface['dispatch']>>
       try {
-        outcome = await this.ports.bridge.dispatch(sessionId, actorKey, text)
+        const content = await this.withFileHint(actorKey, ctx, sessionId, text)
+        outcome = await this.ports.bridge.dispatch(sessionId, actorKey, content, overrides)
       } catch {
         // dispatch 正常只回 {ok,error}；走到这说明宿主指令通道本身炸了，如实回滚并告知
         await this.ports.storage.patchContext(actorKey, { mode: 'draft', activeSessionId: undefined }, () => ({ mode: 'draft' }))
@@ -811,7 +1067,8 @@ export class BotsCore {
     }
 
     const wasBusy = this.ports.bridge.isBusy(target.id)
-    const outcome = await this.ports.bridge.dispatch(target.id, actorKey, text)
+    const content = await this.withFileHint(actorKey, ctx, target.id, text)
+    const outcome = await this.ports.bridge.dispatch(target.id, actorKey, content, overrides)
     if (!outcome.ok) {
       await this.reply(
         message,
@@ -864,6 +1121,94 @@ export class BotsCore {
    */
   private clearChoice(actorKey: string): void {
     this.pendingChoices.delete(actorKey)
+  }
+
+  /**
+   * 把正文里的 [[file:路径]] 标记兑现成真正的文件推送，返回剥掉标记（可能附失败说明）的正文。
+   *
+   * 安全是硬闸不是提示：解析后的路径必须落在会话工作目录内（相对路径按工作目录拼，
+   * 绝对路径也照此复核，`..` 逃不掉 path-safety 的规范化比较）。
+   * IM 对端拿到的是「工作区文件的外送通道」，不是「整台电脑任意文件的外送通道」——
+   * 提示词注入能骗模型写出标记，边界判定必须在这层拦。
+   *
+   * 去重键含消息 id 与路径：同一条消息的多个标记各发一次，跨消息重复同一路径也放行
+   * （用户说「再发一次」时模型会重写标记，拦了反而违背意图）；重发 Dedupe 只在同一轮内。
+   */
+  private async deliverMarkedFiles(
+    outcome: RunOutcome,
+    actorKey: string,
+    target: { botId: string; provider: BotProvider; providerUserId: string },
+    ctx: ChatContext,
+    text: string
+  ): Promise<string> {
+    const markers = extractFileMarkers(text)
+    if (markers.length === 0) return text
+    const cleaned = stripFileMarkers(text)
+    const session = await this.ports.bridge.findSession(outcome.sessionId)
+    const workDir = session?.workingDir ?? session?.defaultWorkDir
+    const seen = this.sentFiles.get(outcome.sessionId) ?? new Set<string>()
+    this.sentFiles.set(outcome.sessionId, seen)
+    // 表按会话增长：只留最近 32 个会话的记账，够覆盖一轮任务的全部消息
+    if (this.sentFiles.size > 32) {
+      const oldest = this.sentFiles.keys().next()
+      if (!oldest.done) this.sentFiles.delete(oldest.value)
+    }
+    const notes: string[] = []
+    for (const marker of markers) {
+      const filename = marker.split(/[\\/]/).filter(Boolean).pop() || marker
+      const resolved = workDir && !isAbsolutePath(marker) ? joinPath(workDir, marker) : marker
+      const dedupeKey = `${actorKey}\u001f${outcome.messageId ?? outcome.kind}\u001f${comparableFolderPath(resolved)}`
+      if (seen.has(dedupeKey)) continue
+      seen.add(dedupeKey)
+      if (!workDir) {
+        notes.push(this.ports.text('bots.reply.fileNoteNoWorkdir', { name: filename }))
+        continue
+      }
+      if (!isPathInside(resolved, workDir)) {
+        notes.push(this.ports.text('bots.reply.fileNoteOutside', { name: filename }))
+        continue
+      }
+      const result = await this.ports.deliverFile({
+        botId: target.botId,
+        provider: target.provider,
+        providerUserId: target.providerUserId,
+        // 微信只认「原样带回最近入站的 token」，与文本回复同一规矩
+        contextToken: target.provider === 'weixin' ? ctx.weixinContextToken : undefined,
+        filePath: resolved,
+        filename,
+      })
+      if (result.ok) continue
+      notes.push(this.fileFailureNote(result, filename))
+    }
+    return notes.length > 0 ? `${cleaned}\n${notes.join('\n')}` : cleaned
+  }
+
+  private fileFailureNote(result: DeliverFileResult, filename: string): string {
+    switch (result.error) {
+      case 'too-large':
+        return this.ports.text('bots.reply.fileNoteTooLarge', { name: filename, limit: formatBytes(result.limitBytes ?? 0) })
+      case 'missing':
+        return this.ports.text('bots.reply.fileNoteMissing', { name: filename })
+      case 'unsupported':
+        return this.ports.text('bots.reply.fileNoteUnsupported', { name: filename })
+      default:
+        return this.ports.text('bots.reply.fileNoteFailed', { name: filename })
+    }
+  }
+
+  /**
+   * 每个 IM 会话只在第一条消息里教一次「发文件」的标记。
+   * 提示随用户消息落库，之后靠会话历史记忆，不逐条重复（每条都带等于永久 token 税）。
+   */
+  private async withFileHint(
+    actorKey: string,
+    ctx: ChatContext | undefined,
+    sessionId: string,
+    text: string
+  ): Promise<string> {
+    if (!ctx || ctx.fileHintSessionId === sessionId) return text
+    await this.ports.storage.patchContext(actorKey, { fileHintSessionId: sessionId })
+    return `${text}\n\n${this.ports.text('bots.reply.fileHint')}`
   }
 
   /**

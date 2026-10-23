@@ -28,6 +28,7 @@ import {
   type BotConfig,
   type ChannelDeps,
   type InboundMessage,
+  type OutboundFile,
   type OutboundTarget,
 } from './types'
 
@@ -40,6 +41,14 @@ import {
 const FEISHU_BASE_URL = 'https://open.feishu.cn'
 const TENANT_TOKEN_PATH = '/open-apis/auth/v3/tenant_access_token/internal'
 const SEND_MESSAGE_PATH = '/open-apis/im/v1/messages'
+const UPLOAD_IMAGE_PATH = '/open-apis/im/v1/images'
+const UPLOAD_FILE_PATH = '/open-apis/im/v1/files'
+
+/** im/v1/images 的官方上限 10MB；超限或非图片改走 im/v1/files（上限 30MB） */
+const FEISHU_IMAGE_MAX_BYTES = 10 * 1024 * 1024
+/** 上传媒体是大文件 multipart，15s 的通用超时兜不住，单独放宽 */
+const UPLOAD_TIMEOUT_MS = 120_000
+const FEISHU_IMAGE_RE = /\.(png|jpe?g|gif|webp|bmp|tiff|ico)$/i
 
 /** 自建应用 App ID 形如 cli_ + 16 位十六进制（feishuProvider.ts:30）。
  *  SDK 的 start() 对非法 appId 只 logger.error 后静默 return（node-sdk lib/index.js:102791），
@@ -253,6 +262,18 @@ export function resolveReceiveIdType(receiveId: string): 'chat_id' | 'open_id' {
   return receiveId.startsWith('oc_') ? 'chat_id' : 'open_id'
 }
 
+/** im/v1/files 的 file_type 按扩展名映射（官方枚举：opus/mp4/pdf/doc/xls/ppt/stream） */
+export function feishuFileType(filename: string): string {
+  const ext = (filename.split('.').pop() ?? '').toLowerCase()
+  if (ext === 'pdf') return 'pdf'
+  if (ext === 'doc' || ext === 'docx') return 'doc'
+  if (ext === 'xls' || ext === 'xlsx' || ext === 'csv') return 'xls'
+  if (ext === 'ppt' || ext === 'pptx') return 'ppt'
+  if (ext === 'mp4') return 'mp4'
+  if (ext === 'opus') return 'opus'
+  return 'stream'
+}
+
 /** 长文本切条（feishuProvider.ts:1083-1090）：空串也要发一条，避免「回了个空」 */
 export function splitFeishuText(text: string, limit = TEXT_CHUNK_LIMIT): string[] {
   const chunks: string[] = []
@@ -319,7 +340,8 @@ interface JsonReply<T> {
 export interface FeishuFetchInit {
   method?: string
   headers?: Record<string, string>
-  body?: string
+  /** JSON 请求是字符串；媒体上传是 FormData（fetch 会自动带上 multipart 边界） */
+  body?: string | FormData
 }
 
 /**
@@ -594,6 +616,93 @@ class FeishuChannelHandle implements BotChannelHandle {
     const token = await sharedTokenStore.get(secret.appId, secret.appSecret)
     for (const chunk of splitFeishuText(text)) {
       await this.sendTextChunk(receiveId, token, chunk, deps)
+    }
+  }
+
+  /**
+   * 发文件：先上传拿 key（image_key / file_key 必须同一应用上传，跨应用发会被 230017 拒），
+   * 再发对应类型的消息。图片走 im/v1/images 在聊天里直接预览；超过 10MB 或非图片
+   * 改走 im/v1/files（file_type 按扩展名映射，认不出的归 stream 通用二进制）。
+   * 需要应用开通 im:resource 权限——没开通时飞书报 99991672/230002 一类 code，原样上抛。
+   */
+  async sendFile(target: OutboundTarget, file: OutboundFile): Promise<void> {
+    const deps = this.deps
+    if (!deps) throw new Error('飞书通道尚未启动，无法发送')
+    const receiveId = target.providerUserId?.trim()
+    if (!receiveId) throw new Error('飞书发送缺少接收者 open_id')
+    const secret = parseFeishuSecret((await deps.readCredential()) ?? '')
+    if (!secret) throw new Error('飞书凭据未配置或格式不正确，无法发送')
+    const token = await sharedTokenStore.get(secret.appId, secret.appSecret)
+    const asImage = FEISHU_IMAGE_RE.test(file.filename) && file.data.length <= FEISHU_IMAGE_MAX_BYTES
+    const key = asImage
+      ? await this.uploadFeishuImage(token, file, deps)
+      : await this.uploadFeishuFile(token, file, deps)
+    await this.sendMediaChunk(receiveId, token, asImage ? 'image' : 'file', key, deps)
+  }
+
+  private async uploadFeishuImage(token: string, file: OutboundFile, deps: ChannelDeps): Promise<string> {
+    const form = new FormData()
+    form.append('image_type', 'message')
+    form.append('image', new Blob([new Uint8Array(file.data)]), file.filename)
+    const reply = await requestFeishuJson<{ code?: number; msg?: string; data?: { image_key?: string } }>(
+      `${FEISHU_BASE_URL}${UPLOAD_IMAGE_PATH}`,
+      { method: 'POST', headers: { authorization: `Bearer ${token}` }, body: form },
+      globalThis.fetch,
+      UPLOAD_TIMEOUT_MS
+    )
+    const key = reply.payload?.data?.image_key
+    if (!reply.ok || reply.payload?.code !== 0 || !key) {
+      const error = feishuApiError('上传图片', reply)
+      deps.log(messageText(error))
+      throw error
+    }
+    return key
+  }
+
+  private async uploadFeishuFile(token: string, file: OutboundFile, deps: ChannelDeps): Promise<string> {
+    const form = new FormData()
+    form.append('file_type', feishuFileType(file.filename))
+    form.append('file_name', file.filename)
+    form.append('file', new Blob([new Uint8Array(file.data)]), file.filename)
+    const reply = await requestFeishuJson<{ code?: number; msg?: string; data?: { file_key?: string } }>(
+      `${FEISHU_BASE_URL}${UPLOAD_FILE_PATH}`,
+      { method: 'POST', headers: { authorization: `Bearer ${token}` }, body: form },
+      globalThis.fetch,
+      UPLOAD_TIMEOUT_MS
+    )
+    const key = reply.payload?.data?.file_key
+    if (!reply.ok || reply.payload?.code !== 0 || !key) {
+      const error = feishuApiError('上传文件', reply)
+      deps.log(messageText(error))
+      throw error
+    }
+    return key
+  }
+
+  /** 发 image / file 消息：content 必须是序列化后的字符串（与 text 同一条规矩） */
+  private async sendMediaChunk(
+    receiveId: string,
+    token: string,
+    msgType: 'image' | 'file',
+    key: string,
+    deps: ChannelDeps
+  ): Promise<void> {
+    const content = msgType === 'image' ? { image_key: key } : { file_key: key }
+    const receiveIdType = resolveReceiveIdType(receiveId)
+    const reply = await requestFeishuJson<{ code?: number; msg?: string; error?: { log_id?: string } }>(
+      `${FEISHU_BASE_URL}${SEND_MESSAGE_PATH}?receive_id_type=${receiveIdType}`,
+      {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ receive_id: receiveId, msg_type: msgType, content: JSON.stringify(content) }),
+      },
+      globalThis.fetch
+    )
+    const payload = reply.payload ?? {}
+    if (!reply.ok || payload.code !== 0) {
+      const error = feishuApiError(`发送${msgType === 'image' ? '图片' : '文件'}消息`, reply)
+      deps.log(messageText(error))
+      throw error
     }
   }
 

@@ -29,18 +29,46 @@ interface SentMessage {
   body: { msgtype: string; markdown: { content: string } }
 }
 
+interface MediaUpload {
+  buffer: Buffer
+  options: { type: string; filename: string }
+}
+
+interface MediaSent {
+  chatid: string
+  mediaType: string
+  mediaId: string
+}
+
 const harness: {
   textHandler: TextHandler | null
   errorHandler: ErrorHandler | null
   sent: SentMessage[]
   disconnects: number
-} = { textHandler: null, errorHandler: null, sent: [], disconnects: 0 }
+  uploads: MediaUpload[]
+  mediaSent: MediaSent[]
+  /** 置 false 模拟「SDK 版本太老、没有 uploadMedia/sendMediaMessage」 */
+  sdkSupportsMedia: boolean
+} = { textHandler: null, errorHandler: null, sent: [], disconnects: 0, uploads: [], mediaSent: [], sdkSupportsMedia: true }
 
 vi.mock('@wecom/aibot-node-sdk', () => ({
   WSClient: class {
+    uploadMedia?: (fileBuffer: Buffer, options: { type: string; filename: string }) => Promise<{ media_id?: string }>
+    sendMediaMessage?: (chatid: string, mediaType: string, mediaId: string) => Promise<unknown>
     constructor(_options: unknown) {
       harness.textHandler = null
       harness.errorHandler = null
+      // 媒体能力按开关挂到实例上：老版本 SDK 就是「没有这两个方法」的形状
+      if (harness.sdkSupportsMedia) {
+        this.uploadMedia = async (fileBuffer, options) => {
+          harness.uploads.push({ buffer: fileBuffer, options })
+          return { media_id: 'media-1' }
+        }
+        this.sendMediaMessage = async (chatid, mediaType, mediaId) => {
+          harness.mediaSent.push({ chatid, mediaType, mediaId })
+          return { headers: { req_id: 'r' } }
+        }
+      }
     }
     on(event: string, handler: (payload: never) => void) {
       if (event === 'message.text') harness.textHandler = handler as TextHandler
@@ -103,6 +131,9 @@ afterEach(() => {
   harness.errorHandler = null
   harness.sent = []
   harness.disconnects = 0
+  harness.uploads = []
+  harness.mediaSent = []
+  harness.sdkSupportsMedia = true
 })
 
 describe('企业微信通道', () => {
@@ -155,5 +186,32 @@ describe('企业微信通道', () => {
     await handle.stop()
     await running
     expect(harness.sent).toHaveLength(0)
+  })
+
+  it('sendFile：图片走 image 上传 + sendMediaMessage；非图片走 file', async () => {
+    const { deps, setStopped } = makeDeps()
+    const handle = wecomChannel.create()
+    const running = handle.start(BOT, deps)
+    await vi.waitFor(() => expect(harness.textHandler).not.toBeNull())
+    await handle.sendFile?.({ providerUserId: 'u9' }, { filename: 'pic.png', data: new Uint8Array([1, 2, 3]) })
+    expect(harness.uploads[0]?.options).toEqual({ type: 'image', filename: 'pic.png' })
+    expect(harness.uploads[0]?.buffer).toBeInstanceOf(Buffer)
+    expect(harness.mediaSent[0]).toEqual({ chatid: 'u9', mediaType: 'image', mediaId: 'media-1' })
+    setStopped(true)
+    await running
+  })
+
+  it('sendFile：SDK 缺媒体方法时报「不支持」而不是硬调', async () => {
+    harness.sdkSupportsMedia = false
+    const { deps, setStopped } = makeDeps()
+    const handle = wecomChannel.create()
+    const running = handle.start(BOT, deps)
+    await vi.waitFor(() => expect(harness.textHandler).not.toBeNull())
+    await expect(
+      handle.sendFile?.({ providerUserId: 'u9' }, { filename: 'a.pdf', data: new Uint8Array([1]) })
+    ).rejects.toThrow('不支持')
+    expect(harness.uploads).toHaveLength(0)
+    setStopped(true)
+    await running
   })
 })

@@ -8,9 +8,11 @@
  * 所以「draft→task 状态机」「忙时入队」「完成回推」都能在 vitest 里用假端口跑通。
  */
 import type { AgentEvent } from '../../src/agent-core/protocol'
+import type { AgentSettings } from '../../src/agent-core/ports'
 import type { SessionRow } from '../../src/types/ipc'
 import type { UserQuestion } from '../../src/types/agent'
 import { NEW_SESSION_TITLE } from '../../src/lib/chat-row'
+import type { BotApprovalMode } from './types'
 
 /** 桥接层看得懂的会话行（其余字段原样透传，不做二次加工） */
 export interface BridgeSessionRow {
@@ -32,20 +34,28 @@ export interface BridgeMessageRow {
 
 /** 桥会下发的两种宿主命令：联合类型而不是重载签名，方便 index.ts 用一个函数适配 */
 export type BridgeCommand =
-  | { type: 'run'; sessionId: string; content: string }
+  | { type: 'run'; sessionId: string; content: string; settings?: AgentSettings }
   | { type: 'queue.enqueue'; sessionId: string; item: { id: string; content: string; queuedAt: number } }
+
+/** /permission 与 /model 落在聊天身份上的覆盖项，dispatch 时克隆快照后应用 */
+export interface DispatchOverrides {
+  approvalMode?: BotApprovalMode
+  model?: { providerId: string; modelId: string }
+}
 
 /** AgentSessionManager 的窄面：桥只用到这几项，不碰其余 20 个命令 */
 export interface BridgeManagerPort {
   /**
    * run 不带 settings：由宿主回退到「本会话快照 → 本机最近一份本地快照」，
-   * 见 agent-host.ts 的 lastLocalSettings。
+   * 见 agent-host.ts 的 lastLocalSettings。带 settings（覆盖项存在时）则宿主原样采用。
    */
   handleCommand(cmd: BridgeCommand, meta: { remote: boolean }): Promise<{ ok: boolean; error?: string }>
   /** 运行态摘要：桥只用它判断「这个会话正在跑 / 排了几条」 */
   inspectSession(sessionId: string): { status: 'idle' | 'working' | 'awaiting'; queued: number; hasRun: boolean } | undefined
   /** 本机是否已有一份可用的模型配置（bot 冷启动提示的判据） */
   hasLocalSettingsSnapshot(): boolean
+  /** 本机设置快照（/model 的清单来源、覆盖项的组装底座）；还没有就回 null */
+  getLocalSettingsSnapshot(): AgentSettings | null
   /** 订阅宿主全量事件，返回取消函数 */
   subscribeEvents(handler: (payload: { seq: number; event: AgentEvent }) => void): () => void
 }
@@ -106,6 +116,12 @@ export interface RunOutcome {
    * 才回落到「取尾部答案/本轮没有产出」。
    */
   answerPushed?: boolean
+  /**
+   * progress 专属：这条正文对应的消息 id。
+   * 文件标记的去重键用到它——同一条消息的 added 与 completed 收尾只发一次文件，
+   * 不同消息里的同一路径（用户说「再发一次」）不受影响。
+   */
+  messageId?: string
   /** 该会话当前绑定到的聊天身份（可能没有：桌面自己跑的会话） */
   actorKeys: string[]
 }
@@ -201,7 +217,7 @@ export class SessionBridge {
       const text = (message.content ?? '').trim()
       if (text) {
         this.markAssistantPushed(event.sessionId, message.id)
-        await this.emitProgress(event.sessionId, text)
+        await this.emitProgress(event.sessionId, text, message.id)
       }
       return
     }
@@ -215,7 +231,7 @@ export class SessionBridge {
       const text = (event.updates.content ?? '').trim()
       if (!text) return
       this.markAssistantPushed(event.sessionId, event.messageId)
-      await this.emitProgress(event.sessionId, text)
+      await this.emitProgress(event.sessionId, text, event.messageId)
       return
     }
 
@@ -300,11 +316,17 @@ export class SessionBridge {
   }
 
   /** 把一条写完的助手正文作为过程消息推给登记过的聊天身份 */
-  private async emitProgress(sessionId: string, text: string): Promise<void> {
+  private async emitProgress(sessionId: string, text: string, messageId?: string): Promise<void> {
     if (!this.onOutcome) return
     const actorKeys = [...(this.watchers.get(sessionId) ?? [])]
     if (actorKeys.length === 0) return
-    await this.onOutcome({ sessionId, kind: 'progress', text, actorKeys })
+    await this.onOutcome({
+      sessionId,
+      kind: 'progress',
+      text,
+      ...(messageId ? { messageId } : {}),
+      actorKeys,
+    })
   }
 
   // ── 会话创建与运行 ────────────────────────────────────────────────────────
@@ -354,8 +376,18 @@ export class SessionBridge {
    * 不登记就会出现「手机上排队了、跑完没人吭声」。
    * remote 恒为 false：bot 在主进程内，输入已经过绑定白名单，等同本地用户操作；
    * 但它不携带 settings，靠宿主的 lastLocalSettings 回退拿上游配置。
+   *
+   * overrides 非空时（/permission、/model 落过聊天身份覆盖项），克隆本机快照并就地改写
+   * 审批档位 / 模型后随 run 显式下发——只影响这一轮 IM run，桌面全局设置不动。
+   * 忙时入队的那条不带 settings：宿主 flushQueue 复用本会话首跑的快照，
+   * 于是排队消息沿用「排进去那一刻」的覆盖项，行为可预期。
    */
-  async dispatch(sessionId: string, actorKey: string, content: string): Promise<DispatchResult> {
+  async dispatch(
+    sessionId: string,
+    actorKey: string,
+    content: string,
+    overrides?: DispatchOverrides
+  ): Promise<DispatchResult> {
     // 前置判空而不是等宿主回 MISSING_SETTINGS：后者也要能走通（宿主是唯一权威），
     // 但先挡一道能让「请先在桌面完成一次对话」这句话在第一轮就发出去，
     // 而不是让用户看到一条被拒的 run。
@@ -372,8 +404,9 @@ export class SessionBridge {
       )
       return result.ok ? { ok: true } : { ok: false, error: 'run-rejected' }
     }
+    const settings = this.settingsWithOverrides(overrides)
     const result = await this.ports.manager.handleCommand(
-      { type: 'run', sessionId, content },
+      { type: 'run', sessionId, content, ...(settings ? { settings } : {}) },
       { remote: false }
     )
     if (result.error === MISSING_SETTINGS) {
@@ -385,6 +418,59 @@ export class SessionBridge {
       return { ok: false, error: 'run-rejected' }
     }
     return { ok: true }
+  }
+
+  /**
+   * 把聊天身份的覆盖项套到本机快照上；没有覆盖项回 undefined（宿主走自己的回退链）。
+   * 覆盖项指向的提供商/模型已被删时按原快照跑——配置比覆盖项先失效是常态，
+   * 让任务继续跑比报「模型不存在」更接近用户意图，/model 重选一次即恢复。
+   */
+  private settingsWithOverrides(overrides?: DispatchOverrides): AgentSettings | undefined {
+    if (!overrides || (!overrides.approvalMode && !overrides.model)) return undefined
+    const base = this.ports.manager.getLocalSettingsSnapshot()
+    if (!base) return undefined
+    let settings: AgentSettings = base
+    if (overrides.approvalMode) settings = { ...settings, approvalMode: overrides.approvalMode }
+    if (overrides.model) settings = applyModelOverride(settings, overrides.model)
+    return settings
+  }
+
+  /**
+   * /model 的候选：本机快照里所有提供商下的已启用模型。
+   * key 用 `\u001f` 拼 providerId 与 modelId（两者都不含控制字符），兑现时拆回来。
+   * currentLabel 即便不在前 limit 条里也给全——「当前是哪个」比「清单不全」更需要先说清。
+   */
+  modelOptions(limit: number): { keys: string[]; labels: string[]; currentLabel?: string } {
+    const snapshot = this.ports.manager.getLocalSettingsSnapshot()
+    const keys: string[] = []
+    const labels: string[] = []
+    const seen = new Set<string>()
+    let currentIndex = -1
+    for (const provider of snapshot?.providers ?? []) {
+      for (const model of provider.models ?? []) {
+        const key = `${provider.id}\u001f${model.id}`
+        if (seen.has(key)) continue
+        seen.add(key)
+        keys.push(key)
+        labels.push(
+          model.label && model.label !== model.id
+            ? `${provider.name} · ${model.label}（${model.id}）`
+            : `${provider.name} · ${model.id}`
+        )
+        if (provider.id === snapshot?.activeProviderId && model.id === snapshot?.model) {
+          currentIndex = labels.length - 1
+        }
+      }
+    }
+    return {
+      keys: keys.slice(0, limit),
+      labels: labels.slice(0, limit),
+      ...(currentIndex >= 0
+        ? { currentLabel: labels[currentIndex] }
+        : snapshot?.model
+          ? { currentLabel: snapshot.model }
+          : {}),
+    }
   }
 
   private addWatcher(sessionId: string, actorKey: string): void {
@@ -464,12 +550,22 @@ export class SessionBridge {
     return seen
   }
 
-  /** 会话是否真的存在且可读（/task 选完之后的复核，以及 /status 的标题来源） */
-  async findSession(sessionId: string): Promise<{ id: string; title: string; workingDir?: string } | null> {
+  /** 会话是否真的存在且可读（/task 选完之后的复核、/status 的标题、文件外送的目录边界来源） */
+  async findSession(sessionId: string): Promise<{
+    id: string
+    title: string
+    workingDir?: string
+    defaultWorkDir?: string
+  } | null> {
     const rows = await this.ports.store.getAllSessions()
     const row = rows.find((item) => item.id === sessionId)
     if (!row) return null
-    return { id: row.id, title: row.title || NEW_SESSION_TITLE, workingDir: row.working_dir || undefined }
+    return {
+      id: row.id,
+      title: row.title || NEW_SESSION_TITLE,
+      workingDir: row.working_dir || undefined,
+      defaultWorkDir: row.default_work_dir || undefined,
+    }
   }
 
   // ── 结果取回与投递 ────────────────────────────────────────────────────────
@@ -613,6 +709,33 @@ function lastBoundary(window: string, marker: string): number | null {
   const at = window.lastIndexOf(marker)
   if (at <= Math.floor(window.length / 2)) return null
   return at + marker.length
+}
+
+/**
+ * 模型覆盖落到生效字段：与设置页的 applyActive（settings-store.ts）同一口径。
+ * 模型级参数未配置时保留桌面当前值——那是用户的全局偏好，切模型不该顺手清掉；
+ * 思考开关同理，仅当模型明确不支持时才强制关闭。
+ * 提供商或模型已被删时原样返回：让这轮 run 继续用桌面配置，比直接失败更接近意图。
+ */
+function applyModelOverride(base: AgentSettings, ref: { providerId: string; modelId: string }): AgentSettings {
+  const provider = (base.providers ?? []).find((item) => item.id === ref.providerId)
+  const model = provider?.models.find((item) => item.id === ref.modelId)
+  if (!provider || !model) return base
+  return {
+    ...base,
+    model: model.id,
+    baseUrl: provider.baseUrl,
+    apiKey: provider.apiKey,
+    apiCompat: provider.apiCompat,
+    directFetch: provider.directFetch ?? false,
+    temperature: model.temperature ?? base.temperature,
+    maxInputTokens: model.maxInputTokens ?? base.maxInputTokens,
+    maxTokens: model.maxTokens ?? base.maxTokens,
+    reasoningEffort: model.reasoningEfforts?.length
+      ? (model.reasoningEffort ?? model.reasoningEfforts[0])
+      : base.reasoningEffort,
+    enableThinking: model.supportsThinking === false ? false : base.enableThinking,
+  }
 }
 
 /**

@@ -15,7 +15,7 @@
  * 实现约定（与 feishu.ts / telegram.ts 相同）：start() 恒 resolve、凭据指纹变化
  * 退出交给宿主重建、deps.isStopped() 为真立即退出。
  */
-import type { BotChannelHandle, BotConfig, ChannelDeps, OutboundTarget } from './types'
+import type { BotChannelHandle, BotConfig, ChannelDeps, OutboundFile, OutboundTarget } from './types'
 import { credentialFingerprint } from './types'
 
 /** 出站漏桶间隔：30 条/分钟 = 2s/条，留 100ms 余量 */
@@ -24,6 +24,9 @@ const SEND_INTERVAL_MS = 2_100
 const BACKOFF_MS = 5_000
 /** 连接建立看门狗：SDK 认证失败会反复重试，超过这个时长整轮退出重建 */
 const CONNECT_WATCHDOG_MS = 30_000
+/** 图片消息走 image 类型直接预览的上限（官方 10MB）；超限或非图片改走 file（20MB） */
+const WECOM_IMAGE_MAX_BYTES = 10 * 1024 * 1024
+const WECOM_IMAGE_RE = /\.(png|jpe?g|gif)$/i
 
 /** SDK 的类型在这里只有运行时形状可用（CJS 互导），按官方 d.ts 手写最小截面 */
 interface WecomSdk {
@@ -41,6 +44,12 @@ interface WecomClient {
   on(event: 'message.text', handler: (frame: { headers: { req_id: string }; body: WecomTextBody }) => void): unknown
   on(event: 'error', handler: (error: Error) => void): unknown
   sendMessage(chatid: string, body: { msgtype: 'markdown'; markdown: { content: string } }): Promise<unknown>
+  /**
+   * 三步分片上传（init → chunk×N → finish 在 SDK 内部封装）：返回 media_id，3 天内可发。
+   * 老版本 SDK 可能没有这两个方法——sendFile 按不支持处理，不硬调。
+   */
+  uploadMedia?(fileBuffer: Buffer, options: { type: 'image' | 'file' | 'voice' | 'video'; filename: string }): Promise<{ media_id?: string }>
+  sendMediaMessage?(chatid: string, mediaType: 'image' | 'file' | 'voice' | 'video', mediaId: string): Promise<unknown>
 }
 
 interface WecomTextBody {
@@ -126,6 +135,32 @@ class WecomChannelHandle implements BotChannelHandle {
     if (wait > 0) await sleep(wait)
     this.lastSendAt = Date.now()
     await client.sendMessage(userid, { msgtype: 'markdown', markdown: { content: text } })
+  }
+
+  /**
+   * 发文件：uploadMedia（走同一条 WebSocket，30/分钟频控与发消息合计）→ media_id →
+   * sendMediaMessage 主动推送。图片直接预览，超 10MB 或非图片按 file 发（官方对 file
+   * 的格式不限）。官方文档对「主动推送媒体」的字段表与格式说明有出入，以 SDK 类型为准。
+   */
+  async sendFile(target: OutboundTarget, file: OutboundFile): Promise<void> {
+    const client = this.client
+    const deps = this.deps
+    if (!client || !deps) throw new Error('企业微信通道尚未连接，无法发送')
+    const userid = target.providerUserId?.trim()
+    if (!userid) throw new Error('企业微信发送缺少接收者 userid')
+    if (!client.uploadMedia || !client.sendMediaMessage) {
+      throw new Error('当前 @wecom/aibot-node-sdk 版本不支持发送文件（缺 uploadMedia/sendMediaMessage）')
+    }
+    // 上传也计入 30 条/分钟频控：与 send 共用同一个漏桶
+    const wait = this.lastSendAt + SEND_INTERVAL_MS - Date.now()
+    if (wait > 0) await sleep(wait)
+    this.lastSendAt = Date.now()
+    const asImage = WECOM_IMAGE_RE.test(file.filename) && file.data.length <= WECOM_IMAGE_MAX_BYTES
+    const mediaType = asImage ? 'image' : 'file'
+    const uploaded = await client.uploadMedia(Buffer.from(file.data), { type: mediaType, filename: file.filename })
+    const mediaId = uploaded?.media_id
+    if (!mediaId) throw new Error('企业微信上传媒体失败：未返回 media_id')
+    await client.sendMediaMessage(userid, mediaType, mediaId)
   }
 
   async stop(): Promise<void> {

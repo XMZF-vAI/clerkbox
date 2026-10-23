@@ -7,12 +7,16 @@ import { BotsStorage } from '../electron/im-bots/storage'
 import type { UserQuestion } from '../src/types/agent'
 import {
   BotsCore,
+  extractFileMarkers,
   makeRandomBindCode,
   parseActorKey,
   parseApprovalAnswer,
   parseCommand,
   parseQuestionAnswer,
   pickFromList,
+  stripFileMarkers,
+  type DeliverFileInput,
+  type DeliverFileResult,
   type DeliverInput,
 } from '../electron/im-bots/core'
 import type { BridgeSessionRow, DispatchResult } from '../electron/im-bots/session-bridge'
@@ -37,13 +41,15 @@ class FakeBridge {
   /** sessionId → 是否正在跑（由用例显式摆，dispatch 不自动改：忙闲是被测语义的一部分） */
   busy = new Set<string>()
   queued = new Map<string, number>()
-  dispatches: Array<{ sessionId: string; actorKey: string; content: string }> = []
+  dispatches: Array<{ sessionId: string; actorKey: string; content: string; overrides?: unknown }> = []
   watches: Array<{ sessionId: string; actorKey: string; on: boolean }> = []
   answers = new Map<string, string>()
   /** 模拟「桌面一次对话都没发生过」：第一轮 run 必然被宿主挡下 */
   settingsReady = true
   workDirs: string[] = []
   created: BridgeSessionRow[] = []
+  /** /model 的候选（由用例摆；默认空 = 桌面没配置过模型） */
+  models: Array<{ key: string; label: string; current?: boolean }> = []
   private seq = 0
 
   async createSessionForActor(workDir: string | undefined): Promise<{ sessionId: string; workDir: string }> {
@@ -62,11 +68,26 @@ class FakeBridge {
     return { sessionId: id, workDir: dir }
   }
 
-  async dispatch(sessionId: string, actorKey: string, content: string): Promise<DispatchResult> {
+  async dispatch(
+    sessionId: string,
+    actorKey: string,
+    content: string,
+    overrides?: unknown
+  ): Promise<DispatchResult> {
     if (!this.settingsReady) return { ok: false, error: 'missing-settings' }
-    this.dispatches.push({ sessionId, actorKey, content })
+    this.dispatches.push({ sessionId, actorKey, content, overrides })
     if (this.busy.has(sessionId)) this.queued.set(sessionId, (this.queued.get(sessionId) ?? 0) + 1)
     return { ok: true }
+  }
+
+  modelOptions(limit: number): { keys: string[]; labels: string[]; currentLabel?: string } {
+    const picked = this.models.slice(0, limit)
+    const current = this.models.find((item) => item.current)
+    return {
+      keys: picked.map((item) => item.key),
+      labels: picked.map((item) => item.label),
+      ...(current ? { currentLabel: current.label } : {}),
+    }
   }
 
   isBusy(sessionId: string): boolean {
@@ -120,6 +141,9 @@ let storage: BotsStorage
 let bridge: FakeBridge
 let core: BotsCore
 let delivered: DeliverInput[]
+/** 文件投递的记账与可编程结果队列（deliverFile 的假件） */
+let deliveredFiles: DeliverFileInput[]
+let fileResults: DeliverFileResult[]
 /** 审批通道假件：记录续等待与答复，答复结果可编程 */
 let approvals: {
   extended: Array<{ sessionId: string; requestId: string }>
@@ -186,12 +210,18 @@ beforeEach(async () => {
   await storage.writeConfig({ version: 1, bots: [BOT] })
   bridge = new FakeBridge()
   delivered = []
+  deliveredFiles = []
+  fileResults = []
   approvals = makeApprovals()
   const ports: ConstructorParameters<typeof BotsCore>[0] = {
     storage,
     bridge: bridge as unknown as ConstructorParameters<typeof BotsCore>[0]['bridge'],
     deliver: async (input) => {
       delivered.push(input)
+    },
+    deliverFile: async (input) => {
+      deliveredFiles.push(input)
+      return fileResults.shift() ?? { ok: true }
     },
     text: (key, vars) => (vars && Object.keys(vars).length > 0 ? `${key} ${JSON.stringify(vars)}` : key),
     makeBindCode: () => 'ABC123',
@@ -336,7 +366,10 @@ describe('draft / task 状态机', () => {
     await core.handleInbound(inbound('把 README 里的版本号改成 3.3'))
     expect(bridge.created).toHaveLength(1)
     expect(bridge.created[0]?.working_dir).toBe('D:/repo-a')
-    expect(bridge.dispatches).toEqual([{ sessionId: 's1', actorKey: key, content: '把 README 里的版本号改成 3.3' }])
+    // 首条消息带「发文件」用法提示（教学只此一次）；正文原样在前面
+    expect(bridge.dispatches).toHaveLength(1)
+    expect(bridge.dispatches[0]?.sessionId).toBe('s1')
+    expect(bridge.dispatches[0]?.content.startsWith('把 README 里的版本号改成 3.3\n\nbots.reply.fileHint')).toBe(true)
     expect(lastReply().key).toBe('bots.reply.started')
     expect(await storage.getContext(key)).toMatchObject({ mode: 'task', activeSessionId: 's1', workDir: 'D:/repo-a' })
   })
@@ -427,7 +460,8 @@ describe('draft / task 状态机', () => {
     const key = await bindMe()
     const original = bridge.dispatch.bind(bridge)
     bridge.dispatch = async (sessionId: string, actorKey: string, content: string) => {
-      if (content === '会炸') throw new Error('宿主不可用')
+      // 首条消息会被附加提示，所以按前缀判定而不是全等
+      if (content.startsWith('会炸')) throw new Error('宿主不可用')
       return original(sessionId, actorKey, content)
     }
     // dispatch 抛异常不再向上传播：就地回滚 draft + 回复 runRejected，
@@ -437,7 +471,8 @@ describe('draft / task 状态机', () => {
     expect((await storage.getContext(key))?.mode).toBe('draft')
     const result = await core.handleInbound(inbound('正常的一条'))
     expect(result).toBeUndefined()
-    expect(bridge.dispatches.some((item) => item.content === '正常的一条')).toBe(true)
+    // 会炸那条已经把提示教给了作废的 s1，重开的新会话（s2）要重新教一次
+    expect(bridge.dispatches.some((item) => item.content.startsWith('正常的一条'))).toBe(true)
     expect((await storage.getContext(key))?.mode).toBe('task')
   })
 })
@@ -485,7 +520,12 @@ describe('/status', () => {
     // 状态是多行拼装成的一条消息，逐行才是各项信息
     expect(delivered).toHaveLength(1)
     const lines = lastReplyLines()
-    expect(lines.map((line) => line.key)).toEqual(['bots.reply.statusWorkDir', 'bots.reply.statusDraft'])
+    expect(lines.map((line) => line.key)).toEqual([
+      'bots.reply.statusWorkDir',
+      'bots.reply.statusApprovalFollow',
+      'bots.reply.statusModelFollow',
+      'bots.reply.statusDraft',
+    ])
     expect(lines[0]?.vars).toEqual({ dir: 'D:/repo-a' })
   })
 
@@ -499,10 +539,12 @@ describe('/status', () => {
     const lines = lastReplyLines()
     expect(lines.map((line) => line.key)).toEqual([
       'bots.reply.statusWorkDir',
+      'bots.reply.statusApprovalFollow',
+      'bots.reply.statusModelFollow',
       'bots.reply.statusSession',
       'bots.reply.statusBusy',
     ])
-    expect(lines[2]?.vars).toEqual({ queued: 1 })
+    expect(lines[4]?.vars).toEqual({ queued: 1 })
   })
 
   it('task 但空闲：报 idle', async () => {
@@ -592,6 +634,16 @@ describe('/workspace', () => {
       deliver: async (input) => {
         delivered.push(input)
       },
+      deliverFile: async () => {
+        deliveredFiles.push({
+          botId: 'x',
+          provider: 'weixin',
+          providerUserId: 'x',
+          filePath: 'x',
+          filename: 'x',
+        })
+        return { ok: true }
+      },
       text: (key, vars) => (vars && Object.keys(vars).length > 0 ? `${key} ${JSON.stringify(vars)}` : key),
       makeBindCode: () => 'ABC123',
       now: () => clock,
@@ -633,10 +685,12 @@ describe('/task', () => {
     expect(lastReply().key).toBe('bots.reply.taskSet')
     expect((await storage.getContext(key))?.activeSessionId).toBe('s-old')
     expect(bridge.watches.some((item) => item.sessionId === 's-old' && item.on)).toBe(true)
-    // 切过去之后，普通消息进的就是这个会话而不是新开的
+    // 切过去之后，普通消息进的就是这个会话而不是新开的；
+    // 这是发进 s-old 的第一条消息，按规则带一次用法提示
     delivered = []
     await core.handleInbound(inbound('接着做'))
-    expect(bridge.dispatches[0]).toMatchObject({ sessionId: 's-old', content: '接着做' })
+    expect(bridge.dispatches[0]?.sessionId).toBe('s-old')
+    expect(bridge.dispatches[0]?.content.startsWith('接着做\n\nbots.reply.fileHint')).toBe(true)
     expect(lastReply().key).toBe('bots.reply.running')
   })
 
@@ -774,6 +828,7 @@ describe('结果回推', () => {
       deliver: async () => {
         throw new Error('网络断了')
       },
+      deliverFile: async () => ({ ok: false, error: 'send-failed' }),
       text: (key2) => key2,
       makeBindCode: () => 'ABC123',
       now: () => Date.now(),
@@ -874,6 +929,7 @@ describe('IM 内审批', () => {
       deliver: async (input) => {
         delivered.push(input)
       },
+      deliverFile: async () => ({ ok: true }),
       text: (k, vars) => (vars && Object.keys(vars).length > 0 ? `${k} ${JSON.stringify(vars)}` : k),
       makeBindCode: () => 'ABC123',
       now: () => Date.now(),
@@ -1094,3 +1150,222 @@ describe('actorKey 反解', () => {
   })
 })
 
+
+describe('/permission', () => {
+  it('无参列三档并挂问，回序号写入聊天身份覆盖项', async () => {
+    const key = await bindMe()
+    delivered = []
+    await core.handleInbound(inbound('/permission'))
+    const text = delivered[0]?.text ?? ''
+    expect(text).toContain('1. agent.approvalManualTitle')
+    expect(text).toContain('2. agent.approvalAutoTitle')
+    expect(text).toContain('3. agent.approvalFullTitle')
+    expect(text).toContain('bots.reply.followDesktop')
+    expect(text).toContain('bots.reply.followHint')
+    delivered = []
+    await core.handleInbound(inbound('2'))
+    expect(lastReply().key).toBe('bots.reply.choiceAppliedPermission')
+    expect(await storage.getContext(key)).toMatchObject({ approvalModeOverride: 'auto' })
+  })
+
+  it('带参直接切换：序号、档位名都认，0 恢复跟随桌面', async () => {
+    const key = await bindMe()
+    await core.handleInbound(inbound('/permission 3'))
+    expect(await storage.getContext(key)).toMatchObject({ approvalModeOverride: 'full' })
+    await core.handleInbound(inbound('/permission manual'))
+    expect(await storage.getContext(key)).toMatchObject({ approvalModeOverride: 'manual' })
+    await core.handleInbound(inbound('/permission 0'))
+    expect((await storage.getContext(key))?.approvalModeOverride).toBeUndefined()
+    expect(lastReply().key).toBe('bots.reply.choiceFollowDesktop')
+  })
+
+  it('非法参数回 choiceInvalid 且不改现状', async () => {
+    const key = await bindMe()
+    await core.handleInbound(inbound('/permission 9'))
+    expect(lastReply().key).toBe('bots.reply.choiceInvalid')
+    expect((await storage.getContext(key))?.approvalModeOverride).toBeUndefined()
+    await core.handleInbound(inbound('/permission 随便'))
+    expect(lastReply().key).toBe('bots.reply.choiceInvalid')
+  })
+
+  it('覆盖项随下一次 dispatch 下发；未设覆盖时不下发 settings', async () => {
+    const key = await bindMe()
+    await core.handleInbound(inbound('/permission full'))
+    await core.handleInbound(inbound('放开手干'))
+    expect(bridge.dispatches[0]?.overrides).toEqual({ approvalMode: 'full' })
+    await core.handleInbound(inbound('/permission 0'))
+    await core.handleInbound(inbound('再一条'))
+    expect(bridge.dispatches[1]?.overrides).toBeUndefined()
+  })
+})
+
+describe('/model', () => {
+  it('桌面没有配置过模型时如实说没有', async () => {
+    await bindMe()
+    await core.handleInbound(inbound('/model'))
+    expect(lastReply().key).toBe('bots.reply.modelListEmpty')
+  })
+
+  it('列出候选并标记当前项，回序号写入模型覆盖项', async () => {
+    const key = await bindMe()
+    bridge.models = [
+      { key: 'prov-a\u001fmodel-a', label: 'A · model-a', current: true },
+      { key: 'prov-b\u001fmodel-b', label: 'B · model-b' },
+    ]
+    delivered = []
+    await core.handleInbound(inbound('/model'))
+    const text = delivered[0]?.text ?? ''
+    expect(text).toContain('1. A · model-a')
+    expect(text).toContain('2. B · model-b')
+    expect(text).toContain('bots.reply.followHint')
+    delivered = []
+    await core.handleInbound(inbound('2'))
+    expect(lastReply().key).toBe('bots.reply.choiceAppliedModel')
+    expect(await storage.getContext(key)).toMatchObject({
+      modelOverride: { providerId: 'prov-b', modelId: 'model-b' },
+    })
+  })
+
+  it('覆盖模型随 dispatch 下发；0 恢复跟随桌面', async () => {
+    const key = await bindMe()
+    bridge.models = [{ key: 'prov-a\u001fmodel-a', label: 'A · model-a' }]
+    await core.handleInbound(inbound('/model 1'))
+    expect(lastReply().key).toBe('bots.reply.choiceAppliedModel')
+    await core.handleInbound(inbound('换模型跑'))
+    expect(bridge.dispatches[0]?.overrides).toEqual({ model: { providerId: 'prov-a', modelId: 'model-a' } })
+    await core.handleInbound(inbound('/model 0'))
+    expect((await storage.getContext(key))?.modelOverride).toBeUndefined()
+    expect(lastReply().key).toBe('bots.reply.choiceFollowDesktop')
+  })
+
+  it('序号越界回 choiceInvalid', async () => {
+    await bindMe()
+    bridge.models = [{ key: 'prov-a\u001fmodel-a', label: 'A · model-a' }]
+    await core.handleInbound(inbound('/model 5'))
+    expect(lastReply().key).toBe('bots.reply.choiceInvalid')
+  })
+})
+
+describe('文件标记', () => {
+  it('extractFileMarkers / stripFileMarkers：抽出与剥落', () => {
+    const text = '报告好了\n[[file:D:/x/a.pdf]]\n顺便 [[file:b.png]] 完事'
+    expect(extractFileMarkers(text)).toEqual(['D:/x/a.pdf', 'b.png'])
+    const stripped = stripFileMarkers(text)
+    expect(stripped).not.toContain('[[file:')
+    expect(stripped).toContain('报告好了')
+    expect(extractFileMarkers('没有标记的正文')).toEqual([])
+    expect(extractFileMarkers('[[file:]]')).toEqual([])
+  })
+
+  it('正文里的 [[file:]] 兑现成文件投递并从回推文本里剥掉', async () => {
+    const key = await bindMe()
+    await core.handleInbound(inbound('开始任务'))
+    delivered = []
+    await core.handleOutcome({
+      sessionId: 's1',
+      kind: 'progress',
+      messageId: 'm1',
+      text: '报告写好了 [[file:D:/repo-a/报告.md]] 请查收',
+      actorKeys: [key],
+    })
+    expect(deliveredFiles).toEqual([
+      {
+        botId: 'bot1',
+        provider: 'weixin',
+        providerUserId: 'u1',
+        contextToken: 'CTX-1',
+        filePath: 'D:/repo-a/报告.md',
+        filename: '报告.md',
+      },
+    ])
+    const pushed = delivered[0]?.text ?? ''
+    expect(pushed).not.toContain('[[file:')
+    expect(pushed).toContain('报告写好了')
+    expect(pushed).toContain('请查收')
+  })
+
+  it('相对路径按会话工作目录解析', async () => {
+    const key = await bindMe()
+    await core.handleInbound(inbound('开始任务'))
+    delivered = []
+    await core.handleOutcome({
+      sessionId: 's1',
+      kind: 'progress',
+      messageId: 'm2',
+      text: '[[file:out/result.pdf]]',
+      actorKeys: [key],
+    })
+    expect(deliveredFiles[0]?.filePath).toBe('D:/repo-a/out/result.pdf')
+  })
+
+  it('工作目录之外的路径拒绝投递并附说明', async () => {
+    const key = await bindMe()
+    await core.handleInbound(inbound('开始任务'))
+    delivered = []
+    await core.handleOutcome({
+      sessionId: 's1',
+      kind: 'progress',
+      messageId: 'm3',
+      text: '[[file:D:/outside/secret.txt]]',
+      actorKeys: [key],
+    })
+    expect(deliveredFiles).toHaveLength(0)
+    expect(delivered[0]?.text).toContain('bots.reply.fileNoteOutside')
+  })
+
+  it('同一条消息里重复的同一路径只发一次；失败折算成人话说明', async () => {
+    const key = await bindMe()
+    await core.handleInbound(inbound('开始任务'))
+    fileResults = [{ ok: false, error: 'too-large', limitBytes: 20 * 1024 * 1024 }]
+    delivered = []
+    await core.handleOutcome({
+      sessionId: 's1',
+      kind: 'progress',
+      messageId: 'm4',
+      text: '[[file:D:/repo-a/big.zip]] 再看 [[file:D:/repo-a/big.zip]]',
+      actorKeys: [key],
+    })
+    expect(deliveredFiles).toHaveLength(1)
+    const pushed = delivered[0]?.text ?? ''
+    expect(pushed).toContain('bots.reply.fileNoteTooLarge')
+    expect(pushed).toContain('20.0MB')
+    expect((pushed.match(/fileNoteTooLarge/g) ?? []).length).toBe(1)
+  })
+
+  it('没有工作目录的会话拒绝发文件（default_work_dir 兜底也算有）', async () => {
+    const key = await bindMe()
+    await core.handleInbound(inbound('开始任务'))
+    bridge.sessions.set('s-noDir', { id: 's-noDir', title: '老会话', workingDir: 'D:/repo-a' })
+    bridge.sessions.get('s1')!.workingDir = undefined
+    delivered = []
+    await core.handleOutcome({
+      sessionId: 's1',
+      kind: 'progress',
+      messageId: 'm5',
+      text: '[[file:D:/repo-a/a.txt]]',
+      actorKeys: [key],
+    })
+    // findSession 的 FakeSession 没有 defaultWorkDir 字段 → 视为没有目录
+    expect(deliveredFiles).toHaveLength(0)
+    expect(delivered[0]?.text).toContain('bots.reply.fileNoteNoWorkdir')
+  })
+})
+
+describe('文件提示注入', () => {
+  it('每个会话只在首条消息教一次用法，后续消息不再附加', async () => {
+    await bindMe()
+    await core.handleInbound(inbound('第一条'))
+    await core.handleInbound(inbound('第二条'))
+    expect(bridge.dispatches[0]?.content.endsWith('bots.reply.fileHint')).toBe(true)
+    expect(bridge.dispatches[1]?.content).toBe('第二条')
+  })
+
+  it('切到老会话（/task）同样教一次', async () => {
+    await bindMe()
+    bridge.sessions.set('s-old', { id: 's-old', title: '老会话', workingDir: 'D:/repo-a', updatedAt: 1 })
+    await core.handleInbound(inbound('/task 1'))
+    delivered = []
+    await core.handleInbound(inbound('接着做'))
+    expect(bridge.dispatches[0]?.content.startsWith('接着做\n\nbots.reply.fileHint')).toBe(true)
+  })
+})

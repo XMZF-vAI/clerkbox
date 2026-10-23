@@ -14,7 +14,7 @@
  * 2. 凭据指纹变化 → 退出交给宿主重建，不热切换；
  * 3. deps.isStopped() 为真立即退出且不再发请求。
  */
-import type { BotChannelHandle, BotConfig, ChannelDeps, OutboundTarget } from './types'
+import type { BotChannelHandle, BotConfig, ChannelDeps, OutboundFile, OutboundTarget } from './types'
 import { credentialFingerprint } from './types'
 
 const TG_API_BASE = 'https://api.telegram.org/bot'
@@ -26,6 +26,9 @@ const REQUEST_TIMEOUT_MS = 70_000
 const BACKOFF_MS = 5_000
 /** Telegram 单聊限频 1 msg/s：分段回复之间至少隔这么多 */
 const SEND_INTERVAL_MS = 1_100
+/** sendPhoto 的官方上限 10MB；超限或非图片一律走 sendDocument（上限 50MB） */
+const TG_PHOTO_MAX_BYTES = 10 * 1024 * 1024
+const TG_IMAGE_RE = /\.(png|jpe?g|gif|webp)$/i
 
 interface TgUpdate {
   update_id: number
@@ -144,6 +147,34 @@ class TelegramChannelHandle implements BotChannelHandle {
     })
     if (!body.ok) {
       throw new Error(`Telegram 发送失败：${describeTgError(body).message}`)
+    }
+  }
+
+  /**
+   * 发文件：multipart 直传（Bot API 的 InputFile 只认 form-data）。
+   * 图片走 sendPhoto 在聊天里直接预览，超过 10MB 或非图片改 sendDocument——
+   * Telegram 会把 document 也当文件卡发出来，用户拿到的东西一样，只是没有缩略图。
+   */
+  async sendFile(target: OutboundTarget, file: OutboundFile): Promise<void> {
+    const deps = this.deps
+    if (!deps) throw new Error('Telegram 通道尚未启动，无法发送')
+    const chatId = target.providerUserId?.trim()
+    if (!chatId) throw new Error('Telegram 发送缺少接收者 chat id')
+    const secret = parseSecret((await deps.readCredential()) ?? '')
+    if (!secret) throw new Error('Telegram 凭据未配置或格式不正确，无法发送')
+    const fetchImpl = deps.fetchImpl ?? globalThis.fetch
+    // 与 send 共用同一个 1 msg/s 漏桶：文件也是消息，超了同样吃 429
+    const wait = this.lastSendAt + SEND_INTERVAL_MS - Date.now()
+    if (wait > 0) await sleep(wait)
+    this.lastSendAt = Date.now()
+    const asPhoto = TG_IMAGE_RE.test(file.filename) && file.data.length <= TG_PHOTO_MAX_BYTES
+    const method = asPhoto ? 'sendPhoto' : 'sendDocument'
+    const form = new FormData()
+    form.append('chat_id', chatId)
+    form.append(asPhoto ? 'photo' : 'document', new Blob([new Uint8Array(file.data)]), file.filename)
+    const body = await tgFetch<unknown>(fetchImpl, secret.botToken, method, { method: 'POST', body: form })
+    if (!body.ok) {
+      throw new Error(`Telegram 文件发送失败：${describeTgError(body).message}`)
     }
   }
 

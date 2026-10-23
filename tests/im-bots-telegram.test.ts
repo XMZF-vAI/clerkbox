@@ -199,3 +199,74 @@ describe('Telegram 通道循环', () => {
     expect(credentialFingerprint('telegram', SECRET_JSON)).not.toBe(credentialFingerprint('telegram', JSON.stringify({ botToken: '456:XYZ' })))
   })
 })
+
+describe('sendFile（出站文件）', () => {
+  interface SendCall {
+    url: string
+    form: FormData
+  }
+
+  /** 只捕获 sendPhoto/sendDocument 的 multipart；长轮询照常回空批 */
+  function stubMediaFetch(): SendCall[] {
+    const calls: SendCall[] = []
+    const impl = vi.fn(async (input: unknown, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('getUpdates')) return { ok: true, status: 200, json: async () => ({ ok: true, result: [] }) }
+      calls.push({ url, form: init?.body as FormData })
+      return { ok: true, status: 200, json: async () => ({ ok: true, result: { message_id: 1 } }) }
+    })
+    vi.stubGlobal('fetch', impl)
+    return calls
+  }
+
+  it('图片走 sendPhoto；非图片走 sendDocument，multipart 带文件名', async () => {
+    const { deps } = makeDeps()
+    const calls = stubMediaFetch()
+    const handle = telegramChannel.create()
+    const running = handle.start(BOT, deps)
+    await vi.waitFor(() => expect(calls.length).toBeGreaterThanOrEqual(0))
+    await handle.sendFile?.({ providerUserId: '42' }, { filename: 'pic.png', data: new Uint8Array([4]) })
+    await handle.sendFile?.({ providerUserId: '42' }, { filename: 'report.pdf', data: new Uint8Array([1, 2, 3]) })
+    await handle.stop()
+    await running
+    const photo = calls.find((c) => c.url.endsWith('/sendPhoto'))
+    const document = calls.find((c) => c.url.endsWith('/sendDocument'))
+    expect(photo).toBeDefined()
+    expect(document).toBeDefined()
+    expect(photo?.form.get('chat_id')).toBe('42')
+    expect((photo?.form.get('photo') as File).name).toBe('pic.png')
+    expect((document?.form.get('document') as File).name).toBe('report.pdf')
+  })
+
+  it('超过 10MB 的图片降级为 sendDocument（官方 sendPhoto 上限）', async () => {
+    const { deps } = makeDeps()
+    const calls = stubMediaFetch()
+    const handle = telegramChannel.create()
+    const running = handle.start(BOT, deps)
+    await vi.waitFor(() => expect(calls.length).toBeGreaterThanOrEqual(0))
+    const big = new Uint8Array(10 * 1024 * 1024 + 1)
+    await handle.sendFile?.({ providerUserId: '42' }, { filename: 'big.png', data: big })
+    await handle.stop()
+    await running
+    expect(calls.some((c) => c.url.endsWith('/sendDocument'))).toBe(true)
+    expect(calls.some((c) => c.url.endsWith('/sendPhoto'))).toBe(false)
+  })
+
+  it('Telegram 返回错误时抛出可读信息', async () => {
+    const { deps } = makeDeps()
+    const impl = vi.fn(async (input: unknown) => {
+      const url = String(input)
+      if (url.includes('getUpdates')) return { ok: true, status: 200, json: async () => ({ ok: true, result: [] }) }
+      return { ok: false, status: 400, json: async () => ({ ok: false, error_code: 400, description: 'chat not found' }) }
+    })
+    vi.stubGlobal('fetch', impl)
+    const handle = telegramChannel.create()
+    const running = handle.start(BOT, deps)
+    await vi.waitFor(() => expect(String(impl.mock.calls[0]?.[0])).toContain('getUpdates'))
+    await expect(
+      handle.sendFile?.({ providerUserId: '42' }, { filename: 'a.pdf', data: new Uint8Array([1]) })
+    ).rejects.toThrow('chat not found')
+    await handle.stop()
+    await running
+  })
+})

@@ -27,7 +27,7 @@
  *    字段能存它，core 侧只能在内存里记；进程重启或 core 漏传时，这张表保证回信还送得出去。
  */
 import { Buffer } from 'node:buffer'
-import { createCipheriv, createDecipheriv, randomInt, randomUUID } from 'node:crypto'
+import { createCipheriv, createDecipheriv, createHash, randomBytes, randomInt, randomUUID } from 'node:crypto'
 import {
   credentialFingerprint,
   parseWeixinSecret,
@@ -36,6 +36,7 @@ import {
   type BotConfig,
   type ChannelDeps,
   type InboundMessage,
+  type OutboundFile,
   type OutboundTarget,
   type WeixinQrEvent,
   type WeixinQrLogin,
@@ -61,6 +62,20 @@ const WEIXIN_MESSAGE_TYPE_BOT = 2
 const WEIXIN_MESSAGE_STATE_FINISH = 2
 /** weixinProvider.ts:622 —— item_list 里文本项的 type */
 const WEIXIN_ITEM_TYPE_TEXT = 1
+/**
+ * 出站媒体条目类型（openclaw-weixin 协议文档 MessageItem 枚举；ZCode 代码只用到 1）。
+ * 2=image_item、4=file_item；入站解析里 3 是 video、5 是 audio，出站我们只做图片与文件。
+ */
+const WEIXIN_ITEM_TYPE_IMAGE = 2
+const WEIXIN_ITEM_TYPE_FILE = 4
+/** getuploadurl 的 media_type：1=图片、3=文件（协议文档枚举；2=视频、4=语音未用） */
+const WEIXIN_UPLOAD_MEDIA_TYPE_IMAGE = 1
+const WEIXIN_UPLOAD_MEDIA_TYPE_FILE = 3
+/** 协议文档的默认媒体 CDN 基址；getuploadurl 没带 full_url 时按 upload_param + filekey 拼 */
+const WEIXIN_CDN_DEFAULT_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c'
+/** 媒体上传（getuploadurl + CDN POST + sendmessage）是大载荷链路，15s 的默认值兜不住 */
+export const WEIXIN_MEDIA_TIMEOUT_MS = 120_000
+const WEIXIN_IMAGE_RE = /\.(png|jpe?g|gif|webp|bmp)$/i
 /** weixinProvider.ts:18 —— CDN 附件是 AES-128-ECB + PKCS7（Node 的默认 autoPad 就是 PKCS#7） */
 const WEIXIN_CDN_AES_ALGORITHM = 'aes-128-ecb'
 /** weixinProvider.ts:19 —— getupdates 服务端会挂约 35s，超时给 90s */
@@ -220,18 +235,105 @@ export function buildWeixinSendBody(input: {
   text: string
   clientId?: string
 }): Record<string, unknown> {
-  const contextToken = input.target.contextToken?.trim() ?? ''
   return {
     msg: {
-      // from_user_id = 机器人自己的 iLink bot id；ZCode 存在 providerUserId，我们存在凭据的 instanceId
-      from_user_id: input.secret.instanceId ?? '',
-      to_user_id: input.target.providerUserId,
-      client_id: input.clientId ?? `clerkbox-weixin-${randomUUID()}`,
-      message_type: WEIXIN_MESSAGE_TYPE_BOT,
-      message_state: WEIXIN_MESSAGE_STATE_FINISH,
-      ...(contextToken ? { context_token: contextToken } : {}),
+      ...buildWeixinMsgEnvelope(input.secret, input.target, input.clientId),
       item_list: [{ type: WEIXIN_ITEM_TYPE_TEXT, text_item: { text: normalizeWeixinOutboundText(input.text) } }],
     },
+  }
+}
+
+/** sendmessage 信封（from/to/client_id/message_type/state/context_token），文本与媒体共用 */
+function buildWeixinMsgEnvelope(
+  secret: WeixinSecret,
+  target: OutboundTarget,
+  clientId?: string
+): Record<string, unknown> {
+  const contextToken = target.contextToken?.trim() ?? ''
+  return {
+    // from_user_id = 机器人自己的 iLink bot id；ZCode 存在 providerUserId，我们存在凭据的 instanceId
+    from_user_id: secret.instanceId ?? '',
+    to_user_id: target.providerUserId,
+    client_id: clientId ?? `clerkbox-weixin-${randomUUID()}`,
+    message_type: WEIXIN_MESSAGE_TYPE_BOT,
+    message_state: WEIXIN_MESSAGE_STATE_FINISH,
+    ...(contextToken ? { context_token: contextToken } : {}),
+  }
+}
+
+/**
+ * getuploadurl 的响应 → CDN 上传 URL（openclaw-weixin cdn-url.ts 同一规则）：
+ * 优先用服务端下发的 upload_full_url；没有才按 upload_param + filekey 在 CDN 基址下拼。
+ * 拼不出来就抛错——拿空 URL 去 POST 只会得到一个没法归因的网络错误。
+ */
+export function buildWeixinUploadUrl(input: {
+  uploadFullUrl?: string | null
+  uploadParam?: string | null
+  cdnBaseUrl?: string | null
+  filekey: string
+}): string {
+  const full = input.uploadFullUrl?.trim()
+  if (full) return full
+  const param = (input.uploadParam ?? '').replace(/^\/+|\/+$/g, '')
+  if (!param) throw new Error('微信 iLink getuploadurl 未返回上传参数（upload_full_url / upload_param 均为空）')
+  const base = (input.cdnBaseUrl?.trim() || WEIXIN_CDN_DEFAULT_BASE).replace(/\/+$/, '')
+  return `${base}/${param}/${input.filekey}`
+}
+
+/**
+ * sendmessage 的媒体条目（协议文档 MessageItem；openclaw-weixin send.ts 同一构造）：
+ * - media.aes_key = **十六进制密钥串再 base64**（官方发送器口径；下载端两种编码都认）；
+ * - image_item.mid_size = 密文字节数；file_item.len = 明文字节数（十进制字符串）；
+ * - encrypt_type 恒为 1（AES-128-ECB）。
+ */
+export function buildWeixinMediaSendItem(input: {
+  kind: 'image' | 'file'
+  downloadParam: string
+  aesKeyHex: string
+  cipherBytes: number
+  plaintextBytes: number
+  filename: string
+}): Record<string, unknown> {
+  const media = {
+    encrypt_query_param: input.downloadParam,
+    aes_key: Buffer.from(input.aesKeyHex, 'utf8').toString('base64'),
+    encrypt_type: 1,
+  }
+  return input.kind === 'image'
+    ? { type: WEIXIN_ITEM_TYPE_IMAGE, image_item: { media, mid_size: input.cipherBytes } }
+    : {
+        type: WEIXIN_ITEM_TYPE_FILE,
+        file_item: { media, file_name: input.filename, len: String(input.plaintextBytes) },
+      }
+}
+
+/**
+ * CDN 直传密文：application/octet-stream POST，成功判据 = HTTP 2xx 且响应头带
+ * x-encrypted-param（它就是 sendmessage media.encrypt_query_param 的值，丢了等于白传）。
+ */
+export async function uploadWeixinMedia(url: string, cipher: Uint8Array): Promise<string> {
+  const controller = new AbortController()
+  const timer = setTimeout(
+    () => controller.abort(new Error(`微信 CDN 上传超时（${WEIXIN_MEDIA_TIMEOUT_MS / 1000}s）`)),
+    WEIXIN_MEDIA_TIMEOUT_MS
+  )
+  timer.unref?.()
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/octet-stream' },
+      // 复制成独立 ArrayBuffer 的视图：BodyInit 不收 SharedArrayBuffer 视图
+      body: new Uint8Array(cipher),
+      signal: controller.signal,
+    })
+    if (!response.ok) {
+      throw new Error(`微信 CDN 上传失败：HTTP ${response.status}`)
+    }
+    const param = response.headers.get('x-encrypted-param') ?? ''
+    if (!param) throw new Error('微信 CDN 上传完成但未返回 x-encrypted-param 响应头')
+    return param
+  } finally {
+    clearTimeout(timer)
   }
 }
 
@@ -900,6 +1002,82 @@ class WeixinChannelHandle implements BotChannelHandle {
         text,
       })
     )
+  }
+
+  /**
+   * 发文件（iLink 出站媒体，ZCode 未实现、依据腾讯官方 openclaw-weixin 插件的协议文档）：
+   * getuploadurl（明文大小/MD5 + AES 密文大小 + hex 密钥）→ 本地 AES-128-ECB 加密 →
+   * CDN 直传密文（拿 x-encrypted-param 回来当下载参数）→ sendmessage 带 image_item/file_item。
+   * 与文本同一规矩：必须带回 context_token（bot 不能主动发起会话）。
+   * 协议无官方文档站、未公布大小上限——服务端拒了就如实抛错，宿主按发送失败回话。
+   */
+  async sendFile(target: OutboundTarget, file: OutboundFile): Promise<void> {
+    const deps = this.deps
+    if (!deps) throw new Error('weixin channel not started：请先 start 再 sendFile')
+    const raw = await deps.readCredential()
+    if (raw === null) throw new Error(MSG_NO_CREDENTIAL)
+    const secret = parseWeixinSecret(raw)
+    if (!secret) throw new Error(MSG_BAD_CREDENTIAL)
+    const providerUserId = target.providerUserId.trim()
+    if (!providerUserId) throw new Error('微信发送缺少 to_user_id')
+    const contextToken = target.contextToken?.trim() || (this.lastTokens.get(providerUserId) ?? '')
+    if (!contextToken) {
+      deps.log('[weixin] 出站文件没有 context_token，服务端可能直接拒（bot 不能主动发起会话）')
+    }
+
+    const kind = WEIXIN_IMAGE_RE.test(file.filename) ? 'image' : 'file'
+    const aesKeyHex = randomBytes(16).toString('hex')
+    const cipher = encryptWeixinMediaBytes(file.data, aesKeyHex)
+    const filekey = `cb_${Date.now().toString(36)}_${randomBytes(6).toString('hex')}`
+    const uploadPayload = await weixinApiPost(
+      '/getuploadurl',
+      secret,
+      {
+        filekey,
+        media_type: kind === 'image' ? WEIXIN_UPLOAD_MEDIA_TYPE_IMAGE : WEIXIN_UPLOAD_MEDIA_TYPE_FILE,
+        to_user_id: providerUserId,
+        rawsize: file.data.length,
+        rawfilemd5: createHash('md5').update(file.data).digest('hex'),
+        filesize: cipher.length,
+        aeskey: aesKeyHex,
+        no_need_thumb: true,
+      },
+      undefined,
+      WEIXIN_MEDIA_TIMEOUT_MS
+    )
+    // 服务端可能把结果裹一层 data（与 getupdates 同一习惯），两处都找一遍字段
+    const uploadRecord = isRecord(uploadPayload) && isRecord(uploadPayload.data) ? uploadPayload.data : uploadPayload
+    const record = isRecord(uploadRecord) ? uploadRecord : {}
+    const readField = (name: string): string | undefined => {
+      const value = record[name]
+      return typeof value === 'string' && value.trim() ? value.trim() : undefined
+    }
+    const uploadUrl = buildWeixinUploadUrl({
+      uploadFullUrl: readField('upload_full_url'),
+      uploadParam: readField('upload_param'),
+      cdnBaseUrl: readField('cdn_base_url'),
+      filekey,
+    })
+    const downloadParam = await uploadWeixinMedia(uploadUrl, cipher)
+    await weixinApiPost('/sendmessage', secret, {
+      msg: {
+        ...buildWeixinMsgEnvelope(
+          secret,
+          { providerUserId, ...(contextToken ? { contextToken } : {}) },
+          `clerkbox-weixin-${randomUUID()}`
+        ),
+        item_list: [
+          buildWeixinMediaSendItem({
+            kind,
+            downloadParam,
+            aesKeyHex,
+            cipherBytes: cipher.length,
+            plaintextBytes: file.data.length,
+            filename: file.filename,
+          }),
+        ],
+      },
+    })
   }
 
   /**

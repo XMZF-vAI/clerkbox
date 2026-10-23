@@ -100,6 +100,14 @@ export function makeActorKey(
   return `${botId}:${provider}:${providerUserId}:${chatType}`
 }
 
+/**
+ * IM 侧可切的审批档位（与 src/types/agent.ts 的 approvalMode 同一口径）。
+ * 刻意本地声明而不是 import：types.ts 不依赖 src 的设置类型，渠道与状态机保持可独立实例化。
+ * 必须在 ChatContextSchema 之前：z.enum 在模块加载期就要读到它。
+ */
+export const BOT_APPROVAL_MODES = ['manual', 'auto', 'full'] as const
+export type BotApprovalMode = (typeof BOT_APPROVAL_MODES)[number]
+
 export const ChatContextSchema = z.strictObject({
   actorKey: z.string().min(1),
   /** draft = 等一条消息来开新会话；task = 已绑定到一个具体会话 */
@@ -118,6 +126,22 @@ export const ChatContextSchema = z.strictObject({
   weixinContextToken: z.string().max(4096).optional(),
   /** 首次收到该身份消息的时刻（微信侧「激活」＝用户主动发第一条） */
   weixinActivatedAt: z.number().int().nonnegative().optional(),
+  /**
+   * 该聊天身份的审批档位覆盖（/permission 设置）。不设 = 跟随桌面全局档位。
+   * 与 workDir 同一先例：聊天身份单独选定，优先于全局，桌面设置不受影响。
+   */
+  approvalModeOverride: z.enum(BOT_APPROVAL_MODES).optional(),
+  /** 该聊天身份的模型覆盖（/model 设置）。不设 = 跟随桌面当前模型 */
+  modelOverride: z
+    .strictObject({
+      /** settings 快照里 ModelProvider.id */
+      providerId: z.string().min(1).max(160),
+      /** ModelProvider.models[].id */
+      modelId: z.string().min(1).max(256),
+    })
+    .optional(),
+  /** 已注入过「发文件」用法提示的会话：每个会话只教一次，之后靠会话历史记忆 */
+  fileHintSessionId: z.string().max(64).optional(),
   updatedAt: z.number().int(),
 })
 export type ChatContext = z.infer<typeof ChatContextSchema>
@@ -341,6 +365,12 @@ export interface OutboundTarget {
   contextToken?: string
 }
 
+/** 一次出站文件：字节由宿主读好，通道只做协议（各渠道的图片/文件判定用文件名扩展名） */
+export interface OutboundFile {
+  filename: string
+  data: Uint8Array
+}
+
 /**
  * 通道向宿主索取的服务。刻意做成接口而不是 import：
  * 通道模块因此不依赖 electron 与 db，可以在 vitest 里直接实例化跑协议逻辑。
@@ -378,6 +408,11 @@ export interface BotChannelHandle {
   readonly provider: BotProvider
   start(bot: BotConfig, deps: ChannelDeps): Promise<void>
   send(target: OutboundTarget, text: string): Promise<void>
+  /**
+   * 发送文件（出站附件）。可选能力：不实现的渠道没有这个方法，
+   * 宿主 deliverFile 按 unsupported 处理并如实回话，绝不硬调。
+   */
+  sendFile?(target: OutboundTarget, file: OutboundFile): Promise<void>
   stop(): Promise<void>
 }
 

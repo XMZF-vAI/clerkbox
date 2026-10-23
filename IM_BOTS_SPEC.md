@@ -55,7 +55,11 @@ ChatContext = {
   mode: 'draft' | 'task'
   activeSessionId?: string      // 对应 ZCode activeTaskId
   workDir?: string              // 当前绑定工作目录（本聊天身份可单独 /workspace 切换）
+  approvalModeOverride?: 'manual'|'auto'|'full'   // /permission 设置；不设 = 跟随桌面全局档位
+  modelOverride?: { providerId, modelId }         // /model 设置；不设 = 跟随桌面当前模型
+  fileHintSessionId?: string    // 已教过 [[file:]] 用法的会话（每会话只教一次）
   weixinGetUpdatesBuf?: string  // 微信长轮询游标
+  weixinContextToken?: string   // 最近入站的 context_token（回推凭据，必须落盘）
   weixinActivatedAt?: number
   updatedAt: number
 }
@@ -104,6 +108,8 @@ BotsStateFile = { version: 1, contexts: ChatContext[], pendingBinds: BindCode[],
    - `/new`：task 态且闲 → 回 draft（提示发消息开新会话）；运行中拒绝
    - `/workspace`：列出候选（bot.defaultWorkDir + 最近 10 个会话的 distinct working_dir）带序号，回复序号切换（draft 态才可切）
    - `/task`：列出绑定目录最近 10 个会话带序号，回复序号把 activeSessionId 切到该会话（闲时）
+   - `/permission`：列三档审批（手动/自动/完全访问）带序号，回复序号切换**本聊天身份**的覆盖项（0 = 恢复跟随桌面）；完全访问档下电脑/网页操控由既有 loop 逻辑自动放行（桌面全局设置不受影响）
+   - `/model`：列桌面设置快照里全部提供商的已启用模型带序号，回复序号切换本聊天身份的模型覆盖项（0 = 恢复跟随桌面）
 3. **普通消息状态机**（与 ZCode 一致，忙时改进为排队）：
    - draft → 建会话 + run（标题由宿主 deriveSessionTitle 自动派生）→ mode=task
    - task 且闲 → `resume` 语义：直接对该会话发 run
@@ -172,3 +178,17 @@ BotsStateFile = { version: 1, contexts: ChatContext[], pendingBinds: BindCode[],
 **企业微信（`wecom.ts`）**：官方 `@wecom/aibot-node-sdk`（WSClient 长连接，maxReconnectAttempts=-1 无限重连 + 本通道 30s 建连看门狗：启动超阈值且从未收到消息且期间报过错 → 判死交宿主重建）。只收单聊文本；出站走 `sendMessage`（markdown，主动推送无 5s 被动窗口），**官方限频 30 条/分钟 → ≥2.1s 漏桶**。
 
 测试：`im-bots-telegram.test.ts`（8 用例：游标语义/私聊过滤/401/429/网络错误/send 形状/指纹变更）、`im-bots-wecom.test.ts`（4 用例：单聊过滤/send 形状/断开/凭据缺失）。
+
+## 14. 审批/模型覆盖 + 文件外送（2026-10-05 已实施）
+
+**聊天身份级覆盖项**（`/permission`、`/model`）：落在 ChatContext（与 workDir 同一先例——远程的人调的是 bot 的手，不动桌面全局设置）。dispatch 时桥克隆宿主快照（`getLocalSettingsSnapshot()`）并就地改写：审批档位直接换；模型按设置页 applyActive 同口径落 baseUrl/apiKey/apiCompat/temperature/maxTokens/reasoningEffort/enableThinking（模型级参数未配置保留桌面当前值；覆盖项指向已删模型时原快照兜底）。以 `cmd.settings` 显式随 run 下发；忙时入队的那条不带 settings——宿主 flushQueue 复用首跑快照，排队消息沿用入队时配置。`/status` 增报审批档位与模型两行（覆盖项标注「IM 覆盖」，未设报「跟随桌面」）。
+
+**文件外送（bot → 用户）**：OpenClaw 同款标记机制——AI 在回复正文写 `[[file:路径]]`（每会话首条消息注入一行用法提示，之后靠会话历史记忆），core.handleOutcome 对 progress 与 completed 回落两条路径做兑现：
+
+1. 相对路径按会话工作目录拼接；**解析后的绝对路径必须落在工作目录内**（path-safety 的规范化比较，`..` 逃不掉）——IM 对端拿到的是「工作区文件的外送通道」，不是「整台电脑任意文件的外送通道」；
+2. `index.ts` deliverFile：stat（存在 + 是文件）→ 渠道上限（telegram 50MB / feishu 30MB / wecom 20MB / weixin 20MB 保守值）→ 读字节 → 路由到通道 `sendFile`（可选能力，未实现的渠道按 unsupported 如实回话）；
+3. 发送后标记从回推文本剥掉；失败附一行人话说明（不存在/超限/不支持/失败），同一条消息内同路径去重（键 = actorKey+messageId+路径，RunOutcome.progress 新增 messageId 字段）。
+
+各渠道实现：**Telegram** sendPhoto（≤10MB 图片，multipart）/ sendDocument（其余，≤50MB）；**飞书** im/v1/images（≤10MB）→ msg_type=image，否则 im/v1/files（file_type 按扩展名映射，默认 stream）→ msg_type=file（需应用开通 im:resource 权限）；**企微** SDK `uploadMedia`（WS 三步分片）+ `sendMediaMessage`（图片 ≤10MB，文件 ≤20MB；与发消息合计 30/分钟）；**微信 iLink**（ZCode 未实现，依据腾讯官方 openclaw-weixin 协议文档）：`getuploadurl`（明文大小/MD5/密文大小/hex 密钥）→ 本地 AES-128-ECB/PKCS7 加密 → CDN 直传（`x-encrypted-param` 响应头即下载参数）→ sendmessage 带 image_item（type 2，mid_size=密文字节数）/ file_item（type 4，len=明文字节十进制串），media.aes_key = base64(十六进制密钥串)。协议无官方文档站且未公布大小上限，需真机验证。
+
+测试：`im-bots-core.test.ts`（/permission、/model、覆盖项下发、文件标记兑现/越界拒绝/去重/失败说明、提示每会话一次）、`im-bots-bridge.test.ts`（settingsWithOverrides 组装、modelOptions、messageId 贯通）、四渠道 sendFile 用例（TG multipart 路由、飞书双通道、企微媒体上传与 SDK 版本回退、微信全链路加密与条目拼装）。

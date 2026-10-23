@@ -18,6 +18,7 @@
  */
 import { BrowserWindow, ipcMain, net } from 'electron'
 import os from 'os'
+import { promises as fsp } from 'node:fs'
 import i18n from '../../src/i18n'
 import type { ChatStore } from '../db'
 import type { AgentSessionManager } from '../agent-host'
@@ -54,7 +55,14 @@ import {
 } from './types'
 import { BotsStorage } from './storage'
 import { SessionBridge, type BridgeCommand, type BridgePorts, type BridgeSessionRow } from './session-bridge'
-import { BotsCore, type CorePorts, type DeliverInput, makeRandomBindCode } from './core'
+import {
+  BotsCore,
+  type CorePorts,
+  type DeliverFileInput,
+  type DeliverFileResult,
+  type DeliverInput,
+  makeRandomBindCode,
+} from './core'
 import { weixinChannel, createWeixinQrLogin } from './weixin'
 import { feishuChannel } from './feishu'
 import { telegramChannel } from './telegram'
@@ -210,6 +218,61 @@ async function deliver(input: DeliverInput): Promise<void> {
   const item = running.get(input.botId)
   if (!item) throw new Error(`bot ${input.botId} 当前未运行`)
   await item.handle.send({ providerUserId: input.providerUserId, contextToken: input.contextToken }, input.text)
+}
+
+/**
+ * 各渠道的文件字节上限（index 统一闸，渠道内部还有「图片 vs 文件」的路由细分）：
+ * - telegram：sendDocument 上限 50MB（图片 >10MB 自动改走文件通道）
+ * - feishu：im/v1/files 上限 30MB（图片 >10MB 自动改走文件通道）
+ * - wecom：智能机器人文件消息 20MB（图片 >10MB 自动改走文件通道）
+ * - weixin：iLink 协议未公布上限，按 20MB 保守限（超了大概率也是服务端拒）
+ */
+const FILE_SIZE_CAPS: Record<BotProvider, number> = {
+  telegram: 50 * 1024 * 1024,
+  feishu: 30 * 1024 * 1024,
+  wecom: 20 * 1024 * 1024,
+  weixin: 20 * 1024 * 1024,
+}
+
+/**
+ * 文件投递：core 判过「该不该发」，这里做「能不能发」——
+ * stat（存在 + 是文件）、渠道限长、读字节、路由到通道的 sendFile。
+ * 每一步的失败都折算成 core 认识的错误码，让手机上收到的是「为什么没发成」的人话。
+ */
+async function deliverFile(input: DeliverFileInput): Promise<DeliverFileResult> {
+  const item = running.get(input.botId)
+  if (!item) return { ok: false, error: 'send-failed' }
+  if (!item.handle.sendFile) return { ok: false, error: 'unsupported' }
+  const limit = FILE_SIZE_CAPS[item.provider]
+  let size = 0
+  try {
+    const stat = await fsp.stat(input.filePath)
+    if (!stat.isFile()) return { ok: false, error: 'missing' }
+    size = stat.size
+  } catch {
+    return { ok: false, error: 'missing' }
+  }
+  if (size > limit) return { ok: false, error: 'too-large', limitBytes: limit }
+  let data: Uint8Array
+  try {
+    data = new Uint8Array(await fsp.readFile(input.filePath))
+  } catch (error) {
+    log(`读文件失败 ${input.filePath}:`, error instanceof Error ? error.message : error)
+    return { ok: false, error: 'missing' }
+  }
+  try {
+    await item.handle.sendFile(
+      { providerUserId: input.providerUserId, contextToken: input.contextToken },
+      { filename: input.filename, data }
+    )
+    return { ok: true }
+  } catch (error) {
+    log(
+      `文件发送失败 bot=${input.botId} file=${input.filename}:`,
+      error instanceof Error ? error.message : error
+    )
+    return { ok: false, error: 'send-failed' }
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -849,6 +912,7 @@ export function initImBots(injected: ImBotsHost): void {
         return found ? { status: found.status, queued: found.queued, hasRun: found.hasRun } : undefined
       },
       hasLocalSettingsSnapshot: () => manager.hasLocalSettingsSnapshot,
+      getLocalSettingsSnapshot: () => manager.getLocalSettingsSnapshot(),
       subscribeEvents: (handler) => registerAgentEventSink(handler),
     },
     store: {
@@ -885,6 +949,7 @@ export function initImBots(injected: ImBotsHost): void {
     storage,
     bridge,
     deliver,
+    deliverFile,
     /**
      * IM 内审批：手机上回一句「确定 / 拒绝」就是这条挂起审批的结果。
      *

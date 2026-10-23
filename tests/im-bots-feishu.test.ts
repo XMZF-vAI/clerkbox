@@ -538,6 +538,53 @@ describe('feishuChannel 循环', () => {
     await expect(handle.send({ providerUserId: 'ou_user_1' }, 'hi')).rejects.toThrow(/尚未启动/)
   })
 
+  it('sendFile：小图片走 im/v1/images + image 消息；其他走 im/v1/files + file 消息', async () => {
+    const deps = createDeps()
+    const handle = feishuChannel.create()
+    const started = handle.start(bot, deps)
+    await waitFor(() => deps.statuses.some((item) => item.state === 'connected'))
+    fetchMock.mockImplementation(async (url: string | URL | Request) => {
+      const u = String(url)
+      if (u.includes('/auth/v3/tenant_access_token/internal')) {
+        return jsonResponse({ code: 0, msg: 'ok', tenant_access_token: 'token-x', expire: 7200 })
+      }
+      if (u.includes('/im/v1/images')) return jsonResponse({ code: 0, msg: 'ok', data: { image_key: 'img_v2_x' } })
+      if (u.includes('/im/v1/files')) return jsonResponse({ code: 0, msg: 'ok', data: { file_key: 'file_v3_x' } })
+      return jsonResponse({ code: 0, msg: 'ok', data: { message_id: 'om_out' } })
+    })
+    await handle.sendFile?.({ providerUserId: 'ou_user_1' }, { filename: 'pic.png', data: new Uint8Array([1]) })
+    await handle.sendFile?.({ providerUserId: 'ou_user_1' }, { filename: 'doc.pdf', data: new Uint8Array([2]) })
+    const imageCall = fetchMock.mock.calls.find((call) => String(call[0]).includes('/im/v1/images')) as
+      | [string, RequestInit]
+      | undefined
+    const fileCall = fetchMock.mock.calls.find((call) => String(call[0]).includes('/im/v1/files')) as
+      | [string, RequestInit]
+      | undefined
+    expect(imageCall).toBeTruthy()
+    expect(fileCall).toBeTruthy()
+    const imageForm = imageCall?.[1].body as FormData
+    expect(imageForm.get('image_type')).toBe('message')
+    const fileForm = fileCall?.[1].body as FormData
+    expect(fileForm.get('file_type')).toBe('pdf')
+    expect(fileForm.get('file_name')).toBe('doc.pdf')
+    // 两条媒体消息：msg_type 与序列化后的 content 都要对
+    const sends = fetchMock.mock.calls
+      .filter((call) => String(call[0]).includes('/im/v1/messages'))
+      .map((call) => JSON.parse(String((call[1] as RequestInit).body)) as { msg_type: string; content: string })
+    expect(sends.map((item) => item.msg_type)).toEqual(['image', 'file'])
+    expect(sends[0]?.content).toBe(JSON.stringify({ image_key: 'img_v2_x' }))
+    expect(sends[1]?.content).toBe(JSON.stringify({ file_key: 'file_v3_x' }))
+    await handle.stop()
+    await started
+  })
+
+  it('sendFile：未启动直接报错，不猜凭据', async () => {
+    const handle = feishuChannel.create()
+    await expect(
+      handle.sendFile?.({ providerUserId: 'ou_user_1' }, { filename: 'a.pdf', data: new Uint8Array([1]) })
+    ).rejects.toThrow(/尚未启动/)
+  })
+
   it('凭据指纹变化：start() 按约定 resolve，旧连接已 force close，由宿主重建 handle', async () => {
     const deps = createDeps()
     const handle = feishuChannel.create()

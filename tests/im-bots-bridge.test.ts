@@ -15,6 +15,7 @@ import {
   type RunOutcome,
 } from '../electron/im-bots/session-bridge'
 import type { AgentEvent } from '../src/agent-core/protocol'
+import type { AgentSettings } from '../src/agent-core/ports'
 import type { SessionRow } from '../src/types/ipc'
 import { NEW_SESSION_TITLE } from '../src/lib/chat-row'
 
@@ -30,6 +31,8 @@ class FakeManager implements BridgeManagerPort {
   queued = new Map<string, number>()
   /** 默认「桌面已经跑过一次、有一份可用配置」；单独有测例把它关掉 */
   settingsReady = true
+  /** getLocalSettingsSnapshot 的返回（由用例摆；默认 null = 还没推送过） */
+  snapshot: Record<string, unknown> | null = null
   private listeners = new Set<(payload: { seq: number; event: AgentEvent }) => void>()
   private seq = 0
 
@@ -51,6 +54,10 @@ class FakeManager implements BridgeManagerPort {
 
   hasLocalSettingsSnapshot(): boolean {
     return this.settingsReady
+  }
+
+  getLocalSettingsSnapshot(): AgentSettings | null {
+    return this.snapshot ? ({ ...this.snapshot } as AgentSettings) : null
   }
 
   subscribeEvents(handler: (payload: { seq: number; event: AgentEvent }) => void): () => void {
@@ -217,7 +224,9 @@ describe('完成感知', () => {
     manager.emit({ type: 'queue.snapshot', sessionId: 's1', items: [] })
     // 助手消息 added 只是登记候选（内容非空会作为过程消息推），status(idle) 本身仍不是收尾
     manager.emit({ type: 'message.added', sessionId: 's1', message: { id: 'm', role: 'assistant', content: 'x', timestamp: 1 } })
-    expect(bag.outcomes).toEqual([{ sessionId: 's1', kind: 'progress', text: 'x', actorKeys: ['actorA'] }])
+    expect(bag.outcomes).toEqual([
+      { sessionId: 's1', kind: 'progress', text: 'x', messageId: 'm', actorKeys: ['actorA'] },
+    ])
     bag.outcomes.length = 0
     manager.emit({ type: 'run.completed', sessionId: 's1', runId: 'r1' })
     expect(bag.outcomes).toEqual([{ sessionId: 's1', kind: 'completed', answerPushed: true, actorKeys: ['actorA'] }])
@@ -237,7 +246,9 @@ describe('完成感知', () => {
     expect(bag.outcomes).toHaveLength(0)
     // 收尾覆盖：推一次
     manager.emit({ type: 'message.updated', sessionId: 's1', messageId: 'm1', updates: { content: '写完了', _isStreaming: false } })
-    expect(bag.outcomes).toEqual([{ sessionId: 's1', kind: 'progress', text: '写完了', actorKeys: ['actorA'] }])
+    expect(bag.outcomes).toEqual([
+      { sessionId: 's1', kind: 'progress', text: '写完了', messageId: 'm1', actorKeys: ['actorA'] },
+    ])
     // usage 收尾的第二次覆盖：不重复
     manager.emit({ type: 'message.updated', sessionId: 's1', messageId: 'm1', updates: { content: '写完了', _isStreaming: false } })
     expect(bag.outcomes).toHaveLength(1)
@@ -543,5 +554,124 @@ describe('生效目录与默认目录家族折叠', () => {
     const list = await bridge.recentSessionsIn(WIN_ROOT, 10)
     expect(list.map((item) => item.id)).toEqual(['o1', 'o2'])
     expect(await bridge.recentSessionsIn('D:/repo', 10).then((r) => r.map((i) => i.id))).toEqual(['n1'])
+  })
+})
+
+describe('覆盖项与模型清单', () => {
+  function makeSnapshotBridge() {
+    const made = makeBridge()
+    made.manager.snapshot = {
+      model: 'model-a',
+      activeProviderId: 'prov-a',
+      approvalMode: 'auto',
+      temperature: 0.7,
+      maxTokens: 16000,
+      enableThinking: true,
+      providers: [
+        {
+          id: 'prov-a',
+          name: 'A',
+          apiCompat: 'openai',
+          baseUrl: 'https://a/v1',
+          apiKey: 'k1',
+          models: [{ id: 'model-a' }, { id: 'model-b', temperature: 0.2 }],
+        },
+        {
+          id: 'prov-b',
+          name: 'B',
+          apiCompat: 'openai',
+          baseUrl: 'https://b/v1',
+          apiKey: 'k2',
+          models: [{ id: 'model-c' }],
+        },
+      ],
+    }
+    return made
+  }
+
+  function runCommandOf(manager: FakeManager): { settings?: Record<string, unknown>; content?: string } {
+    const found = manager.commands.find((item) => (item.cmd as { type?: string }).type === 'run')
+    return (found?.cmd ?? {}) as { settings?: Record<string, unknown>; content?: string }
+  }
+
+  it('modelOptions 列出全部提供商的已启用模型并标记当前', () => {
+    const { bridge } = makeSnapshotBridge()
+    const options = bridge.modelOptions(10)
+    expect(options.keys).toEqual(['prov-a\u001fmodel-a', 'prov-a\u001fmodel-b', 'prov-b\u001fmodel-c'])
+    expect(options.currentLabel).toContain('model-a')
+  })
+
+  it('modelOptions：快照缺失时给空清单', () => {
+    const { bridge } = makeBridge()
+    expect(bridge.modelOptions(10)).toEqual({ keys: [], labels: [] })
+  })
+
+  it('dispatch 带覆盖项：审批档位与模型（含模型级参数）克隆下发，不动快照', async () => {
+    const { bridge, manager } = makeSnapshotBridge()
+    await bridge.dispatch('s1', 'bot1:weixin:u1:private', '内容', {
+      approvalMode: 'full',
+      model: { providerId: 'prov-b', modelId: 'model-c' },
+    })
+    const settings = runCommandOf(manager).settings as {
+      approvalMode: string
+      model: string
+      baseUrl: string
+      apiKey: string
+      temperature: number
+    }
+    expect(settings.approvalMode).toBe('full')
+    expect(settings.model).toBe('model-c')
+    expect(settings.baseUrl).toBe('https://b/v1')
+    expect(settings.apiKey).toBe('k2')
+    // 模型级参数未配置 → 保留桌面当前值，而不是被清掉
+    expect(settings.temperature).toBe(0.7)
+    // 宿主快照本身不被改写（克隆语义）
+    expect(manager.getLocalSettingsSnapshot()).toMatchObject({ model: 'model-a', approvalMode: 'auto' })
+  })
+
+  it('覆盖模型带模型级参数时按 applyActive 同口径落生效字段', async () => {
+    const { bridge, manager } = makeSnapshotBridge()
+    await bridge.dispatch('s1', 'x', '内容', { model: { providerId: 'prov-a', modelId: 'model-b' } })
+    const settings = runCommandOf(manager).settings as { model: string; temperature: number }
+    expect(settings.model).toBe('model-b')
+    expect(settings.temperature).toBe(0.2)
+  })
+
+  it('无覆盖项时不下发 settings（宿主走自己的回退链）', async () => {
+    const { bridge, manager } = makeSnapshotBridge()
+    await bridge.dispatch('s1', 'x', '内容')
+    expect(runCommandOf(manager).settings).toBeUndefined()
+  })
+
+  it('覆盖项指向已删除的提供商/模型时原快照兜底', async () => {
+    const { bridge, manager } = makeSnapshotBridge()
+    await bridge.dispatch('s1', 'x', '内容', { model: { providerId: 'ghost', modelId: 'nope' } })
+    const settings = runCommandOf(manager).settings as { model: string }
+    expect(settings.model).toBe('model-a')
+  })
+
+  it('快照缺失但设了覆盖项：不下发 settings，让宿主回 MISSING_SETTINGS', async () => {
+    const { bridge, manager } = makeBridge()
+    manager.snapshot = null
+    await bridge.dispatch('s1', 'x', '内容', { approvalMode: 'full' })
+    expect(runCommandOf(manager).settings).toBeUndefined()
+  })
+
+  it('progress 事件把 messageId 带进 outcome（文件去重键的来源）', () => {
+    const { bridge, manager } = makeBridge()
+    const outcomes: RunOutcome[] = []
+    bridge.watchRuns((outcome) => {
+      outcomes.push(outcome)
+    })
+    bridge.watch('s1', 'bot1:weixin:u1:private')
+    manager.emit({ type: 'run.started', sessionId: 's1' } as unknown as AgentEvent)
+    manager.emit({
+      type: 'message.added',
+      sessionId: 's1',
+      message: { id: 'mm-1', role: 'assistant', content: '好了 [[file:D:/x/a.pdf]]', timestamp: 1 },
+    } as unknown as AgentEvent)
+    expect(outcomes).toHaveLength(1)
+    expect(outcomes[0]?.kind).toBe('progress')
+    expect(outcomes[0]?.messageId).toBe('mm-1')
   })
 })

@@ -15,11 +15,13 @@ import {
   WEIXIN_RET_SESSION_EXPIRED,
   buildWeixinApiHeaders,
   buildWeixinApiUrl,
+  buildWeixinMediaSendItem,
   buildWeixinQrBeginUrl,
   buildWeixinQrStatusUrl,
   buildWeixinSecretJson,
   buildWeixinSendBody,
   buildWeixinUpdatesBody,
+  buildWeixinUploadUrl,
   createWeixinQrLogin,
   decryptWeixinMediaBytes,
   encryptWeixinMediaBytes,
@@ -738,5 +740,196 @@ describe('createWeixinQrLogin', () => {
     login.stop(second.session.id)
     expect(login.peek(second.session.id)).toBeNull()
     login.dispose()
+  })
+})
+
+describe('微信出站媒体拼装（openclaw-weixin 协议口径）', () => {
+  it('buildWeixinUploadUrl：优先 full_url，否则 CDN 基址 + upload_param + filekey', () => {
+    expect(
+      buildWeixinUploadUrl({ uploadFullUrl: 'https://cdn.x/full', uploadParam: 'p', filekey: 'k' })
+    ).toBe('https://cdn.x/full')
+    expect(
+      buildWeixinUploadUrl({ uploadParam: '/up-1/', cdnBaseUrl: 'https://cdn.y/c2c/', filekey: 'fk-1' })
+    ).toBe('https://cdn.y/c2c/up-1/fk-1')
+    // 没给 cdnBaseUrl 用协议默认基址；两者都缺直接抛错
+    expect(buildWeixinUploadUrl({ uploadParam: 'p', filekey: 'k' })).toBe(
+      'https://novac2c.cdn.weixin.qq.com/c2c/p/k'
+    )
+    expect(() => buildWeixinUploadUrl({ filekey: 'k' })).toThrow('上传参数')
+  })
+
+  it('buildWeixinMediaSendItem：image 带密文字节数，file 带明文字节数字符串，aes_key=base64(hex串)', () => {
+    const image = buildWeixinMediaSendItem({
+      kind: 'image',
+      downloadParam: 'enc-1',
+      aesKeyHex: 'a'.repeat(32),
+      cipherBytes: 48,
+      plaintextBytes: 33,
+      filename: 'pic.png',
+    }) as { type: number; image_item: { media: Record<string, unknown>; mid_size: number } }
+    expect(image.type).toBe(2)
+    expect(image.image_item.mid_size).toBe(48)
+    expect(image.image_item.media.encrypt_query_param).toBe('enc-1')
+    expect(image.image_item.media.encrypt_type).toBe(1)
+    expect(Buffer.from(String(image.image_item.media.aes_key), 'base64').toString('utf8')).toBe('a'.repeat(32))
+
+    const file = buildWeixinMediaSendItem({
+      kind: 'file',
+      downloadParam: 'enc-2',
+      aesKeyHex: 'b'.repeat(32),
+      cipherBytes: 48,
+      plaintextBytes: 33,
+      filename: 'a.pdf',
+    }) as { type: number; file_item: { media: Record<string, unknown>; file_name: string; len: string } }
+    expect(file.type).toBe(4)
+    expect(file.file_item.file_name).toBe('a.pdf')
+    expect(file.file_item.len).toBe('33')
+  })
+})
+
+describe('sendFile（iLink 出站文件全链路）', () => {
+  interface MediaCall {
+    url: string
+    method: string
+    body: unknown
+    headers: Record<string, string>
+  }
+
+  /** getupdates 常规打桩 + getuploadurl / CDN / sendmessage 分流；CDN 响应带 x-encrypted-param 头 */
+  function stubMediaFetch(): MediaCall[] {
+    const calls: MediaCall[] = []
+    const impl = vi.fn(async (input: unknown, init?: RequestInit) => {
+      const url = String(input)
+      const record: MediaCall = {
+        url,
+        method: init?.method ?? 'GET',
+        body: init?.body,
+        headers: Object.assign({}, init?.headers as Record<string, string>),
+      }
+      calls.push(record)
+      if (url.includes('/getupdates')) {
+        return { ok: true, status: 200, text: async (): Promise<string> => JSON.stringify({ ret: 0, data: { msgs: [], get_updates_buf: '' } }) }
+      }
+      if (url.includes('/getuploadurl')) {
+        return {
+          ok: true,
+          status: 200,
+          text: async (): Promise<string> => JSON.stringify({ ret: 0, data: { upload_param: 'up-1', upload_full_url: 'https://cdn.test/upload/x' } }),
+        }
+      }
+      if (url.includes('cdn.test')) {
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: (name: string) => (name.toLowerCase() === 'x-encrypted-param' ? 'enc-param-1' : null) },
+          text: async (): Promise<string> => '',
+        }
+      }
+      if (url.includes('/sendmessage')) {
+        return { ok: true, status: 200, text: async (): Promise<string> => JSON.stringify({ ret: 0 }) }
+      }
+      throw new Error(`unexpected url: ${url}`)
+    })
+    vi.stubGlobal('fetch', impl)
+    return calls
+  }
+
+  it('文件：getuploadurl → AES 加密 CDN 直传 → sendmessage 带 file_item；密文可解回明文', async () => {
+    const { deps } = makeDeps({ stopOnPolling: false })
+    const calls = stubMediaFetch()
+    const handle = weixinChannel.create()
+    const running = handle.start(BOT, deps)
+    await vi.waitFor(() => expect(calls.some((c) => c.url.includes('/getupdates'))).toBe(true))
+    const plaintext = new Uint8Array([1, 2, 3])
+    await handle.sendFile?.({ providerUserId: 'user-1', contextToken: 'ctx-1' }, { filename: 'a.pdf', data: plaintext })
+    await handle.stop()
+    await running
+
+    const upload = calls.find((c) => c.url.includes('/getuploadurl'))
+    const cdn = calls.find((c) => c.url.includes('cdn.test'))
+    const send = calls.find((c) => c.url.includes('/sendmessage'))
+    expect(upload).toBeDefined()
+    expect(cdn).toBeDefined()
+    expect(send).toBeDefined()
+
+    const uploadBody = JSON.parse(String(upload?.body)) as {
+      filekey: string
+      media_type: number
+      to_user_id: string
+      rawsize: number
+      rawfilemd5: string
+      filesize: number
+      aeskey: string
+      no_need_thumb: boolean
+    }
+    expect(uploadBody.media_type).toBe(3)
+    expect(uploadBody.to_user_id).toBe('user-1')
+    expect(uploadBody.rawsize).toBe(3)
+    expect(uploadBody.filesize).toBeGreaterThan(3) // PKCS#7 补齐
+    expect(uploadBody.aeskey).toMatch(/^[a-f0-9]{32}$/)
+    expect(uploadBody.no_need_thumb).toBe(true)
+
+    // CDN 直传的是 AES-128-ECB 密文，用 getuploadurl 的同一把 key 能解回明文
+    const cipher = new Uint8Array(cdn?.body as ArrayBuffer)
+    expect(cipher.length).toBe(uploadBody.filesize)
+    expect(cdn?.headers['content-type']).toBe('application/octet-stream')
+    expect([...Buffer.from(decryptWeixinMediaBytes(cipher, uploadBody.aeskey))]).toEqual([1, 2, 3])
+
+    const sentBody = JSON.parse(String(send?.body)) as {
+      msg: { to_user_id: string; context_token?: string; item_list: Array<Record<string, never>> }
+    }
+    expect(sentBody.msg.to_user_id).toBe('user-1')
+    expect(sentBody.msg.context_token).toBe('ctx-1')
+    const item = sentBody.msg.item_list[0] as unknown as {
+      type: number
+      file_item: { media: Record<string, unknown>; file_name: string; len: string }
+    }
+    expect(item.type).toBe(4)
+    expect(item.file_item.file_name).toBe('a.pdf')
+    expect(item.file_item.len).toBe('3')
+    expect(item.file_item.media.encrypt_query_param).toBe('enc-param-1')
+    expect(item.file_item.media.encrypt_type).toBe(1)
+    expect(Buffer.from(String(item.file_item.media.aes_key), 'base64').toString('utf8')).toBe(uploadBody.aeskey)
+  })
+
+  it('图片：media_type=1 且条目是 image_item（mid_size=密文字节数）', async () => {
+    const { deps } = makeDeps({ stopOnPolling: false })
+    const calls = stubMediaFetch()
+    const handle = weixinChannel.create()
+    const running = handle.start(BOT, deps)
+    await vi.waitFor(() => expect(calls.some((c) => c.url.includes('/getupdates'))).toBe(true))
+    await handle.sendFile?.({ providerUserId: 'user-1' }, { filename: 'pic.png', data: new Uint8Array([9, 9]) })
+    await handle.stop()
+    await running
+    const uploadBody = JSON.parse(String(calls.find((c) => c.url.includes('/getuploadurl'))?.body)) as { media_type: number }
+    expect(uploadBody.media_type).toBe(1)
+    const sentBody = JSON.parse(String(calls.find((c) => c.url.includes('/sendmessage'))?.body)) as {
+      msg: { item_list: Array<Record<string, unknown>> }
+    }
+    expect(sentBody.msg.item_list[0]?.type).toBe(2)
+    expect((sentBody.msg.item_list[0] as { image_item: { mid_size: number } }).image_item.mid_size).toBeGreaterThan(2)
+  })
+
+  it('getuploadurl 不给上传参数时如实抛错，不拿空 URL 去撞 CDN', async () => {
+    const { deps } = makeDeps({ stopOnPolling: false })
+    const impl = vi.fn(async (input: unknown) => {
+      const url = String(input)
+      if (url.includes('/getupdates')) {
+        return { ok: true, status: 200, text: async () => JSON.stringify({ ret: 0, data: { msgs: [], get_updates_buf: '' } }) }
+      }
+      if (url.includes('/getuploadurl')) {
+        return { ok: true, status: 200, text: async () => JSON.stringify({ ret: 0, data: {} }) }
+      }
+      throw new Error(`unexpected url: ${url}`)
+    })
+    vi.stubGlobal('fetch', impl)
+    const handle = weixinChannel.create()
+    const running = handle.start(BOT, deps)
+    await vi.waitFor(() => expect(String(impl.mock.calls[0]?.[0])).toContain('/getupdates'))
+    await expect(
+      handle.sendFile?.({ providerUserId: 'user-1' }, { filename: 'a.pdf', data: new Uint8Array([1]) })
+    ).rejects.toThrow('上传参数')
+    await handle.stop()
+    await running
   })
 })

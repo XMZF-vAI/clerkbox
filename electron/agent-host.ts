@@ -1017,6 +1017,14 @@ export class AgentSessionManager {
   }
 
   /**
+   * 本机设置快照的只读副本，IM 桥的 /model 清单与覆盖项组装都从这取。
+   * 返回浅拷贝：桥侧要克隆改写（审批档位/模型覆盖），不能让改写漏进宿主的真快照。
+   */
+  getLocalSettingsSnapshot(): AgentSettings | null {
+    return this.lastLocalSettings ? { ...this.lastLocalSettings } : null
+  }
+
+  /**
    * 渲染层主动推送的本地设置快照（'agent:push-settings'，仅本地窗口可调）。
    *
    * 为什么需要这条独立通道：P6 之前宿主默认 mode=renderer，桌面上每一次对话都在渲染层
