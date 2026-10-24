@@ -226,8 +226,9 @@ async function checkForUpdates(): Promise<UpdaterState> {
 /** 用户点击「重启更新」：agent 忙碌与否由渲染端确认后调用，此处直接执行。 */
 function installUpdate(): void {
   if (!supportsAutoInstall() || state.phase !== 'ready') return
-  // isSilent: 静默安装；isForceRunAfter: 装完自动重启应用
-  autoUpdater.quitAndInstall(true, true)
+  // isSilent=false：显示 NSIS 安装器窗口（安装阶段唯一能展示真实进度的地方）；
+  // 静默安装会让应用退出后全程无反馈，用户以为没反应。
+  autoUpdater.quitAndInstall(false, true)
 }
 
 /** 供系统托盘等模块复用 agent 忙碌判定（渲染心跳 + 工具子进程双保险） */

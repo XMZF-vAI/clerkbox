@@ -135,6 +135,7 @@
       "repo": "clerkbox"
     },
     "nsis": {
+      "include": "build/installer-update.nsh",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
