@@ -52,6 +52,7 @@ export default function JouleAccountCard() {
   const status = useJouleStore((s) => s.status)
   const user = useJouleStore((s) => s.user)
   const subscription = useJouleStore((s) => s.subscription)
+  const promo = useJouleStore((s) => s.promo)
   const expired = useJouleStore((s) => s.expired)
   const plan = useJouleStore((s) => s.plan)
   const quotas = useJouleStore((s) => s.quotas)
@@ -286,6 +287,13 @@ export default function JouleAccountCard() {
               </span>
             )}
           </div>
+
+          {promo && (
+            <div className="flex items-center gap-1.5 text-[11px] text-md-primary">
+              <span className="w-1.5 h-1.5 rounded-full bg-md-primary" />
+              {t('joule.promoActive', { percent: Math.round((1 - promo.factor) * 100) })}
+            </div>
+          )}
 
           {w5h && plan && (
             <div>

@@ -3837,6 +3837,15 @@ app.whenReady().then(async () => {
     },
     writeKey: (key) => secretWrite('joule', key),
     clearKey: () => secretRemove('joule'),
+    readInstall: () => {
+      try {
+        return secretRead('joule-install')
+      } catch {
+        return null
+      }
+    },
+    writeInstall: (value) => secretWrite('joule-install', value),
+    clearInstall: () => secretRemove('joule-install'),
     notify: (snapshot) => {
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('joule:state', snapshot)

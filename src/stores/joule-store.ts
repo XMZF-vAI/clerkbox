@@ -10,6 +10,7 @@ import type {
   JouleExpired,
   JouleModel,
   JoulePlan,
+  JoulePromo,
   JouleQuotas,
   JouleStateSnapshot,
   JouleStatus,
@@ -37,6 +38,7 @@ interface JouleStoreState {
   plan: JoulePlan | null
   quotas: JouleQuotas | null
   desktop: JouleDesktop | null
+  promo: JoulePromo | null
   lastSyncAt: number | null
   stale: boolean
   error: string | null
@@ -66,6 +68,7 @@ const emptyAccount = {
   plan: null,
   quotas: null,
   desktop: null,
+  promo: null,
   lastSyncAt: null,
   stale: false,
   error: null,
@@ -180,6 +183,7 @@ function applySnapshot(snapshot: JouleStateSnapshot | null | undefined): void {
     plan: snapshot.plan,
     quotas: snapshot.quotas,
     desktop: snapshot.desktop,
+    promo: snapshot.promo ?? null,
     lastSyncAt: snapshot.lastSyncAt,
     stale: snapshot.stale,
     error: snapshot.error,

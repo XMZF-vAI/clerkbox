@@ -66,6 +66,12 @@ export interface JouleDesktop {
   lastUsedAt?: number | null
 }
 
+/** 客户端折扣：服务端按安装签名判定，界面上只做如实展示 */
+export interface JoulePromo {
+  label: string
+  factor: number
+}
+
 export interface JouleModelFree {
   until: number
   daily: Record<string, number>
@@ -101,6 +107,7 @@ export interface JouleStateSnapshot {
   plan: JoulePlan | null
   quotas: JouleQuotas | null
   desktop: JouleDesktop | null
+  promo?: JoulePromo | null
   models?: JouleModel[]
   login: JouleLoginState | null
   lastSyncAt: number | null

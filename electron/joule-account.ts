@@ -1,10 +1,12 @@
 import { hostname } from 'node:os'
+import { createHash, randomBytes, webcrypto } from 'node:crypto'
 import type {
   JouleDesktop,
   JouleExpired,
   JouleLoginResult,
   JouleModel,
   JoulePlan,
+  JoulePromo,
   JouleQuotas,
   JouleStateSnapshot,
   JouleSubscription,
@@ -34,14 +36,27 @@ interface JouleDeps {
   readKey: () => string | null
   writeKey: (key: string) => void
   clearKey: () => void
+  readInstall: () => string | null
+  writeInstall: (value: string) => void
+  clearInstall: () => void
   notify: (snapshot: JouleStateSnapshot) => void
   openExternal: (url: string) => Promise<void>
+}
+
+/**
+ * 安装凭据：Joule 折扣只认这把 ECDSA 私钥的签名，API Key 单独被复制拿不到折扣。
+ * 私钥与 Key 一样只进 safeStorage，不进渲染层。
+ */
+interface InstallCredential {
+  id: string
+  privateKey: string
 }
 
 interface LoginSession {
   deviceCode: string
   intervalMs: number
   expiresAt: number
+  install: InstallCredential | null
   cancelled: boolean
   settled: boolean
   timer: ReturnType<typeof setTimeout> | null
@@ -96,6 +111,98 @@ function apiMessage(data: unknown, fallback: string): string {
   return typeof message === 'string' && message ? message : fallback
 }
 
+/* ---------------- 安装凭据与请求签名 ---------------- */
+
+const JOULE_HOSTS = new Set(['joule.xmzf.space', 'xmzfserver.xmzf.space'])
+let cachedInstall: InstallCredential | null | undefined
+let installKey: Awaited<ReturnType<typeof webcrypto.subtle.importKey>> | null = null
+
+function parseInstall(raw: string | null): InstallCredential | null {
+  if (!raw) return null
+  try {
+    const parsed = JSON.parse(raw) as { id?: unknown; privateKey?: unknown }
+    if (typeof parsed.id === 'string' && /^[a-f0-9]{32}$/.test(parsed.id) &&
+      typeof parsed.privateKey === 'string' && parsed.privateKey.length > 40) {
+      return { id: parsed.id, privateKey: parsed.privateKey }
+    }
+  } catch {
+    // 凭据损坏按未登记处理：下次登录会重新生成，不影响 Key 本身
+  }
+  return null
+}
+
+function currentInstall(): InstallCredential | null {
+  if (cachedInstall === undefined) cachedInstall = parseInstall(deps?.readInstall() ?? null)
+  return cachedInstall
+}
+
+function resetInstallCache(): void {
+  cachedInstall = undefined
+  installKey = null
+}
+
+async function createInstall(): Promise<{ credential: InstallCredential; pubkey: string }> {
+  const pair = await webcrypto.subtle.generateKey(
+    { name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify'],
+  )
+  const spki = new Uint8Array(await webcrypto.subtle.exportKey('spki', pair.publicKey))
+  const pkcs8 = new Uint8Array(await webcrypto.subtle.exportKey('pkcs8', pair.privateKey))
+  return {
+    credential: {
+      id: randomBytes(16).toString('hex'),
+      privateKey: Buffer.from(pkcs8).toString('base64'),
+    },
+    pubkey: Buffer.from(spki).toString('base64'),
+  }
+}
+
+/**
+ * 给发往 Joule 的模型请求签名。服务端验签通过才按 9 折计费；
+ * 任何失败都返回空头，请求照常发出（只是原价），绝不阻断调用。
+ * 私钥不出主进程，渲染层与 WebUI 都拿不到。
+ */
+export async function jouleSignatureHeaders(
+  method: string,
+  url: string,
+  body: string,
+): Promise<Record<string, string>> {
+  const install = currentInstall()
+  if (!install) return {}
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return {}
+  }
+  if (!JOULE_HOSTS.has(parsed.host)) return {}
+  try {
+    if (!installKey) {
+      installKey = await webcrypto.subtle.importKey(
+        'pkcs8',
+        Buffer.from(install.privateKey, 'base64'),
+        { name: 'ECDSA', namedCurve: 'P-256' },
+        false,
+        ['sign'],
+      )
+    }
+    const ts = Date.now()
+    const bodyHash = createHash('sha256').update(body, 'utf8').digest('hex')
+    const message = `${ts}\n${method.toUpperCase()}\n${parsed.pathname}\n${bodyHash}`
+    const sig = await webcrypto.subtle.sign(
+      { name: 'ECDSA', hash: 'SHA-256' },
+      installKey,
+      new TextEncoder().encode(message),
+    )
+    return {
+      'x-cb-install': install.id,
+      'x-cb-ts': String(ts),
+      'x-cb-sig': Buffer.from(new Uint8Array(sig)).toString('base64'),
+    }
+  } catch {
+    return {}
+  }
+}
+
 async function fetchJson(
   url: string,
   init: RequestInit = {},
@@ -128,6 +235,7 @@ function mapAccount(data: Record<string, unknown>): Partial<JouleStateSnapshot> 
     plan,
     quotas: (data.quotas as JouleQuotas | null | undefined) ?? null,
     desktop: (data.desktop as JouleDesktop | null | undefined) ?? null,
+    promo: (data.promo as JoulePromo | null | undefined) ?? null,
     serverNow: Number(data.serverNow) || Date.now(),
   }
 }
@@ -266,6 +374,15 @@ async function pollOnce(session: LoginSession): Promise<void> {
       settle(session, { error: `无法保存登录凭据：${errorMessage(error)}` })
       return
     }
+    // 安装私钥与 Key 分开放：折扣凭据写失败不影响正常使用，只是按原价计费
+    if (session.install) {
+      try {
+        deps?.writeInstall(JSON.stringify(session.install))
+        resetInstallCache()
+      } catch {
+        // 忽略：下次登录会重新生成
+      }
+    }
     // Key 已落 safeStorage：即使账号快照失败也要让渲染层拿到 Key 完成 Provider 创建。
     const account = await refresh({ models: true })
     startTimers()
@@ -285,6 +402,15 @@ export async function startLogin(): Promise<JouleLoginResult> {
   if (!deps) return { error: '主进程尚未就绪' }
   if (login) return { error: '登录已在进行中' }
 
+  // 每次登录生成新的安装密钥对：公钥随设备码登记，私钥在授权成功后落 safeStorage。
+  // 生成失败不阻断登录，只是拿不到客户端折扣。
+  let install: { credential: InstallCredential; pubkey: string } | null = null
+  try {
+    install = await createInstall()
+  } catch {
+    install = null
+  }
+
   let res: { status: number; ok: boolean; data: unknown }
   try {
     res = await fetchJson(`${JOULE_ORIGIN}/api/integration/device/code`, {
@@ -293,6 +419,7 @@ export async function startLogin(): Promise<JouleLoginResult> {
       body: JSON.stringify({
         client_id: DESKTOP_CLIENT_ID,
         device_name: hostname().slice(0, 64) || 'ClerkBox',
+        ...(install ? { install_id: install.credential.id, install_pubkey: install.pubkey } : {}),
       }),
     })
   } catch (error) {
@@ -321,6 +448,7 @@ export async function startLogin(): Promise<JouleLoginResult> {
     deviceCode: data.device_code,
     intervalMs: Math.max(5, Number(data.interval) || 5) * 1000,
     expiresAt: Date.now() + (Number(data.expires_in) || 600) * 1000,
+    install: install?.credential ?? null,
     cancelled: false,
     settled: false,
     timer: null,
@@ -358,6 +486,12 @@ export async function logout(): Promise<void> {
     deps?.clearKey()
   } catch {
     // 凭据已不可读时也继续清本地快照
+  }
+  try {
+    deps?.clearInstall()
+    resetInstallCache()
+  } catch {
+    // 安装私钥清除失败不影响退出；下次登录会覆盖
   }
   stopTimers()
   lastManualRefreshAt = 0

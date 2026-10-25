@@ -1568,6 +1568,7 @@
     noSubscription: 'No subscription',
     subscribe: 'View subscription',
     fiveHourQuota: '5-hour quota',
+    promoActive: 'Client discount active: {{percent}}% off usage',
     remainingOf: '{{remaining}} / {{cap}} left',
     desktopLinked: 'Linked to {{name}}',
     lastUsed: 'Last used {{time}}',

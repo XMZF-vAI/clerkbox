@@ -1,5 +1,6 @@
 import { ipcMain, BrowserWindow } from 'electron'
 import { deflateSync } from 'node:zlib'
+import { jouleSignatureHeaders } from './joule-account'
 
 /**
  * 主进程 API 代理。
@@ -437,9 +438,12 @@ export function startChatStream(
         REQUEST_TIMEOUT_MS
       )
 
+      // Joule 客户端折扣：安装私钥只在主进程，验签通过服务端才按 9 折计费。
+      // 其他端点不受影响；签名失败只是返回空头，按原价调用。
+      const signature = await jouleSignatureHeaders('POST', url, serializedBody)
       const res = await fetch(url, {
         method: 'POST',
-        headers: headersFor(cfg),
+        headers: { ...headersFor(cfg), ...signature },
         body: serializedBody,
         signal: controller.signal,
       })

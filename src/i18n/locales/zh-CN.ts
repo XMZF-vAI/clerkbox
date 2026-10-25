@@ -1569,6 +1569,7 @@
     noSubscription: '未订阅',
     subscribe: '查看订阅',
     fiveHourQuota: '5 小时额度',
+    promoActive: '客户端折扣已生效：用量减 {{percent}}%',
     remainingOf: '剩余 {{remaining}} / {{cap}}',
     desktopLinked: '已绑定 {{name}}',
     lastUsed: '最近使用 {{time}}',
