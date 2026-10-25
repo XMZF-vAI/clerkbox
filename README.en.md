@@ -57,7 +57,7 @@
 
 | Capability | Description |
 | --- | --- |
-| **Multi-provider presets** | 22 built-in providers (Lunora / OpenAI / Anthropic / Gemini / DeepSeek / Qwen / Zhipu GLM / Ollama, etc.). Each provider pulls its model list from `/models` automatically. Custom endpoints with OpenAI or Anthropic protocol supported. |
+| **Multi-provider presets** | 23 built-in providers (Joule / OpenAI / Anthropic / Gemini / DeepSeek / Qwen / Zhipu GLM / Ollama, etc.). Each provider pulls its model list from `/models` automatically. Custom endpoints with OpenAI or Anthropic protocol supported. |
 | **ReAct tool loop** | Reason → call tools → observe → reason again, up to 100 iterations with an automatic wrap-up summary, abortable at any time. |
 | **MCP tool ecosystem** | Connect Model Context Protocol servers and inject external tools into the conversation; one-click install from the MCP Hub China marketplace in the extension store. |
 | **Approval modes** | TRAE-style manual / auto / full approval tiers, plus a `/` command menu for the Spec / Plan / Goal workflows. |

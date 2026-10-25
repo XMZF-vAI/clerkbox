@@ -63,7 +63,7 @@
 
 | 能力 | 说明 |
 | --- | --- |
-| **多供应商预设** | 内置 22 家供应商（Lunora / OpenAI / Anthropic / Gemini / DeepSeek / 通义千问 / 智谱 GLM / Ollama 等），每个供应商自动从 `/models` 拉取可用模型；支持自定义端点与 OpenAI / Anthropic 双协议 |
+| **多供应商预设** | 内置 23 家供应商（Joule / OpenAI / Anthropic / Gemini / DeepSeek / 通义千问 / 智谱 GLM / Ollama 等），每个供应商自动从 `/models` 拉取可用模型；支持自定义端点与 OpenAI / Anthropic 双协议 |
 | **ReAct 工具循环** | 推理 → 工具调用 → 观察 → 再推理，最多 100 轮，轮次用尽自动收尾总结，可任意时刻中止 |
 | **MCP 工具生态** | 接入 Model Context Protocol 服务器，外部工具动态注入对话；扩展商店可一键安装 MCP Hub 中国版的服务器 |
 | **审批模式** | TRAE 风格 manual / auto / full 三档审批，`/` 命令菜单直达 Spec / Plan / Goal 工作流 |
