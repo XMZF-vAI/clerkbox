@@ -702,6 +702,13 @@
     graphParents: '父提交',
   },
 
+  workSkill: {
+    label: '工作技能',
+    searchPlaceholder: '搜索技能…',
+    noMatch: '没有匹配的技能',
+    skillStore: '技能商店',
+  },
+
   interfaceMode: {
     toggleAria: '切换编程/通用模式',
     coding: '编程',

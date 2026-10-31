@@ -15,6 +15,7 @@ import type { MessageAttachment, MessageSkillSnapshot, TaskMode, HarnessMode } f
 import type { FileEntry, WebUICapabilities } from '../../types/ipc'
 import ConfirmDialog from '../ui/ConfirmDialog'
 import BranchSwitcher from '../git/BranchSwitcher'
+import WorkSkillSwitcher from './WorkSkillSwitcher'
 import { useIsMobile } from '../../hooks/use-mobile'
 import { useShallow } from 'zustand/react/shallow'
 import { hostQueue } from '../../lib/host-queue'
@@ -1233,17 +1234,22 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
         )}
       </div>
 
-      {/* Working directory + branch switcher row：空会话也显示（新会话就能看到分支芯片）；
-          芯片仅编程模式渲染，且会话目录不是 git 仓库时自动隐藏 */}
+      {/* Working directory + mode chip row：空会话也显示（新会话就能看到右侧芯片）；
+          芯片按界面模式二选一：编程模式=分支切换器（非 git 仓库自动隐藏），
+          通用模式=工作技能切换器（无工作类技能自动隐藏） */}
       {effectiveWorkDir && (
         <div className={`flex items-center gap-1.5 mb-2 px-1 max-w-5xl mx-auto ${vibe ? 'text-white/50' : ''}`}>
           <FolderOpen size={12} className={vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/50'} />
           <span className={`text-[11px] truncate max-w-[400px] ${vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/50'}`}>
             {effectiveWorkDir}{currentSession?.workingDir ? '' : t('chat.defaultWorkDirSuffix')}
           </span>
-          {!vibe && settings.interfaceMode === 'coding' && (
+          {!vibe && (
             <span className="ml-auto inline-flex">
-              <BranchSwitcher workDir={effectiveWorkDir} />
+              {settings.interfaceMode === 'coding' ? (
+                <BranchSwitcher workDir={effectiveWorkDir} />
+              ) : (
+                <WorkSkillSwitcher workDir={effectiveWorkDir} />
+              )}
             </span>
           )}
         </div>

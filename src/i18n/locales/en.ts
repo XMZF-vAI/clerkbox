@@ -702,6 +702,13 @@
     graphParents: 'Parents',
   },
 
+  workSkill: {
+    label: 'Work skills',
+    searchPlaceholder: 'Search skills…',
+    noMatch: 'No matching skills',
+    skillStore: 'Skill Store',
+  },
+
   interfaceMode: {
     toggleAria: 'Toggle coding/general mode',
     coding: 'Coding',
