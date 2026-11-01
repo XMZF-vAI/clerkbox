@@ -5,9 +5,27 @@
  * 即聊天内容的 **XSS 边界**。安全约定：
  *  - 所有插值文本先经 escapeHtml 转义；
  *  - 链接 href 经 sanitizeLinkHref 协议白名单（http/mailto/相对锚点）过滤；
- *  - 代码块整体转义，不做语法高亮。
+ *  - 代码块整体转义（高亮版另由 shiki 保证转义，见 code-highlighter.ts）。
  * 修改渲染规则时必须保持以上不变量，并回归测试 javascript:/onerror= 等注入向量。
  */
+import { highlightCode, isHighlighterReady } from './code-highlighter'
+
+/**
+ * 渲染一个代码块。
+ *
+ * 高亮器就绪 → 输出带 token 色的双主题 HTML（--shiki-light / --shiki-dark）；
+ * 未就绪或不认识该语言 → 退回改造前的纯文本块（整体转义）。
+ * 两条分支都保证内容已转义，XSS 边界不变。
+ */
+function renderCodeBlock(code: string, lang: string): string {
+  if (isHighlighterReady()) {
+    const highlighted = highlightCode(code, lang)
+    if (highlighted !== null) {
+      return `<pre class="code-block shiki"><code>${highlighted}</code></pre>`
+    }
+  }
+  return `<pre class="code-block"><code>${escapeHtml(code)}</code></pre>`
+}
 
 export function renderMarkdown(text: string): string {
   const lines = text.split('\n')
@@ -61,7 +79,7 @@ export function renderMarkdown(text: string): string {
       closeList()
       closeTable()
       if (inCodeBlock) {
-        result.push(`<pre class="code-block"><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`)
+        result.push(renderCodeBlock(codeLines.join('\n'), codeLang))
         inCodeBlock = false
         codeLines = []
         codeLang = ''
@@ -144,7 +162,7 @@ export function renderMarkdown(text: string): string {
   closeList()
   closeTable()
   if (inCodeBlock) {
-    result.push(`<pre class="code-block"><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`)
+    result.push(renderCodeBlock(codeLines.join('\n'), codeLang))
   }
 
   return result.join('')
@@ -206,7 +224,7 @@ function sanitizeLinkHref(href: string): string | null {
   return null
 }
 
-function escapeHtml(text: string): string {
+export function escapeHtml(text: string): string {
   return text
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')

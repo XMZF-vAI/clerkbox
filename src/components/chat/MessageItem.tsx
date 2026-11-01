@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef, useMemo, memo, Suspense, type ReactNode } from 'react'
+import { useState, useEffect, useRef, useMemo, memo, Suspense, useSyncExternalStore, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { Check, Terminal, FileText, FolderOpen, AlertTriangle, ChevronDown, ChevronUp, Wrench, FilePen, Globe, Pencil, Archive, Loader2, BookOpen, GitBranch, Target, CircleHelp, ListTodo, Sparkles, LayoutGrid, MonitorSmartphone, MousePointerClick, Brain } from 'lucide-react'
+import { Check, Terminal, FileText, FolderOpen, AlertTriangle, ChevronDown, ChevronUp, Wrench, FilePen, Globe, Pencil, Archive, Loader2, BookOpen, GitBranch, Target, CircleHelp, ListTodo, Sparkles, LayoutGrid, MonitorSmartphone, MousePointerClick, Brain, BellRing } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { Message, StreamingToolCall } from '../../types/agent'
 import { useChatStore } from '../../stores/chat-store'
@@ -8,6 +8,16 @@ import { parsePermissionAudit } from '../../lib/permission-preview'
 // 聊天内容的 dangerouslySetInnerHTML 唯一出口（XSS 边界）。此处曾留了一份逐字节相同的副本，
 // 于是「规范文件」的修补到不了真正在跑的那条路径——现在只留一处。
 import { renderMarkdown } from '../../lib/markdown'
+import { getHighlightVersion, subscribeHighlightVersion } from '../../lib/code-highlighter'
+import {
+  getToolCardOpen,
+  hasAutoActed,
+  hasUserTouched,
+  markAutoActed,
+  resolveToolCardAutoAction,
+  setToolCardOpen,
+  toolGroupStateKey,
+} from '../../lib/tool-card-state'
 import { PermissionAuditRow } from './PermissionCard'
 import { CopyButton, MessageActions } from './MessageActions'
 import { isRenderedByUnifiedEntry, resolveRenderer } from './tool-renderers/resolveRenderer'
@@ -140,7 +150,11 @@ function ToolRow({ toolCall, result, vibe }: {
   vibe?: boolean
 }) {
   const { t } = useTranslation()
-  const [open, setOpen] = useState(false)
+  // 展开态经 tool-card-state 仓库持久（键=toolCall.id）：虚拟行重挂 / 会话切回不丢
+  const [open, setOpen] = useState(() => getToolCardOpen(toolCall.id) ?? false)
+  // 收起动画期间保持展开体挂载（300ms 延迟卸载）：grid-rows 收起动画需要内容在位，
+  // 立即卸载会让动画塌成空壳；也避免误关后立刻重开时重新拉取 lazy 渲染器分片
+  const [mountDetail, setMountDetail] = useState(() => getToolCardOpen(toolCall.id) ?? false)
   const toolResult = result?.find((r) => r.toolCallId === toolCall.id)
   const isError = toolResult?.isError ?? false
   const running = !toolResult
@@ -170,6 +184,49 @@ function ToolRow({ toolCall, result, vibe }: {
     noteToolRunning(toolCall.id, running)
   }, [toolCall.id, running])
 
+  // 展开体挂载跟随 open：打开立即挂；收起走 300ms 延迟卸载（动画期间内容在位不塌陷）
+  useEffect(() => {
+    if (open) {
+      setMountDetail(true)
+      return
+    }
+    const timer = setTimeout(() => setMountDetail(false), 300)
+    return () => clearTimeout(timer)
+  }, [open])
+
+  // 完成边沿的自动展开/收起（每行一次，用户手动操作过的不抢方向盘）：
+  // 写类完成后自动展开看 diff；长输出完成后收起流式期间摊开的明细。
+  const wasRunningRef = useRef(running)
+  useEffect(() => {
+    const wasRunning = wasRunningRef.current
+    wasRunningRef.current = running
+    if (wasRunning === running || !wasRunning || running) return
+    const action = resolveToolCardAutoAction({
+      wasRunning,
+      isRunning: running,
+      isOpen: open,
+      userTouched: hasUserTouched(toolCall.id),
+      toolName: toolCall.name,
+      hasAutoActed: hasAutoActed(toolCall.id),
+    })
+    if (action === 'open' && !open) {
+      markAutoActed(toolCall.id)
+      setToolCardOpen(toolCall.id, true)
+      setOpen(true)
+    } else if (action === 'collapse' && open) {
+      markAutoActed(toolCall.id)
+      setToolCardOpen(toolCall.id, false)
+      setOpen(false)
+    }
+  }, [running, open, toolCall.id, toolCall.name])
+
+  const toggleOpen = () => {
+    const next = !open
+    setOpen(next)
+    // 用户手动操作：此后该行不再被自动动作（autoOpen/autoCollapse 让位）
+    setToolCardOpen(toolCall.id, next, { userAction: true })
+  }
+
   const label = toolCall.name === 'write_file'
     ? t('chat.toolRowWrite', { count: String(toolCall.arguments.content || '').split('\n').length })
     : t(`tools.${toolCall.name}`, { defaultValue: toolCall.name })
@@ -180,7 +237,7 @@ function ToolRow({ toolCall, result, vibe }: {
       <button
         type="button"
         aria-expanded={open}
-        onClick={() => setOpen(!open)}
+        onClick={toggleOpen}
         className={`flex h-7 w-full items-center gap-2 rounded-md3-xs px-1.5 text-left transition-colors duration-100 ${
           vibe ? 'hover:bg-white/10' : 'hover:bg-dark-surfaceContainerHigh/40'
         }`}
@@ -203,7 +260,15 @@ function ToolRow({ toolCall, result, vibe }: {
         {meta && meta.removed > 0 && (
           <span className="shrink-0 font-mono text-[10px] tabular-nums text-md-error">−{meta.removed}</span>
         )}
-        {isError && <span className="shrink-0 text-[10px] text-md-error">{t('toolPreview.executionFailed')}</span>}
+        {/* 失败原因挂原生 tooltip：行不强制展开（ZCode 同款语义），悬停即可读失败输出 */}
+        {isError && (
+          <span
+            className="shrink-0 text-[10px] text-md-error"
+            title={toolResult ? toolResult.content.slice(0, 500) : undefined}
+          >
+            {t('toolPreview.executionFailed')}
+          </span>
+        )}
         {/* chevron 常显（原来只在悬停时与图标交叉淡入）：展开与否是这一行的状态，不该靠悬停才看得见 */}
         <ChevronDown
           size={12}
@@ -215,8 +280,8 @@ function ToolRow({ toolCall, result, vibe }: {
       {/* 展开明细：专属渲染器优先，未注册工具走通用回退（与现状同一份折叠动效与样式） */}
       <ToolShell open={open}>
         {Renderer ? (
-          /* 仅在展开时挂载：lazy 分片按首次展开拉取，未展开不下载渲染器 */
-          open ? (
+          /* 展开时挂载；收起后 300ms 内仍挂载（动画不塌、lazy 分片不重拉），从未展开过不挂载 */
+          mountDetail ? (
             <Suspense fallback={<ToolSkeleton vibe={vibe} />}>
               <Renderer
                 call={toolCall}
@@ -368,15 +433,24 @@ function ToolRunGroup({ toolCalls, toolResults, vibe, defaultOpen = false, finis
   finishReason?: string
 }) {
   const { t } = useTranslation()
-  const [open, setOpen] = useState(defaultOpen)
-
-  // 流式过程中保持工具组展开，消息完成后自动收起
-  useEffect(() => {
-    if (defaultOpen && finishReason) {
-      setOpen(false)
-    }
-  }, [finishReason, defaultOpen])
   const visible = toolCalls.filter((tc) => !isRenderedByUnifiedEntry(tc.name))
+  // 组展开态持久：键锚定组内首行（流式追加不改组身份），虚拟重挂 / 会话切回不丢
+  const groupKey = visible.length > 0 ? toolGroupStateKey(visible[0].id) : ''
+  const [open, setOpen] = useState(() => (groupKey ? getToolCardOpen(groupKey) ?? defaultOpen : defaultOpen))
+
+  // 流式过程中保持工具组展开，消息完成后自动收起（收起也写仓库，重挂后不回弹）
+  useEffect(() => {
+    if (defaultOpen && finishReason && open) {
+      setOpen(false)
+      if (groupKey) setToolCardOpen(groupKey, false)
+    }
+  }, [finishReason, defaultOpen, open, groupKey])
+
+  const toggleGroup = () => {
+    const next = !open
+    setOpen(next)
+    if (groupKey) setToolCardOpen(groupKey, next, { userAction: true })
+  }
   const running = visible.some((tc) => !toolResults?.some((r) => r.toolCallId === tc.id))
   const diffMetas = useMemo(() => {
     const byPath = new Map<string, EditDiffMetaView>()
@@ -402,7 +476,7 @@ function ToolRunGroup({ toolCalls, toolResults, vibe, defaultOpen = false, finis
       <button
         type="button"
         aria-expanded={open}
-        onClick={() => setOpen(!open)}
+        onClick={toggleGroup}
         className={`flex w-fit items-center gap-1.5 rounded-md3-xs px-1.5 py-1 text-[12px] transition-colors duration-100 ${
           vibe ? 'text-white/60 hover:bg-white/10' : 'text-dark-onSurfaceVariant/60 hover:bg-dark-surfaceContainerHigh/40'
         }`}
@@ -444,16 +518,12 @@ interface ThinkingRowProps {
 function ThinkingRow({ thinkingContent, isStreaming, hasContent, finishReason, expanded, onToggle, vibe }: ThinkingRowProps) {
   const { t } = useTranslation()
   const startRef = useRef<number | null>(null)
-  const endRef = useRef<number | null>(null)
-  const [elapsed, setElapsed] = useState(0)
   const [done, setDone] = useState(false)
 
-  // Start and stop the timer only when thinking content or stream state changes.
+  // Mark thinking phase boundaries; the wall-clock duration is no longer displayed.
   useEffect(() => {
     if (!thinkingContent) {
       startRef.current = null
-      endRef.current = null
-      setElapsed(0)
       setDone(false)
       return
     }
@@ -468,28 +538,12 @@ function ThinkingRow({ thinkingContent, isStreaming, hasContent, finishReason, e
     // 1. Message has final content (reply started) → thinking phase ended
     // 2. finishReason present → entire message finished
     // 3. !isStreaming → stream ended
-    if ((hasContent || finishReason || !isStreaming) && endRef.current == null) {
-      endRef.current = Date.now()
-      const secs = Math.max(1, Math.round((endRef.current - startRef.current) / 1000))
-      setElapsed(secs)
+    if ((hasContent || finishReason || !isStreaming) && startRef.current != null) {
       setDone(true)
     }
   }, [thinkingContent, isStreaming, hasContent, finishReason])
 
-  // Keep the ticker independent so renders do not recreate its interval.
-  useEffect(() => {
-    if (done || startRef.current == null) return
-    const id = setInterval(() => {
-      if (startRef.current != null) {
-        setElapsed(Math.max(1, Math.round((Date.now() - startRef.current) / 1000)))
-      }
-    }, 500)
-    return () => clearInterval(id)
-  }, [done])
-
-  const statusText = !done
-    ? t('chat.thinkingInProgress')
-    : t('chat.thinkingElapsed', { n: elapsed })
+  const statusText = !done ? t('chat.thinkingInProgress') : ''
 
   return (
     <div className="w-full">
@@ -538,9 +592,18 @@ function ThinkingRow({ thinkingContent, isStreaming, hasContent, finishReason, e
   )
 }
 
-/** Full markdown renderer */
+/**
+ * Full markdown renderer
+ *
+ * 代码高亮（shiki）经「启动预载 + 版本订阅」接入：高亮器在 main.tsx 启动时预载，
+ * 就绪 / 语言补载完成时 bump 版本号，这里用 useSyncExternalStore 订阅——版本变化
+ * 只让挂载中的 MarkdownContent 各自重渲一次，无 setState、不牵动父组件，与流式
+ * 渲染循环互不放大（此前 setState 接法因此被摘除，通道实现见 lib/code-highlighter.ts）。
+ * 高亮器未就绪时 renderMarkdown 内部走纯文本兜底（markdown.ts 的 renderCodeBlock）。
+ */
 const MarkdownContent = memo(function MarkdownContent({ content, vibe }: { content: string; vibe?: boolean }) {
-  const html = useMemo(() => renderMarkdown(content), [content])
+  const highlightVersion = useSyncExternalStore(subscribeHighlightVersion, getHighlightVersion)
+  const html = useMemo(() => renderMarkdown(content), [content, highlightVersion])
   return <div className={`markdown-body${vibe ? ' md-vibe' : ''}`} dangerouslySetInnerHTML={{ __html: html }} />
 })
 
@@ -711,6 +774,38 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false,
             : 'bg-dark-surfaceContainer/40 border border-dark-onSurfaceVariant/[0.04] text-dark-onSurfaceVariant/65'
         }`}>
           {message.content}
+        </div>
+      </div>
+    )
+  }
+
+  // 后台子代理完成通知：user 角色承载（要进模型上下文），但画成居中的通知条而不是
+  // 用户气泡。把 <subagent-notification> XML 解析成一条条带状态图标的摘要。
+  if (message.isSubAgentNotice) {
+    const notifications = parseSubagentNotifications(message.content)
+    return (
+      <div className="flex justify-center animate-slide-up my-1">
+        <div className={`max-w-[560px] w-full px-3 py-2 rounded-md3-md text-[11px] leading-relaxed ${
+          vibe
+            ? 'bg-white/5 border border-white/[0.03] text-white/55'
+            : 'bg-dark-surfaceContainer/40 border border-dark-onSurfaceVariant/[0.04] text-dark-onSurfaceVariant/65'
+        }`}>
+          <div className="mb-1 flex items-center gap-1 font-medium">
+            <BellRing className="h-3 w-3" />
+            {t('chat.subAgentNoticeTitle')}
+          </div>
+          {notifications.map((n, i) => (
+            <div key={i} className="mt-1 whitespace-pre-line">
+              <span className={n.status === 'completed' ? 'text-md-success' : n.status === 'failed' ? 'text-md-error' : ''}>
+                {n.status === 'completed' ? '✓' : n.status === 'failed' ? '✕' : '·'}
+              </span>{' '}
+              <span className="font-medium">{n.agent}</span>
+              <span className="opacity-60"> ({n.agentId})</span>
+              <span className="opacity-60"> · {t(`chat.subAgentNoticeStatus.${n.status}`, { defaultValue: n.status })}</span>
+              {n.usage && <span className="opacity-60"> · {n.usage}</span>}
+              {n.body && <div className="mt-0.5 opacity-80">{subagentNoticeExcerpt(n.body)}</div>}
+            </div>
+          ))}
         </div>
       </div>
     )
@@ -1002,13 +1097,6 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false,
           </span>
         )}
 
-        {/* Timestamp —— 过程消息不显示时间戳，仅在用户消息和最终回复上显示 */}
-        {!isIntermediate && (isUser || !!message.content.trim() || hasThinking) && (
-          <span className={`text-[10px] ${metaAlign} ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/30'}`}>
-            {new Date(message.timestamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
-          </span>
-        )}
-
         {/* 动作条：复制 + 父级按 turn 语义下发的按钮（编辑/撤回/撤销文件） */}
         {(!!copyText?.trim() || !!message.content.trim() || !!extraActions) && (
           <MessageActions vibe={vibe} className={metaAlign}>
@@ -1022,3 +1110,34 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false,
 }
 
 export default memo(MessageItem)
+
+/**
+ * 通知条的正文摘录：剥掉 markdown 标记噪音（标题井号/加粗星号），折叠空白后截前 200 字。
+ * 完整结果永远在子代理卡片与详情面板里 —— 通知条只负责「谁完成了、结果一句话是什么」，
+ * 整段报告贴进时间线既臃肿又会把裸 markdown 符号暴露给用户。
+ */
+function subagentNoticeExcerpt(body: string): string {
+  const cleaned = body
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return cleaned.length > 200 ? `${cleaned.slice(0, 200)}…` : cleaned
+}
+
+/** 后台子代理通知消息的解析：<subagent-notification> XML → 摘要条目 */
+function parseSubagentNotifications(content: string): Array<{ agentId: string; agent: string; type: string; status: string; body: string; usage?: string }> {
+  const out: Array<{ agentId: string; agent: string; type: string; status: string; body: string; usage?: string }> = []
+  const re = /<subagent-notification agentId="([^"]*)" agent="([^"]*)" type="([^"]*)" status="([^"]*)">([\s\S]*?)<\/subagent-notification>/g
+  for (const m of content.matchAll(re)) {
+    let body = m[5] ?? ''
+    let usage: string | undefined
+    const usageMatch = body.match(/<usage>([\s\S]*?)<\/usage>/)
+    if (usageMatch) {
+      usage = (usageMatch[1] ?? '').replace(/\s+/g, ' ').trim()
+      body = body.replace(/<usage>[\s\S]*?<\/usage>/g, '').trim()
+    }
+    out.push({ agentId: m[1] ?? '', agent: m[2] ?? '', type: m[3] ?? '', status: m[4] ?? '', body: body.trim(), usage })
+  }
+  return out
+}

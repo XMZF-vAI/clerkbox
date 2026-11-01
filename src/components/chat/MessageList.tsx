@@ -1,7 +1,7 @@
 ﻿import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, memo } from 'react'
 import { ChevronDown, Wrench } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { defaultRangeExtractor, useVirtualizer, type Range } from '@tanstack/react-virtual'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import type { Message } from '../../types/agent'
 import { lastRewindableTurnIndex } from '../../lib/rewind'
 import MessageItem from './MessageItem'
@@ -18,11 +18,22 @@ import {
   isNearBottomDistance,
   selectTurnRows,
   shouldVirtualizeTurns,
-  streamingTailIndex,
   turnSizeEstimates,
-  withPinnedIndex,
   type RowSpan,
 } from '../../lib/message-list-virtual'
+import {
+  anchorActionAfterContentChange,
+  classifyScrollSource,
+  reconcileFollowingForContentAnchor,
+  resolveFollowingAfterScroll,
+  shouldAdjustVirtualizerForItemSizeChange,
+  timelineKeyboardScrollIntent,
+  timelineTouchScrollIntent,
+  timelineWheelScrollIntent,
+  type TimelineScrollIntent,
+} from '../../lib/timeline-scroll-anchor'
+import { TimelineRowHeightCache } from '../../lib/timeline-row-height-cache'
+import { splitLiveTail } from '../../lib/live-tail-split'
 import {
   peekSessionScroll,
   rememberSessionScroll,
@@ -74,6 +85,14 @@ export function groupIntoTurns(messages: Message[]): Turn[] {
     }
     // 正在压缩上下文占位 —— 独立成 turn，确保压缩过程提示可见
     if (msg._isCompacting) {
+      turns.push({ userMsg: msg, aiMessages: [], turnId: msg.id })
+      continue
+    }
+    // 后台子代理完成通知 —— 时间线上的孤立横条：不结束当前轮、不参与折叠，
+    // 后续 AI 消息仍归属原轮（与「正在压缩」占位同一模式）。
+    // 它虽是 user 角色（要进模型上下文），但绝不能按 user 消息切轮——
+    // 否则每条通知都把进行中的工作拦腰截断，折叠头会出现在莫名其妙的位置。
+    if (msg.isSubAgentNotice) {
       turns.push({ userMsg: msg, aiMessages: [], turnId: msg.id })
       continue
     }
@@ -134,7 +153,9 @@ function tailTurnStepCount(messages: Message[]): number {
   let count = 0
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]
-    if (!m || m.role === 'user') break
+    if (!m) break
+    if (m.isSubAgentNotice) continue
+    if (m.role === 'user') break
     if (m.isSubAgentCard) count += 1
     else count += m.toolCalls?.filter((tc) => tc.name !== 'spawn_agent').length ?? 0
   }
@@ -299,6 +320,20 @@ const TurnPanel = memo(function TurnPanel({ turn, isLastTurn, isStreaming, vibe,
 /** 滚动停住多久之后补一次「行锚点」记忆（锚点要读全部行矩形，不能每个 scroll 事件都读） */
 const SCROLL_MEMORY_SETTLE_MS = 200
 
+/** 用户滚动意图的有效期：过期后 scroll 事件不再算作用户输入（ZCode 同款 1.2s） */
+const USER_INTENT_TTL_MS = 1200
+/** 程序化贴底 / 回到底部后的宽限期：期间产生的 scroll 不算用户输入 */
+const PROGRAMMATIC_WINDOW_MS = 200
+/** 布局保护窗：初始落位 / 虚拟化切换 / 测高补偿引发的 scroll 不夺走跟随权 */
+const LAYOUT_GUARD_MS = 250
+/** 容器宽度变化后的窗口：多条消息分帧重排期间不做逐条测高补偿 */
+const WIDTH_CHANGE_WINDOW_MS = 300
+
+/** 时间窗是否仍有效 */
+function withinWindow(until: number): boolean {
+  return until > Date.now()
+}
+
 /**
  * 首帧滚动落位：底部与行顶都只认真实 DOM。
  * 早先这里返回的是「估算总高」，而估算口径是 184+72/条（`TURN_BASE_PX`），
@@ -365,63 +400,201 @@ export default function MessageList({ messages, isStreaming, sessionId, vibe, on
   const scrollRef = useRef<HTMLDivElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const scrollRafRef = useRef<number | null>(null)
-  const isNearBottomRef = useRef(true)
+  const touchYRef = useRef<number | null>(null)
 
   const turns = useMemo(() => groupIntoTurns(messages), [messages])
   const turnSizes = useMemo(() => turnSizeEstimates(turns), [turns])
 
   const [scrollPlan] = useState(() => planInitialScroll(turns, peekSessionScroll(sessionId)))
+  // 滚动权状态机（timeline-scroll-anchor）：following 表达用户滚动权，只有用户输入能翻转。
+  // 初值按恢复落点定：落点在底 → 跟随；否则打开会话即处于阅读位置。
+  const followingRef = useRef(scrollPlan.kind === 'bottom')
+  const intentRef = useRef<{ intent: TimelineScrollIntent; at: number }>({ intent: 'none', at: 0 })
+  const lastObservedScrollTopRef = useRef(0)
+  const programmaticUntilRef = useRef(0)
+  const guardUntilRef = useRef(0)
+  const suppressAdjustUntilRef = useRef(0)
+  const contentWidthChangingUntilRef = useRef(0)
   // 用户上翻后置 true：配合 isStreaming 控制悬浮「回到底部」按钮的显隐
   const [awayFromBottom, setAwayFromBottom] = useState(scrollPlan.kind !== 'bottom')
   const [virtualized, setVirtualized] = useState(() => turns.length >= VIRTUALIZE_MIN_TURNS)
 
-  const useVirtual = shouldVirtualizeTurns(turns.length, virtualized, !awayFromBottom)
+  // 测高缓存：turnId 键的组件实例内持久缓存。MessageList 按 sessionId remount，会话天然隔离。
+  const heightCacheRef = useRef<TimelineRowHeightCache | null>(null)
+  const rowResizeObserverRef = useRef<ResizeObserver | null>(null)
 
-  // 流式中的末行永不回收（打字不被卸载导致闪烁）；未虚拟化时 count=0，虚拟库整体惰性、不写任何 DOM。
-  const pinnedRef = useRef<number | null>(null)
-  pinnedRef.current = streamingTailIndex(useVirtual ? turns.length : 0, isStreaming)
+  // 流式尾行拆分（live-tail-split）：最后一个正在流式的 turn 走普通文档流，不进虚拟行——
+  // 正文 DOM 先长高、ResizeObserver 下一帧才回填 totalSize，虚拟行里轮尾的
+  // 「工作状态指示器」会跟着抖一下。非流式时 liveTurn=null，行为与拆分前完全一致。
+  const { virtualizedTurns, liveTurn, liveTurnIndex } = useMemo(
+    () => splitLiveTail(turns, isStreaming),
+    [turns, isStreaming],
+  )
+  const lastTurnId = turns.length > 0 ? turns[turns.length - 1].turnId : null
+
+  const useVirtual = shouldVirtualizeTurns(turns.length, virtualized, !awayFromBottom)
 
   const turnsRef = useRef(turns)
   turnsRef.current = turns
   const sizesRef = useRef(turnSizes)
   sizesRef.current = turnSizes
 
-  // getItemKey / estimateSize / rangeExtractor 必须保持恒定身份：它们是虚拟库测量缓存的
+  /** TTL 内的用户滚动意图；过期即视为 none（拖滚动条等无意图输入按落点判） */
+  const readUserIntent = useCallback((): TimelineScrollIntent => {
+    const record = intentRef.current
+    return record.intent !== 'none' && Date.now() - record.at <= USER_INTENT_TTL_MS ? record.intent : 'none'
+  }, [])
+
+  /** 行测量镜像：共享一个 ResizeObserver 把真实测量写进 turnId 键缓存——虚拟库自带的
+   *  测量缓存会在重建（turns 数组重建 / StrictMode 重挂）时清回估算值，这份镜像让
+   *  「重建后仍用上次的真实测量」。borderBoxSize 含行自身的 pt-6 间距，与测量口径一致。 */
+  const getRowObserver = useCallback(() => {
+    if (!rowResizeObserverRef.current) {
+      rowResizeObserverRef.current = new ResizeObserver((entries) => {
+        for (const entry of entries) {
+          const node = entry.target as HTMLElement
+          const turn = turnsRef.current[Number(node.dataset.turnIndex)]
+          if (!turn) continue
+          const box = entry.borderBoxSize?.[0]
+          heightCacheRef.current?.set(turn.turnId, box ? box.blockSize : node.offsetHeight)
+        }
+      })
+    }
+    return rowResizeObserverRef.current
+  }, [])
+
+  // getItemKey / estimateSize 必须保持恒定身份：它们是虚拟库测量缓存的
   // memo 依赖，每个 token 换一次引用会让整列（可达上千行）重算。
   const getItemKey = useCallback((index: number) => turnsRef.current[index]?.turnId ?? index, [])
-  const estimateSize = useCallback((index: number) => sizesRef.current[index] ?? estimateTurnSizePx(1), [])
-  const rangeExtractor = useCallback(
-    (range: Range) => withPinnedIndex(defaultRangeExtractor(range), range.count, pinnedRef.current),
-    []
-  )
+  const estimateSize = useCallback((index: number) => {
+    const turn = turnsRef.current[index]
+    const fallback = sizesRef.current[index] ?? estimateTurnSizePx(1)
+    return turn ? heightCacheRef.current?.estimate(turn.turnId, fallback) ?? fallback : fallback
+  }, [])
 
   const virtualizer = useVirtualizer<HTMLDivElement, HTMLDivElement>({
-    count: useVirtual ? turns.length : 0,
+    count: useVirtual ? virtualizedTurns.length : 0,
     getScrollElement: () => scrollRef.current,
     estimateSize,
     getItemKey,
-    rangeExtractor,
     indexAttribute: 'data-turn-index',
     overscan: VIRTUAL_OVERSCAN,
     initialOffset: () => estimateOffsetFor(scrollPlan, sizesRef.current),
   })
 
-  // Only auto-scroll while the user is already near the latest message.
+  // 虚拟行的测高 ref：观察真实尺寸写入缓存 + 交给虚拟库测量（React 19 支持 cleanup 退订）
+  const measureRow = useCallback((node: HTMLDivElement | null) => {
+    if (!node) return
+    getRowObserver().observe(node)
+    virtualizer.measureElement(node)
+    return () => {
+      getRowObserver().unobserve(node)
+    }
+  }, [getRowObserver, virtualizer])
+  // 流式尾行（live tail）不交给虚拟库测量，但仍观察写入缓存——流结束进入虚拟列表时，
+  // 第一帧就用得上它的真实高度，不会闪回估算值。
+  const liveRowRef = useCallback((node: HTMLDivElement | null) => {
+    if (!node) return
+    getRowObserver().observe(node)
+    return () => {
+      getRowObserver().unobserve(node)
+    }
+  }, [getRowObserver])
+
+  // 测高补偿裁决：following 中 / 恢复期 / 宽度重排窗内一律不补偿（贴底与补偿互不打架）；
+  // 其余沿用「整行在视口上方才补偿」的口径，防止下方行长高把视口往下拽。
+  useLayoutEffect(() => {
+    virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item) =>
+      shouldAdjustVirtualizerForItemSizeChange({
+        following: followingRef.current,
+        suppressAdjustment: withinWindow(suppressAdjustUntilRef.current),
+        contentWidthChanging: withinWindow(contentWidthChangingUntilRef.current),
+        itemEnd: item.end,
+        scrollTop: scrollRef.current?.scrollTop ?? 0,
+      })
+    return () => {
+      virtualizer.shouldAdjustScrollPositionOnItemSizeChange = undefined
+    }
+  }, [virtualizer])
+
+  // 用户滚动意图捕获：capture 阶段监听（抢在 scroll 事件派发之前），滚轮/触摸/键盘三类。
+  // 1.2s TTL 过后 scroll 事件不再算用户输入。容器宽度变化记入宽窗（测高补偿的让位输入）。
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const setIntent = (intent: TimelineScrollIntent) => {
+      if (intent === 'none') return
+      intentRef.current = { intent, at: Date.now() }
+    }
+    const onWheel = (event: WheelEvent) => setIntent(timelineWheelScrollIntent(event.deltaY))
+    const onTouchStart = (event: TouchEvent) => {
+      touchYRef.current = event.touches[0]?.clientY ?? null
+    }
+    const onTouchMove = (event: TouchEvent) => {
+      const previous = touchYRef.current
+      const next = event.touches[0]?.clientY ?? null
+      if (previous !== null && next !== null) setIntent(timelineTouchScrollIntent(previous, next))
+      touchYRef.current = next
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target
+      const editableTarget =
+        target instanceof HTMLElement &&
+        (target.isContentEditable ||
+          target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT')
+      setIntent(timelineKeyboardScrollIntent({ key: event.key, shiftKey: event.shiftKey, editableTarget }))
+    }
+    el.addEventListener('wheel', onWheel, { capture: true, passive: true })
+    el.addEventListener('touchstart', onTouchStart, { capture: true, passive: true })
+    el.addEventListener('touchmove', onTouchMove, { capture: true, passive: true })
+    window.addEventListener('keydown', onKeyDown, true)
+    let lastWidth = el.clientWidth
+    const widthObserver = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width ?? lastWidth
+      if (width !== lastWidth) {
+        lastWidth = width
+        contentWidthChangingUntilRef.current = Date.now() + WIDTH_CHANGE_WINDOW_MS
+      }
+    })
+    widthObserver.observe(el)
+    return () => {
+      el.removeEventListener('wheel', onWheel, true)
+      el.removeEventListener('touchstart', onTouchStart, true)
+      el.removeEventListener('touchmove', onTouchMove, true)
+      window.removeEventListener('keydown', onKeyDown, true)
+      widthObserver.disconnect()
+    }
+  }, [])
+
   const memoryRef = useRef<SessionScrollMemory | null>(null)
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
+    lastObservedScrollTopRef.current = el.scrollTop
     let settleTimer: ReturnType<typeof setTimeout> | null = null
     const capture = () => captureScrollMemory(el, turnsRef.current, distanceToBottomPx(el.scrollTop, el.scrollHeight, el.clientHeight))
     const onScroll = () => {
       const distance = distanceToBottomPx(el.scrollTop, el.scrollHeight, el.clientHeight)
-      isNearBottomRef.current = isNearBottomDistance(distance)
-      setAwayFromBottom(!isNearBottomRef.current)
+      const atBottom = isNearBottomDistance(distance)
+      // 来源裁决（顺序不可反）：用户意图（TTL 内）> 程序化贴底 > 布局保护窗 > 默认按用户处理。
+      // 只有 user 来源能翻转 following——测高补偿 / 程序化贴底产生的 scroll
+      // 不得夺走用户已交出的滚动权。
+      const source = classifyScrollSource({
+        hasUserIntent: readUserIntent() !== 'none',
+        programmaticScrollActive: withinWindow(programmaticUntilRef.current),
+        withinLayoutGuardWindow: withinWindow(guardUntilRef.current),
+      })
+      followingRef.current = resolveFollowingAfterScroll({ following: followingRef.current, atBottom, source })
+      // 写后记账：下一次内容 commit 的对账以本次事件落点为基准
+      lastObservedScrollTopRef.current = el.scrollTop
+      setAwayFromBottom(!followingRef.current)
       // 锚点要读每一行的真实矩形（querySelectorAll + 每行一次 getBoundingClientRect），
       // 挂在每个 scroll 事件上等于每帧强制重排一次。改成滚动停住后补锚点，
       // 其间只刷新便宜的 scrollTop / 贴底标记，卸载时拿这份近似值记忆。
       if (!memoryRef.current) memoryRef.current = capture()
-      else memoryRef.current = { ...memoryRef.current, offset: el.scrollTop, atBottom: isNearBottomDistance(distance) }
+      else memoryRef.current = { ...memoryRef.current, offset: el.scrollTop, atBottom }
       if (settleTimer) clearTimeout(settleTimer)
       settleTimer = setTimeout(() => {
         settleTimer = null
@@ -434,7 +607,7 @@ export default function MessageList({ messages, isStreaming, sessionId, vibe, on
       if (settleTimer) clearTimeout(settleTimer)
       if (sessionId && memoryRef.current) rememberSessionScroll(sessionId, memoryRef.current)
     }
-  }, [sessionId])
+  }, [sessionId, readUserIntent])
 
   // 滚动落位在布局阶段写入：浏览器绘制前就位，长会话首帧不会先画顶部再跳底。
   const restoredRef = useRef(false)
@@ -445,32 +618,55 @@ export default function MessageList({ messages, isStreaming, sessionId, vibe, on
     restoredRef.current = true
     applyInitialScroll(el, scrollPlan, sizesRef.current)
     const distance = distanceToBottomPx(el.scrollTop, el.scrollHeight, el.clientHeight)
-    isNearBottomRef.current = isNearBottomDistance(distance)
-    setAwayFromBottom(!isNearBottomRef.current)
+    followingRef.current = isNearBottomDistance(distance)
+    lastObservedScrollTopRef.current = el.scrollTop
+    // 初始落位与首帧测量都在保护窗内：它们产生的 scroll / 测高不夺走跟随权、不触发补偿
+    guardUntilRef.current = Date.now() + LAYOUT_GUARD_MS
+    suppressAdjustUntilRef.current = guardUntilRef.current
+    setAwayFromBottom(!followingRef.current)
   }, [scrollPlan])
 
   const scrollToEnd = useCallback((behavior: 'instant' | 'smooth') => {
-    const count = virtualizer.options.count
-    if (count > 0) {
-      // 末项 + align:'end' 命中库内的「真实 maxScrollOffset」分支，与原 bottomRef.scrollIntoView 等价
-      virtualizer.scrollToIndex(count - 1, { align: 'end', behavior })
-    } else {
-      bottomRef.current?.scrollIntoView({ behavior })
-    }
-  }, [virtualizer])
+    // live tail 拆分后虚拟行不含流式尾行，scrollToIndex(count-1) 不再等价于真贴底；
+    // bottomRef 挂在全部内容（含尾行 / 状态指示器）之后，两条分支同一路径。
+    bottomRef.current?.scrollIntoView({ behavior })
+  }, [scrollRef, bottomRef])
 
+  // 内容变化（流式 delta / 新消息 / 测高修正）后的锚定：先对账用户滚动权，再决定贴底。
+  // following=false（上滑读历史）时绝不拉回；贴底动作标记程序化窗口并写后回读记账。
   useEffect(() => {
-    if (isNearBottomRef.current) {
-      // Streaming can update state many times per frame. Coalesce scroll work
-      // to one layout pass per animation frame instead of forcing a layout on
-      // every token.
-      if (scrollRafRef.current !== null) return
-      scrollRafRef.current = requestAnimationFrame(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const atBottom = isNearBottomDistance(distanceToBottomPx(el.scrollTop, el.scrollHeight, el.clientHeight))
+    const following = reconcileFollowingForContentAnchor({
+      following: followingRef.current,
+      atBottom,
+      scrollTop: el.scrollTop,
+      lastObservedScrollTop: lastObservedScrollTopRef.current,
+      userScrollIntent: readUserIntent(),
+    })
+    followingRef.current = following
+    setAwayFromBottom(!following)
+    if (anchorActionAfterContentChange(following) !== 'stickToBottom') {
+      // 已解除跟随：撤掉还在排队中的贴底帧，避免旧意图把用户拽回去
+      if (scrollRafRef.current !== null) {
+        cancelAnimationFrame(scrollRafRef.current)
         scrollRafRef.current = null
-        scrollToEnd(isStreaming ? 'instant' : 'smooth')
-      })
+      }
+      return
     }
-  }, [messages, isStreaming, scrollToEnd])
+    // Streaming can update state many times per frame. Coalesce scroll work
+    // to one layout pass per animation frame instead of forcing a layout on
+    // every token.
+    if (scrollRafRef.current !== null) return
+    scrollRafRef.current = requestAnimationFrame(() => {
+      scrollRafRef.current = null
+      programmaticUntilRef.current = Date.now() + PROGRAMMATIC_WINDOW_MS
+      bottomRef.current?.scrollIntoView({ behavior: isStreaming ? 'instant' : 'smooth' })
+      const elNow = scrollRef.current
+      if (elNow) lastObservedScrollTopRef.current = elNow.scrollTop
+    })
+  }, [messages, isStreaming, readUserIntent])
 
   // 达到阈值后只在粘底时切入虚拟化：上翻阅读历史时切换布局会让整列按估算重排、视口跳位。
   useEffect(() => {
@@ -482,10 +678,11 @@ export default function MessageList({ messages, isStreaming, sessionId, vibe, on
     if (scrollRafRef.current !== null) cancelAnimationFrame(scrollRafRef.current)
   }, [])
 
-  /** 悬浮「回到底部」：滚到底并恢复粘底（随后的 scroll 事件会重新校准 isNearBottomRef） */
+  /** 悬浮「回到底部」：滚到底并恢复跟随（随后的 scroll 事件经来源裁决保持跟随） */
   const scrollToBottom = () => {
-    isNearBottomRef.current = true
+    followingRef.current = true
     setAwayFromBottom(false)
+    programmaticUntilRef.current = Date.now() + PROGRAMMATIC_WINDOW_MS
     scrollToEnd('smooth')
   }
 
@@ -498,12 +695,11 @@ if (messages.length === 0) {
   return <div className="relative flex-1 min-h-0 flex flex-col" aria-hidden />
 }
 
-  const lastTurnIndex = turns.length - 1
   // 撤回/编辑的锚点判定用「最后一条可撤回的用户消息」而不是「最后一个 turn」：
   // 只撤销文件时会在尾部多出一条合成回执 turn，按后者算会让上一轮的两个按钮凭空消失。
   const rewindAnchorIndex = lastRewindableTurnIndex(messages)
   const rewindAnchorId = rewindAnchorIndex >= 0 ? (messages[rewindAnchorIndex]?.id ?? null) : null
-  const rows = useVirtual ? selectTurnRows(turns, virtualizer.getVirtualItems()) : []
+  const rows = useVirtual ? selectTurnRows(virtualizedTurns, virtualizer.getVirtualItems()) : []
 
   // overflow-clip：根自身不可滚，且不再把内层 scroller 的内容高度传播给祖先
   // （传播会让外层 overflow-hidden 祖先也获得假 scrollHeight，bug 换层复发）
@@ -520,13 +716,13 @@ if (messages.length === 0) {
                 <div
                   key={row.turnId}
                   data-turn-index={row.index}
-                  ref={virtualizer.measureElement}
+                  ref={measureRow}
                   className="absolute left-0 right-0 top-0 pt-6"
                   style={{ transform: `translateY(${row.start}px)` }}
                 >
                   <TurnPanel
                     turn={turn}
-                    isLastTurn={row.index === lastTurnIndex}
+                    isLastTurn={turn.turnId === lastTurnId}
                     isStreaming={isStreaming}
                     vibe={vibe}
                     sessionId={sessionId}
@@ -535,11 +731,11 @@ if (messages.length === 0) {
                   />
                 </div>
               ))
-            : turns.map((turn, index) => (
+            : virtualizedTurns.map((turn, index) => (
                 <div key={turn.turnId} data-turn-index={index} className="pt-6">
                   <TurnPanel
                     turn={turn}
-                    isLastTurn={index === lastTurnIndex}
+                    isLastTurn={turn.turnId === lastTurnId}
                     isStreaming={isStreaming}
                     vibe={vibe}
                     sessionId={sessionId}
@@ -549,6 +745,24 @@ if (messages.length === 0) {
                 </div>
               ))}
         </div>
+        {/*
+          流式尾行（live tail）：不进虚拟行。正文 DOM 先长高、ResizeObserver 下一帧才回填
+          totalSize——虚拟行里轮尾的「工作状态指示器」会跟着抖一下，普通文档流没有这个窗口期。
+          只拆真正的最后一个流式 turn，历史或陈旧 running 行仍归虚拟列表。
+        */}
+        {liveTurn && (
+          <div key={liveTurn.turnId} data-turn-index={liveTurnIndex ?? undefined} ref={liveRowRef} className="pt-6">
+            <TurnPanel
+              turn={liveTurn}
+              isLastTurn
+              isStreaming={isStreaming}
+              vibe={vibe}
+              sessionId={sessionId}
+              canRewindAnchor={liveTurn.userMsg.id === rewindAnchorId}
+              onResend={onResend}
+            />
+          </div>
+        )}
         {/* 行间距口径与上方一致：指示器前 24、其后再留 24 + 容器 pb-6，等价改造前 space-y-6 + py-6 */}
         {isStreaming && (
           <div className="pt-6">

@@ -168,6 +168,21 @@
 .markdown-body .code-block {
   @apply my-2 p-3 bg-dark-surfaceContainerHighest rounded-md3-sm overflow-x-auto text-[12px] leading-5 border border-dark-onSurfaceVariant/10;
 }
+/*
+ * 代码块语法高亮：shiki 输出双主题 CSS 变量（--shiki-light / --shiki-dark），
+ * 这里按当前主题取对应的那一套 —— 亮色取 --shiki-light，暗色取 --shiki-dark。
+ * 不用 prefers-color-scheme：ClerkBox 的暗色是 class 驱动（root.dark），
+ * 用户可以强制亮色而不改系统设置。
+ */
+.markdown-body .code-block.shiki span {
+  color: var(--shiki-light);
+}
+.dark .markdown-body .code-block.shiki span {
+  color: var(--shiki-dark);
+}
+.markdown-body .code-block.shiki .line {
+  display: block;
+}
 .markdown-body .inline-code {
   @apply px-1.5 py-0.5 bg-dark-surfaceContainerHighest rounded-md3-xs text-[12px] border border-dark-onSurfaceVariant/10;
 }
@@ -194,6 +209,13 @@
 /* VIBE 模式下的 markdown 覆盖：玻璃气泡内用半透明深色块，避免突兀的不透明补丁 */
 .markdown-body.md-vibe .code-block {
   @apply bg-black/40 border border-white/15 text-white/90;
+}
+/*
+ * vibe 模式的高亮代码块：vibe 的代码块底色是半透明黑（深色容器），
+ * 所以取 shiki 的暗色变量那套；若沿用亮色变量，深底浅字会看不清。
+ */
+.markdown-body.md-vibe .code-block.shiki span {
+  color: var(--shiki-dark);
 }
 .markdown-body.md-vibe .inline-code {
   @apply bg-black/40 border border-white/10 text-white/90;
