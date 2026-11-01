@@ -227,6 +227,11 @@ export interface Message {
    * 而 UI 按这个标记把它渲染成居中的灰色回执条，不是用户气泡。
    */
   isRewindNotice?: boolean
+  /**
+   * 后台子代理完成通知（合并注入）。与 isRewindNotice 同一设计：user 角色承载
+   * （system 会被循环整条跳过传不到模型），UI 按此标记渲染成通知条而非用户气泡。
+   */
+  isSubAgentNotice?: boolean
 }
 
 export interface ToolCall {
@@ -537,9 +542,29 @@ export interface AgentDefinition {
   disallowedTools?: string[] // 禁用工具
   systemPrompt: string       // 子 agent 的 system prompt
   model?: string             // 模型覆盖（不设=继承主 agent 的 settings.model）
-  maxTurns?: number          // 最大迭代数（默认 50）
+  maxTurns?: number          // 最大迭代数（不设=统一默认 DEFAULT_SUBAGENT_MAX_TURNS）
   source: 'built-in' | 'custom'  // 来源
   color?: string             // UI 颜色（如 'blue' / 'green' / 'orange'）
+  /** 自定义来源目录：user=用户级 ~/.clerkbox/agents，project=项目 .clerkbox/agents（内置不设） */
+  origin?: 'user' | 'project'
+  /** 默认后台运行：spawn_agent 未显式传 run_in_background 时以此为准 */
+  background?: boolean
+  /** 推理档位覆盖（不设=沿用全局设置） */
+  reasoningEffort?: ReasoningEffort
+  /** 思考开关覆盖（不设=沿用全局设置） */
+  thinking?: boolean
+  /** 思考预算覆盖，token 数（不设=沿用全局设置） */
+  thinkingBudget?: number
+}
+
+/** 子 agent 一次运行的用量统计（卡片与详情面板展示用） */
+export interface SubAgentUsage {
+  /** 输入 + 输出 token 总量（API 未回报时为估算值） */
+  totalTokens: number
+  /** 执行的工具调用次数 */
+  toolCalls: number
+  /** 运行时长（毫秒） */
+  durationMs: number
 }
 
 // 子 agent 运行时状态
@@ -554,4 +579,10 @@ export interface SubAgentRun {
   startedAt: number
   finishedAt?: number
   error?: string
+  /** 后台运行：不阻塞主循环，完成后经通知注回（前台运行不带此标记） */
+  background?: boolean
+  /** 用量统计（完成/失败时回填） */
+  usage?: SubAgentUsage
+  /** 续聊代数：send_message_to_agent 唤醒已完成 run 时 +1（0=首轮） */
+  continuations?: number
 }

@@ -252,11 +252,13 @@ const agentTools: ToolDefinition[] = [
   {
     name: 'spawn_agent',
     description:
-      'Spawn a sub-agent that executes an independent subtask in an isolated context with its own toolset and history, returning a result summary. Multiple spawn_agent calls in one message run in parallel.\n' +
+      'Spawn a sub-agent that executes an independent subtask in an isolated context with its own toolset and history, returning a result summary. Multiple spawn_agent calls in one message run in parallel — issue them in the same message to fan out.\n' +
       'Usage notes:\n' +
       '- Use for parallelizable independent research/queries, or to keep bulky exploration output out of the main context. Do NOT use for a single known file lookup — read_file/search directly is faster.\n' +
       '- Once work is delegated, do not duplicate it yourself: continue with other work or wait for the result.\n' +
-      '- The sub-agent sees none of this conversation: put the task goal, relevant context (paths, constraints, what you already tried), and the expected output format entirely in the prompt. State whether it should only research or also write code.',
+      '- The sub-agent sees none of this conversation: put the task goal, relevant context (paths, constraints, what you already tried), and the expected output format entirely in the prompt. State whether it should only research or also write code.\n' +
+      '- For long-running or exploratory subtasks you do not need immediately, set run_in_background: true: the call returns immediately with an agentId, the agent keeps running, and a completion notification is delivered to you automatically. Do not poll and do not duplicate its work.\n' +
+      '- Every completed sub-agent reports its agentId. To continue or follow up with a finished agent, use send_message_to_agent with that agentId instead of re-spawning with a fresh prompt.',
     parameters: {
       type: 'object',
       properties: {
@@ -268,8 +270,34 @@ const agentTools: ToolDefinition[] = [
           type: 'string',
           description: 'Complete task instructions for the sub-agent: goal, context, expected output format. It must be self-contained.',
         },
+        run_in_background: {
+          type: 'boolean',
+          description: 'Set to true to run this agent in the background: you get an agentId immediately and will be notified when it completes.',
+        },
       },
       required: ['agent_type', 'prompt'],
+    },
+  },
+  {
+    name: 'send_message_to_agent',
+    description:
+      'Send a follow-up message to a previously spawned sub-agent by its agentId (every spawn_agent result includes one).\n' +
+      '- If the agent is still running, the message is delivered on its next turn (steering).\n' +
+      '- If the agent has completed, it resumes in the background with its full prior conversation and you will be notified of the new result. Prefer this over re-spawning: the agent keeps its context.\n' +
+      'Your plain text output is NOT visible to any sub-agent — this tool is the only way to reach one.',
+    parameters: {
+      type: 'object',
+      properties: {
+        agent_id: {
+          type: 'string',
+          description: 'The agentId of the target sub-agent (from a spawn_agent or send_message_to_agent result).',
+        },
+        message: {
+          type: 'string',
+          description: 'The follow-up instruction or question. It must be self-contained enough for the agent to act on.',
+        },
+      },
+      required: ['agent_id', 'message'],
     },
   },
 ]
@@ -349,7 +377,14 @@ export interface ToolContext {
    */
   sessionLabel?: string
   readFileState?: Map<string, ReadFileSnapshot>
-  spawnSubAgent?: (agentType: string, prompt: string) => Promise<string>
+  /**
+   * 派生一个子代理。前台派生返回完整结果文本（阻塞至子代理结束）；
+   * runInBackground 为 true 时立即返回含 agentId 的确认文本，完成后经通知注回主循环。
+   * 仅主对话注入；子代理内没有这个闭包（也不在 schema 里）→ 深度恒为 1。
+   */
+  spawnSubAgent?: (agentType: string, prompt: string, opts?: { runInBackground?: boolean }) => Promise<string>
+  /** 向已有子代理投递消息（运行中注入 / 终态续跑）。仅主对话注入。 */
+  sendMessageToAgent?: (agentId: string, message: string) => Promise<string>
   requestUserInput?: (questions: UserQuestion[]) => Promise<Record<string, string[]>>
   updateTodoList?: (items: TodoItem[]) => void
   /**
@@ -1208,14 +1243,30 @@ class ToolRegistry {
       case 'spawn_agent': {
         const agentType = String(args.agent_type)
         const subPrompt = String(args.prompt)
+        const runInBackground = args.run_in_background === true
         if (!ctx?.spawnSubAgent) {
           return 'Error: sub-agent spawning is not initialized'
         }
         try {
-          const result = await ctx.spawnSubAgent(agentType, subPrompt)
+          const result = await ctx.spawnSubAgent(agentType, subPrompt, { runInBackground })
           return result
         } catch (e) {
           return `Error: sub-agent execution failed - ${e instanceof Error ? e.message : String(e)}`
+        }
+      }
+      case 'send_message_to_agent': {
+        const agentId = String(args.agent_id || '')
+        const message = String(args.message || '')
+        if (!agentId || !message) {
+          return 'Error: send_message_to_agent requires both agent_id and message'
+        }
+        if (!ctx?.sendMessageToAgent) {
+          return 'Error: sending messages to sub-agents is not initialized'
+        }
+        try {
+          return await ctx.sendMessageToAgent(agentId, message)
+        } catch (e) {
+          return `Error: send_message_to_agent failed - ${e instanceof Error ? e.message : String(e)}`
         }
       }
       case 'question': {

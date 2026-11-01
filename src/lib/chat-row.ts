@@ -181,6 +181,7 @@ export function mapMessageRows(msgRows: MessageRow[]): Message[] {
     mutationGaps: parseMutationGaps(m.mutation_gaps),
     filesReverted: m.files_reverted === 1 ? true : undefined,
     isRewindNotice: m.is_rewind_notice === 1 ? true : undefined,
+    isSubAgentNotice: m.is_sub_agent_notice === 1 ? true : undefined,
   }))
 }
 
@@ -210,6 +211,7 @@ export function messageToRow(message: Message, sessionId: string): MessageRow {
     mutation_gaps: message.mutationGaps ? JSON.stringify(message.mutationGaps) : null,
     files_reverted: message.filesReverted ? 1 : 0,
     is_rewind_notice: message.isRewindNotice ? 1 : 0,
+    is_sub_agent_notice: message.isSubAgentNotice ? 1 : 0,
   }
 }
 
@@ -227,6 +229,7 @@ export function messageRewindPatch(message: Message): Record<string, unknown> | 
     mutation_gaps: message.mutationGaps ? JSON.stringify(message.mutationGaps) : null,
     files_reverted: message.filesReverted ? 1 : 0,
     is_rewind_notice: message.isRewindNotice ? 1 : 0,
+    is_sub_agent_notice: message.isSubAgentNotice ? 1 : 0,
   }
 }
 

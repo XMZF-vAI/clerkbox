@@ -1862,27 +1862,33 @@ function registerIpcHandlers(chatStore: ChatStore) {
     rtAccount.rtNotifyMemoryWritten()
   }
 
-  // 扫描 .clerkbox/agents 目录下所有 .md 文件，返回自定义 agent 定义
+  // 扫描自定义 agent 定义：项目级 .clerkbox/agents + 用户级 ~/.clerkbox/agents。
+  // origin 标记来源目录，渲染层按 内置 < 用户 < 项目 三级同名覆盖（agent-registry）。
   ipcMain.handle('scanAgents', async (_event, workingDir: string) => {
-    try {
-      const agentsDir = path.join(workingDir, '.clerkbox', 'agents')
-      if (!fs.existsSync(agentsDir)) return []
-      const files = fs.readdirSync(agentsDir, { withFileTypes: true })
-        .filter((entry) => entry.isFile() && entry.name.endsWith('.md'))
-        .slice(0, MAX_CUSTOM_AGENT_FILES)
-      const agents: Array<{ filename: string; content: string }> = []
-      for (const file of files) {
-        const filename = file.name
-        const fullPath = path.join(agentsDir, filename)
-        const stat = fs.statSync(fullPath)
-        if (stat.size > MAX_CUSTOM_AGENT_FILE_BYTES) continue
-        const content = fs.readFileSync(fullPath, 'utf-8')
-        agents.push({ filename, content })
+    const scanDir = (agentsDir: string, origin: 'user' | 'project'): Array<{ filename: string; content: string; origin: 'user' | 'project' }> => {
+      try {
+        if (!agentsDir || !fs.existsSync(agentsDir)) return []
+        const files = fs.readdirSync(agentsDir, { withFileTypes: true })
+          .filter((entry) => entry.isFile() && entry.name.endsWith('.md'))
+          .slice(0, MAX_CUSTOM_AGENT_FILES)
+        const agents: Array<{ filename: string; content: string; origin: 'user' | 'project' }> = []
+        for (const file of files) {
+          const filename = file.name
+          const fullPath = path.join(agentsDir, filename)
+          const stat = fs.statSync(fullPath)
+          if (stat.size > MAX_CUSTOM_AGENT_FILE_BYTES) continue
+          const content = fs.readFileSync(fullPath, 'utf-8')
+          agents.push({ filename, content, origin })
+        }
+        return agents
+      } catch {
+        return []
       }
-      return agents
-    } catch {
-      return []
     }
+    return [
+      ...scanDir(path.join(os.homedir(), '.clerkbox', 'agents'), 'user'),
+      ...scanDir(path.join(workingDir, '.clerkbox', 'agents'), 'project'),
+    ]
   })
 
   // 读取记忆索引文件 MEMORY.md，按行数和字节数截断

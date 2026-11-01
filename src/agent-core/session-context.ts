@@ -8,7 +8,29 @@
  * - 主进程宿主（P3）：AgentSessionManager 直接持有同样的对象。
  */
 import { TokenTracker } from '../lib/token-tracker'
-import type { FileCheckpoint, FileMutationGap, ReadFileSnapshot, TaskMode } from '../types/agent'
+import type { AgentDefinition, FileCheckpoint, FileMutationGap, Message, ReadFileSnapshot, SubAgentUsage, TaskMode } from '../types/agent'
+
+/**
+ * 子代理运行期记录（挂在 SessionContext 上）。
+ *
+ * 供三件事查址：send_message_to_agent 的三态投递、详情面板的 steering 注入、
+ * 单子代理取消。record.messages 是最近一次循环结束时的完整对话 —— 续跑
+ * （SendMessage 唤醒已完成 run）靠它重建上下文，进程内有效（与后台任务同边界）。
+ */
+export interface SubagentRunRecord {
+  id: string
+  agent: AgentDefinition
+  controller: AbortController
+  /** 运行中注入的指令（send_message_to_agent / 用户 steering），循环下一轮迭代顶部消费 */
+  pendingMessages: string[]
+  /** 最近一次循环的完整对话（续跑用；运行中由 wrapper 在收尾时回写） */
+  messages: Message[]
+  running: boolean
+  /** 续聊代数：send_message_to_agent 唤醒已完成 run 时 +1（0=首轮） */
+  continuations: number
+  /** 最近一次运行的用量统计（前台结果回传的 <usage> 块与后台通知共用） */
+  usage?: SubAgentUsage
+}
 
 export class SessionContext {
   readonly sessionId: string
@@ -55,6 +77,19 @@ export class SessionContext {
    * 「这个会话里别再问我」，不是「这一轮别再问我」。
    */
   readonly grantedAgentActions = new Set<string>()
+
+  // ── 多子代理编排状态 ──
+  /**
+   * 本会话的子代理运行记录（含运行中与已完成）。
+   * send_message_to_agent / steering / 单取消都按 runId 在这里查址。
+   * 容量上限：达到后淘汰最早的已完成记录（运行中的永不淘汰）。
+   */
+  readonly subagentRuns = new Map<string, SubagentRunRecord>()
+  /**
+   * 已完成后台子代理的待注入通知。主循环在每轮迭代顶部 drain（多条合并为一条
+   * isSubAgentNotice 消息）；主循环空闲时留存，随下一条用户消息的新 run 注入。
+   */
+  readonly pendingSubagentNotifications: string[] = []
 
   // ── 消息撤回 / 改动回滚 ──
   /**
@@ -104,4 +139,48 @@ export class SessionContextStore {
   sessionIds(): string[] {
     return [...this.contexts.keys()]
   }
+}
+
+// ── 子代理控制注册表（进程内单例）──
+//
+// UI / 工具处理器要按 (sessionId, runId) 精确取消或注入某个子代理，而 AbortController
+// 与 pendingMessages 都活在 loop 的闭包深处。注册表由 loop 在每次子代理 run 前后登记 /
+// 注销；渲染层宿主与主进程宿主各持一份实例（各自进程内的 run 各自登记）。
+
+const subagentControllers = new Map<string, AbortController>()
+const subagentSteerSinks = new Map<string, (text: string) => boolean>()
+
+const subagentControlKey = (sessionId: string, runId: string): string => `${sessionId}\u0000${runId}`
+
+export function registerSubagentControl(
+  sessionId: string,
+  runId: string,
+  control: { controller: AbortController; steer: (text: string) => boolean }
+): void {
+  const key = subagentControlKey(sessionId, runId)
+  subagentControllers.set(key, control.controller)
+  subagentSteerSinks.set(key, control.steer)
+}
+
+export function unregisterSubagentControl(sessionId: string, runId: string): void {
+  const key = subagentControlKey(sessionId, runId)
+  subagentControllers.delete(key)
+  subagentSteerSinks.delete(key)
+}
+
+/** 单子代理取消（进程内路径）：返回 false 表示该 run 不在本进程运行 */
+export function abortSubagentLocal(sessionId: string, runId: string): boolean {
+  const controller = subagentControllers.get(subagentControlKey(sessionId, runId))
+  if (!controller) return false
+  controller.abort(new Error('stopped by user'))
+  return true
+}
+
+/**
+ * 向运行中的子代理注入指令（进程内路径）。返回 false = run 不在运行
+ * （不存在或已终态），调用方走续跑分支。
+ */
+export function steerSubagentLocal(sessionId: string, runId: string, text: string): boolean {
+  const steer = subagentSteerSinks.get(subagentControlKey(sessionId, runId))
+  return steer ? steer(text) : false
 }

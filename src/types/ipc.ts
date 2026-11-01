@@ -79,6 +79,8 @@ export interface MessageRow {
   files_reverted?: number
   /** 0 or 1 —— 合成的「文件已撤销」回执（user 角色承载，渲染成回执条而非用户气泡） */
   is_rewind_notice?: number
+  /** 0 or 1 —— 后台子代理完成通知（user 角色承载，渲染成通知条而非用户气泡） */
+  is_sub_agent_notice?: number
 }
 
 export interface WebSearchResult {
@@ -548,7 +550,7 @@ export interface ClerkBoxAPI {
   /** 账号快照推送；返回退订函数 */
   onJouleState: (callback: (snapshot: JouleStateSnapshot) => void) => () => void
   scanMemory: (workingDir: string) => Promise<MemoryEntry[]>
-  scanAgents: (workingDir: string) => Promise<Array<{ filename: string; content: string }>>
+  scanAgents: (workingDir: string) => Promise<Array<{ filename: string; content: string; origin: 'user' | 'project' }>>
   readMemoryIndex: (workingDir: string) => Promise<{ content: string; wasTruncated: boolean; reason?: string }>
   writeMemoryFile: (workingDir: string, slug: string, frontmatter: string, content: string) => Promise<void>
   updateMemoryIndex: (workingDir: string, entryLine: string, slug: string) => Promise<void>

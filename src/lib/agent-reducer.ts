@@ -22,6 +22,9 @@ export type StorePatch =
   | { kind: 'set-todos'; sessionId: string; items: TodoItem[] }
   | { kind: 'set-goal'; sessionId: string; goal: SessionGoal | null }
   | { kind: 'upsert-subagent-run'; sessionId: string; run: SubAgentRun }
+  /** 子代理消息级增量（修复 O(n²) 镜像）：run 已存在时追加/更新单条消息 */
+  | { kind: 'append-subagent-message'; sessionId: string; runId: string; message: Message }
+  | { kind: 'update-subagent-message'; sessionId: string; runId: string; messageId: string; updates: Partial<Message> }
   | { kind: 'open-question'; sessionId: string; requestId: string; questions: UserQuestion[] }
   /** 宿主待批审批：带 tool/args 才画得出富预览与「本会话允许」的匹配键 */
   | {
@@ -109,6 +112,10 @@ export function planAgentEvent(event: AgentEvent): StorePatch[] {
       return [{ kind: 'set-goal', sessionId: event.sessionId, goal: event.goal ?? null }]
     case 'subagent.updated':
       return [{ kind: 'upsert-subagent-run', sessionId: event.sessionId, run: event.run }]
+    case 'subagent.message.appended':
+      return [{ kind: 'append-subagent-message', sessionId: event.sessionId, runId: event.runId, message: event.message }]
+    case 'subagent.message.updated':
+      return [{ kind: 'update-subagent-message', sessionId: event.sessionId, runId: event.runId, messageId: event.messageId, updates: event.updates }]
     case 'usage.updated':
       // 宿主目前不广播用量（P3 只在宿主侧留档），上下文指示器的宿主化属 P5 范围
       return []

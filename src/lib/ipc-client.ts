@@ -644,7 +644,7 @@ agentBrowserEnsurePanel: (sessionId?: string): Promise<boolean> =>
   // Memory system
   scanMemory: (workingDir: string): Promise<MemoryEntry[]> =>
     isElectron ? window.clerkbox.scanMemory(workingDir) : webInvoke('scanMemory', [workingDir]),
-  scanAgents: (workingDir: string): Promise<Array<{ filename: string; content: string }>> =>
+  scanAgents: (workingDir: string): Promise<Array<{ filename: string; content: string; origin: 'user' | 'project' }>> =>
     isElectron ? window.clerkbox.scanAgents(workingDir) : webInvoke('scanAgents', [workingDir]),
   readMemoryIndex: (workingDir: string): Promise<{ content: string; wasTruncated: boolean; reason?: string }> =>
     isElectron ? window.clerkbox.readMemoryIndex(workingDir) : webInvoke('readMemoryIndex', [workingDir]),

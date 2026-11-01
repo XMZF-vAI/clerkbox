@@ -108,9 +108,9 @@ const appTools: ToolDefinition[] = [
   {
     name: 'app_list_agents',
     description:
-      'List the sub-agent definitions available for spawn_agent: the built-ins plus any project-local custom agents.\n' +
+      'List the sub-agent definitions available for spawn_agent: the built-ins plus user-level (~/.clerkbox/agents) and project-level (.clerkbox/agents) custom agents.\n' +
       'Usage:\n' +
-      `- Returns up to ${APP_AGENTS_MAX} entries: agentType (the value to pass to spawn_agent), display name, description, and whether it is built-in or project-defined.\n` +
+      `- Returns up to ${APP_AGENTS_MAX} entries: agentType (the value to pass to spawn_agent), display name, description, and origin (built-in / user / project).\n` +
       '- Read-only: no side effects, never needs approval.',
     parameters: {
       type: 'object',
@@ -363,7 +363,7 @@ async function runAppListAgents(ctx: ToolContext | undefined): Promise<string> {
 
   const lines: string[] = [`[App agents: ${Math.min(agents.length, APP_AGENTS_MAX)} of ${agents.length}]`]
   for (const a of agents.slice(0, APP_AGENTS_MAX)) {
-    const origin = a.source === 'custom' ? 'project' : 'built-in'
+    const origin = a.source === 'custom' ? (a.origin ?? 'project') : 'built-in'
     const desc = truncateEnd(a.description || a.whenToUse || '', APP_SKILL_DESC_CHARS_MAX)
     lines.push(`- ${a.agentType} (${origin}) | ${a.name}${desc ? ` | ${desc}` : ''}`)
   }

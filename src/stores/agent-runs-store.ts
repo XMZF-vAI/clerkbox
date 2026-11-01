@@ -15,6 +15,8 @@ interface AgentRunsState {
   completeSubAgentRun: (sessionId: string, runId: string, result: string) => void
   failSubAgentRun: (sessionId: string, runId: string, error: string) => void
   abortSubAgentRun: (sessionId: string, runId: string) => void
+  /** 局部修补 run 的非消息字段（background 标记 / usage / 续聊代数 / 续跑回 running） */
+  patchSubAgentRun: (sessionId: string, runId: string, patch: Partial<SubAgentRun>) => void
   selectRun: (runId: string | null) => void
   clearSession: (sessionId: string) => void
 }
@@ -119,6 +121,17 @@ export const useAgentRunsStore = create<AgentRunsState>((set) => ({
               ? { ...r, status: 'aborted' as const, finishedAt: Date.now() }
               : r
           ),
+        },
+      }
+    }),
+
+  patchSubAgentRun: (sessionId, runId, patch) =>
+    set((state) => {
+      const runs = state.runsBySession[sessionId] || []
+      return {
+        runsBySession: {
+          ...state.runsBySession,
+          [sessionId]: runs.map((r) => (r.id === runId ? { ...r, ...patch } : r)),
         },
       }
     }),

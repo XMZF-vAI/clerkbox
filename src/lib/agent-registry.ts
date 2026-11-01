@@ -1,7 +1,12 @@
-import type { AgentDefinition } from '../types/agent'
+import type { AgentDefinition, ReasoningEffort } from '../types/agent'
 import { ipc } from './ipc-client'
 
-const MAX_CUSTOM_AGENT_TURNS = 100
+/**
+ * 自定义 agent 的 maxTurns 显式值上限。与主循环 MAX_REACT_ITERATIONS 同值同语义：
+ * 子代理轮次是防失控护栏，显式配置也不该越过主循环自己的天花板。
+ * （未写 maxTurns 的 profile 走 loop 的 DEFAULT_SUBAGENT_MAX_TURNS 统一默认。）
+ */
+export const SUBAGENT_MAX_TURNS_CAP = 500
 
 // ── 内置 agent 定义 ──
 
@@ -60,13 +65,19 @@ export const BUILTIN_AGENTS: AgentDefinition[] = [
 
 // ── frontmatter 解析 ──
 
+type FrontmatterValue = string | string[]
+
 // 解析 agent 文件的 frontmatter 与正文
 // 格式：---\nkey: value\n---\n\nbody
+//
+// 宽松解析（对齐 ZCode 的防注入思路）：刻意不用完整 YAML 引擎——
+// 嵌套 mapping（如 mcpServers:）这类能携带结构性注入的字段直接忽略；
+// 支持的是用户真正会用到的三件事：引号值、行内数组、dash 列表。
 export function parseAgentFrontmatter(content: string): {
-  frontmatter: Record<string, string>
+  frontmatter: Record<string, FrontmatterValue>
   body: string
 } {
-  const result: { frontmatter: Record<string, string>; body: string } = {
+  const result: { frontmatter: Record<string, FrontmatterValue>; body: string } = {
     frontmatter: {},
     body: '',
   }
@@ -88,7 +99,9 @@ export function parseAgentFrontmatter(content: string): {
   // body 去掉开头的空行
   result.body = bodyRaw.replace(/^\n+/, '')
 
-  for (const rawLine of fmBlock.split('\n')) {
+  const lines = fmBlock.split('\n')
+  for (let i = 0; i < lines.length; i++) {
+    const rawLine = lines[i]!
     const line = rawLine.trim()
     if (!line || line.startsWith('#')) continue
     const colonIdx = line.indexOf(':')
@@ -96,22 +109,84 @@ export function parseAgentFrontmatter(content: string): {
     const key = line.slice(0, colonIdx).trim()
     const value = line.slice(colonIdx + 1).trim()
     if (!key) continue
-    result.frontmatter[key] = value
+
+    if (value === '') {
+      // 空值后面跟缩进 dash 行 → dash 列表；跟其它缩进行（嵌套 mapping）→ 忽略（防注入）
+      const items: string[] = []
+      let j = i + 1
+      while (j < lines.length) {
+        const next = lines[j]!
+        if (!next.trim() || next.trim().startsWith('#')) { j++; continue }
+        if (/^\s+-\s+/.test(next) || /^\s+-\S/.test(next)) {
+          items.push(unquoteScalar(next.replace(/^\s+-\s*/, '').trim()))
+          j++
+          continue
+        }
+        break
+      }
+      if (items.length > 0) {
+        result.frontmatter[key] = items
+        i = j - 1
+      }
+      continue
+    }
+    result.frontmatter[key] = unquoteScalar(value)
   }
   return result
 }
 
-// 解析数组语法 [a, b, c]：去方括号、按逗号分割、trim
-function parseStringArray(raw: string | undefined): string[] | undefined {
-  if (!raw) return undefined
+/** 剥掉成对引号并反转义引号内的 \"（宽松：不成对的引号原样保留） */
+function unquoteScalar(raw: string): string {
+  const trimmed = raw.trim()
+  if (trimmed.length >= 2) {
+    const first = trimmed[0]
+    const last = trimmed[trimmed.length - 1]
+    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+      const inner = trimmed.slice(1, -1)
+      return first === '"' ? inner.replace(/\\"/g, '"') : inner
+    }
+  }
+  return trimmed
+}
+
+/** 工具列表字段：支持 dash 列表、行内 [a, b] 与逗号分隔三种写法 */
+function parseStringArray(raw: FrontmatterValue | undefined): string[] | undefined {
+  if (raw === undefined) return undefined
+  if (Array.isArray(raw)) {
+    const items = raw.map((s) => s.trim()).filter((s) => s.length > 0)
+    return items.length > 0 ? items : undefined
+  }
   const trimmed = raw.trim()
   if (!trimmed) return undefined
   const inner = trimmed.replace(/^\[/, '').replace(/\]$/, '').trim()
-  if (!inner) return []
+  if (!inner) return undefined
   return inner
     .split(',')
     .map((s) => s.trim())
     .filter((s) => s.length > 0)
+}
+
+function parseBoolean(raw: FrontmatterValue | undefined): boolean | undefined {
+  if (raw === undefined || Array.isArray(raw)) return undefined
+  const v = raw.trim().toLowerCase()
+  if (v === 'true' || v === 'yes') return true
+  if (v === 'false' || v === 'no') return false
+  return undefined
+}
+
+function parsePositiveInt(raw: FrontmatterValue | undefined, cap?: number): number | undefined {
+  if (raw === undefined || Array.isArray(raw)) return undefined
+  const parsed = parseInt(raw.trim(), 10)
+  if (!Number.isFinite(parsed) || parsed <= 0) return undefined
+  return cap !== undefined ? Math.min(parsed, cap) : parsed
+}
+
+const REASONING_EFFORTS: readonly ReasoningEffort[] = ['minimal', 'low', 'medium', 'high', 'max', 'xhigh']
+
+function parseReasoningEffort(raw: FrontmatterValue | undefined): ReasoningEffort | undefined {
+  if (raw === undefined || Array.isArray(raw)) return undefined
+  const v = raw.trim().toLowerCase() as ReasoningEffort
+  return REASONING_EFFORTS.includes(v) ? v : undefined
 }
 
 // 从 filename 去掉路径与扩展名，作为 agentType 兜底
@@ -124,7 +199,7 @@ function basenameNoExt(filename: string): string {
 // ── 自定义 agent 加载 ──
 
 export async function loadCustomAgents(workingDir: string): Promise<AgentDefinition[]> {
-  let files: Array<{ filename: string; content: string }>
+  let files: Array<{ filename: string; content: string; origin?: 'user' | 'project' }>
   try {
     files = await ipc.scanAgents(workingDir)
   } catch {
@@ -134,22 +209,19 @@ export async function loadCustomAgents(workingDir: string): Promise<AgentDefinit
   for (const file of files) {
     try {
       const { frontmatter, body } = parseAgentFrontmatter(file.content)
-      const agentType = frontmatter.name?.trim() || basenameNoExt(file.filename)
-      const description = frontmatter.description?.trim() ?? ''
+      const agentType = (Array.isArray(frontmatter.name) ? '' : frontmatter.name?.trim()) || basenameNoExt(file.filename)
+      const description = Array.isArray(frontmatter.description) ? '' : frontmatter.description?.trim() ?? ''
       const displayName = description || agentType
-      const whenToUse = frontmatter.whenToUse?.trim() || description
+      const whenToUse = Array.isArray(frontmatter.whenToUse) ? '' : frontmatter.whenToUse?.trim() || description
       const tools = parseStringArray(frontmatter.tools)
       const disallowedTools = parseStringArray(frontmatter.disallowedTools)
-      const model = frontmatter.model?.trim() || undefined
-      const maxTurnsRaw = frontmatter.maxTurns?.trim()
-      let maxTurns: number | undefined
-      if (maxTurnsRaw) {
-        const parsed = parseInt(maxTurnsRaw, 10)
-        maxTurns = Number.isFinite(parsed) && parsed > 0
-          ? Math.min(parsed, MAX_CUSTOM_AGENT_TURNS)
-          : undefined
-      }
-      const color = frontmatter.color?.trim() || undefined
+      const model = Array.isArray(frontmatter.model) ? undefined : frontmatter.model?.trim() || undefined
+      const maxTurns = parsePositiveInt(frontmatter.maxTurns, SUBAGENT_MAX_TURNS_CAP)
+      const color = Array.isArray(frontmatter.color) ? undefined : frontmatter.color?.trim() || undefined
+      const reasoningEffort = parseReasoningEffort(frontmatter.reasoningEffort)
+      const thinking = parseBoolean(frontmatter.thinking)
+      const thinkingBudget = parsePositiveInt(frontmatter.thinkingBudget)
+      const background = parseBoolean(frontmatter.background)
 
       agents.push({
         agentType,
@@ -161,8 +233,13 @@ export async function loadCustomAgents(workingDir: string): Promise<AgentDefinit
         model,
         maxTurns,
         color,
+        reasoningEffort,
+        thinking,
+        thinkingBudget,
+        background,
         systemPrompt: body,
         source: 'custom',
+        origin: file.origin ?? 'project',
       })
     } catch {
       // 单个文件解析失败跳过，不中断后续文件
@@ -174,14 +251,19 @@ export async function loadCustomAgents(workingDir: string): Promise<AgentDefinit
 
 // ── 合并内置与自定义 agent ──
 
-// Built-in agent identifiers stay reserved so project-local definitions cannot alter
-// the permissions or behavior users expect from standard agent types.
+// 三级合并：内置 < 用户级 < 项目级。同名覆盖（ZCode 同款语义）：
+// 项目里的 code-reviewer 可以整体换掉内置/用户级的同名定义——
+// 这是 profile 系统的主能力而不是漏洞（子代理的权限仍由执行层白/黑名单与
+// 审批档位约束，profile 只能收窄、不能提升，见 checkToolPermission）。
 export async function getAllAgents(workingDir: string): Promise<AgentDefinition[]> {
   const custom = await loadCustomAgents(workingDir)
   const map = new Map<string, AgentDefinition>()
   for (const a of BUILTIN_AGENTS) map.set(a.agentType, a)
-  for (const a of custom) {
-    if (!map.has(a.agentType)) map.set(a.agentType, a)
+  // 用户级先进、项目级后进 → 同名时项目级覆盖用户级
+  for (const origin of ['user', 'project'] as const) {
+    for (const a of custom) {
+      if (a.origin === origin) map.set(a.agentType, a)
+    }
   }
   return Array.from(map.values())
 }

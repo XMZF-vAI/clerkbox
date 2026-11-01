@@ -28,7 +28,7 @@ import { normalizeHarnessMode } from '../src/lib/harness-modes'
 import { buildPermissionPreview, formatPermissionAuditContent, type PermissionDecision } from '../src/lib/permission-preview'
 import i18n from '../src/i18n'
 import { makeId, runReactLoop } from '../src/agent-core/loop'
-import { SessionContextStore } from '../src/agent-core/session-context'
+import { SessionContextStore, abortSubagentLocal, steerSubagentLocal } from '../src/agent-core/session-context'
 import { createSeqCounter } from '../src/agent-core/protocol'
 import type { AgentCommand, AgentCommandResult, AgentEvent, AgentSnapshot } from '../src/agent-core/protocol'
 import type { AgentPermissionRequest, AgentPorts, AgentSettings, PermissionApproval } from '../src/agent-core/ports'
@@ -427,20 +427,21 @@ export class AgentSessionManager {
         appendSubAgentMessage: (_sid, runId, msg) => {
           const run = s.subRuns.get(runId)
           if (!run) return
-          const next = { ...run, messages: [...run.messages, msg] }
-          s.subRuns.set(runId, next)
-          this.emit(s, { type: 'subagent.updated', sessionId, run: next })
+          // 消息级增量事件：整 run 重发的字节量随消息数平方增长，会挤爆事件环触发
+          // 全量 resync（旧实现的 O(n²) 镜像）。run 级状态补丁才走 subagent.updated。
+          s.subRuns.set(runId, { ...run, messages: [...run.messages, msg] })
+          this.emit(s, { type: 'subagent.message.appended', sessionId, runId, message: msg })
         },
         updateSubAgentMessage: (_sid, runId, msgId, updates) => {
           const run = s.subRuns.get(runId)
           if (!run) return
-          const next = { ...run, messages: run.messages.map((m) => (m.id === msgId ? { ...m, ...updates } : m)) }
-          s.subRuns.set(runId, next)
-          this.emit(s, { type: 'subagent.updated', sessionId, run: next })
+          s.subRuns.set(runId, { ...run, messages: run.messages.map((m) => (m.id === msgId ? { ...m, ...updates } : m)) })
+          this.emit(s, { type: 'subagent.message.updated', sessionId, runId, messageId: msgId, updates })
         },
         completeSubAgentRun: (_sid, runId, result) => this.patchSubRun(s, runId, { status: 'completed', result, finishedAt: Date.now() }),
         abortSubAgentRun: (_sid, runId) => this.patchSubRun(s, runId, { status: 'aborted', finishedAt: Date.now() }),
         failSubAgentRun: (_sid, runId, error) => this.patchSubRun(s, runId, { status: 'failed', error, finishedAt: Date.now() }),
+        patchSubAgentRun: (_sid, runId, patch) => this.patchSubRun(s, runId, patch),
       },
       goal: {
         get: () => s.goal as never,
@@ -705,6 +706,16 @@ export class AgentSessionManager {
         return this.rewind(s, cmd.anchorMessageId, cmd.scope, false)
       case 'rewind.apply':
         return this.rewind(s, cmd.anchorMessageId, cmd.scope, true)
+      case 'subagent.stop': {
+        // 单子代理取消：只中止该 run 的循环，父轮与其它子代理不受影响。
+        // 本地注册表查不到 = 该 run 不在本进程运行（已终态或跨进程），如实回执。
+        const stopped = abortSubagentLocal(cmd.sessionId, cmd.runId)
+        return stopped ? { ok: true } : { ok: false, error: 'subagent-not-running' }
+      }
+      case 'subagent.steer': {
+        const steered = steerSubagentLocal(cmd.sessionId, cmd.runId, cmd.text)
+        return steered ? { ok: true } : { ok: false, error: 'subagent-not-running' }
+      }
       default:
         return { ok: false, error: 'unknown-command' }
     }

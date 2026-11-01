@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
-import { ArrowLeft, Bot, Loader2, CheckCircle, XCircle, Wrench, Brain } from 'lucide-react'
+import { ArrowLeft, Bot, Loader2, CheckCircle, XCircle, Wrench, Brain, Square, SendHorizontal } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useAgentRunsStore } from '../../stores/agent-runs-store'
-import type { Message, ToolCall, ToolResult } from '../../types/agent'
+import { stopSubAgentRun, steerSubAgentRun } from '../../lib/subagent-control'
+import type { Message, SubAgentUsage, ToolCall, ToolResult } from '../../types/agent'
 
 interface SubAgentDetailContentProps {
   sessionId: string
@@ -131,6 +132,13 @@ function SubAgentMessage({ msg, vibe }: { msg: Message; vibe?: boolean }) {
   )
 }
 
+// 用量摘要（详情头部）：1.2k tok · 8 次工具 · 35s
+function formatUsage(usage: SubAgentUsage): string {
+  const tokens = usage.totalTokens >= 1000 ? `${(usage.totalTokens / 1000).toFixed(1)}k` : String(usage.totalTokens)
+  const seconds = Math.max(1, Math.round(usage.durationMs / 1000))
+  return `${tokens} tok · ${usage.toolCalls}× · ${seconds}s`
+}
+
 /**
  * 子 Agent 运行详情的工作台内容（原右侧浮层迁移版，由 WorkbenchPanel 的标签承载）。
  * 无任何用户入口——只有聊天中的子 Agent 卡片点击才会打开对应标签。
@@ -142,6 +150,8 @@ export function SubAgentDetailContent({ sessionId, runId, titleSnapshot, active,
     return (s.runsBySession[sessionId] || []).find((r) => r.id === runId) || null
   })
   const [elapsed, setElapsed] = useState(0)
+  const [steerText, setSteerText] = useState('')
+  const [stopping, setStopping] = useState(false)
   const panelRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -219,6 +229,30 @@ export function SubAgentDetailContent({ sessionId, runId, titleSnapshot, active,
         <Bot className="h-4 w-4 shrink-0 text-md-primary" />
         <span className={`min-w-0 truncate text-sm font-medium ${vibe ? 'text-white/90' : 'text-md-onSurface'}`}>{run.agentName}</span>
         <span className="shrink-0 rounded bg-md-primaryContainer/30 px-1.5 py-0.5 text-[10px] text-md-primary">{run.agentType}</span>
+        {run.background && (
+          <span className="shrink-0 rounded bg-md-tertiary/15 px-1.5 py-0.5 text-[10px] text-md-tertiary">{t('chat.subAgentBackgroundBadge')}</span>
+        )}
+        {/* 单子代理取消：只停这个 run，父轮与其它子代理不受影响 */}
+        {run.status === 'running' && (
+          <button
+            type="button"
+            className={`ml-auto flex shrink-0 items-center gap-1 rounded px-1.5 py-1 text-[10px] text-md-error disabled:opacity-50 ${vibe ? 'hover:bg-white/10' : 'hover:bg-md-error/10'}`}
+            disabled={stopping}
+            onClick={async () => {
+              setStopping(true)
+              try {
+                await stopSubAgentRun(sessionId, runId)
+              } finally {
+                setStopping(false)
+              }
+            }}
+            title={t('chat.subAgentStopTitle')}
+            aria-label={t('chat.subAgentStopAria', { name: run.agentName })}
+          >
+            {stopping ? <Loader2 className="h-3 w-3 animate-spin" /> : <Square className="h-3 w-3" />}
+            {t('chat.subAgentStop')}
+          </button>
+        )}
       </div>
 
       {/* 任务摘要 */}
@@ -229,6 +263,12 @@ export function SubAgentDetailContent({ sessionId, runId, titleSnapshot, active,
           {statusConfig.icon}
           <span className={statusConfig.class}>{statusConfig.label}</span>
           {run.status === 'running' && elapsed > 0 && <span className={vibe ? 'text-white/50' : 'text-md-onSurfaceVariant'}>{elapsed}s</span>}
+          {(run.continuations ?? 0) > 0 && (
+            <span className={vibe ? 'text-white/50' : 'text-md-onSurfaceVariant'}>· {t('chat.subAgentContinuations', { count: run.continuations ?? 0 })}</span>
+          )}
+          {run.status !== 'running' && run.usage && (
+            <span className={vibe ? 'text-white/50' : 'text-md-onSurfaceVariant'}>· {formatUsage(run.usage)}</span>
+          )}
           {run.status === 'completed' && run.result && (
             <span className={vibe ? 'text-white/50' : 'text-md-onSurfaceVariant'}>· {t('chat.subAgentCharResult', { count: (run.result.length / 1000).toFixed(1) })}</span>
           )}
@@ -246,6 +286,39 @@ export function SubAgentDetailContent({ sessionId, runId, titleSnapshot, active,
           run.messages.map((msg) => <SubAgentMessage key={msg.id} msg={msg} vibe={vibe} />)
         )}
       </div>
+
+      {/* 运行中 steering：向子代理注入指令，下一轮迭代顶部消费 */}
+      {run.status === 'running' && (
+        <form
+          className={`flex items-center gap-1.5 border-t px-3 py-2 ${vibe ? 'border-white/10' : 'border-md-outlineVariant/30'}`}
+          onSubmit={async (e) => {
+            e.preventDefault()
+            const text = steerText.trim()
+            if (!text) return
+            const ok = await steerSubAgentRun(sessionId, runId, text)
+            if (ok) setSteerText('')
+          }}
+        >
+          <input
+            type="text"
+            value={steerText}
+            onChange={(e) => setSteerText(e.target.value)}
+            placeholder={t('chat.subAgentSteerPlaceholder')}
+            aria-label={t('chat.subAgentSteerAria')}
+            className={`min-w-0 flex-1 rounded border px-2 py-1 text-xs focus:outline-none focus-visible:ring-1 focus-visible:ring-md-primary/50 ${
+              vibe ? 'border-white/10 bg-white/5 text-white/90 placeholder:text-white/30' : 'border-md-outlineVariant/30 bg-dark-surfaceContainer text-md-onSurface placeholder:text-md-onSurfaceVariant/40'
+            }`}
+          />
+          <button
+            type="submit"
+            className={`shrink-0 rounded p-1.5 text-md-primary disabled:opacity-40 ${vibe ? 'hover:bg-white/10' : 'hover:bg-md-primaryContainer/20'}`}
+            disabled={!steerText.trim()}
+            aria-label={t('chat.subAgentSteerSend')}
+          >
+            <SendHorizontal className="h-3.5 w-3.5" />
+          </button>
+        </form>
+      )}
 
       {/* 最终结果 */}
       {run.status === 'completed' && run.result && (

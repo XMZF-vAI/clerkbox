@@ -197,6 +197,7 @@ export function useAgent(sessionId: string) {
       completeSubAgentRun: (sid, runId, result) => useAgentRunsStore.getState().completeSubAgentRun(sid, runId, result),
       abortSubAgentRun: (sid, runId) => useAgentRunsStore.getState().abortSubAgentRun(sid, runId),
       failSubAgentRun: (sid, runId, errMsg) => useAgentRunsStore.getState().failSubAgentRun(sid, runId, errMsg),
+      patchSubAgentRun: (sid, runId, patch) => useAgentRunsStore.getState().patchSubAgentRun(sid, runId, patch),
     },
     goal: {
       get: (sid) => useGoalStore.getState().bySession[sid],

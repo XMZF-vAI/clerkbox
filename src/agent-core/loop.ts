@@ -29,6 +29,7 @@ import { renderSkillCatalog, type SkillCatalogEntry } from '../lib/skill-catalog
 import { TokenTracker } from '../lib/token-tracker'
 import { estimateTokensForText } from '../lib/token-estimate'
 import type {
+  AgentDefinition,
   ApiCompat,
   FileMutation,
   GoalVerdict,
@@ -43,7 +44,13 @@ import type {
   TokenUsage,
 } from '../types/agent'
 import type { AgentPorts, AgentSettings } from './ports'
-import type { SessionContext } from './session-context'
+import {
+  registerSubagentControl,
+  unregisterSubagentControl,
+  type SessionContext,
+  type SubagentRunRecord,
+} from './session-context'
+import type { ToolContext } from '../lib/tool-registry'
 import { gapFromToolCall, isRewindableUserMessage } from '../lib/rewind'
 import { agentActionFamily, agentActionGrantKey, isAgentActionToolReadOnly } from '../lib/agent-actions'
 
@@ -395,6 +402,8 @@ const parseStream = async (
 /** Send messages to API and get streaming response.
  *  opts.modelOverride: 子 agent 模式下覆盖 settings.model。
  *  opts.thinkingBlocks: anthropic 协议下带签名的 thinking block 缓存（本轮内有效）。
+ *  opts.settingsOverride: 子 agent 按 profile 覆盖模型级参数（推理档位/思考开关与预算）。
+ *  opts.toolFilter: 子 agent 的 schema 级工具裁剪（白/黑名单 + 隐藏集合）。
  *  返回文本分片流 + 协议标记，交给 parseStream 解析。 */
 async function callAPI(
   ports: AgentPorts,
@@ -405,16 +414,33 @@ async function callAPI(
     thinkingBlocks?: Map<string, AnthropicThinkingBlock[]>
     /** 本会话锁定的 harness 模式：决定传给模型的内置工具集/描述（子 agent 与评估器不传，走 default） */
     harnessMode?: HarnessMode
+    /** 子 agent 变体：模型级参数覆盖（与 ports.settings 合并后生效） */
+    settingsOverride?: Partial<AgentSettings>
+    /** 子 agent 变体：schema 级工具裁剪 */
+    toolFilter?: { allowedTools?: string[]; disallowedTools?: string[]; hidden?: ReadonlySet<string> }
   } = {}
 ): Promise<{ chunks: AsyncIterable<string>; compat: ApiCompat }> {
-  const settings = ports.settings
+  const settings = opts.settingsOverride ? { ...ports.settings, ...opts.settingsOverride } : ports.settings
   // Get all tool definitions (skills are prompt-only, no dynamic tools)
   // 兼容模式下按模式取内置工具定义（dsh-minimal 裁剪 + 描述覆盖），MCP 工具不受影响
-  const tools = ports.tools.definitions(opts.harnessMode ?? 'default').map((t) => ({
+  let tools = ports.tools.definitions(opts.harnessMode ?? 'default').map((t) => ({
     name: t.name,
     description: t.description,
     parameters: t.parameters,
   }))
+  // 子 agent 的 schema 级裁剪：模型看不到的工具不会浪费 token，也不会试探性调用
+  // （与 Agent 动作能力开关同一哲学）。Agent 动作工具（browser_/computer_）在子代理
+  // 里既无审批恢复面也无执行面，一并隐藏。
+  if (opts.toolFilter) {
+    const { allowedTools, disallowedTools, hidden } = opts.toolFilter
+    tools = tools.filter((t) => {
+      if (hidden?.has(t.name)) return false
+      if (agentActionFamily(t.name)) return false
+      if (disallowedTools?.includes(t.name)) return false
+      if (allowedTools !== undefined && !allowedTools.includes('*') && !allowedTools.includes(t.name)) return false
+      return true
+    })
+  }
 
   const effectiveModel = opts.modelOverride || settings.model
   const compat: ApiCompat = settings.apiCompat || 'openai'
@@ -1218,39 +1244,100 @@ function recordToolGap(ports: AgentPorts, ctx: SessionContext, toolName: string,
   flushRewindAnchor(ports, ctx)
 }
 
-export async function runReactLoop(
+// ═══════════════ 统一 ReAct 循环（主对话与子代理共用）═══════════════
+//
+// 主对话与子代理曾是两套平行复刻的循环（runReactLoop / runSubAgentLoop，约 390 行重复），
+// compact / doom-loop / 重试 / 收尾注入等机制改一处极易漏另一处。现在差异点全部收进
+// AgentLoopVariant：消息面（store vs run 轨迹）、提示词来源、模型与推理参数覆盖、
+// 工具 schema 裁剪、maxTurns、完成后的收口方式。机制层面只此一份。
+
+/** 子代理 schema 级隐藏工具。这些工具在子代理语境没有执行面（ctx 不注入 handler，
+ *  调用只会得到运行时错误）或没有审批恢复面（question 需要用户在场）——
+ *  与其让模型看到再失败，不如 schema 层直接隐藏（对齐 ZCode「派发工具不进子代理」）。 */
+const SUBAGENT_HIDDEN_TOOLS = new Set(['spawn_agent', 'send_message_to_agent', 'question', 'todowrite', 'scheduled_task'])
+
+/** 子代理默认轮次上限。maxTurns 是防失控护栏而不是目标值；agent 预设显式写了
+ *  maxTurns 的仍以预设为准，显式值封顶主循环上限（MAX_REACT_ITERATIONS）。 */
+export const DEFAULT_SUBAGENT_MAX_TURNS = 200
+
+/** 后台子代理完成通知里结果正文的截断上限 */
+const SUBAGENT_NOTIFICATION_RESULT_CAP = 4000
+
+/** 循环运行变体：主对话与子代理共用的差异点集合 */
+export interface AgentLoopVariant {
+  role: 'main' | 'subagent'
+  /** 主对话：本次运行的任务工作流模式与技能提醒（子代理不继承） */
+  taskMode?: TaskMode
+  skillReminder?: string
+  /** 子代理变体专属 */
+  subagent?: {
+    agent: AgentDefinition
+    subAgentId: string
+  }
+}
+
+/** runAgentLoop 的返回值：子代理 wrapper 据此收口运行记录与用量；主对话调用方忽略 */
+export interface AgentLoopResult {
+  /** 终止时最后一条 assistant 消息正文（无工具调用的那轮；收尾兜底语义与旧实现一致） */
+  text: string
+  aborted: boolean
+  /** 累计 API 用量 token（输入+输出）；全程无 usage 回报时为 null */
+  totalTokens: number | null
+  /** 执行到的工具调用总数（含被拒的调用） */
+  toolCallCount: number
+  /** 循环结束时的完整对话（子代理续跑依赖它） */
+  messages: Message[]
+}
+
+async function runAgentLoop(
   ports: AgentPorts,
   ctx: SessionContext,
   initialMessages: Message[],
   controller: AbortController,
-  taskMode?: TaskMode,
-  /** 当轮相关技能提醒（sendMessage 计算；跨轮复用同一文本保证 API 前缀稳定） */
-  skillReminder?: string
-) {
+  variant: AgentLoopVariant
+): Promise<AgentLoopResult> {
+  const isMain = variant.role === 'main'
+  const isSub = !isMain
+  const subAgent = variant.subagent?.agent
+  const subAgentId = variant.subagent?.subAgentId ?? ''
   const sessionId = ports.sessionId
   const settings = ports.settings
   let conversationMessages = [...initialMessages]
 
+  // ── 消息面：主对话走 store（持久化 + DB），子代理走 ui 的 run 轨迹（内存）。
+  // 子代理消息统一盖 subAgentId 章（轨迹归属依赖它）。 ──
+  const stampMessage = (m: Message): Message => (isSub ? { ...m, subAgentId } : m)
+  const sink = isSub
+    ? {
+        add: (m: Message) => ports.ui.appendSubAgentMessage(sessionId, subAgentId, m),
+        update: (id: string, patch: Partial<Message>) => ports.ui.updateSubAgentMessage(sessionId, subAgentId, id, patch),
+      }
+    : {
+        add: (m: Message) => ports.store.addMessage(sessionId, m),
+        update: (id: string, patch: Partial<Message>) => ports.store.updateMessage(sessionId, id, patch),
+      }
+
   // 撤回锚点 = 本次运行的最后一条真实用户消息；本轮所有文件快照都挂在它身上。
-  // 每次运行都重新开账：上一轮的快照不能算进这一轮的回滚范围。
-  const anchorIndex = initialMessages.reduce(
-    (last, message, index) => (isRewindableUserMessage(message) ? index : last),
-    -1
-  )
-  ctx.beginRewindTurn(anchorIndex >= 0 ? (initialMessages[anchorIndex]?.id ?? null) : null)
+  // 每次运行都重新开账：上一轮的快照不能算进这一轮的回滚范围。（子代理没有自己的
+  // 锚点——它的写操作经 recordFileMutation 记到父轮的账上。）
+  if (isMain) {
+    const anchorIndex = initialMessages.reduce(
+      (last, message, index) => (isRewindableUserMessage(message) ? index : last),
+      -1
+    )
+    ctx.beginRewindTurn(anchorIndex >= 0 ? (initialMessages[anchorIndex]?.id ?? null) : null)
+  }
 
   // 本会话锁定的 harness 兼容模式（首条消息后不可变更，循环开始时读一次即可）。
   // 子 agent 与 goal 评估器不继承：它们有独立的提示词与工具语境。
-  const harnessMode = normalizeHarnessMode(
-    ports.store.getSession(sessionId)?.harnessMode
-  )
+  const harnessMode = isMain
+    ? normalizeHarnessMode(ports.store.getSession(sessionId)?.harnessMode)
+    : 'default'
 
-  // ── Goal 工作流：会话级目标跨消息持续生效 ──
-  // 本次运行未显式选择工作流时，若目标处于 active，则继续按 goal 模式注入提示词
-  //（goal 不改变工具权限档位，只影响提示词语境与运行收尾的评估闭环）。
-  const sessionGoalAtStart = ports.goal.get(sessionId)
+  // ── Goal 工作流：会话级目标跨消息持续生效（仅主对话） ──
+  const sessionGoalAtStart = isMain ? ports.goal.get(sessionId) : undefined
   const effectiveTaskMode: TaskMode | undefined =
-    taskMode ?? (sessionGoalAtStart?.status === 'active' ? 'goal' : undefined)
+    variant.taskMode ?? (sessionGoalAtStart?.status === 'active' ? 'goal' : undefined)
   const goalCondition = sessionGoalAtStart?.status === 'active' ? sessionGoalAtStart.condition : undefined
   // Goal 评估器运行时状态：本次运行的续跑评估计数 / 连续无工具调用的评估计数（防空转）
   let goalEvaluationsThisRun = 0
@@ -1258,7 +1345,7 @@ export async function runReactLoop(
   let iterationHadToolCalls = false
 
   /** Goal 评估器：独立模型调用，依据转录中的可见证据判定三态；不执行任何工具。
-   *  用量计入全局统计但不进 tokenTracker（避免干扰自动压缩判定）。 */
+   *  用量计入全局统计但不进 tokenTracker（避免干扰自动压缩判定）。仅主对话调用。 */
   const evaluateGoal = async (
     condition: string,
     runController: AbortController
@@ -1302,23 +1389,24 @@ export async function runReactLoop(
 
   // Pre-fetch memory prompt —— 会话级冻结快照（见 SessionContext.memorySnapshot 注释）：
   // 每轮 reactLoop 重新构建的话，本轮 save_memory 写入的记忆会让下一轮
-  // memoryPrompt 变化，动态 system 段之后的前缀缓存全部作废。
+  // memoryPrompt 变化，动态 system 段之后的前缀缓存全部作废。（仅主对话注入）
   const workingDir = getWorkingDir(ports, ctx)
   const homeDir = ports.env.homeDir()
 
-  // AI 自主加载技能的感知映射：SKILL.md 规范化绝对路径 → 技能快照。
-  // read_file 命中时在助手消息上展示"已加载技能"芯片（仅 UI，不影响提示词）。
+  // AI 自主加载技能的感知映射：SKILL.md 规范化绝对路径 → 技能快照。（仅主对话）
   const skillPathMap = new Map<string, { id: string; name: string; icon: string; slug: string }>()
-  for (const entry of ports.skills.catalog()) {
-    skillPathMap.set(normalizePathForComparison(entry.skillMdPath), {
-      id: entry.id,
-      name: entry.name,
-      icon: entry.icon,
-      slug: entry.slug,
-    })
+  if (isMain) {
+    for (const entry of ports.skills.catalog()) {
+      skillPathMap.set(normalizePathForComparison(entry.skillMdPath), {
+        id: entry.id,
+        name: entry.name,
+        icon: entry.icon,
+        slug: entry.slug,
+      })
+    }
   }
   let memoryPrompt = ''
-  if (homeDir) {
+  if (isMain && homeDir) {
     const snapKey = `${sessionId}|${homeDir}|${workingDir}`
     const snap = ctx.memorySnapshot
     if (snap && snap.key === snapKey) {
@@ -1333,10 +1421,9 @@ export async function runReactLoop(
     }
   }
 
-  // Pre-fetch AGENTS.md (项目根指令) — 跨工具标准，Codex/OpenCode/Qwen 原生支持
-  // 开启 claudeMdCompat 时，AGENTS.md 不存在则回退读取 CLAUDE.md
+  // Pre-fetch AGENTS.md (项目根指令) — 跨工具标准，Codex/OpenCode/Qwen 原生支持（仅主对话）
   let agentsMdContent = ''
-  if (settings.agentsMdEnabled && workingDir) {
+  if (isMain && settings.agentsMdEnabled && workingDir) {
     try {
       const candidates = settings.claudeMdCompat
         ? ['AGENTS.md', 'CLAUDE.md']
@@ -1361,11 +1448,10 @@ export async function runReactLoop(
 
   // 环境信息：git 仓库探测（每目录缓存），传给 buildAPIMessages 的环境段
   const isGitRepo = workingDir ? await detectGitRepo(ports.env.runShell, workingDir) : false
-  // 运行时防护状态：doom-loop 签名序列 / 工具执行轮计数 / 收尾指令注入标记 / 连续截断轮数
+  // 运行时防护状态：doom-loop 签名序列 / 工具执行轮计数 / 收尾指令注入标记
   const recentToolSignatures: string[] = []
   let toolExecutionTurns = 0
   let wrapUpInjected = false
-  let truncatedRefusalStreak = 0
   // 溢出恢复链：请求真实超上下文时强制压缩一次并重放（参考 Claude Code prompt-too-long recovery）
   let overflowRecovered = false
   // 自动压缩连续失败计数（达到熔断阈值后停止自动触发，防止每次发消息都白跑一次压缩请求）
@@ -1373,25 +1459,49 @@ export async function runReactLoop(
   // microcompact 开关：token 超过压缩阈值 85% 时启用并在本轮内保持启用。
   // 清理集合只增不减 → 请求前缀在后续轮次保持稳定，不会反复破坏缓存。
   let microCompactEnabled = false
+  // 用量累计（子代理 run 的 usage 统计口径；主对话另有全局 recordUsage）
+  let accumulatedTokens = 0
+  let toolCallCount = 0
+
+  // ── 变体生效设置：子代理按 profile 覆盖模型与推理参数（模型请求/压缩阈值共用同一份）──
+  const effectiveSettings: AgentSettings = isSub && subAgent
+    ? {
+        ...settings,
+        ...(subAgent.model ? { model: subAgent.model } : {}),
+        ...(subAgent.reasoningEffort !== undefined ? { reasoningEffort: subAgent.reasoningEffort } : {}),
+        ...(subAgent.thinking !== undefined ? { enableThinking: subAgent.thinking } : {}),
+        ...(subAgent.thinkingBudget !== undefined ? { thinkingBudget: subAgent.thinkingBudget } : {}),
+      }
+    : settings
+  // token 锚点：主对话用会话级 tracker（与上下文用量指示器同源）；子代理独立持有，
+  // 保持父会话的估算不被子代理流量污染
+  const tokenTracker = isSub ? new TokenTracker() : ctx.tokenTracker
+  // read_file 快照：主对话沿用 ctx.readFiles（压缩后整体替换，外部视图保持一致）；
+  // 子代理持有独立快照（auto-compact 文件恢复用）
+  let readFileState = isSub ? new Map<string, ReadFileSnapshot>() : ctx.readFiles
+
+  // maxTurns：主循环护栏；子代理 profile 显式值封顶主循环上限
+  const maxTurns = isMain
+    ? MAX_REACT_ITERATIONS
+    : Math.min(
+        subAgent?.maxTurns && subAgent.maxTurns > 0 ? subAgent.maxTurns : DEFAULT_SUBAGENT_MAX_TURNS,
+        MAX_REACT_ITERATIONS
+      )
 
   /** 执行一次自动压缩：成功后 conversationMessages 换为 API 子集并返回 true；
    *  失败（含「消息不足」）返回 false，由调用方决定回退策略（回落 truncateMessages）。 */
   const performAutoCompact = async (): Promise<boolean> => {
-    // ── 压缩过程展示：插入一条"正在压缩上下文"占位消息，让用户看到压缩在进行中 ──
+    // ── 压缩过程展示（仅主对话）：插入"正在压缩上下文"占位消息 ──
     const compactingId = makeId()
-    ports.store.addMessage(sessionId, {
-      id: compactingId,
-      role: 'assistant',
-      content: '',
-      timestamp: Date.now(),
-      _isCompacting: true,
-    })
+    if (isMain) {
+      sink.add({ id: compactingId, role: 'assistant', content: '', timestamp: Date.now(), _isCompacting: true })
+    }
     try {
       const compactionResult = await compactConversation(
         conversationMessages,
-        settings,
-        ctx.readFiles,
-        undefined,
+        effectiveSettings,
+        readFileState,
+        isSub ? i18n.t('agent.subAgentCompactInstruction', { name: subAgent?.name ?? '' }) : undefined,
         'auto'
       )
       // Recompute the keep boundary (same logic as inside compactConversation)
@@ -1408,60 +1518,148 @@ export async function runReactLoop(
         ...compactionResult.fileAttachments,
       ]
 
-      // 界面/DB 消息：完整保留全部历史（含压缩点之前的 summarizedMessages），
-      // 压缩组件（边界 + 摘要）插在压缩点位置，用户依旧能看到全部对话记录。
-      const newMessages = [
-        ...summarizedMessages,
-        compactionResult.boundaryMessage,
-        compactionResult.summaryMessage,
-        ...keptMessages,
-        ...compactionResult.fileAttachments,
-      ]
+      if (isMain) {
+        // 界面/DB 消息：完整保留全部历史（含压缩点之前的 summarizedMessages），
+        // 压缩组件（边界 + 摘要）插在压缩点位置，用户依旧能看到全部对话记录。
+        // 宿主据此整段原子重写；渲染层 store.compact 同步内存。
+        ports.store.compact(
+          sessionId,
+          [...summarizedMessages, ...apiMessagesAfterCompact],
+          compactionResult.boundaryMessage.id
+        )
+      }
 
-      // Sync to store and DB（保留全部历史）
-      ports.store.compact(sessionId, newMessages, compactionResult.boundaryMessage.id)
-
-      // 后续迭代的 conversationMessages 用 API 子集（释放 token），
-      // 界面上则通过 store.compact 保留全量历史（见 newMessages）。
+      // 后续迭代的 conversationMessages 用 API 子集（释放 token）
       conversationMessages = apiMessagesAfterCompact
 
       // Clear the read file state (it's now in file attachments)
-      ctx.readFiles = new Map()
+      readFileState = new Map()
+      if (isMain) ctx.readFiles = readFileState
       // Reset the token tracker after compaction so stale usage cannot retrigger it.
       // 下一轮 getTokenCount 会取 max(lastUsage, estimated)，导致继续误判超过阈值，
       // 反复进入 compactConversation 并抛 "Not enough messages to compact"。
-      ctx.tokenTracker.reset()
+      tokenTracker.reset()
 
-      console.log(`[compact] Auto-compacted: ${compactionResult.preCompactTokenCount} → ${compactionResult.postCompactTokenCount} tokens, ${compactionResult.boundaryMessage.compactMetadata?.messagesSummarized} messages summarized`)
+      console.log(`[compact] Auto-compacted${isSub ? ` [subagent:${subAgentId}]` : ''}: ${compactionResult.preCompactTokenCount} → ${compactionResult.postCompactTokenCount} tokens, ${compactionResult.boundaryMessage.compactMetadata?.messagesSummarized} messages summarized`)
       return true
     } catch (err) {
       console.error('[compact] Auto-compaction failed, falling back to truncateMessages:', err)
-      // 压缩失败：把"正在压缩"占位消息改为可见提示，避免残留空白占位
-      ports.store.updateMessage(sessionId, compactingId, {
-        content: i18n.t('chat.compactFailed'),
-        _isCompacting: false,
-      })
+      // 压缩失败：把"正在压缩"占位消息改为可见提示，避免残留空白占位（仅主对话有占位）
+      if (isMain) {
+        sink.update(compactingId, { content: i18n.t('chat.compactFailed'), _isCompacting: false })
+      }
       return false
     }
   }
 
+  // ── 多子代理编排：通知与 steering 的消费点 ──
+
+  /** 主对话：把已完成后台子代理的待投通知合并为一条 isSubAgentNotice 消息注入。
+   *  多条合并 = 同批完成只花一轮模型调用（对齐 ZCode 的通知批处理）。
+   *  在循环启动与每轮迭代顶部调用：主循环空闲时通知留存，随下一条用户消息注入。 */
+  const drainSubagentNotifications = (): void => {
+    if (!isMain || ctx.pendingSubagentNotifications.length === 0) return
+    const joined = ctx.pendingSubagentNotifications.splice(0).join('\n\n')
+    const notice: Message = {
+      id: makeId(),
+      role: 'user',
+      content: `<background-agent-notifications>\n${joined}\n</background-agent-notifications>`,
+      timestamp: Date.now(),
+      isSubAgentNotice: true,
+    }
+    ports.store.addMessage(sessionId, notice)
+    conversationMessages.push(notice)
+  }
+
+  /** 子代理：消费 steering 队列（send_message_to_agent / 详情面板注入），逐条入对话。
+   *  运行中的子代理在下一轮迭代顶部看到注入的指令。 */
+  const drainSubagentSteering = (): void => {
+    if (!isSub) return
+    const record = ctx.subagentRuns.get(subAgentId)
+    if (!record) return
+    for (const text of record.pendingMessages.splice(0)) {
+      const steerMsg = stampMessage({ id: makeId(), role: 'user', content: text, timestamp: Date.now() })
+      sink.add(steerMsg)
+      conversationMessages.push(steerMsg)
+    }
+  }
+
+  // ── 主对话专属：spawn_agent / send_message_to_agent 的工具侧入口。
+  // 子代理的工具 ctx 不注入这两个闭包 → 派发/续聊工具在子代理内不可用（无嵌套派生）。──
+  const mainSpawnSubAgent = async (agentType: string, subPrompt: string, spawnOpts?: { runInBackground?: boolean }): Promise<string> => {
+    // 先验证 agent 再落卡片：若 findAgent 失败则卡片已持久化但 runs store 无记录，成为永久孤儿
+    const agent = await ports.tools.findAgent(agentType, getWorkingDir(ports, ctx))
+    if (!agent) {
+      return i18n.t('agent.unknownAgentType', { type: agentType })
+    }
+    const newSubAgentId = `subagent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    ports.store.addMessage(sessionId, {
+      id: makeId(),
+      role: 'assistant',
+      content: '',
+      timestamp: Date.now(),
+      isSubAgentCard: true,
+      subAgentId: newSubAgentId,
+    })
+    // run_in_background 显式指定优先；未指定时采纳 profile 的默认后台标记
+    if (spawnOpts?.runInBackground || agent.background === true) {
+      return launchBackgroundSubagent(ports, ctx, agent, newSubAgentId, subPrompt)
+    }
+    try {
+      const subResult = await runSubAgentLoop(ports, ctx, agentType, subPrompt, controller, newSubAgentId)
+      if (subResult === '[aborted]') return subResult
+      // 前台结果 = 正文 + agentId 续聊引导 + 用量块。agentId 是续聊的唯一钥匙：
+      // 没有它模型只能靠复述上下文重新 spawn，上下文与 token 双输。
+      const record = ctx.subagentRuns.get(newSubAgentId)
+      const usage = record?.usage
+      const usageLine = usage
+        ? `
+<usage>subagent_tokens: ${usage.totalTokens}, tool_uses: ${usage.toolCalls}, duration_ms: ${usage.durationMs}</usage>`
+        : ''
+      return `${subResult}
+
+agentId: ${newSubAgentId} (use send_message_to_agent with agent_id: '${newSubAgentId}' to continue this agent)${usageLine}`
+    } catch (e) {
+      return i18n.t('agent.subAgentFailed', { message: e instanceof Error ? e.message : String(e) })
+    }
+  }
+
+  const mainSendMessageToAgent = async (agentId: string, message: string): Promise<string> =>
+    deliverToSubagent(ports, ctx, agentId, message)
+
+  // 主对话专属工具 ctx 附加件（预构建为 Partial<ToolContext>，保持箭头函数参数的上下文类型；
+  // 子代理展开空对象——派发/续聊/交互/待办在子代理语境没有执行面，schema 层也已隐藏）。
+  // recordImage 例外：它是逐调用的截图旁路，留在 execOne 内部（子代理没有图像工具，恒空）。
+  const mainToolCtxExtras: Partial<ToolContext> = isMain ? {
+    requestUserInput: (questions) => ports.ui.askQuestion(sessionId, questions),
+    updateTodoList: (items) => ports.ui.setTodos(sessionId, items),
+    spawnSubAgent: mainSpawnSubAgent,
+    sendMessageToAgent: mainSendMessageToAgent,
+  } : {}
+
   for (let iteration = 0; ; iteration++) {
-    if (controller.signal.aborted) return
+    if (controller.signal.aborted) {
+      return { text: '', aborted: true, totalTokens: accumulatedTokens || null, toolCallCount, messages: conversationMessages }
+    }
+
+    // ── 编排消费点：后台子代理完成通知（主对话）与 steering 注入（子代理）──
+    drainSubagentNotifications()
+    drainSubagentSteering()
 
     // Auto-compact check: if token count exceeds threshold, summarize older messages
     // 阈值 = 输入预算 − 20K 缓冲（与模型高级设置联动）
     const compactInputBudget = (() => {
-      const m = settings.providers
-        .find((p) => p.id === settings.activeProviderId)
-        ?.models.find((x) => x.id === settings.activeModelId)
-      return m?.maxInputTokens ?? settings.maxInputTokens ?? 184000
+      const m = effectiveSettings.providers
+        .find((p) => p.id === effectiveSettings.activeProviderId)
+        ?.models.find((x) => x.id === effectiveSettings.activeModelId)
+      return m?.maxInputTokens ?? effectiveSettings.maxInputTokens ?? 184000
     })()
     const autoCompactThreshold = Math.max(compactInputBudget - 20000, Math.floor(compactInputBudget * 0.8))
     // 判定口径与 buildAPIMessages 一致：只统计 API 实际发送的消息子集。
     // 旧实现对全量历史（含已被压缩的旧消息）估算，导致压缩后依然超阈值、
     // 每次发消息都误触发压缩（而用量指示器按子集统计显示 30%+，两边对不上）。
     const apiVisibleMessages = getApiVisibleMessages(conversationMessages)
-    const currentTokenCount = ctx.tokenTracker.getTokenCount(apiVisibleMessages)
+    const currentTokenCount = tokenTracker.getTokenCount(apiVisibleMessages)
     if (currentTokenCount > autoCompactThreshold && apiVisibleMessages.length > 12 && failedAutoCompacts < MAX_AUTO_COMPACT_FAILURES) {
       // 连续失败计数：成功归零，达到阈值后本轮运行内不再自动触发（防死亡螺旋）
       if (await performAutoCompact()) failedAutoCompacts = 0
@@ -1471,7 +1669,20 @@ export async function runReactLoop(
     if (currentTokenCount > Math.floor(autoCompactThreshold * 0.85)) microCompactEnabled = true
 
     // Build API messages from conversation history (with auto-truncation for long conversations)
-    const apiMessages = truncateMessages(settings, await buildAPIMessages(ports, ctx, conversationMessages, { memoryPrompt, agentsMdContent, taskMode: effectiveTaskMode, goalCondition, isGitRepo, skillReminder, harnessMode, clearOldToolResults: microCompactEnabled }))
+    // 子代理：system prompt 整体换成 profile 的 systemPrompt，不带记忆/技能目录/任务工作流/AGENTS.md
+    const apiMessages = truncateMessages(effectiveSettings, await buildAPIMessages(ports, ctx, conversationMessages, {
+      workingDir,
+      memoryPrompt,
+      agentsMdContent,
+      taskMode: isMain ? effectiveTaskMode : undefined,
+      goalCondition: isMain ? goalCondition : undefined,
+      skillCatalog: isMain ? undefined : [],
+      skillReminder: isMain ? variant.skillReminder : undefined,
+      extraSystemPrompt: isSub ? subAgent?.systemPrompt : undefined,
+      harnessMode: isMain ? harnessMode : undefined,
+      isGitRepo,
+      clearOldToolResults: microCompactEnabled,
+    }))
 
     // Parse streaming response
     let content = ''
@@ -1486,17 +1697,32 @@ export async function runReactLoop(
     // 429/502/超时/网络中断等瞬时错误用指数退避自动重试（最多 5 次）。
     // 占位消息只 add 一次，重试时复用同一 assistantId，避免残留多条空消息。
     const runModelTurn = async (): Promise<Awaited<ReturnType<typeof parseStream>>> => {
-      const response = await callAPI(ports, apiMessages, controller, { thinkingBlocks, harnessMode })
+      const response = await callAPI(ports, apiMessages, controller, {
+        thinkingBlocks,
+        harnessMode: isMain ? harnessMode : undefined,
+        modelOverride: isSub ? subAgent?.model : undefined,
+        settingsOverride: isSub && subAgent ? {
+          ...(subAgent.model ? { model: subAgent.model } : {}),
+          ...(subAgent.reasoningEffort !== undefined ? { reasoningEffort: subAgent.reasoningEffort } : {}),
+          ...(subAgent.thinking !== undefined ? { enableThinking: subAgent.thinking } : {}),
+          ...(subAgent.thinkingBudget !== undefined ? { thinkingBudget: subAgent.thinkingBudget } : {}),
+        } : undefined,
+        // 子代理：schema 级工具裁剪 —— 白/黑名单 + 派发/交互工具 + Agent 动作工具全部
+        // 从发给模型的工具列表里摘掉，而不是等执行期拒绝
+        toolFilter: isSub
+          ? { allowedTools: subAgent?.tools, disallowedTools: subAgent?.disallowedTools, hidden: SUBAGENT_HIDDEN_TOOLS }
+          : undefined,
+      })
       if (!placeholderAdded) {
         // Create assistant message placeholder
-        ports.store.addMessage(sessionId, {
+        sink.add(stampMessage({
           id: assistantId,
           role: 'assistant',
           content: '',
           thinkingContent: '',
           timestamp: Date.now(),
           _isStreaming: true,  // Mark as currently streaming
-        })
+        }))
         placeholderAdded = true
       }
       // 每轮重试前重置累计，避免上一轮残留内容污染本轮
@@ -1513,14 +1739,14 @@ export async function runReactLoop(
           const now = Date.now()
           if (now - lastStreamUpdate < 50) return
           lastStreamUpdate = now
-          ports.store.updateMessage(sessionId, assistantId, { content })
+          sink.update(assistantId, { content })
         },
         onThinking: (text) => {
           thinkingContent += text
           const now = Date.now()
           if (now - lastStreamUpdate < 50) return
           lastStreamUpdate = now
-          ports.store.updateMessage(sessionId, assistantId, { thinkingContent })
+          sink.update(assistantId, { thinkingContent })
         },
         onToolCallUpdate: (calls) => {
           // Throttle streaming tool call updates to ~20fps for performance
@@ -1531,26 +1757,29 @@ export async function runReactLoop(
           for (const [, tc] of calls) {
             streamingCalls.push({ id: tc.id, name: tc.name, argsSoFar: tc.args })
           }
-          ports.store.updateMessage(sessionId, assistantId, { streamingToolCalls: streamingCalls })
+          sink.update(assistantId, { streamingToolCalls: streamingCalls })
         },
         onFinish: (reason) => {
           // Flush the final buffered content so the persisted response is complete.
-          ports.store.updateMessage(sessionId, assistantId, { content, thinkingContent })
+          sink.update(assistantId, { content, thinkingContent })
           finishReason = reason
         },
         onUsage: (usage: TokenUsage) => {
           turnUsage = usage
-          ctx.tokenTracker.recordUsage(usage)
-          // 累计到全局 token 用量统计（供设置页通用栏展示）
-          try {
-            ports.ui.recordUsage({
-              usage,
-              sessionId,
-              model: settings.model,
-              providerId: settings.activeProviderId,
-            })
-          } catch (error) {
-            console.error('[use-agent] record token usage failed:', error)
+          tokenTracker.recordUsage(usage)
+          accumulatedTokens += usage.total_tokens
+          if (isMain) {
+            // 累计到全局 token 用量统计（供设置页通用栏展示）
+            try {
+              ports.ui.recordUsage({
+                usage,
+                sessionId,
+                model: settings.model,
+                providerId: settings.activeProviderId,
+              })
+            } catch (error) {
+              console.error('[use-agent] record token usage failed:', error)
+            }
           }
         },
         onThinkingBlock: (block) => {
@@ -1570,7 +1799,7 @@ export async function runReactLoop(
         onRetry: (attempt) => {
           // 重试过程中在占位消息上展示「正在重试」提示
           if (placeholderAdded) {
-            ports.store.updateMessage(sessionId, assistantId, {
+            sink.update(assistantId, {
               _isStreaming: true,
               _retrying: { attempt },
               content,
@@ -1580,10 +1809,10 @@ export async function runReactLoop(
         },
       })
       // 重试成功：清除重试标记
-      ports.store.updateMessage(sessionId, assistantId, { _retrying: undefined })
+      sink.update(assistantId, { _retrying: undefined })
     } catch (err) {
       // 重试全部失败：把已添加的占位消息标记为非流式，避免残留一条永远 loading 的空消息
-      if (placeholderAdded) ports.store.updateMessage(sessionId, assistantId, { _isStreaming: false, _retrying: undefined })
+      if (placeholderAdded) sink.update(assistantId, { _isStreaming: false, _retrying: undefined })
       // 溢出恢复链：请求真的超上下文时重试无意义——强制压缩一次并重放本轮。
       // 仅恢复一次（overflowRecovered 单次标记），仍溢出则把错误抛给用户。
       if (!overflowRecovered && !controller.signal.aborted && isContextOverflowError(err)) {
@@ -1598,8 +1827,8 @@ export async function runReactLoop(
     // 直接退出循环。仍会写入最终内容（已在上面的 updateMessage 完成）。
     if (controller.signal.aborted) {
       // 更新消息标记为非流式，但不执行工具
-      ports.store.updateMessage(sessionId, assistantId, { _isStreaming: false })
-      return
+      sink.update(assistantId, { _isStreaming: false })
+      return { text: '', aborted: true, totalTokens: accumulatedTokens || null, toolCallCount, messages: conversationMessages }
     }
 
     // Parse final tool calls
@@ -1617,7 +1846,7 @@ export async function runReactLoop(
 
     // Check for truncation
     if (finishReason === 'length') {
-      content += `\n\n${i18n.t('agent.outputTruncated')}`
+      content += `\n\n${i18n.t(isSub ? 'agent.subAgentTruncated' : 'agent.outputTruncated')}`
     }
 
     // Update the assistant message with final content
@@ -1633,11 +1862,25 @@ export async function runReactLoop(
       streamingToolCalls: undefined,  // Clear streaming data after completion
       _isStreaming: false,  // Stream completed
     }
-    ports.store.updateMessage(sessionId, assistantId, assistantMessage)
-    conversationMessages.push(assistantMessage)
+    sink.update(assistantId, assistantMessage)
+    conversationMessages.push(stampMessage(assistantMessage))
+
+    /** 本轮终点的统一返回结构（text = 本轮正文；aborted 取当前取消态） */
+    const finishResult = (): AgentLoopResult => ({
+      text: content,
+      aborted: controller.signal.aborted,
+      totalTokens: accumulatedTokens || null,
+      toolCallCount,
+      messages: conversationMessages,
+    })
 
     // No tool calls → we're done
     if (toolCalls.length === 0) {
+      if (isSub) {
+        // 子代理：无工具调用的那轮正文即为结果
+        return finishResult()
+      }
+
       // TencentDB Agent Memory：保留本地会话为事实来源，同时异步捕获 L0。
       // Gateway 不可用时静默回退，不阻塞当前回复。
       void ports.ui.agentMemoryCapture({
@@ -1695,7 +1938,7 @@ export async function runReactLoop(
           })
           addGoalCard('achieved', conclusion || i18n.t('goal.noReport'))
           collapseIntermediateMessages(ports, sessionId, assistantId)
-          return
+          return finishResult()
         }
 
         // 护栏：收尾轮（工具已禁用强制总结）/ 连续空转 / 评估上限 → 暂停续跑但保留目标
@@ -1707,7 +1950,7 @@ export async function runReactLoop(
               : i18n.t('goal.evalLimitPaused', { count: GOAL_MAX_EVALUATIONS_PER_RUN })
           addGoalCard('in_progress', pauseReason)
           collapseIntermediateMessages(ports, sessionId, assistantId)
-          return
+          return finishResult()
         }
 
         // 评估器判定（调用失败不阻断：保留目标，结束本次运行，用户下一条消息自然恢复）
@@ -1722,13 +1965,13 @@ export async function runReactLoop(
             ports.goal.updateGoal(sessionId, { status: 'achieved', conclusion: evaluation.reason })
             addGoalCard('achieved', evaluation.reason)
             collapseIntermediateMessages(ports, sessionId, assistantId)
-            return
+            return finishResult()
           }
           if (evaluation.verdict === 'impossible') {
             ports.goal.updateGoal(sessionId, { status: 'failed', conclusion: evaluation.reason })
             addGoalCard('impossible', evaluation.reason)
             collapseIntermediateMessages(ports, sessionId, assistantId)
-            return
+            return finishResult()
           }
           // in_progress：评估理由作为下一轮引导注入对话，自动续跑
           addGoalCard('in_progress', evaluation.reason)
@@ -1742,25 +1985,25 @@ export async function runReactLoop(
           conversationMessages.push(guidanceMsg)
           continue
         } catch (err) {
-          if (controller.signal.aborted) return
+          if (controller.signal.aborted) return finishResult()
           console.error('[goal] evaluator failed:', err)
           addGoalCard('in_progress', i18n.t('goal.evaluatorFailed'))
           collapseIntermediateMessages(ports, sessionId, assistantId)
-          return
+          return finishResult()
         }
       }
 
       // Collapse all intermediate assistant messages (those that had tool calls)
       // Only keep the final assistant message expanded
       collapseIntermediateMessages(ports, sessionId, assistantId)
-      return
+      return finishResult()
     }
 
-    // Execute tool calls (并行执行：同一批 toolCalls 互相独立，尤其 spawn_agent 需要并行)
+    // Execute tool calls (并行执行：同一批 toolCalls 互相独立)
     // 中断后立即跳过工具执行，避免点停止后还在跑命令
     if (controller.signal.aborted) {
-      ports.store.updateMessage(sessionId, assistantId, { _isStreaming: false })
-      return
+      sink.update(assistantId, { _isStreaming: false })
+      return finishResult()
     }
 
     // ── 截断响应保护：finishReason=length 时本轮所有工具调用一律不执行。
@@ -1771,10 +2014,10 @@ export async function runReactLoop(
         content: toolCallRefusal(tc.name, TRUNCATED_TOOL_CALL_REASON),
         isError: true,
       }))
-      ports.store.updateMessage(sessionId, assistantId, { toolResults: refused })
+      sink.update(assistantId, { toolResults: refused })
       for (const r of refused) {
-        const toolMsg: Message = { id: makeId(), role: 'tool', content: r.content, timestamp: Date.now(), toolResults: [r] }
-        ports.store.addMessage(sessionId, toolMsg)
+        const toolMsg = stampMessage({ id: makeId(), role: 'tool', content: r.content, timestamp: Date.now(), toolResults: [r] })
+        sink.add(toolMsg)
         conversationMessages.push(toolMsg)
       }
       continue
@@ -1790,10 +2033,10 @@ export async function runReactLoop(
         content: toolCallRefusal(tc.name, TRUNCATED_TOOL_CALL_REASON),
         isError: true,
       }))
-      ports.store.updateMessage(sessionId, assistantId, { toolResults: refused })
+      sink.update(assistantId, { toolResults: refused })
       for (const r of refused) {
-        const toolMsg: Message = { id: makeId(), role: 'tool', content: r.content, timestamp: Date.now(), toolResults: [r] }
-        ports.store.addMessage(sessionId, toolMsg)
+        const toolMsg = stampMessage({ id: makeId(), role: 'tool', content: r.content, timestamp: Date.now(), toolResults: [r] })
+        sink.add(toolMsg)
         conversationMessages.push(toolMsg)
       }
       continue
@@ -1802,7 +2045,7 @@ export async function runReactLoop(
 // ── 轮次上限收尾：工具执行轮数用尽后不再执行工具，给模型一次文字总结的机会
 //（参考 opencode MAX_STEPS：硬停会丢掉整个 run 的总结）。
 // 收尾轮若仍坚持调用工具 → 全部拒绝并退出循环，走兜底提示。 ──
-    if (toolExecutionTurns >= MAX_REACT_ITERATIONS || wrapUpInjected) {
+    if (toolExecutionTurns >= maxTurns || wrapUpInjected) {
       const refused: ToolResult[] = toolCalls.map((tc) => ({
         toolCallId: tc.id,
         content: toolCallRefusal(tc.name, wrapUpInjected
@@ -1810,23 +2053,18 @@ export async function runReactLoop(
           : 'maximum tool-call turns reached for this run'),
         isError: true,
       }))
-      ports.store.updateMessage(sessionId, assistantId, { toolResults: refused })
+      sink.update(assistantId, { toolResults: refused })
       for (const r of refused) {
-        const toolMsg: Message = { id: makeId(), role: 'tool', content: r.content, timestamp: Date.now(), toolResults: [r] }
-        ports.store.addMessage(sessionId, toolMsg)
+        const toolMsg = stampMessage({ id: makeId(), role: 'tool', content: r.content, timestamp: Date.now(), toolResults: [r] })
+        sink.add(toolMsg)
         conversationMessages.push(toolMsg)
       }
       if (wrapUpInjected) break
       wrapUpInjected = true
       // 收尾指令**只进本轮内存，不落库**。
-      // 曾经 `ports.store.addMessage(sessionId, wrapMsg)` 把它当成一条 role:'user' 的
-      // 真实用户消息持久化了，代价有两层：
-      //   1. 用户在对话记录里看到一条自己没发过的「⚠️ 已达上限，立刻交总结」；
-      //   2. 更糟的是**下一次运行**会把这坨历史从库里读出来喂给模型 ——
-      //      模型读到的是「用户刚要求我立刻总结、不要调工具」，于是后续每轮都被这条
-      //      幽灵指令压着不干活。一次到限额会持续污染这个会话的之后所有轮次。
-      // 参照同文件 goal 模式的做法（addGoalCard + collapseIntermediateMessages + return）：
-      // 终止状态该走 UI 状态，不该伪装成用户输入。
+      // 落库会让它变成一条真实的用户消息持久化：用户会看到一条自己没发过的
+      // 「⚠️ 已达上限，立刻交总结」，且下一次运行会把它当成人话读回去持续压着模型。
+      // 参照 goal 模式的做法：终止状态该走 UI 状态，不该伪装成用户输入。
       conversationMessages.push({
         id: makeId(),
         role: 'user',
@@ -1837,7 +2075,7 @@ export async function runReactLoop(
     }
 
     const results: ToolResult[] = []
-    // 本轮 read_file 命中的技能 SKILL.md（AI 自主加载感知，随本轮助手消息展示）
+    // 本轮 read_file 命中的技能 SKILL.md（AI 自主加载感知，随本轮助手消息展示；仅主对话）
     const turnLoadedSkills = new Map<string, { id: string; name: string; icon: string; slug: string }>()
 
     const execOne = async (tc: ToolCall, runController: AbortController): Promise<ToolResult> => {
@@ -1860,8 +2098,11 @@ export async function runReactLoop(
           isError: true,
         }
       }
-      // Permission check
-      const permResult = await checkToolPermission(ports, ctx, tc.name, tc.arguments)
+      // Permission check（子代理按 profile 白/黑名单进一步收窄，绝不放宽；
+      // 任务工作流的 plan/spec 限制不传入子代理——它只作用于发起规划的那条消息）
+      const permResult = await checkToolPermission(ports, ctx, tc.name, tc.arguments, isSub
+        ? { taskMode: null, allowedTools: subAgent?.tools, disallowedTools: subAgent?.disallowedTools }
+        : {})
       if (!permResult.allowed) {
         return {
           toolCallId: tc.id,
@@ -1889,39 +2130,18 @@ export async function runReactLoop(
         const capturedImages: ToolResultImage[] = []
         const result = await ports.tools.execute(tc.name, argsWithCwd, {
           workingDir,
-          homeDir: ports.env.homeDir(),
+          homeDir,
           sessionId,
-          // 浮层副标题要显示「哪个对话在动手」：AI 操控用户桌面时用户需要能追责
-          sessionLabel: ctx.sessionTitle ?? undefined,
-          readFileState: ctx.readFiles,
+          // 浮层副标题要显示「哪个对话在动手」：AI 操控用户桌面时用户需要能追责（仅主对话）
+          sessionLabel: isMain ? (ctx.sessionTitle ?? undefined) : undefined,
+          readFileState,
           toolCallId: tc.id,
           recordFileMutation: (mutation) => recordFileMutation(ports, ctx, mutation),
+          // 截图旁路（Browser/Computer Use）：仅主对话的图像工具会上报，子代理恒为空数组
           recordImage: (image) => { capturedImages.push(image) },
-          requestUserInput: (questions) => ports.ui.askQuestion(sessionId, questions),
-          updateTodoList: (items) => ports.ui.setTodos(sessionId, items),
-          spawnSubAgent: async (agentType: string, subPrompt: string) => {
-            // Validate the agent before persisting a card that must reference its run.
-            // 若 findAgent 失败则卡片已持久化但 runs store 无记录，成为永久孤儿。
-            const agent = await ports.tools.findAgent(agentType, getWorkingDir(ports, ctx))
-            if (!agent) {
-              return i18n.t('agent.unknownAgentType', { type: agentType })
-            }
-            const subAgentId = `subagent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-            ports.store.addMessage(sessionId, {
-              id: makeId(),
-              role: 'assistant',
-              content: '',
-              timestamp: Date.now(),
-              isSubAgentCard: true,
-              subAgentId,
-            })
-            try {
-              const subResult = await runSubAgentLoop(ports, ctx, agentType, subPrompt, controller, subAgentId)
-              return subResult
-            } catch (e) {
-              return i18n.t('agent.subAgentFailed', { message: e instanceof Error ? e.message : String(e) })
-            }
-          },
+          // spawn / 续聊 / 交互 / 待办仅主对话注入：子代理没有这些执行面，
+          // 对应工具也在 schema 层被裁掉（SUBAGENT_HIDDEN_TOOLS）
+          ...mainToolCtxExtras,
         })
         // 记录已执行调用的签名（含失败结果），供 doom-loop 连续性判定
         recentToolSignatures.push(callSig)
@@ -1930,7 +2150,7 @@ export async function runReactLoop(
         // 标成缺口：带文件的撤回必须 fail-closed，不能假装本轮没改过东西。
         if (!isError) recordToolGap(ports, ctx, tc.name)
         // AI 自主加载感知：read_file 命中技能 SKILL.md → 记录快照（本轮展示芯片）
-        if (tc.name === 'read_file' && !isError) {
+        if (isMain && tc.name === 'read_file' && !isError) {
           const hit = skillPathMap.get(normalizePathForComparison(String(argsWithCwd.path || '')))
           if (hit) turnLoadedSkills.set(hit.id, hit)
         }
@@ -1952,8 +2172,10 @@ export async function runReactLoop(
 
     // Preserve model order for side-effecting tools; read-only calls can still run concurrently.
     // MCP 工具（mcp__ 前缀）可能带副作用，统一按顺序执行
-    // scheduled_task 也在此列：它写提案 KV，并发调用会互相盖同一份数组
-    const sideEffectingTools = new Set(['write_file', 'search_replace', 'execute_command', 'save_memory', 'spawn_agent', 'question', 'todowrite', 'scheduled_task'])
+    // scheduled_task 也在此列：它写提案 KV，并发调用会互相盖同一份数组。
+    // spawn_agent / send_message_to_agent 是编排动作而非直接副作用：多个子代理互相独立，
+    // 同消息派发走并行批（真并行——旧实现把它误列在串行集合里，描述与行为矛盾）。
+    const sideEffectingTools = new Set(['write_file', 'search_replace', 'execute_command', 'save_memory', 'question', 'todowrite', 'scheduled_task'])
     const isSideEffecting = (toolName: string) =>
       sideEffectingTools.has(toolName) || toolName.startsWith('mcp__')
     const orderedResults: Array<ToolResult | undefined> = Array.from({ length: toolCalls.length })
@@ -1976,437 +2198,287 @@ export async function runReactLoop(
     }
     await Promise.all(readOnlyJobs)
     results.push(...orderedResults.filter((result): result is ToolResult => result !== undefined))
+    toolCallCount += toolCalls.length
     toolExecutionTurns++
     // 本轮有工具调用 → 重置 goal 空转计数（评估器护栏依据）
     iterationHadToolCalls = true
 
     // Update assistant message with tool results
-    ports.store.updateMessage(sessionId, assistantId, {
+    sink.update(assistantId, {
       toolResults: results,
       // 本轮 AI 自主读取的技能 → "已加载技能"芯片（随消息持久化，仅展示用）
-      ...(turnLoadedSkills.size > 0 ? { loadedSkills: [...turnLoadedSkills.values()] } : {}),
+      ...(isMain && turnLoadedSkills.size > 0 ? { loadedSkills: [...turnLoadedSkills.values()] } : {}),
     })
 
     // Add tool result messages to conversation
     for (const r of results) {
-      const toolMsg: Message = {
+      const toolMsg = stampMessage({
         id: makeId(),
         role: 'tool',
         content: r.content,
         timestamp: Date.now(),
         toolResults: [r],
-      }
-      ports.store.addMessage(sessionId, toolMsg)
+      })
+      sink.add(toolMsg)
       conversationMessages.push(toolMsg)
     }
 
     // 中断后不再发起新一轮 LLM 请求，直接退出循环
-    if (controller.signal.aborted) return
+    if (controller.signal.aborted) return finishResult()
 
     // Continue the ReAct loop → model will process tool results and decide next action
   }
 
   // Safety net - should almost never hit this（收尾轮模型仍坚持调用工具才会走到这里）
-  ports.store.addMessage(sessionId, {
-    id: makeId(),
-    role: 'assistant',
-    content: i18n.t('agent.maxTurnsTerminated', { limit: MAX_REACT_ITERATIONS }),
-    timestamp: Date.now(),
-  })
+  if (isMain) {
+    ports.store.addMessage(sessionId, {
+      id: makeId(),
+      role: 'assistant',
+      content: i18n.t('agent.maxTurnsTerminated', { limit: MAX_REACT_ITERATIONS }),
+      timestamp: Date.now(),
+    })
+    return { text: '', aborted: controller.signal.aborted, totalTokens: accumulatedTokens || null, toolCallCount, messages: conversationMessages }
+  }
+  // 子代理达到 maxTurns：取最后一条消息内容兜底（与旧实现一致）
+  const partialResult = conversationMessages[conversationMessages.length - 1]?.content || i18n.t('agent.subAgentMaxTurns')
+  return { text: partialResult, aborted: controller.signal.aborted, totalTokens: accumulatedTokens || null, toolCallCount, messages: conversationMessages }
+}
+
+/** 渲染层宿主与主进程宿主的既有入口：主对话变体。 */
+export async function runReactLoop(
+  ports: AgentPorts,
+  ctx: SessionContext,
+  initialMessages: Message[],
+  controller: AbortController,
+  taskMode?: TaskMode,
+  /** 当轮相关技能提醒（sendMessage 计算；跨轮复用同一文本保证 API 前缀稳定） */
+  skillReminder?: string
+): Promise<void> {
+  await runAgentLoop(ports, ctx, initialMessages, controller, { role: 'main', taskMode, skillReminder })
+}
+
+// ═══════════════ 子代理编排层（派生 / 后台 / 续聊 / 通知）═══════════════
+
+/** 为主对话准备子代理任务提示词：goal 目标 active 时附带目标语境 ——
+ *  子任务服务于同一目标，结果报告需与目标相关。 */
+function buildSubagentTaskPrompt(ports: AgentPorts, ctx: SessionContext, prompt: string): string {
+  const activeGoal = ports.goal.get(ports.sessionId)
+  if (activeGoal?.status === 'active') {
+    return `${prompt}\n\n[Session goal context] The main agent is pursuing this goal: ${activeGoal.condition}. Your subtask contributes to it — report results relevant to the goal.`
+  }
+  return prompt
+}
+
+/** 统一的后台子代理完成/失败/停止通知格式（与前台结果回传同一套字段语义） */
+function formatSubagentNotification(input: {
+  runId: string
+  agentName: string
+  agentType: string
+  status: 'completed' | 'failed' | 'aborted'
+  body: string
+}): string {
+  return `<subagent-notification agentId="${input.runId}" agent="${input.agentName}" type="${input.agentType}" status="${input.status}">\n${input.body}\n</subagent-notification>`
+}
+
+/** 后台派生：立即返回确认文本（含 agentId），run 脱离主循环独立执行；
+ *  完成后经 ctx.pendingSubagentNotifications 注回主循环。 */
+function launchBackgroundSubagent(
+  ports: AgentPorts,
+  ctx: SessionContext,
+  agent: AgentDefinition,
+  subAgentId: string,
+  prompt: string
+): string {
+  void runSubAgentLoop(ports, ctx, agent.agentType, prompt, new AbortController(), subAgentId, { background: true })
+    .catch(() => { /* 失败收口（failSubAgentRun + 通知）在 wrapper 内完成 */ })
+  return i18n.t('agent.subAgentBackgroundLaunched', { id: subAgentId, name: agent.name })
+}
+
+/** send_message_to_agent 的三态投递（对齐 ZCode SendMessage）：
+ *  1) 运行中 → 压入 steering 队列，循环下一轮迭代顶部消费；
+ *  2) 已终态（同进程内存里持有完整对话）→ 携历史后台续跑；
+ *  3) 未知 id → 报错并列出本会话已知 agentId。 */
+async function deliverToSubagent(
+  ports: AgentPorts,
+  ctx: SessionContext,
+  agentId: string,
+  message: string
+): Promise<string> {
+  const record = ctx.subagentRuns.get(agentId)
+  if (!record) {
+    const known = [...ctx.subagentRuns.keys()].slice(-20).join(', ')
+    return i18n.t('agent.subAgentUnknownId', { id: agentId, known: known || '—' })
+  }
+  if (record.running) {
+    record.pendingMessages.push(message)
+    return i18n.t('agent.subAgentSteered', { id: agentId })
+  }
+  void runSubAgentLoop(ports, ctx, record.agent.agentType, message, new AbortController(), record.id, {
+    background: true,
+    resumeMessages: [...record.messages],
+    resumeCount: record.continuations ?? 0,
+  }).catch(() => { /* 失败收口在 wrapper 内完成 */ })
+  return i18n.t('agent.subAgentResumed', { id: agentId, name: record.agent.name })
 }
 
 /** 派生子 agent 执行独立子任务。
  *  子 agent 拥有独立的对话上下文、工具白/黑名单、system prompt（覆盖主 agent）。
  *  支持自动上下文压缩（auto-compact），结果回流到主对话。
- *  presetSubAgentId: 由调用方预先生成的 ID（用于关联主对话中的卡片消息），不传则内部生成。 */
+ *  presetSubAgentId: 由调用方预先生成的 ID（用于关联主对话中的卡片消息），不传则内部生成。
+ *  opts.background: 后台运行——不与父 controller 级联取消，完成后经通知队列注回主循环。
+ *  opts.resumeMessages: 续跑（send_message_to_agent 唤醒）——以既有对话为基础继续。 */
 export async function runSubAgentLoop(
   ports: AgentPorts,
   ctx: SessionContext,
   agentType: string,
   prompt: string,
   parentController: AbortController,
-  presetSubAgentId?: string
+  presetSubAgentId?: string,
+  opts?: { background?: boolean; resumeMessages?: Message[]; resumeCount?: number }
 ): Promise<string> {
   const sessionId = ports.sessionId
-  const settings = ports.settings
   const workingDir = getWorkingDir(ports, ctx)
-  const homeDir = ports.env.homeDir()
   const agent = await ports.tools.findAgent(agentType, workingDir)
   if (!agent) throw new Error(i18n.t('agent.unknownAgentType', { type: agentType }))
-
+  const background = opts?.background === true
+  const resumeMessages = opts?.resumeMessages
+  const isResume = (resumeMessages?.length ?? 0) > 0
   const subAgentId = presetSubAgentId || `subagent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-  const subController = new AbortController()
-  // 父 controller abort 联动
-  if (parentController.signal.aborted) subController.abort()
-  const onParentAbort = () => subController.abort()
-  parentController.signal.addEventListener('abort', onParentAbort)
+  const startedAt = Date.now()
 
-  // 子 agent 自己的 readFileState（用于 auto-compact 时的文件附件恢复）
-  let subReadFileState = new Map<string, ReadFileSnapshot>()
-  // Each subagent tracks its own usage to keep the parent estimate independent.
-  const subTokenTracker = new TokenTracker()
-  // 子 agent 自己的 settings 副本（覆盖 model）
-  const subSettings = agent.model ? { ...settings, model: agent.model } : settings
+  // controller：后台 run 脱离父级联（父轮取消不再传播，完成后异步收口）；
+  // 前台 run 保持既有级联行为。
+  const controller = new AbortController()
+  let removeParentListener: (() => void) | undefined
+  if (!background) {
+    if (parentController.signal.aborted) controller.abort()
+    const onParentAbort = () => controller.abort()
+    parentController.signal.addEventListener('abort', onParentAbort)
+    removeParentListener = () => parentController.signal.removeEventListener('abort', onParentAbort)
+  }
 
-  // 初始消息：prompt 作为 user 消息。
-  // goal 目标 active 时附带目标语境：子任务服务于同一目标，结果报告需与目标相关。
-  const activeGoal = ports.goal.get(sessionId)
-  const subPromptWithContext = activeGoal?.status === 'active'
-    ? `${prompt}\n\n[Session goal context] The main agent is pursuing this goal: ${activeGoal.condition}. Your subtask contributes to it — report results relevant to the goal.`
-    : prompt
-  let conversationMessages: Message[] = [{
-    id: makeId(),
-    role: 'user',
-    content: subPromptWithContext,
-    timestamp: Date.now(),
-  }]
+  // 初始消息：续跑 = 既有对话 + 新指令；新任务 = prompt 作为首条 user 消息
+  const initialMessages: Message[] = isResume
+    ? [...resumeMessages!, { id: makeId(), role: 'user', content: prompt, timestamp: Date.now() }]
+    : [{ id: makeId(), role: 'user', content: buildSubagentTaskPrompt(ports, ctx, prompt), timestamp: Date.now() }]
 
-  // 注册到 store
-  ports.ui.addSubAgentRun(sessionId, {
+  if (isResume) {
+    // 续跑：卡片已存在，回到 running 并记录续聊代数
+    ports.ui.patchSubAgentRun?.(sessionId, subAgentId, {
+      status: 'running',
+      continuations: (opts?.resumeCount ?? 0) + 1,
+      startedAt,
+      finishedAt: undefined,
+      error: undefined,
+      result: undefined,
+    })
+  } else {
+    ports.ui.addSubAgentRun(sessionId, {
+      id: subAgentId,
+      agentType: agent.agentType,
+      agentName: agent.name,
+      prompt,
+      status: 'running',
+      messages: [...initialMessages],
+      startedAt,
+      ...(background ? { background: true } : {}),
+    })
+  }
+
+  // 运行记录：复用既有记录（续跑，保留未消费的 steering 队列）；否则新建
+  const existing = ctx.subagentRuns.get(subAgentId)
+  const record: SubagentRunRecord = existing ?? {
     id: subAgentId,
-    agentType: agent.agentType,
-    agentName: agent.name,
-    prompt,
-    status: 'running',
-    messages: [...conversationMessages],
-    startedAt: Date.now(),
+    agent,
+    controller,
+    pendingMessages: [],
+    messages: initialMessages,
+    running: false,
+    continuations: 0,
+  }
+  record.agent = agent
+  record.controller = controller
+  record.messages = initialMessages
+  record.running = true
+  if (opts?.resumeCount !== undefined) record.continuations = opts.resumeCount
+  ctx.subagentRuns.set(subAgentId, record)
+  registerSubagentControl(sessionId, subAgentId, {
+    controller,
+    steer: (text) => {
+      if (!record.running) return false
+      record.pendingMessages.push(text)
+      return true
+    },
   })
 
-  try {
-    // 子 Agent 默认额度。与主 loop 同理由上调（旧的 50 同样是「一轮一步」任务的重灾区）：
-  // 子 Agent 常被派去做检索/批量核对这类需要反复调工具的活，50 轮经常在半路被掐断。
-  // agent 预设里显式写了 maxTurns 的仍然以预设为准。
-  const maxTurns = agent.maxTurns || 200
-    // 子 agent 独立的 thinking 签名缓存，与主 agent 互不干扰
-    const thinkingBlocks = new Map<string, AnthropicThinkingBlock[]>()
-    // 运行时防护状态（与主 agent 一致）：doom-loop 签名 / 工具执行轮计数 / 收尾注入标记
-    const recentToolSignatures: string[] = []
-    let toolExecutionTurns = 0
-    let wrapUpInjected = false
-    // microcompact（与主 agent 一致）：接近压缩阈值时清老工具输出，本轮内保持启用
-    let subMicroCompactEnabled = false
-    const subIsGitRepo = workingDir ? await detectGitRepo(ports.env.runShell, workingDir) : false
-    for (let iteration = 0; ; iteration++) {
-      if (subController.signal.aborted) break
-
-      // ── auto-compact 检查（子 agent 也要应用） ──
-      const subInputBudget = (() => {
-        const m = subSettings.providers
-          ?.find((p) => p.id === subSettings.activeProviderId)
-          ?.models.find((x) => x.id === subSettings.activeModelId)
-        return m?.maxInputTokens ?? subSettings.maxInputTokens ?? 184000
-      })()
-      const subAutoCompactThreshold = Math.max(subInputBudget - 20000, Math.floor(subInputBudget * 0.8))
-      // 与主循环同口径：只统计 API 实际发送的消息子集（压缩边界之后）
-      const subApiVisible = getApiVisibleMessages(conversationMessages)
-      const tokenCount = subTokenTracker.getTokenCount(subApiVisible)
-      if (tokenCount > subAutoCompactThreshold && subApiVisible.length > 12) {
-        try {
-          const compactionResult = await compactConversation(
-            conversationMessages,
-            subSettings,
-            subReadFileState,
-            i18n.t('agent.subAgentCompactInstruction', { name: agent.name }),
-            'auto'
-          )
-          const keepStartIndex = findKeepBoundaryIndex(conversationMessages)
-          const keptMessages = conversationMessages.slice(keepStartIndex)
-          conversationMessages = [
-            compactionResult.boundaryMessage,
-            compactionResult.summaryMessage,
-            ...keptMessages,
-            ...compactionResult.fileAttachments,
-          ]
-          subReadFileState = new Map()
-          console.log(`[subagent:${subAgentId}] auto-compacted: ${compactionResult.preCompactTokenCount} → ${compactionResult.postCompactTokenCount}`)
-        } catch (err) {
-          console.error(`[subagent:${subAgentId}] compaction failed:`, err)
-        }
-      }
-
-      // microcompact 触发（与主 agent 同规则）
-      if (tokenCount > Math.floor(subAutoCompactThreshold * 0.85)) subMicroCompactEnabled = true
-
-      // 构建 API 消息（用子 agent 的 systemPrompt 覆盖；子 agent 不带任务工作流提示词与技能目录）
-      const apiMessages = truncateMessages(settings, await buildAPIMessages(ports, ctx, conversationMessages, {
-        workingDir,
-        memoryPrompt: '',
-        taskMode: undefined,
-        skillCatalog: [],
-        extraSystemPrompt: agent.systemPrompt,
-        isGitRepo: subIsGitRepo,
-        clearOldToolResults: subMicroCompactEnabled,
-      }))
-
-      // 单轮子 Agent 模型调用（可重试）：与主 agent 一致，429/502 等瞬时错误指数退避重试。
-      let content = ''
-      let thinkingContent = ''
-      let finishReason: string | null = null
-      const assistantId = makeId()
-      let lastStreamUpdate = 0
-      let placeholderAdded = false
-
-      const runSubModelTurn = async (): Promise<Awaited<ReturnType<typeof parseStream>>> => {
-        const response = await callAPI(ports, apiMessages, subController, { modelOverride: agent.model, thinkingBlocks })
-        if (!placeholderAdded) {
-          // 添加占位消息到 store
-          const placeholderMsg: Message = {
-            id: assistantId,
-            role: 'assistant',
-            content: '',
-            thinkingContent: '',
-            timestamp: Date.now(),
-            _isStreaming: true,
-            subAgentId,
-          }
-          ports.ui.appendSubAgentMessage(sessionId, subAgentId, placeholderMsg)
-          placeholderAdded = true
-        }
-        // 每轮重试前重置累计，避免上一轮残留内容污染本轮
-        content = ''
-        thinkingContent = ''
-        finishReason = null
-        return parseStream(response, subController, {
-          onContent: (text) => {
-            content += text
-            const now = Date.now()
-            if (now - lastStreamUpdate < 50) return
-            lastStreamUpdate = now
-            ports.ui.updateSubAgentMessage(sessionId, subAgentId, assistantId, { content })
-          },
-          onThinking: (text) => {
-            thinkingContent += text
-            const now = Date.now()
-            if (now - lastStreamUpdate < 50) return
-            lastStreamUpdate = now
-            ports.ui.updateSubAgentMessage(sessionId, subAgentId, assistantId, { thinkingContent })
-          },
-          onToolCallUpdate: (calls) => {
-            const now = Date.now()
-            if (now - lastStreamUpdate < 50) return
-            lastStreamUpdate = now
-            const streamingCalls: StreamingToolCall[] = []
-            for (const [, tc] of calls) {
-              streamingCalls.push({ id: tc.id, name: tc.name, argsSoFar: tc.args })
-            }
-            ports.ui.updateSubAgentMessage(sessionId, subAgentId, assistantId, { streamingToolCalls: streamingCalls })
-          },
-          onFinish: (reason) => {
-            // 最终结果完整更新一次（throttle 期间累积的 content 需要刷到 UI）
-            ports.ui.updateSubAgentMessage(sessionId, subAgentId, assistantId, { content, thinkingContent })
-            finishReason = reason
-          },
-          onUsage: (usage: TokenUsage) => { subTokenTracker.recordUsage(usage) },
-          onThinkingBlock: (block) => {
-            const list = thinkingBlocks.get(assistantId)
-            if (list) list.push(block)
-            else thinkingBlocks.set(assistantId, [block])
-          },
-        })
-      }
-
-      let toolCallBuffers: Awaited<ReturnType<typeof parseStream>>
-      try {
-        toolCallBuffers = await runWithRetry(runSubModelTurn, {
-          retries: 5,
-          shouldRetry: (err) => !subController.signal.aborted && isRetryableError(err),
-          getRetryAfterMs: extractRetryAfterMs,
-          onRetry: (attempt) => {
-            if (placeholderAdded) {
-              ports.ui.updateSubAgentMessage(sessionId, subAgentId, assistantId, {
-                _isStreaming: true,
-                _retrying: { attempt },
-                content,
-                thinkingContent,
-              })
-            }
-          },
-        })
-        ports.ui.updateSubAgentMessage(sessionId, subAgentId, assistantId, { _retrying: undefined })
-      } catch (err) {
-        if (placeholderAdded) {
-          ports.ui.updateSubAgentMessage(sessionId, subAgentId, assistantId, { _isStreaming: false, _retrying: undefined })
-        }
-        throw err
-      }
-
-      // Match the parent behavior: cancellation stops tool execution.
-      if (subController.signal.aborted) {
-        ports.ui.updateSubAgentMessage(sessionId, subAgentId, assistantId, { _isStreaming: false })
-        break
-      }
-
-      // 解析工具调用
-      const toolCalls: ToolCall[] = []
-      for (const [, tc] of toolCallBuffers) {
-        if (tc.name) {
-          try {
-            const args = tc.args ? JSON.parse(tc.args) : {}
-            toolCalls.push({ id: tc.id, name: tc.name, arguments: args })
-          } catch {
-            toolCalls.push({ id: tc.id, name: tc.name, arguments: { _raw: tc.args } })
-          }
-        }
-      }
-
-      if (finishReason === 'length') {
-        content += `\n\n${i18n.t('agent.subAgentTruncated')}`
-      }
-
-      const assistantMessage: Message = {
-        id: assistantId,
-        role: 'assistant',
-        content: content || '',
-        thinkingContent: thinkingContent || undefined,
-        toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-        finishReason: finishReason || undefined,
-        timestamp: Date.now(),
-        streamingToolCalls: undefined,
-        _isStreaming: false,
-        subAgentId,
-      }
-      ports.ui.updateSubAgentMessage(sessionId, subAgentId, assistantId, assistantMessage)
-      conversationMessages.push(assistantMessage)
-
-      // 无工具调用 → 完成
-      if (toolCalls.length === 0) {
-        ports.ui.completeSubAgentRun(sessionId, subAgentId, content)
-        return content
-      }
-
-      // ── 截断响应保护（与主 agent 一致）：被截断的工具调用参数可能残缺，一律不执行 ──
-      if (finishReason === 'length') {
-        const refused: ToolResult[] = toolCalls.map((tc) => ({
-          toolCallId: tc.id,
-          content: toolCallRefusal(tc.name, TRUNCATED_TOOL_CALL_REASON),
-          isError: true,
-        }))
-        ports.ui.updateSubAgentMessage(sessionId, subAgentId, assistantId, { toolResults: refused })
-        for (const r of refused) {
-          const toolMsg: Message = { id: makeId(), role: 'tool', content: r.content, timestamp: Date.now(), toolResults: [r], subAgentId }
-          ports.ui.appendSubAgentMessage(sessionId, subAgentId, toolMsg)
-          conversationMessages.push(toolMsg)
-        }
-        continue
-      }
-
-      // ── 轮次上限收尾（与主 agent 一致）：不再执行工具，注入收尾指令强制文字总结 ──
-      if (toolExecutionTurns >= maxTurns || wrapUpInjected) {
-        const refused: ToolResult[] = toolCalls.map((tc) => ({
-          toolCallId: tc.id,
-          content: toolCallRefusal(tc.name, wrapUpInjected
-            ? 'tool calls are disabled for this run — reply with your final text summary now'
-            : 'maximum tool-call turns reached for this run'),
-          isError: true,
-        }))
-        ports.ui.updateSubAgentMessage(sessionId, subAgentId, assistantId, { toolResults: refused })
-        for (const r of refused) {
-          const toolMsg: Message = { id: makeId(), role: 'tool', content: r.content, timestamp: Date.now(), toolResults: [r], subAgentId }
-          ports.ui.appendSubAgentMessage(sessionId, subAgentId, toolMsg)
-          conversationMessages.push(toolMsg)
-        }
-        if (wrapUpInjected) break
-        wrapUpInjected = true
-        // 同主 agent：收尾指令只进本轮内存，不 appendSubAgentMessage。
-        // 落库会让它变成子 Agent 卡片里一条真实的用户消息，并被后续轮次当成人话读回去
-        conversationMessages.push({
-          id: makeId(),
-          role: 'user',
-          content: MAX_STEPS_MESSAGE,
-          timestamp: Date.now(),
-        })
-        continue
-      }
-
-      // 执行工具调用
-      const results: ToolResult[] = []
-      for (const tc of toolCalls) {
-        const permResult = await checkToolPermission(ports, ctx, tc.name, tc.arguments, {
-          // 子 agent 不继承主对话的任务工作流（plan/spec 限制只作用于发起规划的那条消息）
-          taskMode: null,
-          allowedTools: agent.tools,
-          disallowedTools: agent.disallowedTools,
-        })
-        if (!permResult.allowed) {
-          results.push({ toolCallId: tc.id, content: i18n.t('agent.permissionDenied', { reason: permResult.reason }), isError: true })
-          continue
-        }
-
-        // doom-loop 检测（与主 agent 一致）
-        const callSig = `${tc.name}\u0000${JSON.stringify(tc.arguments ?? {})}`
-        if (isDoomLoopSig(recentToolSignatures, callSig)) {
-          results.push({ toolCallId: tc.id, content: toolCallRefusal(tc.name, DOOM_LOOP_REFUSAL), isError: true })
-          continue
-        }
-
-        const argsWithCwd = { ...tc.arguments }
-        if (workingDir) {
-          if (tc.name === 'execute_command') argsWithCwd.cwd = resolveToolPath(workingDir, argsWithCwd.cwd || workingDir)
-          if (tc.name === 'read_file' || tc.name === 'write_file' || tc.name === 'search_replace' || tc.name === 'read_image') {
-            argsWithCwd.path = resolveToolPath(workingDir, argsWithCwd.path)
-          }
-          if (tc.name === 'list_dir' || tc.name === 'search_files' || tc.name === 'search_content') {
-            argsWithCwd.path = resolveToolPath(workingDir, argsWithCwd.path)
-          }
-        }
-
-        try {
-          const result = await ports.tools.execute(tc.name, argsWithCwd, {
-            workingDir,
-            homeDir,
-            sessionId,
-            readFileState: subReadFileState,
-            toolCallId: tc.id,
-            // 子 agent 的写文件同样要拍快照：父轮撤回时把这些一并滚掉，
-            // 否则「撤这一轮」会留下子 agent 写出的文件残骸。
-            recordFileMutation: (mutation) => recordFileMutation(ports, ctx, mutation),
-          })
-          // 记录已执行调用的签名（含失败结果），供 doom-loop 连续性判定
-          recentToolSignatures.push(callSig)
-          const failed = result.startsWith('Error') || result.startsWith('❌')
-          if (!failed) recordToolGap(ports, ctx, tc.name)
-          results.push({ toolCallId: tc.id, content: result, isError: failed })
-        } catch (err) {
-          results.push({ toolCallId: tc.id, content: i18n.t('agent.toolExecFailed', { message: err instanceof Error ? err.message : String(err) }), isError: true })
-        }
-      }
-
-      ports.ui.updateSubAgentMessage(sessionId, subAgentId, assistantId, { toolResults: results })
-
-      for (const r of results) {
-        const toolMsg: Message = {
-          id: makeId(),
-          role: 'tool',
-          content: r.content,
-          timestamp: Date.now(),
-          toolResults: [r],
-          subAgentId,
-        }
-        ports.ui.appendSubAgentMessage(sessionId, subAgentId, toolMsg)
-        conversationMessages.push(toolMsg)
-      }
-      toolExecutionTurns++
+  // 记录容量收敛：只保留最近约 50 条（运行中的永不淘汰）
+  if (ctx.subagentRuns.size > 60) {
+    for (const key of ctx.subagentRuns.keys()) {
+      if (ctx.subagentRuns.size <= 50) break
+      const rec = ctx.subagentRuns.get(key)
+      if (rec && !rec.running) ctx.subagentRuns.delete(key)
     }
+  }
 
-    // 达到 maxTurns
-    const partialResult = conversationMessages[conversationMessages.length - 1]?.content || i18n.t('agent.subAgentMaxTurns')
+  try {
+    const result = await runAgentLoop(ports, ctx, initialMessages, controller, {
+      role: 'subagent',
+      subagent: { agent, subAgentId },
+    })
+    record.messages = result.messages
+    record.running = false
     // Preserve an aborted terminal state instead of reporting a completed run.
-    if (subController.signal.aborted) {
+    if (result.aborted || controller.signal.aborted) {
       ports.ui.abortSubAgentRun(sessionId, subAgentId)
+      if (background) {
+        ctx.pendingSubagentNotifications.push(formatSubagentNotification({
+          runId: subAgentId, agentName: agent.name, agentType: agent.agentType,
+          status: 'aborted', body: i18n.t('agent.subAgentStoppedBody'),
+        }))
+      }
       return '[aborted]'
     }
-    ports.ui.completeSubAgentRun(sessionId, subAgentId, partialResult)
-    return partialResult
+    const usage = result.totalTokens != null || result.toolCallCount > 0
+      ? { totalTokens: result.totalTokens ?? 0, toolCalls: result.toolCallCount, durationMs: Date.now() - startedAt }
+      : undefined
+    if (usage) record.usage = usage
+    ports.ui.completeSubAgentRun(sessionId, subAgentId, result.text)
+    if (usage) ports.ui.patchSubAgentRun?.(sessionId, subAgentId, { usage })
+    if (background) {
+      const usageLine = usage
+        ? `\n\n<usage>subagent_tokens: ${usage.totalTokens}, tool_uses: ${usage.toolCalls}, duration_ms: ${usage.durationMs}</usage>`
+        : ''
+      ctx.pendingSubagentNotifications.push(formatSubagentNotification({
+        runId: subAgentId, agentName: agent.name, agentType: agent.agentType,
+        status: 'completed',
+        body: `${(result.text || '(no text output)').slice(0, SUBAGENT_NOTIFICATION_RESULT_CAP)}${usageLine}`,
+      }))
+    }
+    return result.text
   } catch (err) {
-    const errMsg = err instanceof Error ? err.message : String(err)
+    record.running = false
     // Abort signals represent cancellation, not a failed subagent run.
-    if (subController.signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
+    if (controller.signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
       ports.ui.abortSubAgentRun(sessionId, subAgentId)
+      if (background) {
+        ctx.pendingSubagentNotifications.push(formatSubagentNotification({
+          runId: subAgentId, agentName: agent.name, agentType: agent.agentType,
+          status: 'aborted', body: i18n.t('agent.subAgentStoppedBody'),
+        }))
+      }
       throw new Error('[aborted]')
     }
+    const errMsg = err instanceof Error ? err.message : String(err)
     ports.ui.failSubAgentRun(sessionId, subAgentId, errMsg)
+    if (background) {
+      ctx.pendingSubagentNotifications.push(formatSubagentNotification({
+        runId: subAgentId, agentName: agent.name, agentType: agent.agentType,
+        status: 'failed', body: errMsg,
+      }))
+    }
     throw err
   } finally {
-    parentController.signal.removeEventListener('abort', onParentAbort)
+    removeParentListener?.()
+    unregisterSubagentControl(sessionId, subAgentId)
   }
 }

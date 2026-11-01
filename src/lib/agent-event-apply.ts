@@ -51,6 +51,17 @@ function applyPatch(patch: StorePatch): void {
     case 'upsert-subagent-run':
       useAgentRunsStore.getState().upsertSubAgentRun(patch.sessionId, patch.run)
       return
+    case 'append-subagent-message': {
+      // 幂等：回放/补发可能重复投递同一条消息，按 id 去重（消息 id 是稳定的 makeId 产物）
+      const runs = useAgentRunsStore.getState().runsBySession[patch.sessionId] || []
+      const target = runs.find((r) => r.id === patch.runId)
+      if (target?.messages.some((m) => m.id === patch.message.id)) return
+      useAgentRunsStore.getState().appendSubAgentMessage(patch.sessionId, patch.runId, patch.message)
+      return
+    }
+    case 'update-subagent-message':
+      useAgentRunsStore.getState().updateSubAgentMessage(patch.sessionId, patch.runId, patch.messageId, patch.updates)
+      return
     case 'open-permission':
       // 幂等由 store 按 requestId 兜住：实时、补发与整环回放会各投一次
       usePermissionStore.getState().open({

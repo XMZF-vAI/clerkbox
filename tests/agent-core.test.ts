@@ -1256,14 +1256,18 @@ describe('runReactLoop · 轮次上限收尾', () => {
     expect(JSON.stringify(bodies.at(-1)?.messages ?? [])).not.toContain(MAX_STEPS_MARKER)
   }, 120_000)
 
-  it('源码层面：子 Agent 的收尾指令也不进 appendSubAgentMessage', async () => {
+  it('源码层面：统一循环的收尾指令只进内存对话，不进任何 UI 轨迹', async () => {
     const fs = await import('fs')
     const src = fs.readFileSync(new URL('../src/agent-core/loop.ts', import.meta.url), 'utf8')
     const block = src.slice(
-      src.indexOf('// ── 轮次上限收尾（与主 agent 一致）'),
-      src.indexOf('const partialResult'),
+      src.indexOf('轮次上限收尾：工具执行轮数用尽后'),
+      src.indexOf('const results: ToolResult[] = []'),
     )
-    expect(block).not.toMatch(/appendSubAgentMessage\([^)]*wrapMsg/)
+    // 收尾指令注入 conversationMessages（仅 API 可见），绝不走 sink——
+    // store.addMessage / appendSubAgentMessage 都会让它变成一条可持久化的用户消息
     expect(block).toContain('MAX_STEPS_MESSAGE')
+    expect(block).toContain('conversationMessages.push')
+    expect(block).not.toMatch(/sink\.add\([^)]*MAX_STEPS/)
+    expect(block).not.toMatch(/addMessage\([^)]*MAX_STEPS/)
   })
 })

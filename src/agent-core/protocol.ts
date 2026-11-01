@@ -45,6 +45,10 @@ export type AgentCommand =
       scope?: 'once' | 'session' }
   | { type: 'question.resolve'; sessionId: string; requestId: string; payload: unknown }
   | { type: 'manual.compact'; sessionId: string; instructions?: string }
+  /** 单子代理取消（详情面板停止按钮）：只中止该 run，不影响父轮 */
+  | { type: 'subagent.stop'; sessionId: string; runId: string }
+  /** 用户向运行中的子代理注入指令（详情面板输入框）：下一轮迭代顶部消费 */
+  | { type: 'subagent.steer'; sessionId: string; runId: string; text: string }
   /**
    * 消息撤回 / 改动回滚。两种宿主模式都只有宿主能提交截断：渲染层本地删消息，
    * 宿主的 messages 镜像与事件环会立刻长出游离条目，重连时又把它们回放回来。
@@ -90,6 +94,14 @@ export type AgentEvent =
   | { type: 'run.completed';    sessionId: string; runId: string }
   | { type: 'run.aborted';      sessionId: string; runId: string; byUser: boolean }
   | { type: 'subagent.updated'; sessionId: string; run: SubAgentRun }
+  /**
+   * 子代理消息级增量事件（只增不改）：修复旧镜像的 O(n²) 膨胀——
+   * 旧实现每次 append/update 都重发整个 run（含全部历史消息），大子任务的
+   * 字节量随消息数平方增长，会挤爆 500 条事件环触发全量 resync。
+   * subagent.updated 现在只承载 run 级补丁（注册/状态/用量），消息级走这两条。
+   */
+  | { type: 'subagent.message.appended'; sessionId: string; runId: string; message: Message }
+  | { type: 'subagent.message.updated'; sessionId: string; runId: string; messageId: string; updates: Partial<Message> }
   | { type: 'usage.updated';    sessionId: string; usage: ContextUsageInfo }
   // ── P3 追加（只增不改）：宿主在运行期持有的 UI 侧状态回流渲染层 ──
   | { type: 'todos.updated';    sessionId: string; items: TodoItem[] }

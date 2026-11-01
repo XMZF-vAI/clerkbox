@@ -22,6 +22,13 @@ const DEFAULT_COLOR = { bg: 'bg-md-primaryContainer', border: 'border-md-primary
 
 type RunStatus = 'running' | 'completed' | 'failed' | 'aborted'
 
+/** 用量摘要（卡片行内）：1.2k tok · 8 次 · 35s */
+function formatSubAgentUsage(usage: { totalTokens: number; toolCalls: number; durationMs: number }): string {
+  const tokens = usage.totalTokens >= 1000 ? `${(usage.totalTokens / 1000).toFixed(1)}k` : String(usage.totalTokens)
+  const seconds = Math.max(1, Math.round(usage.durationMs / 1000))
+  return `${tokens} tok · ${usage.toolCalls}× · ${seconds}s`
+}
+
 export function SubAgentCard({ message, sessionId, vibe }: SubAgentCardProps) {
   const { t } = useTranslation()
   const STATUS_CONFIG: Record<RunStatus, { icon: React.ReactNode; label: string; labelClass: string }> & { default: { icon: React.ReactNode; label: string; labelClass: string } } = {
@@ -43,6 +50,8 @@ export function SubAgentCard({ message, sessionId, vibe }: SubAgentCardProps) {
       agentName: r.agentName,
       prompt: r.prompt,
       startedAt: r.startedAt,
+      background: r.background === true,
+      usage: r.usage,
     }
   }))
   const selectedRunId = useAgentRunsStore((s) => s.selectedRunId)
@@ -100,6 +109,10 @@ export function SubAgentCard({ message, sessionId, vibe }: SubAgentCardProps) {
         <Bot className={`h-3 w-3 ${color.text}`} />
         <span className={`text-xs font-medium ${vibe ? 'text-white/90' : 'text-md-onSurface'}`}>{run.agentName}</span>
         <span className={`rounded px-1 py-0 text-[9px] ${color.bg} ${color.text}`}>{run.agentType}</span>
+        {/* 后台运行徽标：不阻塞主对话，完成经通知条注回 */}
+        {run.background && run.status === 'running' && (
+          <span className="rounded bg-md-tertiary/15 px-1 py-0 text-[9px] text-md-tertiary">{t('chat.subAgentBackgroundBadge')}</span>
+        )}
         {/* 状态 */}
         <div className="ml-auto flex items-center gap-1">
           {statusConfig.icon}
@@ -107,6 +120,12 @@ export function SubAgentCard({ message, sessionId, vibe }: SubAgentCardProps) {
             {statusConfig.label}
             {run.status === 'running' && elapsed > 0 && ` ${elapsed}s`}
           </span>
+          {/* 用量摘要：完成/失败后展示（token 粗计 + 工具调用数 + 时长） */}
+          {run.usage && run.status !== 'running' && (
+            <span className={`text-[10px] ${vibe ? 'text-white/40' : 'text-md-onSurfaceVariant/60'}`}>
+              · {formatSubAgentUsage(run.usage)}
+            </span>
+          )}
         </div>
       </div>
       {/* 任务摘要 */}

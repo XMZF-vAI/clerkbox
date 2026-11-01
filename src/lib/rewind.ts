@@ -83,6 +83,7 @@ export function isRewindableUserMessage(message: Message): boolean {
     !message.isCompactSummary &&
     !message.isCompactAttachment &&
     !message.isRewindNotice &&
+    !message.isSubAgentNotice &&
     !message.subAgentId &&
     !message.isSubAgentCard &&
     !message.goalEvent

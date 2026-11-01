@@ -134,6 +134,11 @@ export interface AgentUiPort {
   completeSubAgentRun(sessionId: string, runId: string, result: string): void
   abortSubAgentRun(sessionId: string, runId: string): void
   failSubAgentRun(sessionId: string, runId: string, error: string): void
+  /**
+   * 局部修补 run 的非消息字段（background 标记 / usage 统计 / 续聊代数 / 状态回退）。
+   * 可选：未装配时 loop 跳过对应修补（消息级方法始终可用）。
+   */
+  patchSubAgentRun?(sessionId: string, runId: string, patch: Partial<SubAgentRun>): void
 }
 
 /** Goal 工作流（会话级目标，跨消息持续生效）。 */
