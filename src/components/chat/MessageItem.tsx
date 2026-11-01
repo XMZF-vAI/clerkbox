@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo, memo, Suspense, useSyncExternalStore, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { Check, Terminal, FileText, FolderOpen, AlertTriangle, ChevronDown, ChevronUp, Wrench, FilePen, Globe, Pencil, Archive, Loader2, BookOpen, GitBranch, Target, CircleHelp, ListTodo, Sparkles, LayoutGrid, MonitorSmartphone, MousePointerClick, Brain, BellRing } from 'lucide-react'
+import { Check, Terminal, FileText, FolderOpen, AlertTriangle, ChevronDown, ChevronUp, Wrench, FilePen, Globe, Pencil, Archive, Loader2, BookOpen, GitBranch, Target, CircleHelp, ListTodo, Sparkles, LayoutGrid, MonitorSmartphone, MousePointerClick, Brain, BellRing, Workflow } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { Message, StreamingToolCall } from '../../types/agent'
 import { useChatStore } from '../../stores/chat-store'
@@ -103,6 +103,7 @@ function toolRowIcon(name: string) {
   if (name.startsWith('browser_')) return <MousePointerClick size={13} />
   if (name === 'question') return <CircleHelp size={13} />
   if (name === 'todowrite') return <ListTodo size={13} />
+  if (name === 'create_workflow') return <Workflow size={13} />
   if (name === 'search_replace' || name === 'edit_file') return <Pencil size={13} />
   if (name === 'write_file') return <FilePen size={13} />
   if (name.includes('read') || name.includes('file')) return <FileText size={13} />
@@ -116,6 +117,8 @@ function chipTextFor(name: string, args: Record<string, unknown>, t: ReturnType<
   // 自我管控工具没有单一目标参数，用工具自身的短标签做 chip 比截断 JSON 可读；
   // i18n 的 tools.app_* 补齐前会回落到英文工具名（defaultValue 兜底，与既有写法一致）
   if (name.startsWith('app_')) return t(`tools.${name}`, { defaultValue: name })
+  // 工作流：显示工作流名（脚本本体太长，名字才是用户认得的标识）
+  if (name === 'create_workflow') return String(args.name || '')
   // Agent 动作：展示目标而不是 JSON 片段。坐标/URL/元素 ref 是用户唯一关心的信息，
   // 摊开 args 只会把它们淹没在默认值里
   if (name.startsWith('browser_') || name.startsWith('computer_')) {

@@ -195,6 +195,27 @@ export function buildPermissionPreview(
     }
   }
 
+  if (tool === 'create_workflow') {
+    const name = String(args.name ?? '未命名工作流')
+    const script = String(args.script ?? '')
+    // grantKey 带脚本指纹：会话级放行只覆盖逐字节相同的脚本，
+    // 改一个字都要重新确认——每次内容都不同的工具不能给持久闸门
+    let hash = 5381
+    for (let i = 0; i < script.length; i++) hash = ((hash << 5) + hash + script.charCodeAt(i)) | 0
+    const head = script.split('\n').slice(0, 5).join('\n')
+    const monospace = `${name}\n${head}${script.split('\n').length > 5 ? '\n…' : ''}`
+    return {
+      ...base,
+      kind: 'generic',
+      risk: 'warning',
+      ...truncate(monospace),
+      reasonKeys: ['chat.permission.reasonWorkflowScript'],
+      target: name,
+      grantKey: `create_workflow:${name}:${(hash >>> 0).toString(36)}`,
+      serverName: undefined,
+    }
+  }
+
   const monospace = stringifyArgs(args)
   return {
     ...base,

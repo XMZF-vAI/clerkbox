@@ -31,6 +31,7 @@ const REGISTRY: Record<string, ToolRenderer> = {
   app: lazy(() => import('./AppRenderer')),
   mcp: lazy(() => import('./McpRenderer')),
   agentAction: lazy(() => import('./AgentActionRenderer')),
+  create_workflow: lazy(() => import('./WorkflowRenderer')),
 }
 
 const MCP_PREFIX = 'mcp__'

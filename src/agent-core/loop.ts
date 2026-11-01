@@ -1082,6 +1082,27 @@ async function checkToolPermission(
     return { allowed: true }
   }
 
+  // ── 工作流脚本门（对标 ZCode CreateWorkflow 的 alwaysAsk 语义）──
+  // 脚本要先给用户过目再执行：它一口气编排多个子代理，确认发生在源头。
+  // grantKey 含脚本指纹 → 「本会话始终允许」只覆盖逐字节相同的脚本，
+  // 改一个字的脚本都要重新确认（每次内容都不同的工具不能给持久闸门）。
+  // full 档与写文件/命令同语义免问。
+  if (toolName === 'create_workflow' && approvalMode !== 'full') {
+    const approval = await ports.permission.confirm({
+      tool: toolName,
+      args,
+      reason: 'workflow-script',
+      workingDir: getWorkingDir(ports, ctx) || '',
+      risk: 'normal',
+      title: i18n.t('agent.confirmWorkflowTitle'),
+      body: i18n.t('agent.confirmWorkflowBody', { name: String(args.name || '未命名工作流') }),
+    })
+    if (!approval.approved) {
+      return { allowed: false, reason: i18n.t('agent.deniedCancelWorkflow') }
+    }
+    return { allowed: true }
+  }
+
   // ── 审批档位：命令执行确认（full 档全部免询问） ──
   if (toolName === 'execute_command' && approvalMode !== 'full') {
     const cmd = String(args.command || '')
@@ -1254,7 +1275,7 @@ function recordToolGap(ports: AgentPorts, ctx: SessionContext, toolName: string,
 /** 子代理 schema 级隐藏工具。这些工具在子代理语境没有执行面（ctx 不注入 handler，
  *  调用只会得到运行时错误）或没有审批恢复面（question 需要用户在场）——
  *  与其让模型看到再失败，不如 schema 层直接隐藏（对齐 ZCode「派发工具不进子代理」）。 */
-const SUBAGENT_HIDDEN_TOOLS = new Set(['spawn_agent', 'send_message_to_agent', 'question', 'todowrite', 'scheduled_task'])
+const SUBAGENT_HIDDEN_TOOLS = new Set(['spawn_agent', 'send_message_to_agent', 'question', 'todowrite', 'scheduled_task', 'create_workflow'])
 
 /** 子代理默认轮次上限。maxTurns 是防失控护栏而不是目标值；agent 预设显式写了
  *  maxTurns 的仍以预设为准，显式值封顶主循环上限（MAX_REACT_ITERATIONS）。 */
@@ -2175,7 +2196,7 @@ agentId: ${newSubAgentId} (use send_message_to_agent with agent_id: '${newSubAge
     // scheduled_task 也在此列：它写提案 KV，并发调用会互相盖同一份数组。
     // spawn_agent / send_message_to_agent 是编排动作而非直接副作用：多个子代理互相独立，
     // 同消息派发走并行批（真并行——旧实现把它误列在串行集合里，描述与行为矛盾）。
-    const sideEffectingTools = new Set(['write_file', 'search_replace', 'execute_command', 'save_memory', 'question', 'todowrite', 'scheduled_task'])
+      const sideEffectingTools = new Set(['write_file', 'search_replace', 'execute_command', 'save_memory', 'question', 'todowrite', 'scheduled_task', 'create_workflow'])
     const isSideEffecting = (toolName: string) =>
       sideEffectingTools.has(toolName) || toolName.startsWith('mcp__')
     const orderedResults: Array<ToolResult | undefined> = Array.from({ length: toolCalls.length })

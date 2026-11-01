@@ -6,6 +6,7 @@ import { SCHEDULE_TOOLS, SCHEDULE_TOOL_NAME, executeScheduledTaskTool } from './
 import { agentActionFamily } from './agent-actions'
 import { BROWSER_TOOLS, executeBrowserTool } from './browser-tools'
 import { COMPUTER_TOOLS, executeComputerTool } from './computer-tools'
+import { WORKFLOW_TOOLS, executeWorkflowTool } from './workflow-tools'
 import type { ToolDefinition, MemoryEntry, TodoItem, UserQuestion, ReadFileSnapshot, HarnessMode, FileMutation, ToolResultImage } from '../types/agent'
 import type { McpToolInfo } from '../types/ipc'
 
@@ -741,7 +742,7 @@ class ToolRegistry {
     // appTools 放在最后：自我管控工具与内建文件/命令工具语义不同（只读、宿主内生），
     // 排末尾让模型先按能力族浏览，最后才是「问宿主自己」的辅助能力。
     // 定时任务工具排在交互工具之后：它写的是宿主应用的状态，且落点同样是「待用户确认」。
-    this.builtinDefinitions = [...fileTools, ...shellTools, ...webTools, ...memoryTools, ...agentTools, ...interactiveTools, ...SCHEDULE_TOOLS, ...BROWSER_TOOLS, ...COMPUTER_TOOLS, ...APP_TOOLS]
+    this.builtinDefinitions = [...fileTools, ...shellTools, ...webTools, ...memoryTools, ...agentTools, ...interactiveTools, ...SCHEDULE_TOOLS, ...BROWSER_TOOLS, ...COMPUTER_TOOLS, ...APP_TOOLS, ...WORKFLOW_TOOLS]
   }
 
   /**
@@ -1340,6 +1341,10 @@ class ToolRegistry {
         // 未命中时返回 null，落到下面的 mcp__ / unknown 分支。
         const appResult = await executeAppTool(name, args ?? {}, ctx)
         if (appResult !== null) return appResult
+        // 工作流（create_workflow）：脚本编排子代理，实现在 workflow-tools.ts。
+        // 子代理语境拿不到 spawnSubAgent 闭包，执行侧兜底直接报错（schema 层也已隐藏）。
+        const workflowResult = await executeWorkflowTool(name, args ?? {}, ctx)
+        if (workflowResult !== null) return workflowResult
         // MCP 工具（mcp__<server>__<tool>）：转发到主进程 McpManager 执行
         if (name.startsWith('mcp__')) {
           try {

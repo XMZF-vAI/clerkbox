@@ -75,6 +75,7 @@ export type PermissionReason =
   | 'outside-write'
   | 'browser-control'
   | 'computer-control'
+  | 'workflow-script'
 
 /**
  * 审批请求的结构化入参。
