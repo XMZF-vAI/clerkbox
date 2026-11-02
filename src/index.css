@@ -240,6 +240,57 @@
   @apply bg-white/5;
 }
 
+/*
+ * 紧凑档（md-compact）：工具卡与子代理面板的正文上下文是 12px（text-ui-xs），
+ * 默认档 h1 是 20px / 正文 14px，塞进卡片会把行高撑破、挤压时间线。
+ * 这里整体降到 ui-xs 档，标题同比缩小，间距收紧——只改尺寸不改配色，
+ * 所以能与 md-vibe 叠加使用。
+ */
+.markdown-body.md-compact {
+  @apply text-ui-xs leading-relaxed;
+}
+.markdown-body.md-compact h1 {
+  @apply text-ui-sm font-bold mt-2 mb-1;
+}
+.markdown-body.md-compact h2 {
+  @apply text-ui-xs font-bold mt-2 mb-1;
+}
+.markdown-body.md-compact h3,
+.markdown-body.md-compact h4,
+.markdown-body.md-compact h5,
+.markdown-body.md-compact h6 {
+  @apply text-ui-xs font-semibold mt-1.5 mb-0.5;
+}
+.markdown-body.md-compact p {
+  @apply mb-1.5;
+}
+.markdown-body.md-compact ul,
+.markdown-body.md-compact ol {
+  @apply pl-4 mb-1.5;
+}
+.markdown-body.md-compact li {
+  @apply text-ui-xs;
+}
+.markdown-body.md-compact blockquote {
+  @apply my-1.5 pl-2;
+}
+.markdown-body.md-compact hr {
+  @apply my-2;
+}
+.markdown-body.md-compact .code-block {
+  @apply my-1.5 p-2 text-ui-xs;
+}
+.markdown-body.md-compact .inline-code {
+  @apply px-1 py-0 text-ui-xs;
+}
+.markdown-body.md-compact table.markdown-table {
+  @apply my-2 text-ui-xs;
+}
+.markdown-body.md-compact table.markdown-table th,
+.markdown-body.md-compact table.markdown-table td {
+  @apply px-2 py-1;
+}
+
 @keyframes shimmer {
   0% { background-position: 200% 0; }
   100% { background-position: -200% 0; }

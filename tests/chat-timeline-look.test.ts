@@ -34,8 +34,10 @@ function slice(text: string, from: string, to: string): string {
 const mainRow = slice(item, '<div className={`flex flex-col gap-1', '{/* User message attachments')
 // 正文块：从注释锚点走到 isUser 分支之前，正好覆盖两侧分支的样式串
 const contentBlock = slice(item, '{/* Message content', '{isUser ? (')
-// 思考行整体（到下一个 markdown 渲染器为止）
-const thinkingRow = slice(item, 'function ThinkingRow(', '/** Full markdown renderer */')
+// 思考行整体（到主消息组件为止）。锚点原先是 MarkdownContent 的注释块，
+// 该组件已抽到 MarkdownContent.tsx —— 锚点必须跟着走，否则 slice 会退化成「到文件尾」，
+// 断言范围悄悄变大（not.toContain 类断言会因此失真）。
+const thinkingRow = slice(item, 'function ThinkingRow(', 'function MessageItem(')
 // 工具行整体（到流式行之前）
 const toolRow = slice(item, 'function ToolRow(', '/** 流式生成中的工具调用行')
 // 整轮折叠头（到最终回复渲染为止）

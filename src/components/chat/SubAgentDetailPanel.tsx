@@ -3,6 +3,7 @@ import { ArrowLeft, Bot, Loader2, CheckCircle, XCircle, Wrench, Brain, Square, S
 import { useTranslation } from 'react-i18next'
 import { useAgentRunsStore } from '../../stores/agent-runs-store'
 import { stopSubAgentRun, steerSubAgentRun } from '../../lib/subagent-control'
+import { MarkdownContent } from './MarkdownContent'
 import type { Message, SubAgentUsage, ToolCall, ToolResult } from '../../types/agent'
 
 interface SubAgentDetailContentProps {
@@ -108,9 +109,9 @@ function SubAgentMessage({ msg, vibe }: { msg: Message; vibe?: boolean }) {
           <div className={`mt-1 whitespace-pre-wrap break-words text-[11px] ${vibe ? 'text-white/60' : 'text-md-tertiary/80'}`}>{msg.thinkingContent}</div>
         </details>
       )}
-      {/* content */}
+      {/* content：子代理产出与主对话同源，走同一套 Markdown 渲染（紧凑档适配 12px 面板） */}
       {hasContent && (
-        <div className={`whitespace-pre-wrap break-words text-xs ${vibe ? 'text-white/90' : 'text-md-onSurface'}`}>{msg.content}</div>
+        <MarkdownContent content={msg.content} vibe={vibe} size="compact" />
       )}
       {/* 流式工具调用预览 */}
       {msg.streamingToolCalls && msg.streamingToolCalls.length > 0 && (
@@ -255,10 +256,13 @@ export function SubAgentDetailContent({ sessionId, runId, titleSnapshot, active,
         )}
       </div>
 
-      {/* 任务摘要 */}
+      {/* 任务摘要：prompt 本身通常是 Markdown 任务书（编号要求、路径、行内代码），
+          按 Markdown 渲染；限高内滚，避免长任务书把消息区挤没 */}
       <div className={`border-b px-3 py-2 ${vibe ? 'border-white/10' : 'border-md-outlineVariant/30'}`}>
         <div className={`text-[10px] ${vibe ? 'text-white/50' : 'text-md-onSurfaceVariant'}`}>{t('chat.subAgentTask')}</div>
-        <div className={`mt-0.5 whitespace-pre-wrap break-words text-xs ${vibe ? 'text-white/90' : 'text-md-onSurface'}`}>{run.prompt}</div>
+        <div className={`mt-0.5 max-h-32 overflow-y-auto rounded ${vibe ? 'text-white/90' : 'text-md-onSurface'}`}>
+          <MarkdownContent content={run.prompt} vibe={vibe} size="compact" />
+        </div>
         <div className="mt-1.5 flex items-center gap-2 text-[11px]">
           {statusConfig.icon}
           <span className={statusConfig.class}>{statusConfig.label}</span>
@@ -320,11 +324,13 @@ export function SubAgentDetailContent({ sessionId, runId, titleSnapshot, active,
         </form>
       )}
 
-      {/* 最终结果 */}
+      {/* 最终结果：Markdown 渲染 + 容器内滚动看全文（此前纯文本还截到 1000 字） */}
       {run.status === 'completed' && run.result && (
         <div className={`border-t px-3 py-2 ${vibe ? 'border-white/10' : 'border-md-outlineVariant/30'}`}>
           <div className={`text-[10px] ${vibe ? 'text-white/50' : 'text-md-onSurfaceVariant'}`}>{t('chat.subAgentFinalResult')}</div>
-          <div className={`mt-1 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded p-1.5 text-xs ${vibe ? 'bg-white/5 text-white/90' : 'bg-md-success/5 text-md-onSurface'}`}>{run.result.slice(0, 1000)}{run.result.length > 1000 && '...'}</div>
+          <div className={`mt-1 max-h-40 overflow-y-auto rounded p-1.5 ${vibe ? 'bg-white/5' : 'bg-md-success/5'}`}>
+            <MarkdownContent content={run.result} vibe={vibe} size="compact" />
+          </div>
         </div>
       )}
     </div>
