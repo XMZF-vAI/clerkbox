@@ -13,6 +13,7 @@ import { useInteractiveStore, useTodoStore } from '../stores/interactive-store'
 import { useGoalStore } from '../stores/goal-store'
 import { usePermissionStore } from '../stores/permission-store'
 import { useAgentRunsStore } from '../stores/agent-runs-store'
+import { useWorkflowRunsStore } from '../stores/workflow-runs-store'
 import type { AgentEvent } from '../agent-core/protocol'
 import type { SessionGoal } from '../types/agent'
 
@@ -78,6 +79,10 @@ function applyPatch(patch: StorePatch): void {
       return
     case 'settle-permission':
       usePermissionStore.getState().settle(patch.sessionId, patch.requestId)
+      return
+    case 'set-workflow-progress':
+      // 后到的帧覆盖先到的：快照本身带全量步骤状态，不需要增量合并
+      useWorkflowRunsStore.getState().update(patch.toolCallId, patch.snapshot)
       return
     case 'open-question': {
       const key = `${patch.sessionId}:${patch.requestId}`

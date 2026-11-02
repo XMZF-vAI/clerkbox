@@ -9,6 +9,7 @@
 import { isDangerousCommand } from './permission-engine'
 import { isPathInside, isSystemPath, resolveToolPath } from './path-safety'
 import { agentActionFamily, isAgentActionToolReadOnly } from './agent-actions'
+import { analyzeWorkflowScript, type WorkflowGraph } from './workflow-graph'
 import type { Message } from '../types/agent'
 
 export type PermissionRiskLevel = 'dangerous' | 'warning' | 'info'
@@ -43,6 +44,13 @@ export interface PermissionPreview {
   grantKey: string
   /** MCP 服务器名（仅 mcp 类工具有值） */
   serverName?: string
+  /**
+   * 工作流静态图（仅 create_workflow）。确认卡据此画泳道流程图——
+   * 这是**静态分析**的结果，不是执行真值，UI 必须一并说明。
+   */
+  graph?: WorkflowGraph
+  /** 工作流脚本原文（仅 create_workflow）：「显示完整脚本」折叠块用它，而不是截断的预览 */
+  script?: string
 }
 
 function truncate(text: string): { monospace: string; truncated: boolean } {
@@ -198,10 +206,6 @@ export function buildPermissionPreview(
   if (tool === 'create_workflow') {
     const name = String(args.name ?? '未命名工作流')
     const script = String(args.script ?? '')
-    // grantKey 带脚本指纹：会话级放行只覆盖逐字节相同的脚本，
-    // 改一个字都要重新确认——每次内容都不同的工具不能给持久闸门
-    let hash = 5381
-    for (let i = 0; i < script.length; i++) hash = ((hash << 5) + hash + script.charCodeAt(i)) | 0
     const head = script.split('\n').slice(0, 5).join('\n')
     const monospace = `${name}\n${head}${script.split('\n').length > 5 ? '\n…' : ''}`
     return {
@@ -211,8 +215,14 @@ export function buildPermissionPreview(
       ...truncate(monospace),
       reasonKeys: ['chat.permission.reasonWorkflowScript'],
       target: name,
-      grantKey: `create_workflow:${name}:${(hash >>> 0).toString(36)}`,
+      // 会话级放行按**会话**归并，不按脚本指纹：模型每轮都会重写脚本，
+      // 指纹级匹配让「本会话始终允许」永远命中不了（点了还是每次问）。
+      // 语义与卡片上的文案一致：本会话内运行工作流不再询问。
+      grantKey: 'create_workflow:session',
       serverName: undefined,
+      // 静态图：确认卡画泳道流程图用；脚本没写成字面形态时可能只有少量站，UI 照实画
+      graph: analyzeWorkflowScript(script),
+      script,
     }
   }
 

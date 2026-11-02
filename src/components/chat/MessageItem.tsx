@@ -1,14 +1,12 @@
-import { useState, useEffect, useRef, useMemo, memo, Suspense, useSyncExternalStore, type ReactNode } from 'react'
+import { useState, useEffect, useRef, useMemo, memo, Suspense, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Check, Terminal, FileText, FolderOpen, AlertTriangle, ChevronDown, ChevronUp, Wrench, FilePen, Globe, Pencil, Archive, Loader2, BookOpen, GitBranch, Target, CircleHelp, ListTodo, Sparkles, LayoutGrid, MonitorSmartphone, MousePointerClick, Brain, BellRing, Workflow } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { Message, StreamingToolCall } from '../../types/agent'
 import { useChatStore } from '../../stores/chat-store'
 import { parsePermissionAudit } from '../../lib/permission-preview'
-// 聊天内容的 dangerouslySetInnerHTML 唯一出口（XSS 边界）。此处曾留了一份逐字节相同的副本，
-// 于是「规范文件」的修补到不了真正在跑的那条路径——现在只留一处。
-import { renderMarkdown } from '../../lib/markdown'
-import { getHighlightVersion, subscribeHighlightVersion } from '../../lib/code-highlighter'
+// 正文 Markdown 渲染已抽到独立组件（子代理面板 / 工作流结果共用同一实现）
+import { MarkdownContent } from './MarkdownContent'
 import {
   getToolCardOpen,
   hasAutoActed,
@@ -196,6 +194,19 @@ function ToolRow({ toolCall, result, vibe }: {
     const timer = setTimeout(() => setMountDetail(false), 300)
     return () => clearTimeout(timer)
   }, [open])
+
+  // 工作流起跑即展开：运行看板是这次调用唯一的进度面，折叠着等于没有。
+  // 只对 create_workflow 生效；展开后记 autoActed，完成边沿就不会又把它收起来
+  // （那会在跑完的瞬间把用户正看着的终态图关掉）。用户手动收起过则完全不抢方向盘。
+  const workflowStartedRef = useRef(false)
+  useEffect(() => {
+    if (!running || workflowStartedRef.current) return
+    if (toolCall.name !== 'create_workflow' || hasUserTouched(toolCall.id)) return
+    workflowStartedRef.current = true
+    markAutoActed(toolCall.id)
+    setToolCardOpen(toolCall.id, true)
+    setOpen(true)
+  }, [running, toolCall.id, toolCall.name])
 
   // 完成边沿的自动展开/收起（每行一次，用户手动操作过的不抢方向盘）：
   // 写类完成后自动展开看 diff；长输出完成后收起流式期间摊开的明细。
@@ -594,21 +605,6 @@ function ThinkingRow({ thinkingContent, isStreaming, hasContent, finishReason, e
     </div>
   )
 }
-
-/**
- * Full markdown renderer
- *
- * 代码高亮（shiki）经「启动预载 + 版本订阅」接入：高亮器在 main.tsx 启动时预载，
- * 就绪 / 语言补载完成时 bump 版本号，这里用 useSyncExternalStore 订阅——版本变化
- * 只让挂载中的 MarkdownContent 各自重渲一次，无 setState、不牵动父组件，与流式
- * 渲染循环互不放大（此前 setState 接法因此被摘除，通道实现见 lib/code-highlighter.ts）。
- * 高亮器未就绪时 renderMarkdown 内部走纯文本兜底（markdown.ts 的 renderCodeBlock）。
- */
-const MarkdownContent = memo(function MarkdownContent({ content, vibe }: { content: string; vibe?: boolean }) {
-  const highlightVersion = useSyncExternalStore(subscribeHighlightVersion, getHighlightVersion)
-  const html = useMemo(() => renderMarkdown(content), [content, highlightVersion])
-  return <div className={`markdown-body${vibe ? ' md-vibe' : ''}`} dangerouslySetInnerHTML={{ __html: html }} />
-})
 
 function MessageItem({ message, vibe = false, sessionId, isIntermediate = false, extraActions, copyText, copyTitle }: MessageItemProps) {
   const { t } = useTranslation()

@@ -28,6 +28,8 @@ export interface WorkflowStep {
   /** facade agent() 的名字（纯展示，子代理卡片的实际名称由 agentType 决定） */
   name: string
   agentType: string
+  /** 派发时所在的 phase 名（空串 = 第一个 phase 标记之前）——运行看板据此把步骤挂到站下 */
+  phase?: string
   /** 截断后的 prompt（簿记用；完整 prompt 已交给子代理） */
   prompt: string
   agentId?: string
@@ -57,6 +59,32 @@ export interface WorkflowRun {
   error?: string
   startedAt: number
   endedAt?: number
+}
+
+// ── 实时进度快照（运行看板的数据面） ──────────────────────────────
+
+/**
+ * 每步结算后推给宿主的只读快照。刻意是**值拷贝**而不是 WorkflowRun 引用：
+ * 运行对象在脚本执行期间持续被改写，直接把引用交给 UI 会让「快照」随下一次
+ * 变更一起变形，React 也拿不到新的对象身份去触发重渲染。
+ */
+export interface WorkflowProgressSnapshot {
+  runId: string
+  name: string
+  status: WorkflowRunStatus
+  /** 已经发出的 phase 标记（声明序，允许重名） */
+  phases: string[]
+  steps: Array<{
+    key: string
+    name: string
+    /** 派发时所在的 phase（空串 = 第一个标记之前） */
+    phase: string
+    status: WorkflowStepStatus
+    startedAt: number
+    endedAt?: number
+  }>
+  startedAt: number
+  updatedAt: number
 }
 
 // ── 运行注册表（进程内；跨会话重启的持久化留给二期） ──────────────
@@ -134,6 +162,11 @@ export interface WorkflowHostPort {
   runAgent(step: { name: string; prompt: string; agentType: string }): Promise<{ result: string; agentId: string | null }>
   /** 会话级中止信号：停止会话 = 停止工作流 */
   signal?: AbortSignal
+  /**
+   * 实时进度回调（可选）：每次阶段标记 / 步骤派发 / 步骤结算 / 运行收尾后各推一次快照。
+   * 宿主据此点亮运行看板；未装配时工作流行为与今天完全一致。
+   */
+  onProgress?(snapshot: WorkflowProgressSnapshot): void
 }
 
 export interface ExecuteWorkflowInput {
@@ -184,6 +217,35 @@ export async function executeWorkflowScript(input: ExecuteWorkflowInput): Promis
   // 它是比 signal 更早到达的停止信号，见到即记账，后续步骤不再派发
   let abortSeen = false
 
+  /** 当前阶段名（phase() 声明序）；步骤派发时记进 step.phase，看板据此挂站 */
+  let currentPhase = ''
+
+  /** 推一次快照。回调由宿主提供，出错绝不能反过来打断工作流 */
+  const emitProgress = () => {
+    const onProgress = input.host.onProgress
+    if (!onProgress) return
+    try {
+      onProgress({
+        runId: run.id,
+        name: run.name,
+        status: run.status,
+        phases: run.phases.map((phase) => phase.name),
+        steps: run.steps.map((step) => ({
+          key: step.key,
+          name: step.name,
+          phase: step.phase ?? '',
+          status: step.status,
+          startedAt: step.startedAt,
+          endedAt: step.endedAt,
+        })),
+        startedAt: run.startedAt,
+        updatedAt: Date.now(),
+      })
+    } catch {
+      // 看板故障不影响编排
+    }
+  }
+
   const facade = {
     /** 派发一个子代理并等它完成，返回结果正文 */
     agent: async (name: unknown, prompt: unknown): Promise<string> => {
@@ -197,11 +259,13 @@ export async function executeWorkflowScript(input: ExecuteWorkflowInput): Promis
         key: `step-${run.steps.length + 1}`,
         name: stepName,
         agentType: 'general',
+        phase: currentPhase,
         prompt: stepPrompt.slice(0, 2000),
         status: 'running',
         startedAt: Date.now(),
       }
       run.steps.push(step)
+      emitProgress()
       try {
         const { result, agentId } = await input.host.runAgent({ name: stepName, prompt: stepPrompt, agentType: step.agentType })
         if (result === '[aborted]') {
@@ -212,11 +276,13 @@ export async function executeWorkflowScript(input: ExecuteWorkflowInput): Promis
         step.endedAt = Date.now()
         step.agentId = agentId ?? undefined
         step.excerpt = result.slice(0, STEP_EXCERPT_CHARS)
+        emitProgress()
         return result
       } catch (e) {
         step.status = aborted() ? 'aborted' : 'failed'
         step.endedAt = Date.now()
         step.excerpt = e instanceof Error ? e.message.slice(0, STEP_EXCERPT_CHARS) : String(e).slice(0, STEP_EXCERPT_CHARS)
+        emitProgress()
         throw e
       }
     },
@@ -236,7 +302,9 @@ export async function executeWorkflowScript(input: ExecuteWorkflowInput): Promis
     },
     /** 阶段标记：写给用户看的进度锚点 */
     phase: (name: unknown): void => {
-      run.phases.push({ name: typeof name === 'string' && name.trim() ? name.trim().slice(0, 80) : `阶段 ${run.phases.length + 1}`, at: Date.now() })
+      currentPhase = typeof name === 'string' && name.trim() ? name.trim().slice(0, 80) : `阶段 ${run.phases.length + 1}`
+      run.phases.push({ name: currentPhase, at: Date.now() })
+      emitProgress()
     },
     /** 进度行（进 run.logs，终态报告附带） */
     log: (msg: unknown): void => {
@@ -244,6 +312,8 @@ export async function executeWorkflowScript(input: ExecuteWorkflowInput): Promis
     },
   }
 
+  // 起跑即推一帧：确认卡上的空心图换成运行看板的那一刻，灯要先亮成"未到"
+  emitProgress()
   try {
     // 脚本以裸标识符使用 facade（agent/parallel/phase/log）——先解构再进入脚本体，
     // 「写脚本的人不该知道 ctx 这个实现细节」
@@ -268,6 +338,7 @@ export async function executeWorkflowScript(input: ExecuteWorkflowInput): Promis
         step.endedAt = step.endedAt ?? run.endedAt
       }
     }
+    emitProgress()
   }
   return run
 }
@@ -326,6 +397,7 @@ export function encodeWorkflowRunTail(run: WorkflowRun): string {
     steps: run.steps.map((s) => ({
       key: s.key,
       name: s.name,
+      phase: s.phase ?? '',
       status: s.status,
       agentId: s.agentId,
       excerpt: s.excerpt?.slice(0, 200),
@@ -347,7 +419,7 @@ export interface WorkflowRunTail {
   durationMs?: number
   error?: string
   result?: string
-  steps: Array<{ key: string; name: string; status: WorkflowStepStatus; agentId?: string; excerpt?: string; durationMs?: number }>
+  steps: Array<{ key: string; name: string; phase?: string; status: WorkflowStepStatus; agentId?: string; excerpt?: string; durationMs?: number }>
 }
 
 /** 渲染器侧解析 UI 尾巴 */

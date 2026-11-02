@@ -78,6 +78,15 @@ export class SessionContext {
    */
   readonly grantedAgentActions = new Set<string>()
 
+  /**
+   * 会话级工作流放行：用户在工作流确认卡里选「本会话始终允许」后置位。
+   *
+   * 语义按**会话**而不是按脚本指纹：工作流脚本每轮都会被模型重写一遍，
+   * 指纹级放行意味着用户点了「始终允许」还是每次都弹（踩过这个坑）。
+   * 与 ZCode 的「本会话内运行工作流不再询问」同义。
+   */
+  workflowApproved = false
+
   // ── 多子代理编排状态 ──
   /**
    * 本会话的子代理运行记录（含运行中与已完成）。

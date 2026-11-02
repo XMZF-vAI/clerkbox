@@ -12,6 +12,7 @@
 import type { AnthropicThinkingBlock, NeutralMessage } from '../lib/api-adapters'
 import type { SkillCatalogEntry } from '../lib/skill-catalog'
 import type { ToolContext } from '../lib/tool-registry'
+import type { WorkflowProgressSnapshot } from '../lib/workflow-runtime'
 import type { SessionStatus } from '../stores/chat-store'
 import type {
   AgentDefinition,
@@ -116,6 +117,14 @@ export interface PermissionApproval {
 /** 权限审批（P1 = Electron 原生确认框；P3 起宿主侧 fail-closed：超时/UI 离线默认拒绝）。 */
 export interface AgentPermissionPort {
   confirm(request: AgentPermissionRequest): Promise<PermissionApproval>
+  /**
+   * 可选：把确认**搬进对话内**渲染（而不是系统弹窗）。
+   *
+   * 只有工作流确认需要它——那张卡要画流程图，原生弹窗画不出来。未装配、或实现
+   * 决定不接管（例如非 workflow-script 的请求）时返回 `null`，调用方原样退回
+   * `confirm`，既有门的行为一字不改。
+   */
+  confirmInChat?(request: AgentPermissionRequest): Promise<PermissionApproval | null>
 }
 
 /** UI 耦合回执：提问/待办/通知/用量统计/子 agent 运行态/记忆捕获。 */
@@ -215,6 +224,11 @@ export interface AgentPorts {
   checkpoint?: AgentCheckpointPort
   /** 事件出口：P1 渲染层宿主为 no-op；P3 起接 'agent:event' 通道（带 seq）。 */
   emit(event: AgentEvent): void
+  /**
+   * 工作流实时进度（可选）。渲染层宿主**直写** store（emit 在 P1 是 no-op）；
+   * 主进程宿主不装配它，改由 `emit('workflow.updated')` 回流到渲染层。
+   */
+  workflowProgress?(sessionId: string, toolCallId: string, snapshot: WorkflowProgressSnapshot): void
 }
 
 /** loop 内部模型调用参数（与旧 callAPI opts 对齐）。 */

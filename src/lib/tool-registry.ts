@@ -7,6 +7,7 @@ import { agentActionFamily } from './agent-actions'
 import { BROWSER_TOOLS, executeBrowserTool } from './browser-tools'
 import { COMPUTER_TOOLS, executeComputerTool } from './computer-tools'
 import { WORKFLOW_TOOLS, executeWorkflowTool } from './workflow-tools'
+import type { WorkflowProgressSnapshot } from './workflow-runtime'
 import type { ToolDefinition, MemoryEntry, TodoItem, UserQuestion, ReadFileSnapshot, HarnessMode, FileMutation, ToolResultImage } from '../types/agent'
 import type { McpToolInfo } from '../types/ipc'
 
@@ -405,6 +406,11 @@ export interface ToolContext {
    * 失败/超限时回调内部自行记缺口，不反过来影响这次写入的结果。
    */
   recordFileMutation?: (mutation: FileMutation) => Promise<void>
+  /**
+   * 工作流实时进度（create_workflow 专用）：每步派发/结算后回调一次快照。
+   * 仅主对话注入；子代理没有工作流执行面，恒为空。
+   */
+  onWorkflowProgress?: (snapshot: WorkflowProgressSnapshot) => void
 }
 
 /** Escape a string for safe interpolation into PowerShell double-quoted strings.

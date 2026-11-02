@@ -991,6 +991,7 @@
       allowAlways: 'Always allow this session',
     /** Agent 动作（浏览器 / 桌面）专用选项：一句话说明它能免掉什么 */
     allowSessionCapability: 'Allow for this whole session (stop asking each time)',
+    allowSessionWorkflow: 'Always allow this session (stop asking about workflows)',
       hint: 'Your choice is recorded in this chat',
       awaitHostHint: 'Confirm in the system dialog to continue',
       expired: 'Approval timed out — treated as denied',
@@ -1010,6 +1011,12 @@
       reasonBrowserUse: 'Controls a page in the built-in browser',
       reasonWorkflowScript: 'Runs a multi-sub-agent orchestration script',
       reasonComputerUse: 'Moves your real mouse and keyboard',
+      /** 工作流确认卡（确认时画泳道流程图） */
+      runWorkflow: 'Run this workflow?',
+      workflowPhaseCount: '{{count}} phases',
+      workflowParallel: 'Up to {{count}} sub-agents run at once',
+      workflowStaticHint: 'diagram read statically from the script',
+      workflowScriptToggle: 'Show full script',
     },
   },
 
@@ -1187,6 +1194,14 @@
     workflowStepCount: '{{count}} steps',
     workflowAborted: 'Stopped',
     workflowScript: 'View script',
+    /** 工作流运行看板 / 终态图 */
+    workflowRunning: 'Workflow running',
+    workflowTitle: 'Workflow',
+    workflowAgentsWorking: '{{count}} sub-agents working',
+    workflowPhaseCount: '{{count}} phases',
+    workflowGraphAria: 'Workflow diagram: {{phases}} phases, {{steps}} steps',
+    workflowUngrouped: 'Ungrouped',
+    workflowMore: '{{count}} more',
     editCount: '{{count}} edits',
     arguments: 'Arguments',
   },

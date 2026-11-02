@@ -991,6 +991,7 @@
       allowOnce: '本次允许',
       allowAlways: '本会话始终允许',
       allowSessionCapability: '本会话始终允许（不再逐次询问）',
+      allowSessionWorkflow: '本会话始终允许（工作流不再询问）',
       hint: '选择会记入对话记录',
       awaitHostHint: '请在系统弹窗中完成确认',
       expired: '审批已超时，按拒绝处理',
@@ -1010,6 +1011,12 @@
       reasonBrowserUse: '操作内置浏览器里的网页',
       reasonWorkflowScript: '运行多子代理编排脚本',
       reasonComputerUse: '动用你真实的鼠标与键盘',
+      /** 工作流确认卡（确认时画泳道流程图） */
+      runWorkflow: '运行此工作流？',
+      workflowPhaseCount: '{{count}} 个阶段',
+      workflowParallel: '最多 {{count}} 个子代理同时运行',
+      workflowStaticHint: '按脚本静态分析绘制',
+      workflowScriptToggle: '显示完整脚本',
     },
   },
 
@@ -1137,6 +1144,14 @@
     workflowStepCount: '{{count}} 个步骤',
     workflowAborted: '已停止',
     workflowScript: '查看脚本',
+    /** 工作流运行看板 / 终态图 */
+    workflowRunning: '工作流运行中',
+    workflowTitle: '工作流',
+    workflowAgentsWorking: '{{count}} 个子代理工作中',
+    workflowPhaseCount: '{{count}} 个阶段',
+    workflowGraphAria: '工作流图：{{phases}} 个阶段、{{steps}} 个步骤',
+    workflowUngrouped: '未分组',
+    workflowMore: '还有 {{count}} 个',
     editCount: '{{count}} 处编辑',
 
     /** Agent 动作（browser_ / computer_）工具卡片 */

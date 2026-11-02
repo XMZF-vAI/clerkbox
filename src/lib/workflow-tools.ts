@@ -92,6 +92,8 @@ export async function executeWorkflowTool(name: string, args: Record<string, unk
       const clean = raw.startsWith('[aborted]') ? '[aborted]' : raw.split('\n\nagentId:')[0]?.trim() ?? raw
       return { result: clean, agentId: extractAgentId(raw) }
     },
+    // 实时进度：宿主装配了看板通道就一路推下去；没装配时 runtime 跳过（行为不变）
+    onProgress: ctx?.onWorkflowProgress,
   }
 
   const run = await executeWorkflowScript({

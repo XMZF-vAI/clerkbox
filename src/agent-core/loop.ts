@@ -959,7 +959,7 @@ async function buildAPIMessages(
  *    避免 rm -rf 类命令在默认档位下零拦截静默执行
  *  - full：完全访问，无需询问直接执行
  *  任务工作流（taskMode）：plan 规划期只读；spec 规划期仅允许读取与写入对应文档目录 */
-async function checkToolPermission(
+export async function checkToolPermission(
   ports: AgentPorts,
   ctx: SessionContext,
   toolName: string,
@@ -1084,22 +1084,28 @@ async function checkToolPermission(
 
   // ── 工作流脚本门（对标 ZCode CreateWorkflow 的 alwaysAsk 语义）──
   // 脚本要先给用户过目再执行：它一口气编排多个子代理，确认发生在源头。
-  // grantKey 含脚本指纹 → 「本会话始终允许」只覆盖逐字节相同的脚本，
-  // 改一个字的脚本都要重新确认（每次内容都不同的工具不能给持久闸门）。
-  // full 档与写文件/命令同语义免问。
+  // 放行按**会话**记（ctx.workflowApproved）：脚本每轮都会被模型重写，按内容
+  // 指纹记放行等于让「本会话始终允许」永远命中不了。full 档与写文件/命令同语义免问。
   if (toolName === 'create_workflow' && approvalMode !== 'full') {
-    const approval = await ports.permission.confirm({
+    // 本会话已经放行过：不再打扰。用户点的「本会话始终允许」必须真的兑现——
+    // 脚本每轮都会被重写，按脚本指纹记放行等于每次都要重问。
+    if (ctx.workflowApproved) return { allowed: true }
+    const request = {
       tool: toolName,
       args,
-      reason: 'workflow-script',
+      reason: 'workflow-script' as const,
       workingDir: getWorkingDir(ports, ctx) || '',
-      risk: 'normal',
+      risk: 'normal' as const,
       title: i18n.t('agent.confirmWorkflowTitle'),
       body: i18n.t('agent.confirmWorkflowBody', { name: String(args.name || '未命名工作流') }),
-    })
+    }
+    // 优先走对话内确认（那张卡要画流程图，原生弹窗画不出）；宿主不接管时原样退回弹窗
+    const inChat = ports.permission.confirmInChat ? await ports.permission.confirmInChat(request) : null
+    const approval = inChat ?? (await ports.permission.confirm(request))
     if (!approval.approved) {
       return { allowed: false, reason: i18n.t('agent.deniedCancelWorkflow') }
     }
+    if (approval.scope === 'session') ctx.workflowApproved = true
     return { allowed: true }
   }
 
@@ -2160,6 +2166,11 @@ agentId: ${newSubAgentId} (use send_message_to_agent with agent_id: '${newSubAge
           recordFileMutation: (mutation) => recordFileMutation(ports, ctx, mutation),
           // 截图旁路（Browser/Computer Use）：仅主对话的图像工具会上报，子代理恒为空数组
           recordImage: (image) => { capturedImages.push(image) },
+          // 工作流实时看板：渲染层宿主直写 store，主进程宿主走事件回流（两者只命中一个）
+          onWorkflowProgress: (snapshot) => {
+            ports.workflowProgress?.(sessionId, tc.id, snapshot)
+            ports.emit({ type: 'workflow.updated', sessionId, toolCallId: tc.id, snapshot })
+          },
           // spawn / 续聊 / 交互 / 待办仅主对话注入：子代理没有这些执行面，
           // 对应工具也在 schema 层被裁掉（SUBAGENT_HIDDEN_TOOLS）
           ...mainToolCtxExtras,

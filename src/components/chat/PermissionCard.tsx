@@ -1,10 +1,10 @@
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Ban, Check, ChevronDown, ChevronUp, Clock, ShieldAlert, ShieldCheck, ShieldQuestion } from 'lucide-react'
+import { Ban, Check, ChevronDown, ChevronRight, ChevronUp, Clock, GitBranch, ShieldAlert, ShieldCheck, ShieldQuestion } from 'lucide-react'
 import { useChatStore } from '../../stores/chat-store'
 import { agentClient } from '../../lib/agent-client'
 import { isWebUIMode } from '../../lib/ipc-client'
-import { usePermissionStore, type HostPermission } from '../../stores/permission-store'
+import { usePermissionStore, resolveLocalPermission, type HostPermission, type LocalPermission } from '../../stores/permission-store'
 import { makeId } from '../../agent-core/loop'
 import {
   buildPermissionPreview,
@@ -15,6 +15,9 @@ import {
   type PermissionRequestStatus,
   type PermissionRiskLevel,
 } from '../../lib/permission-preview'
+import { buildWorkflowGraphView } from '../../lib/workflow-graph'
+import { WorkflowGraph } from './tool-renderers/WorkflowGraph'
+import { MonoBlock } from './tool-renderers/ToolShell'
 
 /**
  * 批次 D 定义的交互语义色（见 DESIGN.md §1.3）：ask=待审批、confirmation=危险确认。
@@ -151,6 +154,105 @@ function ApprovalOptionList({
   )
 }
 
+/**
+ * 工作流确认卡（对标 ZCode `WorkflowPermissionBlock` 的版式，不变量一致）：
+ * 表头问句 + 名字 + 右侧阶段数 → 并行度行 → 泳道流程图 → 脚本折叠 → 编号选项。
+ *
+ * 为什么值得单独一张卡：确认的对象不是一条命令或一个路径，而是**一整张编排**。
+ * 只给五行脚本头，人没法判断「它到底会派几个子代理、分几段跑」——流程图把这件事
+ * 一屏说清；脚本仍然可展开，证据没有被藏起来。
+ */
+function WorkflowPermissionCard({ request, onResolve, interactive = true, vibe = false }: PermissionCardProps) {
+  const { t } = useTranslation()
+  const { preview, status } = request
+  const [scriptOpen, setScriptOpen] = useState(false)
+  const graph = preview.graph
+  const view = useMemo(() => (graph ? buildWorkflowGraphView(graph) : null), [graph])
+  const name = preview.target
+  const showActions = status === 'pending' && interactive
+  const resolve = (decision: PermissionDecision) => () => onResolve?.(request.id, decision)
+
+  const surface = vibe
+    ? 'bg-white/10 border-white/20 text-white/90'
+    : 'bg-dark-surfaceContainer border-dark-onSurfaceVariant/10 text-dark-onSurface'
+
+  return (
+    <section
+      role="group"
+      aria-label={t('chat.permission.title')}
+      // min-h-0 + overflow-y-auto：卡片是消息列里的一个 flex 子项，内容（图 + 脚本）可能
+      // 比剩余高度还高。不让自己滚，展开脚本后编号选项会被输入栏裁掉——用户就没法批了。
+      className={`mx-4 mb-3 min-h-0 overflow-y-auto overflow-x-hidden rounded-md3-lg border shadow-sm animate-slide-up ${surface}`}
+    >
+      <div className={`flex items-center gap-1.5 px-4 pt-3 text-ui-xs ${vibe ? 'text-white/55' : 'text-dark-onSurfaceVariant/60'}`}>
+        <ShieldQuestion size={12} className="shrink-0" />
+        <span>{t('chat.permission.title')}</span>
+      </div>
+
+      <div className="flex items-start gap-2.5 px-4 pb-1 pt-1.5">
+        <GitBranch size={17} className="mt-0.5 shrink-0 opacity-70" />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-baseline gap-2">
+            <span className="shrink-0 text-ui-sm font-medium">{t('chat.permission.runWorkflow')}</span>
+            <span className="min-w-0 truncate text-ui-sm" title={name}>{name}</span>
+            <span className={`ml-auto shrink-0 text-ui-xs ${vibe ? 'text-white/55' : 'text-dark-onSurfaceVariant/60'}`}>
+              {t('chat.permission.workflowPhaseCount', { count: view?.phases.length ?? 0 })}
+            </span>
+          </div>
+          <div className={`mt-0.5 text-ui-xs ${vibe ? 'text-white/55' : 'text-dark-onSurfaceVariant/60'}`}>
+            {t('chat.permission.workflowParallel', { count: view?.maxParallel ?? 1 })}
+            <span className="opacity-70"> · {t('chat.permission.workflowStaticHint')}</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="px-4 py-3">
+        {view ? (
+          <WorkflowGraph view={view} vibe={vibe} />
+        ) : (
+          <pre className={`max-h-40 overflow-auto whitespace-pre font-mono text-ui-xs ${vibe ? 'text-white/80' : 'text-dark-onSurface/80'}`}>
+            {preview.monospace}
+          </pre>
+        )}
+      </div>
+
+      <div className="px-4 pb-3">
+        <button
+          type="button"
+          onClick={() => setScriptOpen((open) => !open)}
+          aria-expanded={scriptOpen}
+          className={`flex w-fit items-center gap-1 text-ui-xs transition-colors ${
+            vibe ? 'text-white/50 hover:text-white/80' : 'text-dark-onSurfaceVariant/55 hover:text-dark-onSurface/85'
+          }`}
+        >
+          {scriptOpen ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+          {t('chat.permission.workflowScriptToggle')}
+        </button>
+        {scriptOpen && <div className="mt-1"><MonoBlock text={preview.script ?? preview.monospace} vibe={vibe} /></div>}
+      </div>
+
+      {showActions ? (
+        <ApprovalOptionList
+          vibe={vibe}
+          onResolve={resolve}
+          allowSessionLabel={t('chat.permission.allowSessionWorkflow')}
+        />
+      ) : status === 'pending' ? (
+        <div className="flex items-center gap-2 border-t border-current/10 px-4 py-2 text-ui-xs">
+          <Clock size={12} className="shrink-0" />
+          <span>{t('chat.permission.awaitHostHint')}</span>
+        </div>
+      ) : (
+        <div className="flex items-center gap-2 border-t border-current/10 px-4 py-2 text-ui-xs">
+          <Check size={12} />
+          <span>{t(DECISION_LABEL_KEY[request.decision ?? 'deny'])}</span>
+          <span className="opacity-70">{name}</span>
+        </div>
+      )}
+    </section>
+  )
+}
+
 export interface PermissionRequestView {
   /** 阶段一 = `${sessionId}:${toolCallId}`；阶段二 = permission.requested 的请求 id */
   id: string
@@ -182,6 +284,11 @@ export function PermissionCard({ request, onResolve, interactive = true, vibe = 
   const resolve = (decision: PermissionDecision) => () => onResolve?.(request.id, decision)
   const toolLabel = t(`tools.${request.tool}`, { defaultValue: request.tool })
   const showActions = status === 'pending' && interactive
+
+  // 工作流确认：画得出静态图才换版式；图空（脚本没写成字面形态）时回落通用卡
+  if (request.tool === 'create_workflow' && preview.graph && preview.graph.phases.length > 0) {
+    return <WorkflowPermissionCard request={request} onResolve={onResolve} interactive={interactive} vibe={vibe} />
+  }
 
   return (
     <section
@@ -308,12 +415,58 @@ function HostPermissionCard({ request, vibe }: { request: HostPermission; vibe: 
 }
 
 /**
+ * 渲染层本地待批（工作流确认）：loop 在同进程里等 promise，这里负责画卡与兑现。
+ * 数据源是 permission-store 的 `localBySession`——不是消息扫描推断出来的镜像态，
+ * 所以卡片真的拥有放行权（interactive）。
+ */
+const NO_LOCAL: LocalPermission[] = []
+
+function LocalPermissionCard({ request, vibe }: { request: LocalPermission; vibe: boolean }) {
+  const addMessage = useChatStore((s) => s.addMessage)
+  const preview = useMemo(
+    () => buildPermissionPreview(request.tool, request.args, { workingDir: request.workingDir }),
+    [request.tool, request.args, request.workingDir]
+  )
+  const view = useMemo<PermissionRequestView>(
+    () => ({
+      id: request.requestId,
+      tool: request.tool,
+      preview,
+      status: 'pending',
+      requestedAt: request.requestedAt,
+    }),
+    [request.requestId, request.tool, request.requestedAt, preview]
+  )
+
+  const handleResolve = (id: string, decision: PermissionDecision) => {
+    // 先兑现 promise（loop 立刻继续/中止），再补一条对话留痕
+    resolveLocalPermission(request.sessionId, id, decision)
+    const at = Date.now()
+    addMessage(request.sessionId, {
+      id: makeId(),
+      role: 'system',
+      content: formatPermissionAuditContent({
+        decision,
+        tool: request.tool,
+        target: preview.target,
+        risk: preview.risk,
+        at,
+      }),
+      timestamp: at,
+    })
+  }
+
+  return <PermissionCard request={view} onResolve={handleResolve} interactive vibe={vibe} />
+}
+
+/**
  * 挂载点：宿主模式走上面的事件数据源；渲染层本地路径这里是镜像态
  * （confirm-danger 会话状态 + 尚未收尾的门控工具调用推断出来），interactive=false
  * 是因为那条路径的放行权在原生确认框手里，卡片不该伪装成决策入口。
  */
 export function PermissionApprovalCard({ sessionId, vibe = false }: { sessionId: string; vibe?: boolean }) {
   const hostPending = usePermissionStore((s) => s.bySession[sessionId] ?? NO_PENDING)
+  const localPending = usePermissionStore((s) => s.localBySession[sessionId] ?? NO_LOCAL)
   const status = useChatStore((s) => s.sessionStatus[sessionId])
   const messages = useChatStore((s) => s.sessions.find((session) => session.id === sessionId)?.messages)
   const workingDir = useChatStore((s) => {
@@ -343,6 +496,9 @@ export function PermissionApprovalCard({ sessionId, vibe = false }: { sessionId:
       previouslyGranted: grants.sessionId === sessionId && grants.keys.includes(preview.grantKey),
     }
   }, [status, messages, sessionId, workingDir, answered, grants])
+
+  // 本地待批（工作流确认）优先：它握着 loop 的 promise，晚一帧画出来就是白等
+  if (localPending.length > 0) return <LocalPermissionCard request={localPending[0]!} vibe={vibe} />
 
   // 宿主模式下待批来自事件流；镜像态（靠消息扫描 + 会话状态推断）让位给它
   if (hostPending.length > 0) return <HostPermissionCard request={hostPending[0]} vibe={vibe} />

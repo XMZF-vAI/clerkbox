@@ -9,6 +9,7 @@
  */
 import type { ContextUsageInfo } from '../lib/context-usage'
 import type { SkillCatalogEntry } from '../lib/skill-catalog'
+import type { WorkflowProgressSnapshot } from '../lib/workflow-runtime'
 import type { QueuedMessageItem } from '../stores/chat-store'
 import type {
   Message,
@@ -103,6 +104,11 @@ export type AgentEvent =
   | { type: 'subagent.message.appended'; sessionId: string; runId: string; message: Message }
   | { type: 'subagent.message.updated'; sessionId: string; runId: string; messageId: string; updates: Partial<Message> }
   | { type: 'usage.updated';    sessionId: string; usage: ContextUsageInfo }
+  /**
+   * 工作流运行看板（P4 追加）：每步派发/结算后推一帧快照。渲染层按 toolCallId
+   * 挂到那张 create_workflow 卡上；运行结束后的终态仍以工具结果里的尾巴为准。
+   */
+  | { type: 'workflow.updated'; sessionId: string; toolCallId: string; snapshot: WorkflowProgressSnapshot }
   // ── P3 追加（只增不改）：宿主在运行期持有的 UI 侧状态回流渲染层 ──
   | { type: 'todos.updated';    sessionId: string; items: TodoItem[] }
   | { type: 'goal.updated';     sessionId: string; goal: SessionGoal | null }

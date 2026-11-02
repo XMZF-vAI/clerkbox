@@ -21,6 +21,7 @@ import {
   resetWorkflowRunsForTests,
   MAX_WORKFLOW_SCRIPT_BYTES,
   type WorkflowHostPort,
+  type WorkflowProgressSnapshot,
 } from '../src/lib/workflow-runtime'
 
 function makeHost(responses: Array<string | Error>, opts: { signal?: AbortSignal } = {}): WorkflowHostPort & { prompts: string[] } {
@@ -300,5 +301,54 @@ return '全部读完'
     const { report, run } = parseWorkflowRunTail('普通结果')
     expect(report).toBe('普通结果')
     expect(run).toBeNull()
+  })
+})
+
+describe('onProgress 实时快照', () => {
+  it('起跑先推一帧，每步派发/结算各推一帧，终帧为终态', async () => {
+    const frames: WorkflowProgressSnapshot[] = []
+    const host = makeHost(['产出A', '产出B'])
+    host.onProgress = (snapshot) => frames.push(snapshot)
+
+    const run = await executeWorkflowScript({
+      sessionId: 's1',
+      name: '看板',
+      script: CLEAN_SCRIPT,
+      args: {},
+      host,
+    })
+
+    expect(run.status).toBe('completed')
+    // 首帧：已开始、还没有步骤
+    expect(frames[0]!.status).toBe('running')
+    expect(frames[0]!.steps).toEqual([])
+    // 末帧：终态 + 每步都结算
+    const last = frames[frames.length - 1]!
+    expect(last.status).toBe('completed')
+    expect(last.steps.map((step) => step.status)).toEqual(['completed', 'completed'])
+    // 阶段归属：两步都在 phase('收集') 之后派发
+    expect(last.steps.map((step) => step.phase)).toEqual(['收集', '收集'])
+    expect(last.phases).toEqual(['收集', '汇总'])
+    // 中间必须出现过「在跑」的帧，否则看板永远亮不起来
+    expect(frames.some((frame) => frame.steps.some((step) => step.status === 'running'))).toBe(true)
+  })
+
+  it('步骤失败时终帧标 failed，看板能亮红灯', async () => {
+    const frames: WorkflowProgressSnapshot[] = []
+    const host = makeHost([new Error('boom')])
+    host.onProgress = (snapshot) => frames.push(snapshot)
+
+    const run = await executeWorkflowScript({ sessionId: 's1', name: '失败', script: "await agent('a', 'x')", args: {}, host })
+
+    expect(run.status).toBe('failed')
+    expect(frames[frames.length - 1]!.steps[0]!.status).toBe('failed')
+  })
+
+  it('回调抛错不影响工作流执行', async () => {
+    const host = makeHost(['产出'])
+    host.onProgress = () => { throw new Error('看板坏了') }
+
+    const run = await executeWorkflowScript({ sessionId: 's1', name: '容错', script: "await agent('a', 'x')", args: {}, host })
+    expect(run.status).toBe('completed')
   })
 })

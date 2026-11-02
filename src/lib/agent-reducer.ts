@@ -7,6 +7,7 @@
  */
 import type { AgentEvent } from '../agent-core/protocol'
 import type { PermissionReason } from '../agent-core/ports'
+import type { WorkflowProgressSnapshot } from './workflow-runtime'
 import type { Message, SessionGoal, SubAgentRun, TodoItem, UserQuestion } from '../types/agent'
 import type { QueuedMessageItem, SessionStatus } from '../stores/chat-store'
 
@@ -39,6 +40,8 @@ export type StorePatch =
       body: string
     }
   | { kind: 'settle-permission'; sessionId: string; requestId: string }
+  /** 工作流运行看板的一帧（幂等：同 toolCallId 后到的帧覆盖先到的） */
+  | { kind: 'set-workflow-progress'; sessionId: string; toolCallId: string; snapshot: WorkflowProgressSnapshot }
   | { kind: 'notify'; sessionId: string; channel: 'error' | 'done' | 'confirm-danger'; message?: string }
   /** 整会话重拉：环形缓冲溢出或宿主原子重写历史（压缩）时唯一的正确动作 */
   | { kind: 'reload-session'; sessionId: string; reason: string }
@@ -104,6 +107,8 @@ export function planAgentEvent(event: AgentEvent): StorePatch[] {
     }
     case 'permission.settled':
       return [{ kind: 'settle-permission', sessionId: event.sessionId, requestId: event.requestId }]
+    case 'workflow.updated':
+      return [{ kind: 'set-workflow-progress', sessionId: event.sessionId, toolCallId: event.toolCallId, snapshot: event.snapshot }]
     case 'question.requested':
       return [{ kind: 'open-question', sessionId: event.sessionId, requestId: event.requestId, questions: event.question as UserQuestion[] }]
     case 'todos.updated':

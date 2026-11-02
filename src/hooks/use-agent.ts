@@ -21,6 +21,8 @@ import { estimateTokensForText } from '../lib/token-estimate'
 import { SYSTEM_PROMPT } from '../lib/prompts'
 import { findAgent } from '../lib/agent-registry'
 import { useAgentRunsStore } from '../stores/agent-runs-store'
+import { useWorkflowRunsStore } from '../stores/workflow-runs-store'
+import { requestLocalPermission, cancelLocalPermissions } from '../stores/permission-store'
 import { agentClient } from '../lib/agent-client'
 import { hostQueue } from '../lib/host-queue'
 import { useShallow } from 'zustand/react/shallow'
@@ -184,6 +186,12 @@ export function useAgent(sessionId: string) {
         // 命令执行 / 文件写入：保持既有两按钮语义，不受 Agent 动作需求影响
         return { approved: await ipc.confirmDialog(request.title, request.body), scope: 'once' }
       },
+      // 对话内确认：只有工作流确认需要（那张卡要画流程图，原生弹窗画不出来）。
+      // 其他场景返回 null，loop 原样退回上面的原生弹窗——既有门的行为不变。
+      confirmInChat: async (request) => {
+        if (request.reason !== 'workflow-script') return null
+        return requestLocalPermission({ sessionId, requestId: makeId(), ...request })
+      },
     },
     ui: {
       askQuestion: (sid, questions) => useInteractiveStore.getState().requestQuestion(sid, questions),
@@ -231,6 +239,9 @@ export function useAgent(sessionId: string) {
       buildMemoryPrompt: (workingDir, homeDir) => buildMemoryPrompt(workingDir, homeDir),
     },
     emit: () => { /* P1 渲染层宿主直写 store；P3 起接 'agent:event' 通道 */ },
+    // 工作流实时看板：渲染层没有事件通道，直接写 store（主进程宿主走 emit）
+    workflowProgress: (_sid, toolCallId, snapshot) =>
+      useWorkflowRunsStore.getState().update(toolCallId, snapshot),
   }), [sessionId, settings])
 
   /** Main send message function with full ReAct loop.
@@ -583,6 +594,8 @@ export function useAgent(sessionId: string) {
       if (sessionId) {
         useChatStore.getState().setSessionStatus(sessionId, null)
         useInteractiveStore.getState().cancelQuestion(sessionId)
+        // 挂起的对话内确认（工作流）要兑现成拒绝，否则 loop 永远等在这个 promise 上
+        cancelLocalPermissions(sessionId)
       }
     }
     // 必须走 ensureMode：冷启动那一刻模式还没问出来，凭 null 判定会落回本地路径，
