@@ -13,6 +13,7 @@ build/license.txt
 release/
 release-out/
 release-out*/
+release-verify*/
 *.exe
 *.zip
 *.blockmap
@@ -51,6 +52,9 @@ Thumbs.db
 # 第三方工作目录
 /.workbuddy/
 /.freebuff/
+# AI 助手本地工作数据（记忆/截图存档，与仓库无关）
+/.workbuddy-ai/
+/.zcode/
 # IDE 本地配置与计划
 .claude/
 # 临时素材与校验脚本
