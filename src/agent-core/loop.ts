@@ -56,6 +56,7 @@ import { agentActionFamily, agentActionGrantKey, isAgentActionToolReadOnly } fro
 import type { WorkflowRun } from '../lib/workflow-runtime'
 import { abortWorkflowRunsForSession } from '../lib/workflow-runtime'
 import { WORKFLOW_GATED_TOOLS } from '../lib/workflow-tools'
+import { escapeEnvelopeSpoofing, escapeExternalText, SYSTEM_INJECTION_DISCLAIMER } from '../lib/injection-hygiene'
 
 export const makeId = (): string => `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
@@ -945,7 +946,10 @@ async function buildAPIMessages(
   if (skillReminder) {
     for (let i = cleaned.length - 1; i >= 0; i--) {
       if (cleaned[i].role === 'user') {
-        cleaned[i] = { ...cleaned[i], content: `${cleaned[i].content}\n\n${skillReminder}` }
+        // reminder 内容来自 SKILL.md（外部文件数据面）：尖括号全量转义，
+        // 防止摘要里藏一段伪造的系统信封（报告 03 P1 注入卫生）
+        const safeReminder = escapeExternalText(skillReminder)
+        cleaned[i] = { ...cleaned[i], content: `${cleaned[i].content}\n\n${safeReminder}` }
         break
       }
     }
@@ -2363,7 +2367,10 @@ function formatSubagentNotification(input: {
   status: 'completed' | 'failed' | 'aborted'
   body: string
 }): string {
-  return `<subagent-notification agentId="${input.runId}" agent="${input.agentName}" type="${input.agentType}" status="${input.status}">\n${input.body}\n</subagent-notification>`
+  // body 是子代理的原文（不可信数据面）：先转义会伪造/提前闭合信封的序列，
+  // 再由系统拼信封——防伪声明写进信封第一行（报告 03 P0-4，ZCode 同款）。
+  const safeBody = escapeEnvelopeSpoofing(input.body)
+  return `<subagent-notification agentId="${input.runId}" agent="${input.agentName}" type="${input.agentType}" status="${input.status}">\n${SYSTEM_INJECTION_DISCLAIMER}\n${safeBody}\n</subagent-notification>`
 }
 
 /** 后台派生：立即返回确认文本（含 agentId），run 脱离主循环独立执行；

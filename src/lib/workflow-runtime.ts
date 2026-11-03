@@ -22,6 +22,8 @@ export const MAX_WORKFLOW_SCRIPT_BYTES = 128 * 1024
 /** 单步结果在报告里的摘录长度 */
 export const STEP_EXCERPT_CHARS = 400
 
+import { escapeEnvelopeSpoofing, SYSTEM_INJECTION_DISCLAIMER } from './injection-hygiene'
+
 export type WorkflowRunStatus = 'running' | 'completed' | 'failed' | 'aborted'
 export type WorkflowStepStatus = 'running' | 'completed' | 'failed' | 'aborted'
 
@@ -545,7 +547,10 @@ export function formatWorkflowNotification(run: WorkflowRun): string {
   if (run.error) lines.push('', `错误：${run.error}`)
   lines.push('', '请向用户如实总结工作流结果（含失败项）；完整步骤明细已在对话的工作流卡片上，不要复述本通知的机械格式。')
   const body = lines.join('\n').slice(0, WORKFLOW_NOTIFICATION_CAP)
-  return `<workflow-notification runId="${run.id}" name="${run.name.replace(/"/g, '')}" status="${run.status}">\n${body}\n</workflow-notification>`
+  // 防伪双件套（报告 03 P0-4/P1）：body 是子代理产出的原文（不可信数据面），
+  // 先转义能伪造/闭合信封的序列；防伪声明由系统写进信封第一行
+  const safeBody = escapeEnvelopeSpoofing(body)
+  return `<workflow-notification runId="${run.id}" name="${run.name.replace(/"/g, "")}" status="${run.status}">\n${SYSTEM_INJECTION_DISCLAIMER}\n${safeBody}\n</workflow-notification>`
 }
 
 /**
