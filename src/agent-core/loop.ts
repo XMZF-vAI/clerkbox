@@ -1173,22 +1173,31 @@ export async function checkToolPermission(
       }
     }
 
-    // auto 档：AI 已自审，目录外写入免确认；manual 档弹窗
+    // auto 档：AI 已自审，写入免确认（危险命令与系统目录仍有兜底）。
+    // manual 档 = 变更前确认：**每一次写文件都先问**（ZCode build 档同款语义），
+    // 走对话内确认卡——卡里用执行期同一套 diff 渲染将要落盘的变更，
+    // 用户批准的是看得见的内容。原生弹窗画不出 diff，只作 fallback。
     if (approvalMode === 'manual' && workingDir) {
       const isOutside = !isPathInside(path, workingDir)
-      if (isOutside) {
-        const { approved: confirmed } = await ports.permission.confirm({
-          tool: toolName,
-          args,
-          reason: 'outside-write',
-          workingDir: workingDir || '',
-          risk: 'normal',
-          title: i18n.t('agent.confirmOutsideWriteTitle'),
-          body: i18n.t('agent.confirmOutsideWriteBody', { path, workingDir }),
-        })
-        if (!confirmed) {
-          return { allowed: false, reason: i18n.t('agent.deniedCancelOutsideWrite') }
-        }
+      const request = {
+        tool: toolName,
+        args,
+        reason: 'file-write' as const,
+        workingDir: workingDir || '',
+        risk: 'normal' as const,
+        title: i18n.t('agent.confirmWriteTitle'),
+        body: isOutside
+          ? i18n.t('agent.confirmOutsideWriteBody', { path, workingDir })
+          : i18n.t('agent.confirmWriteBody', { path }),
+      }
+      const inChat = ports.permission.confirmInChat ? await ports.permission.confirmInChat(request) : null
+      const approval = inChat ?? (await ports.permission.confirm({
+        ...request,
+        reason: isOutside ? 'outside-write' : 'file-write',
+        title: isOutside ? i18n.t('agent.confirmOutsideWriteTitle') : request.title,
+      }))
+      if (!approval.approved) {
+        return { allowed: false, reason: i18n.t(isOutside ? 'agent.deniedCancelOutsideWrite' : 'agent.deniedCancelWrite') }
       }
     }
   }

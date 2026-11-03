@@ -73,7 +73,7 @@ export type PermissionReason =
   | 'dangerous-command'
   | 'outside-cwd'
   | 'system-dir'
-  | 'outside-write'
+  | 'outside-write' | 'file-write'
   | 'browser-control'
   | 'computer-control'
   | 'workflow-script'

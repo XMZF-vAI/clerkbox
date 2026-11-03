@@ -1,11 +1,14 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Ban, Check, ChevronDown, ChevronRight, ChevronUp, Clock, GitBranch, ShieldAlert, ShieldCheck, ShieldQuestion } from 'lucide-react'
+import { DiffLineList } from './tool-renderers/ToolShell'
 import { useChatStore } from '../../stores/chat-store'
 import { agentClient } from '../../lib/agent-client'
 import { isWebUIMode } from '../../lib/ipc-client'
 import { usePermissionStore, resolveLocalPermission, type HostPermission, type LocalPermission } from '../../stores/permission-store'
 import { makeId } from '../../agent-core/loop'
+import { ipc } from '../../lib/ipc-client'
+import { computeEditDiff, type EditDiffMeta } from '../../lib/edit-diff'
 import {
   buildPermissionPreview,
   findPendingApprovalCall,
@@ -70,6 +73,81 @@ const APPROVAL_OPTIONS: Array<{ decision: PermissionDecision; labelKey: string; 
   { decision: 'allow_session', labelKey: 'chat.permission.allowAlways', Icon: ShieldCheck },
   { decision: 'deny', labelKey: 'chat.permission.deny', Icon: Ban },
 ]
+
+/**
+ * 写文件 / 局部替换审批的变更预览：与执行期同一套 computeEditDiff——
+ * 用户批准时看到的就是执行后将落盘的那份变更，而不是等宽路径串。
+ * 读不到旧文件按「新文件」处理（全部新增）；读失败不阻塞审批（回落等宽预览）。
+ */
+function FileDiffPreview({ tool, path, args, vibe }: {
+  tool: string
+  path: string
+  args: Record<string, unknown>
+  vibe: boolean
+}) {
+  const { t } = useTranslation()
+  const [diff, setDiff] = useState<EditDiffMeta | null>(null)
+  const [newFile, setNewFile] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      let oldText: string | null = null
+      try {
+        oldText = await ipc.readFile(path)
+      } catch {
+        oldText = null // 多半是新文件
+      }
+      if (cancelled) return
+      try {
+        if (tool === 'write_file') {
+          const content = String(args.content ?? '')
+          setNewFile(oldText === null)
+          setDiff(computeEditDiff(path, oldText ?? '', content))
+          return
+        }
+        // search_replace / edit_file：把编辑逐个应用到旧文，再对「应用后」做 diff
+        const edits = Array.isArray(args.edits)
+          ? (args.edits as Array<{ old_str?: unknown; new_str?: unknown }>)
+          : [{ old_str: args.old_str, new_str: args.new_str }]
+        if (oldText === null) {
+          setNewFile(true)
+          setDiff(null)
+          return
+        }
+        let work = oldText
+        for (const edit of edits) {
+          const from = String(edit?.old_str ?? '')
+          const to = String(edit?.new_str ?? '')
+          if (from && work.includes(from)) work = work.split(from).join(to)
+        }
+        setNewFile(false)
+        setDiff(computeEditDiff(path, oldText, work))
+      } catch {
+        setDiff(null)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [tool, path, args])
+
+  if (!diff) {
+    return newFile ? (
+      <div className={`rounded-md3-sm border px-3 py-2 text-ui-xs ${vibe ? 'border-white/20 text-white/70' : 'border-dark-onSurfaceVariant/20 text-dark-onSurfaceVariant/80'}`}>
+        {t('chat.permission.fileDiffNew')}
+      </div>
+    ) : null
+  }
+  return (
+    <div className="rounded-md3-sm border px-3 py-2">
+      <div className={`mb-1 flex items-center gap-2 text-ui-xs ${vibe ? 'text-white/60' : 'text-dark-onSurfaceVariant/70'}`}>
+        <span>{newFile ? t('chat.permission.fileDiffNew') : t('chat.permission.fileDiffTitle')}</span>
+        <span className="text-md-success">+{diff.added}</span>
+        <span className="text-md-error">−{diff.removed}</span>
+      </div>
+      <DiffLineList lines={diff.lines} vibe={vibe} />
+    </div>
+  )
+}
 
 /**
  * 审批选项：**编号单选列表**，不是并排按钮。
@@ -336,16 +414,25 @@ export function PermissionCard({ request, onResolve, interactive = true, vibe = 
       </div>
 
       <div className="px-4 pb-3">
-        <div className={`rounded-md3-sm border px-3 py-2 ${tone.border}`}>
-          <div className="text-xs opacity-70">{t('chat.permission.targetLabel')}</div>
-          <pre
-            className={`mt-0.5 max-h-40 overflow-auto whitespace-pre font-mono text-xs ${tone.foreground}`}
-            aria-label={t('chat.permission.targetAria')}
-          >
-            {preview.monospace || t('chat.permission.emptyTarget')}
-          </pre>
-          {preview.truncated && <div className="mt-1 text-xs opacity-70">{t('chat.permission.truncated')}</div>}
-        </div>
+        {preview.kind === 'file' && request.args && (request.tool === 'write_file' || request.tool === 'search_replace' || request.tool === 'edit_file') && preview.target ? (
+          <FileDiffPreview
+            tool={request.tool}
+            path={preview.target}
+            args={request.args}
+            vibe={vibe}
+          />
+        ) : (
+          <div className={`rounded-md3-sm border px-3 py-2 ${tone.border}`}>
+            <div className="text-xs opacity-70">{t('chat.permission.targetLabel')}</div>
+            <pre
+              className={`mt-0.5 max-h-40 overflow-auto whitespace-pre font-mono text-xs ${tone.foreground}`}
+              aria-label={t('chat.permission.targetAria')}
+            >
+              {preview.monospace || t('chat.permission.emptyTarget')}
+            </pre>
+            {preview.truncated && <div className="mt-1 text-xs opacity-70">{t('chat.permission.truncated')}</div>}
+          </div>
+        )}
       </div>
 
       {showActions ? (

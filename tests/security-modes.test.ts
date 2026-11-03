@@ -76,3 +76,24 @@ describe('三档在 loop 里的判定分支', () => {
     expect(read('lib/workflow-tools.ts')).toContain('WORKFLOW_GATED_TOOLS = [WORKFLOW_TOOL_NAME, RESUME_WORKFLOW_TOOL_NAME]')
   })
 })
+
+describe('manual 档的写确认（变更前确认语义）', () => {
+  it('manual 档每一次写文件都先问：走对话内确认卡（diff 预览），原生弹窗只作 fallback', () => {
+    expect(loop).toContain("approvalMode === 'manual' && workingDir")
+    expect(loop).toContain("reason: 'file-write' as const")
+    expect(loop).toContain('ports.permission.confirmInChat ? await ports.permission.confirmInChat(request) : null')
+  })
+
+  it('auto/full 档不新增写确认（语义不变）', () => {
+    // manual 分支整体包在 approvalMode === 'manual' 里；auto 分支不存在写确认
+    const manualBlock = loop.slice(loop.indexOf("if (approvalMode === 'manual' && workingDir)"), loop.indexOf('return { allowed: true }', loop.indexOf("if (approvalMode === 'manual' && workingDir)")))
+    expect(manualBlock).toContain("reason: 'file-write' as const")
+  })
+
+  it('审批卡渲染执行期同一套 diff（FileDiffPreview 接线）', () => {
+    const card = read('components/chat/PermissionCard.tsx')
+    expect(card).toContain("preview.kind === 'file'")
+    expect(card).toContain('computeEditDiff')
+    expect(card).toContain('<DiffLineList')
+  })
+})
