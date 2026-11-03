@@ -70,7 +70,9 @@ describe('三档在 loop 里的判定分支', () => {
     expect(loop).toContain("approvalMode === 'manual' && workingDir && commandCwd && !isPathInside(commandCwd, workingDir)")
   })
 
-  it('create_workflow 门仅 full 档免问（其余档脚本必过目）', () => {
-    expect(loop).toContain("toolName === 'create_workflow' && approvalMode !== 'full'")
+  it('create_workflow / resume_workflow 门仅 full 档免问（其余档脚本必过目）', () => {
+    // 门按 WORKFLOW_GATED_TOOLS 表判定：续跑也是执行脚本，同等过目
+    expect(loop).toContain('WORKFLOW_GATED_TOOLS.includes(toolName) && approvalMode !== \'full\'')
+    expect(read('lib/workflow-tools.ts')).toContain('WORKFLOW_GATED_TOOLS = [WORKFLOW_TOOL_NAME, RESUME_WORKFLOW_TOOL_NAME]')
   })
 })

@@ -1002,6 +1002,7 @@
     allowSessionCapability: 'Allow for this whole session (stop asking each time)',
     allowSessionWorkflow: 'Always allow this session (stop asking about workflows)',
     dangerOnceHint: 'Dangerous commands are allowed once only — the same command will ask again',
+      workflowSavedSource: 'Script from saved workflow "{{name}}"',
       hint: 'Your choice is recorded in this chat',
       awaitHostHint: 'Confirm in the system dialog to continue',
       expired: 'Approval timed out — treated as denied',
@@ -1206,6 +1207,8 @@
     workflowScript: 'View script',
     workflowStop: 'Stop workflow',
     workflowDispatching: 'Dispatching the first sub-agent…',
+    workflowCached: 'cached',
+    workflowResumedFrom: 'resumed',
     /** 工作流运行看板 / 终态图 */
     workflowRunning: 'Workflow running',
     workflowTitle: 'Workflow',

@@ -31,7 +31,7 @@ const STATUS_ICON: Record<WorkflowStepStatus, typeof CircleCheck> = {
   running: Loader2,
 }
 
-function StepRow({ step, vibe }: { step: WorkflowRunTail['steps'][0]; vibe: boolean }) {
+function StepRow({ step, vibe, cachedLabel }: { step: WorkflowRunTail['steps'][0]; vibe: boolean; cachedLabel: string }) {
   const Icon = STATUS_ICON[step.status] ?? CircleDashed
   const spinning = step.status === 'running'
   const tone = step.status === 'completed'
@@ -44,7 +44,8 @@ function StepRow({ step, vibe }: { step: WorkflowRunTail['steps'][0]; vibe: bool
     <div className="flex flex-col gap-0.5">
       <div className="flex items-center gap-1.5">
         <Icon size={12} className={`shrink-0 ${tone} ${spinning ? 'animate-spin' : ''}`} />
-        <span className={`shrink-0 text-ui-xs font-medium ${vibe ? 'text-white/85' : 'text-dark-onSurface/85'}`}>{step.name}</span>
+        <span className={`shrink-0 text-ui-xs font-medium ${vibe ? 'text-white/85' : 'text-dark-onSurface/85'}`}>{step.cached ? '⚡ ' : ''}{step.name}</span>
+        {step.cached && <span className={`shrink-0 text-ui-xs ${vibe ? 'text-white/45' : 'text-dark-onSurfaceVariant/50'}`}>{cachedLabel}</span>}
         {seconds && <span className={`shrink-0 font-mono text-ui-xs tabular-nums opacity-60 ${spinning ? 'animate-pulse' : ''}`}>{seconds}</span>}
         {step.status === 'failed' && <span className="shrink-0 text-ui-xs text-md-error">{step.excerpt ?? ''}</span>}
       </div>
@@ -107,6 +108,11 @@ export default function WorkflowRenderer({ call, result, isError, args, vibe = f
           {running || backgroundRunning ? t('toolRenderer.workflowRunning') : t('toolRenderer.workflowTitle')}
         </span>
         {name && <span className={`min-w-0 truncate text-ui-xs ${vibe ? 'text-white/60' : 'text-dark-onSurfaceVariant/60'}`} title={name}>{name}</span>}
+        {run?.resumedFrom && (
+          <span className={`shrink-0 text-ui-xs ${vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/55'}`} title={run.resumedFrom}>
+            {t('toolRenderer.workflowResumedFrom')}
+          </span>
+        )}
         <span className={`ml-auto shrink-0 text-ui-xs ${vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/55'}`}>
           {t('toolRenderer.workflowPhaseCount', { count: view.phases.length })}
           {(running || backgroundRunning) && working > 0 && ` · ${t('toolRenderer.workflowAgentsWorking', { count: working })}`}
@@ -136,7 +142,7 @@ export default function WorkflowRenderer({ call, result, isError, args, vibe = f
       {run && !backgroundRunning && (
         <>
           <div className="flex flex-col gap-1.5">
-            {run.steps.map((step) => <StepRow key={step.key} step={step} vibe={vibe} />)}
+            {run.steps.map((step) => <StepRow key={step.key} step={step} vibe={vibe} cachedLabel={t('toolRenderer.workflowCached')} />)}
           </div>
           {run.status === 'failed' && run.error && (
             <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-ui-xs text-md-error">{run.error}</pre>
@@ -172,6 +178,7 @@ export default function WorkflowRenderer({ call, result, isError, args, vibe = f
                 excerpt: undefined,
                 durationMs: step.endedAt ? step.endedAt - step.startedAt : undefined,
               }}
+              cachedLabel={t('toolRenderer.workflowCached')}
             />
           ))}
           {progress.steps.length === 0 && (

@@ -36,8 +36,12 @@ export interface WorkflowStep {
   prompt: string
   agentId?: string
   status: WorkflowStepStatus
-  /** 结果摘录 */
+  /** 结果摘录（展示与报告用，400 字符） */
   excerpt?: string
+  /** 完整结果（journal 续跑用，8KB 截断）——摘录喂下游会退化，这里存真身 */
+  result?: string
+  /** 命中续跑缓存：结果来自上一次 run 的 journal，本次没有派发子代理（零 token） */
+  cached?: boolean
   startedAt: number
   endedAt?: number
 }
@@ -65,6 +69,12 @@ export interface WorkflowRun {
   toolCallId?: string
   /** 承载该工具调用的 assistant 消息 id（恢复时把卡死的 running 尾巴补成终态） */
   assistantMessageId?: string
+  /** 编排脚本原稿（journal 持久化用——resume 要按原脚本重放） */
+  script?: string
+  /** 脚本入参（随 script 一起进 journal） */
+  args?: Record<string, unknown>
+  /** 本 run 是从哪次 run 续跑来的（resume_workflow 的血缘） */
+  resumedFrom?: string
 }
 
 // ── 实时进度快照（运行看板的数据面） ──────────────────────────────
@@ -198,6 +208,30 @@ export interface ExecuteWorkflowInput {
   toolCallId?: string
   /** 承载工具调用的 assistant 消息 id（恢复时寻址） */
   assistantMessageId?: string
+  /**
+   * 续跑缓存（resume_workflow）：键 = `phase|name|prompt`，值 = 上次已完成的
+   * 完整结果。命中即短路——不派发子代理、零 token，步骤记 cached 标记。
+   * 脚本改过一个字都会导致键不匹配 → 照常重跑（诚实的缓存失效）。
+   */
+  stepCache?: Map<string, string>
+  /** 血缘：本次 run 从哪次 run 续跑 */
+  resumedFrom?: string
+}
+
+/** 续跑缓存的键（phase|name|prompt——脚本重放时同一逻辑步骤的稳定身份） */
+export function workflowStepCacheKey(phase: string | undefined, name: string, prompt: string): string {
+  return `${phase ?? ''}|${name}|${prompt}`
+}
+
+/** 从一次终态 run 构建续跑缓存（completed 步骤才有资格短路） */
+export function buildStepCacheFromRun(run: WorkflowRun, fullResults?: Record<string, string>): Map<string, string> {
+  const cache = new Map<string, string>()
+  for (const step of run.steps) {
+    if (step.status !== 'completed') continue
+    const full = fullResults?.[step.key] ?? step.excerpt
+    if (full) cache.set(workflowStepCacheKey(step.phase, step.name, step.prompt), full)
+  }
+  return cache
 }
 
 function safeText(value: unknown, limit: number): string {
@@ -226,6 +260,9 @@ export async function executeWorkflowScript(input: ExecuteWorkflowInput): Promis
     startedAt: Date.now(),
     toolCallId: input.toolCallId,
     assistantMessageId: input.assistantMessageId,
+    script: input.script,
+    args: input.args,
+    resumedFrom: input.resumedFrom,
   }
   runs.set(run.id, run)
   while (runs.size > MAX_RUNS) {
@@ -280,6 +317,28 @@ export async function executeWorkflowScript(input: ExecuteWorkflowInput): Promis
         throw new Error(`agent("${stepName}") 的 prompt 是空的——子代理看不到主对话，prompt 必须自带全部上下文`)
       }
       if (aborted()) throw new Error('[aborted] 会话已停止')
+      // 续跑短路：同一逻辑步骤（phase|name|prompt 全同）在上次 run 已完成 →
+      // 直接复用 journal 里的结果，不派发子代理（零 token）。脚本改过一个字
+      // 键就不匹配，缓存自动失效照常重跑——诚实优先。
+      const cacheHit = input.stepCache?.get(workflowStepCacheKey(currentPhase, stepName, stepPrompt))
+      if (cacheHit !== undefined) {
+        const step: WorkflowStep = {
+          key: `step-${run.steps.length + 1}`,
+          name: stepName,
+          agentType: 'general',
+          phase: currentPhase,
+          prompt: stepPrompt.slice(0, 2000),
+          status: 'completed',
+          cached: true,
+          excerpt: cacheHit.slice(0, STEP_EXCERPT_CHARS),
+          result: cacheHit.slice(0, RESUME_RESULT_CAP),
+          startedAt: Date.now(),
+          endedAt: Date.now(),
+        }
+        run.steps.push(step)
+        emitProgress()
+        return cacheHit
+      }
       const step: WorkflowStep = {
         key: `step-${run.steps.length + 1}`,
         name: stepName,
@@ -302,6 +361,7 @@ export async function executeWorkflowScript(input: ExecuteWorkflowInput): Promis
         step.endedAt = Date.now()
         step.agentId = agentId ?? undefined
         step.excerpt = result.slice(0, STEP_EXCERPT_CHARS)
+        step.result = result.slice(0, RESUME_RESULT_CAP)
         emitProgress()
         return result
       } catch (e) {
@@ -436,7 +496,7 @@ function formatDuration(ms: number | undefined): string {
 export function formatWorkflowRunReport(run: WorkflowRun): string {
   const lines: string[] = []
   const statusText = run.status === 'completed' ? '✅ 已完成' : run.status === 'failed' ? '❌ 失败' : run.status === 'aborted' ? '⏹ 已停止' : '运行中'
-  lines.push(`工作流「${run.name}」${statusText}（runId: ${run.id}，总耗时 ${formatDuration(run.endedAt ? run.endedAt - run.startedAt : undefined)}）`)
+  lines.push(`工作流「${run.name}」${statusText}（runId: ${run.id}${run.resumedFrom ? `，续跑自 ${run.resumedFrom}` : ''}，总耗时 ${formatDuration(run.endedAt ? run.endedAt - run.startedAt : undefined)}）`)
   if (run.phases.length > 0) {
     lines.push(`阶段：${run.phases.map((p) => p.name).join(' → ')}`)
   }
@@ -444,7 +504,7 @@ export function formatWorkflowRunReport(run: WorkflowRun): string {
   for (const step of run.steps) {
     const icon = step.status === 'completed' ? '✅' : step.status === 'failed' ? '❌' : step.status === 'aborted' ? '⏹' : '⏳'
     const duration = formatDuration(step.endedAt ? step.endedAt - step.startedAt : undefined)
-    lines.push(`${icon} ${step.name}${duration ? `（${duration}）` : ''}${step.agentId ? ` [agentId: ${step.agentId}]` : ''}`)
+    lines.push(`${icon} ${step.cached ? '⚡' : ''}${step.name}${duration ? `（${duration}）` : ''}${step.agentId ? ` [agentId: ${step.agentId}]` : ''}${step.cached ? ' [缓存]' : ''}`)
     if (step.excerpt) {
       lines.push(`   ${step.excerpt.replace(/\n+/g, ' ').slice(0, STEP_EXCERPT_CHARS)}`)
     }
@@ -488,12 +548,29 @@ export function formatWorkflowNotification(run: WorkflowRun): string {
   return `<workflow-notification runId="${run.id}" name="${run.name.replace(/"/g, '')}" status="${run.status}">\n${body}\n</workflow-notification>`
 }
 
+/**
+ * 续跑用的完整步骤结果（journal 落盘专用，比 UI 摘要长得多）。
+ * 键 = step.key；单步上限 8KB——超过按截断记（缓存结果质量降级是明示的）。
+ */
+export const RESUME_RESULT_CAP = 8 * 1024
+
+export function collectResumeResults(run: WorkflowRun): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const step of run.steps) {
+    if (step.status !== 'completed') continue
+    const full = step.result ?? step.excerpt
+    if (full) out[step.key] = full.slice(0, RESUME_RESULT_CAP)
+  }
+  return out
+}
+
 /** UI 专用尾巴（随 __EDIT_DIFF__ 同一模式：发模型前剥离，渲染器解析） */
 export function encodeWorkflowRunTail(run: WorkflowRun): string {
   const payload = {
     runId: run.id,
     name: run.name,
     status: run.status,
+    resumedFrom: run.resumedFrom,
     phases: run.phases.map((p) => p.name),
     durationMs: run.endedAt ? run.endedAt - run.startedAt : undefined,
     error: run.error,
@@ -506,6 +583,7 @@ export function encodeWorkflowRunTail(run: WorkflowRun): string {
       agentId: s.agentId,
       excerpt: s.excerpt?.slice(0, 200),
       durationMs: s.endedAt ? s.endedAt - s.startedAt : undefined,
+      cached: s.cached,
     })),
   }
   try {
@@ -523,7 +601,8 @@ export interface WorkflowRunTail {
   durationMs?: number
   error?: string
   result?: string
-  steps: Array<{ key: string; name: string; phase?: string; status: WorkflowStepStatus; agentId?: string; excerpt?: string; durationMs?: number }>
+  resumedFrom?: string
+  steps: Array<{ key: string; name: string; phase?: string; status: WorkflowStepStatus; agentId?: string; excerpt?: string; durationMs?: number; cached?: boolean }>
 }
 
 /** 渲染器侧解析 UI 尾巴 */

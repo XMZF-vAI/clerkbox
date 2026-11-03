@@ -55,6 +55,7 @@ import { gapFromToolCall, isRewindableUserMessage } from '../lib/rewind'
 import { agentActionFamily, agentActionGrantKey, isAgentActionToolReadOnly } from '../lib/agent-actions'
 import type { WorkflowRun } from '../lib/workflow-runtime'
 import { abortWorkflowRunsForSession } from '../lib/workflow-runtime'
+import { WORKFLOW_GATED_TOOLS } from '../lib/workflow-tools'
 
 export const makeId = (): string => `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
@@ -1088,7 +1089,8 @@ export async function checkToolPermission(
   // 脚本要先给用户过目再执行：它一口气编排多个子代理，确认发生在源头。
   // 放行按**会话**记（ctx.workflowApproved）：脚本每轮都会被模型重写，按内容
   // 指纹记放行等于让「本会话始终允许」永远命中不了。full 档与写文件/命令同语义免问。
-  if (toolName === 'create_workflow' && approvalMode !== 'full') {
+  // create_workflow 与 resume_workflow 都在执行脚本（后者按 journal 原样重放），同等过目
+  if (WORKFLOW_GATED_TOOLS.includes(toolName) && approvalMode !== 'full') {
     // 本会话已经放行过：不再打扰。用户点的「本会话始终允许」必须真的兑现——
     // 脚本每轮都会被重写，按脚本指纹记放行等于每次都要重问。
     if (ctx.workflowApproved) return { allowed: true }
@@ -1099,7 +1101,7 @@ export async function checkToolPermission(
       workingDir: getWorkingDir(ports, ctx) || '',
       risk: 'normal' as const,
       title: i18n.t('agent.confirmWorkflowTitle'),
-      body: i18n.t('agent.confirmWorkflowBody', { name: String(args.name || '未命名工作流') }),
+      body: i18n.t('agent.confirmWorkflowBody', { name: String(args.name || args.runId || '未命名工作流') }),
     }
     // 优先走对话内确认（那张卡要画流程图，原生弹窗画不出）；宿主不接管时原样退回弹窗
     const inChat = ports.permission.confirmInChat ? await ports.permission.confirmInChat(request) : null
@@ -1303,7 +1305,7 @@ function recordToolGap(ports: AgentPorts, ctx: SessionContext, toolName: string,
 /** 子代理 schema 级隐藏工具。这些工具在子代理语境没有执行面（ctx 不注入 handler，
  *  调用只会得到运行时错误）或没有审批恢复面（question 需要用户在场）——
  *  与其让模型看到再失败，不如 schema 层直接隐藏（对齐 ZCode「派发工具不进子代理」）。 */
-const SUBAGENT_HIDDEN_TOOLS = new Set(['spawn_agent', 'send_message_to_agent', 'question', 'todowrite', 'scheduled_task', 'create_workflow'])
+const SUBAGENT_HIDDEN_TOOLS = new Set(['spawn_agent', 'send_message_to_agent', 'question', 'todowrite', 'scheduled_task', 'create_workflow', 'save_workflow', 'resume_workflow'])
 
 /** 子代理默认轮次上限。maxTurns 是防失控护栏而不是目标值；agent 预设显式写了
  *  maxTurns 的仍以预设为准，显式值封顶主循环上限（MAX_REACT_ITERATIONS）。 */
@@ -2250,7 +2252,7 @@ agentId: ${newSubAgentId} (use send_message_to_agent with agent_id: '${newSubAge
     // scheduled_task 也在此列：它写提案 KV，并发调用会互相盖同一份数组。
     // spawn_agent / send_message_to_agent 是编排动作而非直接副作用：多个子代理互相独立，
     // 同消息派发走并行批（真并行——旧实现把它误列在串行集合里，描述与行为矛盾）。
-      const sideEffectingTools = new Set(['write_file', 'search_replace', 'execute_command', 'save_memory', 'question', 'todowrite', 'scheduled_task', 'create_workflow'])
+      const sideEffectingTools = new Set(['write_file', 'search_replace', 'execute_command', 'save_memory', 'question', 'todowrite', 'scheduled_task', 'create_workflow', 'save_workflow'])
     const isSideEffecting = (toolName: string) =>
       sideEffectingTools.has(toolName) || toolName.startsWith('mcp__')
     const orderedResults: Array<ToolResult | undefined> = Array.from({ length: toolCalls.length })

@@ -203,6 +203,21 @@ export function buildPermissionPreview(
     }
   }
 
+  // 续跑：过同一道脚本门，但内容只是 runId（脚本原文在 journal 里，与上次确认的一致）
+  if (tool === 'resume_workflow') {
+    const runId = String(args.runId ?? '')
+    return {
+      ...base,
+      kind: 'generic',
+      risk: 'warning',
+      ...truncate(runId),
+      reasonKeys: ['chat.permission.reasonWorkflowScript'],
+      target: runId,
+      grantKey: `resume_workflow:${runId}`,
+      serverName: undefined,
+    }
+  }
+
   if (tool === 'create_workflow') {
     const name = String(args.name ?? '未命名工作流')
     const script = String(args.script ?? '')

@@ -1002,6 +1002,7 @@
       allowSessionCapability: '本会话始终允许（不再逐次询问）',
       allowSessionWorkflow: '本会话始终允许（工作流不再询问）',
       dangerOnceHint: '危险命令仅允许这一次——同类命令再次出现时会重新询问',
+      workflowSavedSource: '脚本来自已保存的工作流「{{name}}」',
       hint: '选择会记入对话记录',
       awaitHostHint: '请在系统弹窗中完成确认',
       expired: '审批已超时，按拒绝处理',
@@ -1156,6 +1157,8 @@
     workflowScript: '查看脚本',
     workflowStop: '停止工作流',
     workflowDispatching: '正在派发第一个子代理…',
+    workflowCached: '缓存',
+    workflowResumedFrom: '续跑',
     /** 工作流运行看板 / 终态图 */
     workflowRunning: '工作流运行中',
     workflowTitle: '工作流',

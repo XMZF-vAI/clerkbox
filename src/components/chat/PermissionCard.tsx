@@ -203,6 +203,11 @@ function WorkflowPermissionCard({ request, onResolve, interactive = true, vibe =
             {t('chat.permission.workflowParallel', { count: view?.maxParallel ?? 1 })}
             <span className="opacity-70"> · {t('chat.permission.workflowStaticHint')}</span>
           </div>
+          {typeof request.args?.saved === 'string' && request.args.saved && (
+            <div className={`mt-1 text-ui-xs ${vibe ? 'text-white/60' : 'text-dark-onSurfaceVariant/70'}`}>
+              {t('chat.permission.workflowSavedSource', { name: String(request.args.saved) })}
+            </div>
+          )}
         </div>
       </div>
 
@@ -261,6 +266,8 @@ export interface PermissionRequestView {
   id: string
   /** 来源工具名（原始 name） */
   tool: string
+  /** 原始入参（个别确认卡要读特定字段，如工作流的 saved 来源）；镜像态可缺省 */
+  args?: Record<string, unknown>
   preview: ReturnType<typeof buildPermissionPreview>
   status: PermissionRequestStatus
   /** status='resolved' 时的审批结果 */
@@ -442,11 +449,12 @@ function LocalPermissionCard({ request, vibe }: { request: LocalPermission; vibe
     () => ({
       id: request.requestId,
       tool: request.tool,
+      args: request.args,
       preview,
       status: 'pending',
       requestedAt: request.requestedAt,
     }),
-    [request.requestId, request.tool, request.requestedAt, preview]
+    [request.requestId, request.tool, request.args, request.requestedAt, preview]
   )
 
   const handleResolve = (id: string, decision: PermissionDecision) => {
@@ -496,11 +504,12 @@ export function PermissionApprovalCard({ sessionId, vibe = false }: { sessionId:
     const preview = buildPermissionPreview(pending.tool, pending.args, { workingDir })
     const requestedAt = messages[messages.length - 1]?.timestamp ?? Date.now()
     if (answered?.requestId === id) {
-      return { id, tool: pending.tool, preview, status: 'resolved', decision: answered.decision, requestedAt }
+      return { id, tool: pending.tool, args: pending.args, preview, status: 'resolved', decision: answered.decision, requestedAt }
     }
     return {
       id,
       tool: pending.tool,
+      args: pending.args,
       preview,
       status: 'pending',
       requestedAt,
