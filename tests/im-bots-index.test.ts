@@ -200,12 +200,15 @@ describe('初始化与 IPC 注册', () => {
     const storage = new BotsStorage(base)
     await storage.writeConfig({ version: 1, bots: [bot()] })
     initImBots(fakeHost(base))
-    await new Promise((resolve) => setTimeout(resolve, 60))
-    const snapshot = imBotsDiagnostics()
-    expect(snapshot.running).toEqual([])
-    const status = snapshot.statuses.find((item) => item.botId === 'bot1')
-    expect(status?.state).toBe('error')
-    expect(status?.message).toContain('扫码')
+    // 状态落位是异步的（通道启动失败后才置 error）：固定 sleep 在负载下会偶发不够，
+    // 改轮询等待，最坏 2s——与 2026-11-03 的偶发失败直接对应。
+    await vi.waitFor(() => {
+      const snapshot = imBotsDiagnostics()
+      expect(snapshot.running).toEqual([])
+      const status = snapshot.statuses.find((item) => item.botId === 'bot1')
+      expect(status?.state).toBe('error')
+      expect(status?.message).toContain('扫码')
+    }, { timeout: 2000, interval: 50 })
   })
 
   it('停用的 bot 状态是 disabled，不是 error', async () => {
