@@ -384,7 +384,11 @@ export interface ToolContext {
    * runInBackground 为 true 时立即返回含 agentId 的确认文本，完成后经通知注回主循环。
    * 仅主对话注入；子代理内没有这个闭包（也不在 schema 里）→ 深度恒为 1。
    */
-  spawnSubAgent?: (agentType: string, prompt: string, opts?: { runInBackground?: boolean }) => Promise<string>
+  spawnSubAgent?: (agentType: string, prompt: string, opts?: {
+    runInBackground?: boolean
+    /** 外部中止信号（后台工作流用）：abort 时链式掐断这次派生的子代理 */
+    signal?: AbortSignal
+  }) => Promise<string>
   /** 向已有子代理投递消息（运行中注入 / 终态续跑）。仅主对话注入。 */
   sendMessageToAgent?: (agentId: string, message: string) => Promise<string>
   requestUserInput?: (questions: UserQuestion[]) => Promise<Record<string, string[]>>
@@ -411,6 +415,23 @@ export interface ToolContext {
    * 仅主对话注入；子代理没有工作流执行面，恒为空。
    */
   onWorkflowProgress?: (snapshot: WorkflowProgressSnapshot) => void
+  /** 承载本次工具调用的 assistant 消息 id：后台工作流 settle 后要更新这条消息里的工具尾巴 */
+  assistantMessageId?: string
+  /**
+   * 后台工作流宿主桥（create_workflow 专用，v2）：settle 时的注回面。
+   * 渲染层宿主直写 store/ctx/journal-ipc；主进程宿主走镜像 + 事件。
+   * 仅主对话注入；子代理没有工作流执行面，恒为空。
+   */
+  workflowHost?: {
+    /** 把工具结果的 UI 尾巴换成终态（落库，UI 尾巴发模型前剥离） */
+    updateToolResultTail(toolCallId: string, content: string): void
+    /** 推一条完成通知进注回队列（<workflow-notification>，与后台子代理同一信封） */
+    pushNotification(text: string): void
+    /** 会话空闲时请求一次无用户消息的续跑（渲染层宿主装配；未装配时静默忽略） */
+    requestWake(): void
+    /** 落一份运行快照进 journal（崩溃恢复用；失败静默，绝不影响 run） */
+    journalPut(run: unknown): void
+  }
 }
 
 /** Escape a string for safe interpolation into PowerShell double-quoted strings.

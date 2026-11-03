@@ -95,6 +95,10 @@ export const REMOTE_INVOKE_BLOCKLIST: readonly string[] = [
   'ckptGet',
   'ckptRemove',
   'ckptRemoveSession',
+  // 工作流 journal：与 ckpt* 同理，能按调用方给定的内容往本机写文件，不对远程暴露
+  'workflowJournalPut',
+  'workflowJournalList',
+  'workflowJournalSweep',
   'dbDeleteMessagesFrom',
   'dbPatchMessage',
   // Agent 动作通道：agentBrowser:command 能让远程调用方驱动本机 Agent 浏览器

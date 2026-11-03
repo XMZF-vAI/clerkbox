@@ -48,6 +48,8 @@ export type AgentCommand =
   | { type: 'manual.compact'; sessionId: string; instructions?: string }
   /** 单子代理取消（详情面板停止按钮）：只中止该 run，不影响父轮 */
   | { type: 'subagent.stop'; sessionId: string; runId: string }
+  /** 单个工作流取消（运行看板的停止按钮）：只中止该 run，不影响会话 */
+  | { type: 'workflow.stop'; sessionId: string; runId: string }
   /** 用户向运行中的子代理注入指令（详情面板输入框）：下一轮迭代顶部消费 */
   | { type: 'subagent.steer'; sessionId: string; runId: string; text: string }
   /**

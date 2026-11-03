@@ -695,6 +695,13 @@ agentBrowserEnsurePanel: (sessionId?: string): Promise<boolean> =>
     isElectron ? window.clerkbox.ckptRemove(sessionId, refs) : webInvoke('ckptRemove', [sessionId, refs]),
   ckptRemoveSession: (sessionId: string): Promise<void> =>
     isElectron ? window.clerkbox.ckptRemoveSession(sessionId) : webInvoke('ckptRemoveSession', [sessionId]),
+  // ── 工作流 journal（v2 后台运行的崩溃恢复面；WebUI 侧列入黑名单，走 webInvoke 会被 403 拒绝）──
+  workflowJournalPut: (entry: unknown): Promise<void> =>
+    isElectron ? window.clerkbox.workflowJournalPut(entry) : webInvoke('workflowJournalPut', [entry]),
+  workflowJournalList: (): Promise<unknown[]> =>
+    isElectron ? window.clerkbox.workflowJournalList() : webInvoke('workflowJournalList', []),
+  workflowJournalSweep: (): Promise<void> =>
+    isElectron ? window.clerkbox.workflowJournalSweep() : webInvoke('workflowJournalSweep', []),
 
   // ── Git（编程模式：分支/审查/图谱；WebUI 侧全部列入黑名单，走 webInvoke 会被 403 拒绝）──
   gitGetStatus: (workDir: string): Promise<GitStatusResult> =>

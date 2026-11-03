@@ -97,8 +97,17 @@ export class SessionContext {
   /**
    * 已完成后台子代理的待注入通知。主循环在每轮迭代顶部 drain（多条合并为一条
    * isSubAgentNotice 消息）；主循环空闲时留存，随下一条用户消息的新 run 注入。
+   * 工作流的完成通知走同一个队列（<workflow-notification> 同一信封）。
    */
   readonly pendingSubagentNotifications: string[] = []
+
+  /**
+   * 空闲唤醒（v2 后台工作流）：宿主装配。工作流在会话空闲时 settle，宿主可据此
+   * 发起一次「无用户消息的续跑」——initialMessages 直接用现有会话消息，迭代顶部
+   * 的 drain 会把队列里的通知注入模型，模型向用户总结结果。未装配（主进程宿主
+   * 本轮未做唤醒）时通知静留队列，行为与后台子代理一致。
+   */
+  requestWake?: () => void
 
   // ── 消息撤回 / 改动回滚 ──
   /**

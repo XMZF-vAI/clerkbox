@@ -1,22 +1,26 @@
 /**
- * create_workflow 渲染器：运行中 = 实时看板，结束后 = 终态图 + 步骤明细。
+ * create_workflow 渲染器：后台运行 = 实时看板 + 停止按钮，结束后 = 终态图 + 步骤明细。
  *
  * 数据面有三层，优先级从高到低：
- *  1. 工具结果里的 __WORKFLOW_RUN__ 尾巴（终态真值，发模型前已剥离）；
- *  2. workflow-runs-store 里的实时快照（运行中每步一帧，键=toolCallId）；
+ *  1. workflow-runs-store 里的实况快照（运行中每步一帧，键=toolCallId）；
+ *  2. 工具结果里的 __WORKFLOW_RUN__ 尾巴（settle 时更新落库，发模型前已剥离）；
  *  3. 脚本静态分析出的静态图（确认那一刻就已经画过，运行前先顶住画面）。
  *
+ * v2 后台语义下尾巴有两种含义：status='running' 的启动快照（工具立即返回时写入，
+ * 实况以 store 为准）与终态快照（settle 时换上）。尾巴 running 而 store 已终态是
+ * 「消息落库竞态」的正常窗口——store 优先，消息更新到达后自然切换。
  * 三层都收敛到同一个视图模型（workflow-graph 的 buildWorkflowGraphView*），所以
- * 「确认窗里的图」和「运行中的图」是同一张图的两个状态，不是两套实现。
+ * 「确认窗里的图」「运行中的图」「终态的图」是同一张图的三个状态，不是三套实现。
  */
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { ChevronDown, CircleCheck, CircleX, CircleDashed, Loader2 } from 'lucide-react'
+import { ChevronDown, CircleCheck, CircleX, CircleDashed, Loader2, Square } from 'lucide-react'
 import { MonoBlock, ToolDetailPanel, ToolSkeleton, ToolStatusLine, useToolDuration } from './ToolShell'
 import type { ToolRendererProps } from './resolveRenderer'
 import { parseWorkflowRunTail, type WorkflowRunTail, type WorkflowStepStatus } from '../../../lib/workflow-runtime'
 import { analyzeWorkflowScript, buildWorkflowGraphView, buildWorkflowGraphViewFromTail } from '../../../lib/workflow-graph'
 import { useWorkflowRunsStore } from '../../../stores/workflow-runs-store'
+import { stopWorkflowRunControlled } from '../../../lib/workflow-control'
 import { MarkdownContent } from '../MarkdownContent'
 import { WorkflowGraph } from './WorkflowGraph'
 
@@ -41,7 +45,7 @@ function StepRow({ step, vibe }: { step: WorkflowRunTail['steps'][0]; vibe: bool
       <div className="flex items-center gap-1.5">
         <Icon size={12} className={`shrink-0 ${tone} ${spinning ? 'animate-spin' : ''}`} />
         <span className={`shrink-0 text-ui-xs font-medium ${vibe ? 'text-white/85' : 'text-dark-onSurface/85'}`}>{step.name}</span>
-        {seconds && <span className="shrink-0 font-mono text-ui-xs tabular-nums opacity-60">{seconds}</span>}
+        {seconds && <span className={`shrink-0 font-mono text-ui-xs tabular-nums opacity-60 ${spinning ? 'animate-pulse' : ''}`}>{seconds}</span>}
         {step.status === 'failed' && <span className="shrink-0 text-ui-xs text-md-error">{step.excerpt ?? ''}</span>}
       </div>
       {step.status !== 'failed' && step.excerpt && (
@@ -53,9 +57,10 @@ function StepRow({ step, vibe }: { step: WorkflowRunTail['steps'][0]; vibe: bool
   )
 }
 
-export default function WorkflowRenderer({ call, result, isError, args, vibe = false }: ToolRendererProps) {
+export default function WorkflowRenderer({ call, result, isError, args, vibe = false, sessionId }: ToolRendererProps) {
   const { t } = useTranslation()
   const [scriptOpen, setScriptOpen] = useState(false)
+  const [stopping, setStopping] = useState(false)
   const running = !result
   const duration = useToolDuration(call.id, running)
   const name = String(args.name ?? '')
@@ -66,36 +71,69 @@ export default function WorkflowRenderer({ call, result, isError, args, vibe = f
   const progress = useWorkflowRunsStore((s) => s.byToolCall[call.id])
   const content = result?.content ?? ''
   const { run } = useMemo(() => parseWorkflowRunTail(content), [content])
+  // v2 后台：工具立即返回，尾巴带着 running 快照——看板常驻、结果经通知回流
+  const backgroundRunning = run?.status === 'running'
 
   const view = useMemo(() => {
+    if (backgroundRunning) {
+      // 实况优先；store 缺席（重启后未水合）退回静态图，等恢复侧补尾巴
+      if (progress) return buildWorkflowGraphView(graph, progress)
+      return buildWorkflowGraphView(graph)
+    }
     if (run) return buildWorkflowGraphViewFromTail(graph, run)
     if (progress) return buildWorkflowGraphView(graph, progress)
     return buildWorkflowGraphView(graph)
-  }, [graph, progress, run])
+  }, [backgroundRunning, graph, progress, run])
 
   // 还没有任何实况、也没有结果：保持骨架（脚本可能还没开始跑）
   if (running && !progress) return <ToolSkeleton vibe={vibe} lines={3} />
 
   const working = progress?.steps.filter((step) => step.status === 'running').length ?? 0
 
+  const handleStop = async () => {
+    if (!run?.runId || stopping) return
+    setStopping(true)
+    try {
+      await stopWorkflowRunControlled(run.runId, sessionId ?? '')
+    } finally {
+      setStopping(false)
+    }
+  }
+
   return (
     <ToolDetailPanel vibe={vibe}>
       <div className="flex min-w-0 items-baseline gap-2">
         <span className={`shrink-0 text-ui-xs font-medium ${vibe ? 'text-white/85' : 'text-dark-onSurface/85'}`}>
-          {running ? t('toolRenderer.workflowRunning') : t('toolRenderer.workflowTitle')}
+          {running || backgroundRunning ? t('toolRenderer.workflowRunning') : t('toolRenderer.workflowTitle')}
         </span>
         {name && <span className={`min-w-0 truncate text-ui-xs ${vibe ? 'text-white/60' : 'text-dark-onSurfaceVariant/60'}`} title={name}>{name}</span>}
         <span className={`ml-auto shrink-0 text-ui-xs ${vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/55'}`}>
           {t('toolRenderer.workflowPhaseCount', { count: view.phases.length })}
-          {running && working > 0 && ` · ${t('toolRenderer.workflowAgentsWorking', { count: working })}`}
+          {(running || backgroundRunning) && working > 0 && ` · ${t('toolRenderer.workflowAgentsWorking', { count: working })}`}
         </span>
+        {backgroundRunning && (
+          <button
+            type="button"
+            onClick={handleStop}
+            disabled={stopping}
+            title={t('toolRenderer.workflowStop')}
+            aria-label={t('toolRenderer.workflowStop')}
+            className={`shrink-0 rounded-md3-xs p-0.5 transition-colors disabled:opacity-50 ${
+              vibe
+                ? 'text-white/55 hover:bg-white/10 hover:text-white/90'
+                : 'text-dark-onSurfaceVariant/60 hover:bg-dark-surfaceContainerHigh hover:text-md-error'
+            }`}
+          >
+            {stopping ? <Loader2 size={11} className="animate-spin" /> : <Square size={11} />}
+          </button>
+        )}
       </div>
 
       <div className="py-1.5">
         <WorkflowGraph view={view} vibe={vibe} />
       </div>
 
-      {run && (
+      {run && !backgroundRunning && (
         <>
           <div className="flex flex-col gap-1.5">
             {run.steps.map((step) => <StepRow key={step.key} step={step} vibe={vibe} />)}
@@ -117,6 +155,31 @@ export default function WorkflowRenderer({ call, result, isError, args, vibe = f
             {duration && <span>{duration}</span>}
           </ToolStatusLine>
         </>
+      )}
+
+      {backgroundRunning && progress && (
+        <div className="flex flex-col gap-1.5">
+          {progress.steps.map((step) => (
+            <StepRow
+              key={step.key}
+              vibe={vibe}
+              step={{
+                key: step.key,
+                name: step.name,
+                phase: step.phase,
+                status: step.status,
+                agentId: undefined,
+                excerpt: undefined,
+                durationMs: step.endedAt ? step.endedAt - step.startedAt : undefined,
+              }}
+            />
+          ))}
+          {progress.steps.length === 0 && (
+            <span className={`text-ui-xs ${vibe ? 'text-white/55' : 'text-dark-onSurfaceVariant/60'}`}>
+              {t('toolRenderer.workflowDispatching')}
+            </span>
+          )}
+        </div>
       )}
 
       {!run && !running && (

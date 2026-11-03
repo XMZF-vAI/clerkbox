@@ -1,17 +1,20 @@
 /**
- * create_workflow：把「怎么干」写成脚本，一键编排子代理小队（工作流一期工具面）。
+ * create_workflow：把「怎么干」写成脚本，一键编排子代理小队（工作流工具面）。
  *
- * 语义对标 ZCode CreateWorkflow：显式点名才启动、点名即绑定；脚本在权限门
- * （workflow-script 确认）放行后同步执行，工具结果即完整报告——不轮询。
+ * 语义对标 ZCode CreateWorkflow 的 backgrounded：脚本在权限门（workflow-script
+ * 确认）放行后**立即返回**确认文本，运行在后台进行；终态经宿主桥注回——
+ * 通知进 pendingSubagentNotifications 队列（与后台子代理同一信封）、工具尾巴
+ * 落回终态、journal 落盘、会话空闲时唤醒续跑。不轮询、不阻塞主对话。
  * 实现在 workflow-runtime.ts，这里只有契约与宿主端口桥接。
  */
-import type { ToolDefinition, Message } from '../types/agent'
+import type { ToolDefinition } from '../types/agent'
 import type { ToolContext } from './tool-registry'
 import {
   checkWorkflowScript,
   encodeWorkflowRunTail,
-  executeWorkflowScript,
+  formatWorkflowNotification,
   formatWorkflowRunReport,
+  launchWorkflowRun,
   MAX_WORKFLOW_SCRIPT_BYTES,
   type WorkflowHostPort,
 } from './workflow-runtime'
@@ -22,7 +25,7 @@ export const WORKFLOW_TOOLS: ToolDefinition[] = [
   {
     name: WORKFLOW_TOOL_NAME,
     description:
-      'Create and run a multi-agent workflow: you write a JavaScript orchestration script, it is shown to the user for approval, and on approval it executes immediately — the tool returns the full report when every step settles.\n' +
+      'Create and run a multi-agent workflow in the background: you write a JavaScript orchestration script, it is shown to the user for approval, and on approval it starts immediately — the tool returns right away with a run id, the workflow executes in the background, and its completion is delivered back to you as a notification.\n' +
       'When to use: ONLY when the user explicitly asks for a workflow ("用工作流", "use a workflow", "跑个工作流", "workflow"). This tool is mandatory in that case: do not substitute spawn_agent, however small the task. For single delegations without an explicit workflow request, use spawn_agent instead.\n' +
       'Script environment: the script is the body of an async function. Available bindings:\n' +
       '- `await agent(name, prompt)` — spawn a sub-agent, wait for completion, return its result text. Sub-agents see NONE of this conversation: put the goal, file paths, constraints and expected output format entirely in the prompt.\n' +
@@ -33,8 +36,8 @@ export const WORKFLOW_TOOLS: ToolDefinition[] = [
       'Usage notes:\n' +
       '- `return` a final string to deliver the workflow conclusion; per-step results are reported automatically.\n' +
       `- Script limit: ${MAX_WORKFLOW_SCRIPT_BYTES} chars. No import/require/process/DOM access — only the bindings above.\n` +
-      '- The script runs with the session: stopping the session stops the workflow and all its sub-agents.\n' +
-      '- Do not poll and do not duplicate the workflow\'s work while it runs — the result arrives when it settles.',
+      '- The run belongs to the session: stopping the session stops the workflow and all its sub-agents.\n' +
+      '- After launching: do NOT poll, do NOT wait for the result, and do NOT duplicate the workflow\'s work — continue with whatever else the user asked, and summarize the result faithfully when the completion notification arrives.',
     parameters: {
       type: 'object',
       properties: {
@@ -65,7 +68,7 @@ export function extractAgentId(raw: string): string | null {
 
 /**
  * 工作流工具执行入口。未命中返回 null（调用方继续走其他分支）。
- * 运行全程在这一次工具调用内完成：子代理卡片实时出现，resolve 即终态报告。
+ * v2：校验通过即后台启动并立即返回确认文本——工具调用不再阻塞到跑完。
  */
 export async function executeWorkflowTool(name: string, args: Record<string, unknown>, ctx?: ToolContext): Promise<string | null> {
   if (name !== WORKFLOW_TOOL_NAME) return null
@@ -86,27 +89,46 @@ export async function executeWorkflowTool(name: string, args: Record<string, unk
   }
 
   const host: WorkflowHostPort = {
-    runAgent: async ({ prompt }) => {
-      const raw = await spawn('general', prompt)
+    runAgent: async ({ prompt, signal }) => {
+      // signal 透传：停止工作流时链式掐断在飞的子代理（mainSpawnSubAgent 侧做链接）
+      const raw = await spawn('general', prompt, { signal })
       // mainSpawnSubAgent 中止时返回字面量 [aborted]；透传给 runtime 归档为 aborted
       const clean = raw.startsWith('[aborted]') ? '[aborted]' : raw.split('\n\nagentId:')[0]?.trim() ?? raw
       return { result: clean, agentId: extractAgentId(raw) }
     },
-    // 实时进度：宿主装配了看板通道就一路推下去；没装配时 runtime 跳过（行为不变）
     onProgress: ctx?.onWorkflowProgress,
+    onSettle: ctx?.workflowHost
+      ? (run) => {
+          const bridge = ctx.workflowHost!
+          // 工具尾巴换终态：卡片从实时板切到终态图（发模型前剥离，只影响 UI 与恢复）
+          bridge.updateToolResultTail(ctx.toolCallId ?? '', formatWorkflowRunReport(run) + encodeWorkflowRunTail(run))
+          bridge.pushNotification(formatWorkflowNotification(run))
+          bridge.journalPut(run)
+          // 唤醒：completed/failed 都值得让模型立刻向用户总结；aborted 是用户亲手停的，
+          // 再弹一轮总结是打扰——通知静留队列，随下一条用户消息注入。
+          if (run.status !== 'aborted') bridge.requestWake()
+        }
+      : undefined,
   }
 
-  const run = await executeWorkflowScript({
+  const run = launchWorkflowRun({
     sessionId: ctx?.sessionId ?? '',
     name: workflowName,
     script,
     args: scriptArgs,
     host,
+    toolCallId: ctx?.toolCallId,
+    assistantMessageId: ctx?.assistantMessageId,
   })
+  ctx?.workflowHost?.journalPut(run) // 起跑快照也落盘：跑到一半崩溃时恢复侧才知道它是 running
 
-  const report = formatWorkflowRunReport(run)
-  return `${report}${encodeWorkflowRunTail(run)}`
+  return [
+    `⏳ 工作流「${run.name}」已在后台启动（runId: ${run.id}）。`,
+    '- 完成时会自动通知你，届时请向用户如实总结结果（含失败项）。',
+    '- 现在不要轮询、不要等待、也不要重复它的工作——继续做用户交代的其他事即可。',
+    '- 运行进度在对话的工作流卡片上实时可见。',
+  ].join('\n') + encodeWorkflowRunTail(run)
 }
 
 /** 渲染器/摘要侧用的类型再出口（避免 UI 直接依赖 runtime 内部） */
-export type WorkflowToolCall = NonNullable<Message['toolCalls']>[0]
+export type WorkflowToolCall = NonNullable<import('../types/agent').Message['toolCalls']>[0]

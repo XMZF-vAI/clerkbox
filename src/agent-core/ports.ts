@@ -229,6 +229,11 @@ export interface AgentPorts {
    * 主进程宿主不装配它，改由 `emit('workflow.updated')` 回流到渲染层。
    */
   workflowProgress?(sessionId: string, toolCallId: string, snapshot: WorkflowProgressSnapshot): void
+  /**
+   * 工作流 journal 落盘（可选，v2）。渲染层宿主经 IPC 写 `<userData>/workflow-runs/`；
+   * 主进程宿主直写文件。未装配（测试）时跳过，不影响运行。
+   */
+  workflowJournal?: { put(run: unknown): void }
 }
 
 /** loop 内部模型调用参数（与旧 callAPI opts 对齐）。 */

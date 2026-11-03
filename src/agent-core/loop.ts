@@ -53,6 +53,8 @@ import {
 import type { ToolContext } from '../lib/tool-registry'
 import { gapFromToolCall, isRewindableUserMessage } from '../lib/rewind'
 import { agentActionFamily, agentActionGrantKey, isAgentActionToolReadOnly } from '../lib/agent-actions'
+import type { WorkflowRun } from '../lib/workflow-runtime'
+import { abortWorkflowRunsForSession } from '../lib/workflow-runtime'
 
 export const makeId = (): string => `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
@@ -1263,6 +1265,26 @@ async function recordFileMutation(ports: AgentPorts, ctx: SessionContext, mutati
   flushRewindAnchor(ports, ctx)
 }
 
+/**
+ * 整体替换 assistant 消息里某个工具结果的内容（后台工作流 settle 时换终态尾巴）。
+ * 只动 UI 尾巴与展示正文——模型的对话历史里该工具结果保持启动确认文本，
+ * 结果细节由 <workflow-notification> 注回，不在这里双份。
+ */
+function replaceToolResultContent(
+  ports: AgentPorts,
+  sessionId: string,
+  assistantMessageId: string | undefined,
+  toolCallId: string,
+  content: string,
+): void {
+  if (!assistantMessageId || !toolCallId) return
+  const message = ports.store.getSession(sessionId)?.messages.find((m) => m.id === assistantMessageId)
+  if (!message?.toolResults?.some((r) => r.toolCallId === toolCallId)) return
+  ports.store.updateMessage(sessionId, assistantMessageId, {
+    toolResults: message.toolResults.map((r) => (r.toolCallId === toolCallId ? { ...r, content } : r)),
+  })
+}
+
 /** 由工具名推断无法回滚的改动（shell / MCP / 未知工具）；快照覆盖不到的都在这里挡掉 */
 function recordToolGap(ports: AgentPorts, ctx: SessionContext, toolName: string, path?: string): void {
   const gap = gapFromToolCall(toolName)
@@ -1613,7 +1635,7 @@ async function runAgentLoop(
 
   // ── 主对话专属：spawn_agent / send_message_to_agent 的工具侧入口。
   // 子代理的工具 ctx 不注入这两个闭包 → 派发/续聊工具在子代理内不可用（无嵌套派生）。──
-  const mainSpawnSubAgent = async (agentType: string, subPrompt: string, spawnOpts?: { runInBackground?: boolean }): Promise<string> => {
+  const mainSpawnSubAgent = async (agentType: string, subPrompt: string, spawnOpts?: { runInBackground?: boolean; signal?: AbortSignal }): Promise<string> => {
     // 先验证 agent 再落卡片：若 findAgent 失败则卡片已持久化但 runs store 无记录，成为永久孤儿
     const agent = await ports.tools.findAgent(agentType, getWorkingDir(ports, ctx))
     if (!agent) {
@@ -1632,8 +1654,17 @@ async function runAgentLoop(
     if (spawnOpts?.runInBackground || agent.background === true) {
       return launchBackgroundSubagent(ports, ctx, agent, newSubAgentId, subPrompt)
     }
+    // 外部中止信号（后台工作流）：链接出一个派生控制器——工作流被停时在飞的
+    // 子代理立即收到 abort，而不是等它自然跑完。父控制器语义原样保留。
+    let effectiveController = controller
+    if (spawnOpts?.signal) {
+      const linked = new AbortController()
+      if (spawnOpts.signal.aborted) linked.abort()
+      else spawnOpts.signal.addEventListener('abort', () => linked.abort(new Error('[aborted] 工作流已停止')), { once: true })
+      effectiveController = linked
+    }
     try {
-      const subResult = await runSubAgentLoop(ports, ctx, agentType, subPrompt, controller, newSubAgentId)
+      const subResult = await runSubAgentLoop(ports, ctx, agentType, subPrompt, effectiveController, newSubAgentId)
       if (subResult === '[aborted]') return subResult
       // 前台结果 = 正文 + agentId 续聊引导 + 用量块。agentId 是续聊的唯一钥匙：
       // 没有它模型只能靠复述上下文重新 spawn，上下文与 token 双输。
@@ -2163,6 +2194,8 @@ agentId: ${newSubAgentId} (use send_message_to_agent with agent_id: '${newSubAge
           sessionLabel: isMain ? (ctx.sessionTitle ?? undefined) : undefined,
           readFileState,
           toolCallId: tc.id,
+          // 后台工作流 settle 后要更新这条 assistant 消息里的工具尾巴
+          assistantMessageId: isMain ? assistantId : undefined,
           recordFileMutation: (mutation) => recordFileMutation(ports, ctx, mutation),
           // 截图旁路（Browser/Computer Use）：仅主对话的图像工具会上报，子代理恒为空数组
           recordImage: (image) => { capturedImages.push(image) },
@@ -2171,6 +2204,16 @@ agentId: ${newSubAgentId} (use send_message_to_agent with agent_id: '${newSubAge
             ports.workflowProgress?.(sessionId, tc.id, snapshot)
             ports.emit({ type: 'workflow.updated', sessionId, toolCallId: tc.id, snapshot })
           },
+          // 后台工作流宿主桥（仅主对话）：settle 时注回通知 / 尾巴 / journal / 唤醒
+          workflowHost: isMain
+            ? {
+                updateToolResultTail: (tailCallId, content) =>
+                  replaceToolResultContent(ports, sessionId, assistantId, tailCallId, content),
+                pushNotification: (text) => { ctx.pendingSubagentNotifications.push(text) },
+                requestWake: () => ctx.requestWake?.(),
+                journalPut: (run) => ports.workflowJournal?.put(run as WorkflowRun),
+              }
+            : undefined,
           // spawn / 续聊 / 交互 / 待办仅主对话注入：子代理没有这些执行面，
           // 对应工具也在 schema 层被裁掉（SUBAGENT_HIDDEN_TOOLS）
           ...mainToolCtxExtras,

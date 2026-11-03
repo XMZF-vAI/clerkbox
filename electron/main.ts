@@ -32,6 +32,7 @@ import { initUpdater, isAgentBusyNow } from './updater'
 import { initMainLogger, registerLogIpcHandlers } from './logger'
 import { createChatStore, registerDbIpcHandlers, type ChatStore } from './db'
 import { registerCheckpointIpcHandlers } from './checkpoint-store'
+import { registerWorkflowJournalIpcHandlers, getWorkflowJournal } from './workflow-journal'
 import { registerGitIpcHandlers } from './git-service'
 import { registerAgentHostIpc, getAgentSessionManager, registerAgentEventSink } from './agent-host'
 import { initImBots, disposeImBots } from './im-bots'
@@ -2062,6 +2063,11 @@ function registerIpcHandlers(chatStore: ChatStore) {
   // 文件变更前快照仓库（消息撤回 / 改动回滚）：正文落 userData/checkpoints，
   // 索引随消息行持久化。必须先于 agent 宿主注册——宿主端口装配会直接取用。
   registerCheckpointIpcHandlers(app.getPath('userData'))
+  // 工作流 journal（v2 后台运行的崩溃恢复面）：一 run 一文件落 userData/workflow-runs。
+  // 同样先于 agent 宿主注册——宿主端口装配会直接取用。
+  registerWorkflowJournalIpcHandlers(app.getPath('userData'))
+  // 启动清扫：TTL 过期与超限快照就地回收（只此一次，运行期不 GC）
+  void getWorkflowJournal().sweep()
   // Git 服务（编程模式：分支/审查/图谱）：只读+写操作两组通道，全部不对 WebUI 放行
   registerGitIpcHandlers()
   // Agent 宿主（批次 B · P3）：装配主进程端口并注册 agent:command / agent:snapshot 通道。

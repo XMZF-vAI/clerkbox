@@ -38,6 +38,8 @@ import type { Message, RewindScope, Session, SubAgentRun, TodoItem, TokenUsage }
 import { buildRewindPlan } from '../src/lib/rewind'
 import { buildRewindIo, executeRewind } from '../src/lib/rewind-service'
 import { saveFileMutation } from '../src/lib/checkpoint-recorder'
+import { abortWorkflowRunsForSession, stopWorkflowRun } from '../src/lib/workflow-runtime'
+import { getWorkflowJournal } from './workflow-journal'
 import type { QueuedMessageItem } from '../src/stores/chat-store'
 
 /** 审批挂起上限（计划 §3.3）：超时即拒绝 */
@@ -462,6 +464,27 @@ export class AgentSessionManager {
       checkpoint: {
         save: (sid, mutation) => saveFileMutation(sid, mutation),
       },
+      // 工作流 journal：宿主在主进程，直写文件（与渲染层同一个 WorkflowJournal 实现）。
+      // journal 未初始化（测试环境）时跳过——恢复面缺失只影响崩溃恢复，不影响运行。
+      workflowJournal: {
+        put: (run) => {
+          const record = run as import('../src/lib/workflow-runtime').WorkflowRun
+          try {
+            void getWorkflowJournal().put({
+              runId: record.id,
+              sessionId: record.sessionId,
+              toolCallId: record.toolCallId,
+              assistantMessageId: record.assistantMessageId,
+              name: record.name,
+              status: record.status,
+              payload: record,
+              savedAt: Date.now(),
+            })
+          } catch {
+            /* journal 未初始化：跳过 */
+          }
+        },
+      },
       // Agent 动作能力开关：主进程有一份独立的 toolRegistry 单例，必须在这里同样注入一次，
       // 否则宿主模式下这些工具对模型不可见，而渲染层那边却是开着的
       ...(cmd.settings
@@ -658,6 +681,8 @@ export class AgentSessionManager {
       case 'abort': {
         if (!s.run) return { ok: false, error: 'no-run' }
         s.run.controller.abort()
+        // 停止会话 = 停止该会话所有在跑的后台工作流（兑现 create_workflow 描述的承诺）
+        abortWorkflowRunsForSession(s.sessionId)
         // 中断语义（计划 §5.4）：停模型流 + 杀本会话仍在跑的 shell + 清运行态，缺一不可
         void ipc.cancelSessionCommands(s.sessionId).catch(() => { /* 主进程未注册该 handler 时无害 */ })
         return { ok: true }
@@ -711,6 +736,11 @@ export class AgentSessionManager {
         // 本地注册表查不到 = 该 run 不在本进程运行（已终态或跨进程），如实回执。
         const stopped = abortSubagentLocal(cmd.sessionId, cmd.runId)
         return stopped ? { ok: true } : { ok: false, error: 'subagent-not-running' }
+      }
+      case 'workflow.stop': {
+        // 单工作流取消（运行看板的停止按钮）：只中止该 run，不影响会话。
+        const workflowStopped = stopWorkflowRun(cmd.runId)
+        return workflowStopped ? { ok: true } : { ok: false, error: 'workflow-not-running' }
       }
       case 'subagent.steer': {
         const steered = steerSubagentLocal(cmd.sessionId, cmd.runId, cmd.text)

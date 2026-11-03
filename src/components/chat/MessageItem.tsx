@@ -145,10 +145,12 @@ function chipTextFor(name: string, args: Record<string, unknown>, t: ReturnType<
 }
 
 /** 单个工具调用行：图标 + 动作标签 + 参数 chip；悬停露出 chevron，点击展开明细 */
-function ToolRow({ toolCall, result, vibe }: {
+function ToolRow({ toolCall, result, vibe, sessionId }: {
   toolCall: NonNullable<Message['toolCalls']>[0]
   result?: Message['toolResults']
   vibe?: boolean
+  /** 所属会话：工作流停止按钮要向宿主发停止命令 */
+  sessionId?: string
 }) {
   const { t } = useTranslation()
   // 展开态经 tool-card-state 仓库持久（键=toolCall.id）：虚拟行重挂 / 会话切回不丢
@@ -303,6 +305,7 @@ function ToolRow({ toolCall, result, vibe }: {
                 isError={isError}
                 args={toolCall.arguments}
                 vibe={vibe}
+                sessionId={sessionId}
               />
             </Suspense>
           ) : null
@@ -438,13 +441,15 @@ function DiffChips({ metas, vibe }: { metas: EditDiffMetaView[]; vibe?: boolean 
 }
 
 /** 工具运行组：折叠头部「N 个工具调用」+ 紧凑行列表 + 差异 chips */
-function ToolRunGroup({ toolCalls, toolResults, vibe, defaultOpen = false, finishReason }: {
+function ToolRunGroup({ toolCalls, toolResults, vibe, defaultOpen = false, finishReason, sessionId }: {
   toolCalls: NonNullable<Message['toolCalls']>
   toolResults?: Message['toolResults']
   vibe?: boolean
   defaultOpen?: boolean
   /** 消息完成原因；流式过程中工具组默认展开，完成后自动收起 */
   finishReason?: string
+  /** 所属会话：透传给 ToolRow（工作流停止按钮） */
+  sessionId?: string
 }) {
   const { t } = useTranslation()
   const visible = toolCalls.filter((tc) => !isRenderedByUnifiedEntry(tc.name))
@@ -506,7 +511,7 @@ function ToolRunGroup({ toolCalls, toolResults, vibe, defaultOpen = false, finis
         <div className="min-h-0 overflow-hidden">
           <div className="mt-1 flex flex-col gap-0.5">
             {visible.map((tc) => (
-              <ToolRow key={tc.id} toolCall={tc} result={toolResults} vibe={vibe} />
+              <ToolRow key={tc.id} toolCall={tc} result={toolResults} vibe={vibe} sessionId={sessionId} />
             ))}
           </div>
           {!running && diffMetas.length > 0 && <DiffChips metas={diffMetas} vibe={vibe} />}
@@ -782,6 +787,7 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false,
   // 用户气泡。把 <subagent-notification> XML 解析成一条条带状态图标的摘要。
   if (message.isSubAgentNotice) {
     const notifications = parseSubagentNotifications(message.content)
+    const workflowNotices = parseWorkflowNotifications(message.content)
     return (
       <div className="flex justify-center animate-slide-up my-1">
         <div className={`max-w-[560px] w-full px-3 py-2 rounded-md3-md text-[11px] leading-relaxed ${
@@ -803,6 +809,17 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false,
               <span className="opacity-60"> · {t(`chat.subAgentNoticeStatus.${n.status}`, { defaultValue: n.status })}</span>
               {n.usage && <span className="opacity-60"> · {n.usage}</span>}
               {n.body && <div className="mt-0.5 opacity-80">{subagentNoticeExcerpt(n.body)}</div>}
+            </div>
+          ))}
+          {workflowNotices.map((w, i) => (
+            <div key={`wf-${i}`} className="mt-1 whitespace-pre-line">
+              <Workflow size={10} className="mr-1 inline align-[-1px]" />
+              <span className={w.status === 'completed' ? 'text-md-success' : w.status === 'aborted' ? '' : 'text-md-error'}>
+                {w.status === 'completed' ? '✓' : w.status === 'aborted' ? '⏹' : '✕'}
+              </span>{' '}
+              <span className="font-medium">{w.name}</span>
+              <span className="opacity-60"> · {t(`chat.workflowNoticeStatus.${w.status}`, { defaultValue: w.status })}</span>
+              {w.body && <div className="mt-0.5 opacity-80">{subagentNoticeExcerpt(w.body)}</div>}
             </div>
           ))}
         </div>
@@ -886,7 +903,7 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false,
                 </div>
               )}
               {message.toolCalls && (
-                <ToolRunGroup toolCalls={message.toolCalls} toolResults={message.toolResults} vibe={vibe} />
+                <ToolRunGroup toolCalls={message.toolCalls} toolResults={message.toolResults} vibe={vibe} sessionId={sessionId} />
               )}
             </div>
           )}
@@ -1064,7 +1081,7 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false,
               {message.toolCalls
                 .filter((tc) => !isRenderedByUnifiedEntry(tc.name))
                 .map((tc) => (
-                  <ToolRow key={tc.id} toolCall={tc} result={message.toolResults} vibe={vibe} />
+                  <ToolRow key={tc.id} toolCall={tc} result={message.toolResults} vibe={vibe} sessionId={sessionId} />
                 ))}
             </div>
           ) : (
@@ -1074,6 +1091,7 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false,
               vibe={vibe}
               defaultOpen={!!message.streamingToolCalls?.length || !message.finishReason}
               finishReason={message.finishReason}
+              sessionId={sessionId}
             />
           )
         )}
@@ -1137,6 +1155,20 @@ function parseSubagentNotifications(content: string): Array<{ agentId: string; a
       body = body.replace(/<usage>[\s\S]*?<\/usage>/g, '').trim()
     }
     out.push({ agentId: m[1] ?? '', agent: m[2] ?? '', type: m[3] ?? '', status: m[4] ?? '', body: body.trim(), usage })
+  }
+  return out
+}
+
+/**
+ * 后台工作流完成通知（v2）：<workflow-notification runId name status>。
+ * 与 <subagent-notification> 同一信封（<background-agent-notifications>）注入，
+ * 这里单独解析、单独渲染一行——工作流不是子代理，图标与状态语义都不同。
+ */
+function parseWorkflowNotifications(content: string): Array<{ runId: string; name: string; status: string; body: string }> {
+  const out: Array<{ runId: string; name: string; status: string; body: string }> = []
+  const re = /<workflow-notification runId="([^"]*)" name="([^"]*)" status="([^"]*)">([\s\S]*?)<\/workflow-notification>/g
+  for (const m of content.matchAll(re)) {
+    out.push({ runId: m[1] ?? '', name: m[2] ?? '', status: m[3] ?? '', body: (m[4] ?? '').trim() })
   }
   return out
 }

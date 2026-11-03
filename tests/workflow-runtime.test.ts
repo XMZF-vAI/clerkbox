@@ -9,19 +9,25 @@
  *  5. 报告面向模型如实转述（含 agentId 续聊钥匙），UI 尾巴可往返解析；
  *  6. 注册表生命周期：get/list/reset，运行上限淘汰只动终态运行。
  */
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import {
   checkWorkflowScript,
   executeWorkflowScript,
   formatWorkflowRunReport,
   encodeWorkflowRunTail,
   parseWorkflowRunTail,
+  formatWorkflowNotification,
   getWorkflowRun,
   listWorkflowRuns,
+  listRunningWorkflowRuns,
+  launchWorkflowRun,
+  stopWorkflowRun,
+  abortWorkflowRunsForSession,
   resetWorkflowRunsForTests,
   MAX_WORKFLOW_SCRIPT_BYTES,
   type WorkflowHostPort,
   type WorkflowProgressSnapshot,
+  type WorkflowRun,
 } from '../src/lib/workflow-runtime'
 
 function makeHost(responses: Array<string | Error>, opts: { signal?: AbortSignal } = {}): WorkflowHostPort & { prompts: string[] } {
@@ -350,5 +356,116 @@ describe('onProgress 实时快照', () => {
 
     const run = await executeWorkflowScript({ sessionId: 's1', name: '容错', script: "await agent('a', 'x')", args: {}, host })
     expect(run.status).toBe('completed')
+  })
+})
+
+// ── v2：后台启动 / 停止 / 通知 ──────────────────────────────────────
+
+describe('launchWorkflowRun 后台语义', () => {
+  beforeEach(() => resetWorkflowRunsForTests())
+
+  /** 可控的宿主：runAgent 挂在 gates 上，测试手动放行 */
+  function gatedHost() {
+    const resolvers: Array<(v: string) => void> = []
+    const prompts: string[] = []
+    const signals: Array<AbortSignal | undefined> = []
+    return {
+      prompts,
+      signals,
+      release: (i: number, v: string) => resolvers[i]?.(v),
+      host: {
+        runAgent: async ({ prompt, signal }: { prompt: string; signal?: AbortSignal }) => {
+          prompts.push(prompt)
+          signals.push(signal)
+          return { result: await new Promise<string>((resolve) => { resolvers[prompts.length - 1] = resolve }), agentId: `subagent-test-${prompts.length}` }
+        },
+      } as WorkflowHostPort,
+    }
+  }
+
+  it('launch 立即返回 running 的 run，脚本在后台跑，onSettle 恰好一次', async () => {
+    const g = gatedHost()
+    const settles: WorkflowRun[] = []
+    const run = launchWorkflowRun({
+      sessionId: 's1',
+      name: '后台跑',
+      script: "await agent('一', '任务一')\nawait agent('二', '任务二')\nreturn 'done'",
+      args: {},
+      host: { ...g.host, onSettle: (r) => settles.push(r) },
+      toolCallId: 'call-1',
+    })
+    // launch 返回即已注册、状态 running——不等脚本
+    expect(run.status).toBe('running')
+    expect(run.toolCallId).toBe('call-1')
+    expect(g.prompts).toHaveLength(1)
+    // 放行两步后，onSettle 恰好一次且终态 completed
+    g.release(0, 'A 结果')
+    await vi.waitFor(() => expect(g.prompts).toHaveLength(2))
+    g.release(1, 'B 结果')
+    await vi.waitFor(() => expect(settles).toHaveLength(1))
+    expect(settles[0]!.status).toBe('completed')
+    expect(settles[0]!.result).toBe('done')
+    expect(getWorkflowRun(run.id)?.status).toBe('completed')
+  })
+
+  it('stopWorkflowRun 掐断在飞子代理（signal 透传）并归档 aborted', async () => {
+    const g = gatedHost()
+    const run = launchWorkflowRun({
+      sessionId: 's1',
+      name: '要被停的',
+      script: "await agent('一', '任务一')\nawait agent('二', '任务二')",
+      args: {},
+      host: g.host,
+      toolCallId: 'call-2',
+    })
+    expect(listRunningWorkflowRuns('s1')).toHaveLength(1)
+    // 第一步在飞时停止：宿主收到的 signal 被 abort → 宿主如实回报中止哨兵
+    expect(stopWorkflowRun(run.id)).toBe(true)
+    expect(g.signals[0]?.aborted).toBe(true)
+    g.release(0, '[aborted]')
+    await vi.waitFor(() => expect(getWorkflowRun(run.id)?.status).toBe('aborted'))
+    // 后续步骤不再派发
+    expect(g.prompts).toHaveLength(1)
+    expect(listRunningWorkflowRuns('s1')).toHaveLength(0)
+  })
+
+  it('abortWorkflowRunsForSession 只收敛目标会话', async () => {
+    const g = gatedHost()
+    launchWorkflowRun({ sessionId: 's-A', name: 'a', script: "await agent('x', '任务')", args: {}, host: g.host, toolCallId: 'c-a' })
+    await vi.waitFor(() => expect(listRunningWorkflowRuns('s-A')).toHaveLength(1))
+    expect(abortWorkflowRunsForSession('s-B')).toBe(0)
+    expect(listRunningWorkflowRuns('s-A')).toHaveLength(1)
+    expect(abortWorkflowRunsForSession('s-A')).toBe(1)
+    expect(g.signals[0]?.aborted).toBe(true)
+  })
+
+  it('stopWorkflowRun 对未知运行返回 false', () => {
+    expect(stopWorkflowRun('wf-nope')).toBe(false)
+  })
+})
+
+describe('formatWorkflowNotification 通知格式', () => {
+  beforeEach(() => resetWorkflowRunsForTests())
+
+  it('完成通知：信封属性 + 步数摘要 + 最终结果 + 汇报纪律', async () => {
+    const host = makeHost(['A 结果', 'B 结果'])
+    const run = await executeWorkflowScript({
+      sessionId: 's1', name: '通知格式', script: "await agent('A', '任务A')\nawait agent('B', '任务B')\nreturn '全部完成'", args: {}, host,
+    })
+    const notice = formatWorkflowNotification(run)
+    expect(notice).toContain(`<workflow-notification runId="${run.id}" name="通知格式" status="completed">`)
+    expect(notice).toContain('共 2 步')
+    expect(notice).toContain('全部完成')
+    expect(notice).toContain('如实总结')
+    expect(notice.endsWith('</workflow-notification>')).toBe(true)
+  })
+
+  it('失败通知：列失败步骤与错误', async () => {
+    const host = makeHost([new Error('子代理超时')])
+    const run = await executeWorkflowScript({ sessionId: 's1', name: 'n', script: "await agent('会挂的', '任务')", args: {}, host })
+    const notice = formatWorkflowNotification(run)
+    expect(notice).toContain('status="failed"')
+    expect(notice).toContain('会挂的')
+    expect(notice).toContain('子代理超时')
   })
 })

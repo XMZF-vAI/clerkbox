@@ -38,6 +38,8 @@ import { makeId, runReactLoop } from '../agent-core/loop'
 import { saveFileMutation } from '../lib/checkpoint-recorder'
 import { SessionContextStore } from '../agent-core/session-context'
 import type { AgentPorts } from '../agent-core/ports'
+import { abortWorkflowRunsForSession, parseWorkflowRunTail, type WorkflowRun } from '../lib/workflow-runtime'
+import { formatWorkflowRunReport, encodeWorkflowRunTail } from '../lib/workflow-runtime'
 
 /**
  * 宿主拒绝理由 → 界面上看得懂的话。错误码原样回显等于把内部术语甩给用户，
@@ -218,6 +220,23 @@ export function useAgent(sessionId: string) {
     // 变更前快照：与主进程宿主共用 checkpoint-recorder，分类规则只有一份
     checkpoint: {
       save: (sid, mutation) => saveFileMutation(sid, mutation),
+    },
+    // 工作流 journal：渲染层宿主经 IPC 落盘（fire-and-forget，失败只打日志）。
+    // 主进程宿主在 agent-host 里直写文件；测试宿主不装配则跳过。
+    workflowJournal: {
+      put: (run) => {
+        const record = run as WorkflowRun
+        void ipc.workflowJournalPut({
+          runId: record.id,
+          sessionId: record.sessionId,
+          toolCallId: record.toolCallId,
+          assistantMessageId: record.assistantMessageId,
+          name: record.name,
+          status: record.status,
+          payload: record,
+          savedAt: Date.now(),
+        }).catch((err) => console.error('[workflow-journal] put failed:', err))
+      },
     },
     env: {
       platform: navigator.platform || 'unknown',
@@ -577,6 +596,116 @@ export function useAgent(sessionId: string) {
     return () => { sessionAgentRegistry.delete(sessionId) }
   }, [sessionId, manualCompact, getContextUsage])
 
+  // ── v2 后台工作流：空闲唤醒 ──
+  // 工作流在会话空闲时 settle → ctx.requestWake() → 这里发起一次「无用户消息的续跑」：
+  // initialMessages 用现有会话消息，run 的迭代顶部 drain 会把通知队列注入模型，
+  // 模型向用户总结工作流结果。运行中 settle 的通知不唤醒（活跃 run 的下一轮迭代顶
+  // 自然消费）；主进程宿主本轮不装配 requestWake，通知等下条消息注入（与后台子代理同现状）。
+  const wakeFnRef = useRef<(() => void) | null>(null)
+  const wakeSession = useCallback(async (): Promise<void> => {
+    const state = useChatStore.getState()
+    if (!state.sessions.some((s) => s.id === sessionId)) return
+    if (state.streamingSessionIds.has(sessionId)) return
+    if (getSessionAbortController(sessionId)) return
+    if (isCompactingRef.current) return
+    const ctx = contextsRef.current.get(sessionId)
+    if (ctx.pendingSubagentNotifications.length === 0) return
+    // 模式与配置守卫与 sendMessage 同口径；任一不满足时通知静留队列，等下条消息
+    if ((await agentClient.ensureMode()) !== 'renderer') return
+    if (!settings.baseUrl) return
+    const activeProvider = settings.providers.find((p) => p.id === settings.activeProviderId)
+    if (!settings.apiKey && requiresApiKey(settings.baseUrl, activeProvider?.presetId)) return
+    // await 之后重查一次：模式询问的间隙里用户可能刚好发出新消息
+    const recheck = useChatStore.getState()
+    if (recheck.streamingSessionIds.has(sessionId) || getSessionAbortController(sessionId)) return
+    if (isCompactingRef.current) return
+    if (ctx.pendingSubagentNotifications.length === 0) return
+    const currentSession = recheck.sessions.find((s) => s.id === sessionId)
+    if (!currentSession) return
+
+    const controller = new AbortController()
+    setSessionAbortController(sessionId, controller)
+    ctx.requestWorkingDir = currentSession.workingDir || currentSession.defaultWorkDir || ''
+    ctx.sessionTitle = currentSession.title
+    ctx.activeTaskMode = null
+    setStreaming(true, sessionId)
+    setSessionStatus(sessionId, 'working')
+    try {
+      await runReactLoop(makePorts(), ctx, currentSession.messages, controller, undefined, undefined)
+    } catch {
+      // 唤醒轮失败不打扰用户：通知留在队列，随下一条用户消息注入
+    } finally {
+      ctx.requestWorkingDir = undefined
+      ctx.activeTaskMode = null
+      if (getSessionAbortController(sessionId) === controller) setSessionAbortController(sessionId, null)
+      useChatStore.getState().setStreaming(false, sessionId)
+      const cur = useChatStore.getState().sessionStatus[sessionId]
+      if (cur === 'working') {
+        setSessionStatus(sessionId, null)
+        notifyIfNotViewing(sessionId, 'done')
+      }
+    }
+  }, [sessionId, settings, makePorts, setStreaming, setSessionStatus])
+  wakeFnRef.current = wakeSession
+
+  // ctx.requestWake 装配：ctx 惰性创建，挂载/切换会话时把唤醒入口接上（经 ref 取最新闭包）
+  useEffect(() => {
+    const ctx = contextsRef.current.get(sessionId)
+    ctx.requestWake = () => wakeFnRef.current?.()
+    return () => { ctx.requestWake = undefined }
+  }, [sessionId])
+
+  // ── v2 工作流 journal 水合 ──
+  // 启动时读一次：running 的一律改判 aborted（进程没了工作流就没了，本期不做续跑，
+  // 但卡片不能永远空转），并按 assistantMessageId 把消息里卡在 running 的尾巴补成终态。
+  // 终态快照不回灌 store——settle 时的尾巴更新已落库，这里只修崩溃留下的残局。
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const entries = (await ipc.workflowJournalList()) as Array<{
+          runId: string; sessionId: string; toolCallId?: string; assistantMessageId?: string
+          name: string; status: string; payload: unknown; savedAt: number
+        }>
+        for (const entry of entries) {
+          if (cancelled) return
+          if (entry.status !== 'running') continue
+          const run = entry.payload as WorkflowRun
+          const interrupted: WorkflowRun = {
+            ...run,
+            status: 'aborted',
+            error: run.error ?? i18n.t('agent.workflowInterrupted'),
+            endedAt: run.endedAt ?? Date.now(),
+            steps: (run.steps ?? []).map((s) =>
+              s.status === 'running' ? { ...s, status: 'aborted' as const, endedAt: s.endedAt ?? Date.now() } : s),
+          }
+          if (entry.assistantMessageId && entry.toolCallId) {
+            const session = useChatStore.getState().sessions.find((s) => s.id === entry.sessionId)
+            const message = session?.messages.find((m) => m.id === entry.assistantMessageId)
+            const tail = message?.toolResults?.find((r) => r.toolCallId === entry.toolCallId)
+            if (tail && message?.toolResults && parseWorkflowRunTail(tail.content).run?.status === 'running') {
+              useChatStore.getState().updateMessage(entry.sessionId, entry.assistantMessageId, {
+                toolResults: message.toolResults.map((r) =>
+                  r.toolCallId === entry.toolCallId
+                    ? { ...r, content: formatWorkflowRunReport(interrupted) + encodeWorkflowRunTail(interrupted) }
+                    : r),
+              })
+            }
+          }
+          // journal 回写改判结果，避免下次启动重复修
+          void ipc.workflowJournalPut({
+            runId: entry.runId, sessionId: entry.sessionId, toolCallId: entry.toolCallId,
+            assistantMessageId: entry.assistantMessageId, name: entry.name,
+            status: interrupted.status, payload: interrupted, savedAt: Date.now(),
+          }).catch(() => { /* 恢复面写不进去就放弃，消息尾巴已经补过 */ })
+        }
+      } catch {
+        // WebUI（403）或目录不存在：没有恢复面可用，静默跳过
+      }
+    })()
+    return () => { cancelled = true }
+  }, [])
+
   const abort = useCallback(() => {
     // per-session abort：只中止当前会话的 controller，不影响其他并发会话
     const abortLocally = () => {
@@ -584,6 +713,8 @@ export function useAgent(sessionId: string) {
       if (ctrl) {
         ctrl.abort()
       }
+      // 停止会话 = 停止该会话所有在跑的后台工作流（兑现 create_workflow 描述的承诺）
+      abortWorkflowRunsForSession(sessionId)
       // 杀掉该会话在主进程里还在跑的 shell 子进程，让阻塞中的 execute_command 立即返回
       if (sessionId) {
         void ipc.cancelSessionCommands(sessionId).catch(() => { /* ignore */ })

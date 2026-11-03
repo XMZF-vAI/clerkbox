@@ -8,6 +8,8 @@ export interface ToolRendererProps {
   isError: boolean
   args: Record<string, unknown>
   vibe?: boolean
+  /** 所属会话：个别渲染器（工作流停止按钮）要向宿主发停止命令 */
+  sessionId?: string
 }
 
 export type ToolRenderer = LazyExoticComponent<ComponentType<ToolRendererProps>>

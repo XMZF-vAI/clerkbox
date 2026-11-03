@@ -309,6 +309,13 @@ contextBridge.exposeInMainWorld('clerkbox', {
     ipcRenderer.invoke('ckptRemove', sessionId, refs),
   ckptRemoveSession: (sessionId: string): Promise<void> =>
     ipcRenderer.invoke('ckptRemoveSession', sessionId),
+  // ── 工作流 journal（v2 后台运行的崩溃恢复面）──
+  workflowJournalPut: (entry: unknown): Promise<void> =>
+    ipcRenderer.invoke('workflowJournalPut', entry),
+  workflowJournalList: (): Promise<unknown[]> =>
+    ipcRenderer.invoke('workflowJournalList'),
+  workflowJournalSweep: (): Promise<void> =>
+    ipcRenderer.invoke('workflowJournalSweep'),
 
   // ── Git（编程模式：分支/审查/图谱）──
   gitGetStatus: (workDir: string): Promise<GitStatusResult> => ipcRenderer.invoke('gitGetStatus', workDir),

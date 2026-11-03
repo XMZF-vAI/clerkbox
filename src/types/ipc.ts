@@ -580,6 +580,10 @@ export interface ClerkBoxAPI {
   ckptRemove: (sessionId: string, refs: string[]) => Promise<void>
   /** 会话删除时整目录回收 */
   ckptRemoveSession: (sessionId: string) => Promise<void>
+  // ── 工作流 journal（v2 后台运行的崩溃恢复面；写通道进远程黑名单，见 webui-server.ts）──
+  workflowJournalPut: (entry: unknown) => Promise<void>
+  workflowJournalList: () => Promise<unknown[]>
+  workflowJournalSweep: () => Promise<void>
   // ── Git（编程模式：分支/审查/图谱；写操作通道全部进远程黑名单，见 webui-server.ts）──
   /** 仓库状态快照（summary + 未暂存/已暂存变更），面板与分支芯片共用 */
   gitGetStatus: (workDir: string) => Promise<GitStatusResult>

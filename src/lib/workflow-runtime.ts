@@ -9,9 +9,11 @@
  * （loop 的 create_workflow 权限门），「进程/函数隔离不是安全沙箱」——
  * 静态 deny 清单只是第一道粗筛，确认门才是安全边界。
  *
- * v1 边界（对照 zcode-research/02 报告的分期）：同步执行（工具调用即运行全程，
- * 子代理卡片实时可见，结果即报告）；journal 重放 / resume / Amend / hole /
- * quota 续跑 / 保存复跑留给二三期。
+ * v2 语义（对标 ZCode CreateWorkflow 的 backgrounded）：工具调用**立即返回**，
+ * 脚本在后台跑（launchWorkflowRun），终态经 onSettle 回调由宿主注回——
+ * 通知进 pendingSubagentNotifications 队列（与后台子代理同一信封），UI 尾巴
+ * 落回工具结果，journal 落盘。resume-from-journal / Amend / hole / 保存复跑
+ * 仍是三期。
  */
 
 /** 脚本体积上限（ZCode 同款 512KB 收窄到 128KB——CB 单工具入参本就有截断） */
@@ -59,6 +61,10 @@ export interface WorkflowRun {
   error?: string
   startedAt: number
   endedAt?: number
+  /** 发起这次运行的工具调用 id（journal 恢复与工具尾巴更新的寻址钥匙） */
+  toolCallId?: string
+  /** 承载该工具调用的 assistant 消息 id（恢复时把卡死的 running 尾巴补成终态） */
+  assistantMessageId?: string
 }
 
 // ── 实时进度快照（运行看板的数据面） ──────────────────────────────
@@ -87,9 +93,11 @@ export interface WorkflowProgressSnapshot {
   updatedAt: number
 }
 
-// ── 运行注册表（进程内；跨会话重启的持久化留给二期） ──────────────
+// ── 运行注册表（进程内） ──────────────────────────────────────────
 const MAX_RUNS = 100
 const runs = new Map<string, WorkflowRun>()
+/** 在跑的运行各自的停止开关：stopWorkflowRun / 会话级收敛都从这里拿 */
+const runControllers = new Map<string, AbortController>()
 
 export function getWorkflowRun(id: string): WorkflowRun | undefined {
   return runs.get(id)
@@ -101,8 +109,14 @@ export function listWorkflowRuns(sessionId?: string): WorkflowRun[] {
   return sessionId ? all.filter((r) => r.sessionId === sessionId) : all
 }
 
+/** 会话内仍在跑的运行（会话停止时要一并收敛的集合） */
+export function listRunningWorkflowRuns(sessionId: string): WorkflowRun[] {
+  return listWorkflowRuns(sessionId).filter((r) => r.status === 'running')
+}
+
 export function resetWorkflowRunsForTests(): void {
   runs.clear()
+  runControllers.clear()
 }
 
 // ── 脚本校验 ──────────────────────────────────────────────────────
@@ -159,7 +173,7 @@ export function checkWorkflowScript(source: string): WorkflowScriptCheck {
 /** 宿主端口：脚本环境与真实子代理机制的唯一缝隙（依赖注入，双宿主同构） */
 export interface WorkflowHostPort {
   /** 派发一个前台子代理并等它完成。返回干净结果正文与 agentId（续聊钥匙）。 */
-  runAgent(step: { name: string; prompt: string; agentType: string }): Promise<{ result: string; agentId: string | null }>
+  runAgent(step: { name: string; prompt: string; agentType: string; signal?: AbortSignal }): Promise<{ result: string; agentId: string | null }>
   /** 会话级中止信号：停止会话 = 停止工作流 */
   signal?: AbortSignal
   /**
@@ -167,6 +181,11 @@ export interface WorkflowHostPort {
    * 宿主据此点亮运行看板；未装配时工作流行为与今天完全一致。
    */
   onProgress?(snapshot: WorkflowProgressSnapshot): void
+  /**
+   * 终态回调（可选，v2 后台语义）：run 落进 completed/failed/aborted 时调用一次。
+   * 宿主据此注回通知、更新工具尾巴、落 journal。未装配时调用方自行 await。
+   */
+  onSettle?(run: WorkflowRun): void
 }
 
 export interface ExecuteWorkflowInput {
@@ -175,6 +194,10 @@ export interface ExecuteWorkflowInput {
   script: string
   args?: Record<string, unknown>
   host: WorkflowHostPort
+  /** 发起运行的工具调用 id（进 run 记录，journal 与尾巴更新用） */
+  toolCallId?: string
+  /** 承载工具调用的 assistant 消息 id（恢复时寻址） */
+  assistantMessageId?: string
 }
 
 function safeText(value: unknown, limit: number): string {
@@ -201,6 +224,8 @@ export async function executeWorkflowScript(input: ExecuteWorkflowInput): Promis
     steps: [],
     logs: [],
     startedAt: Date.now(),
+    toolCallId: input.toolCallId,
+    assistantMessageId: input.assistantMessageId,
   }
   runs.set(run.id, run)
   while (runs.size > MAX_RUNS) {
@@ -267,7 +292,8 @@ export async function executeWorkflowScript(input: ExecuteWorkflowInput): Promis
       run.steps.push(step)
       emitProgress()
       try {
-        const { result, agentId } = await input.host.runAgent({ name: stepName, prompt: stepPrompt, agentType: step.agentType })
+        // signal 透传给宿主：停止工作流时要能掐断**在飞**的子代理，而不只是挡住下一步
+        const { result, agentId } = await input.host.runAgent({ name: stepName, prompt: stepPrompt, agentType: step.agentType, signal: input.host.signal })
         if (result === '[aborted]') {
           abortSeen = true
           throw new Error('[aborted] 会话已停止')
@@ -339,8 +365,63 @@ export async function executeWorkflowScript(input: ExecuteWorkflowInput): Promis
       }
     }
     emitProgress()
+    runControllers.delete(run.id)
+    // 终态回调（v2 后台语义）：宿主注回通知 / 尾巴 / journal 的唯一时机。
+    // 回调出错绝不反过来影响 run 的终态归档。
+    try {
+      input.host.onSettle?.(run)
+    } catch {
+      /* 注回失败只影响展示，工作流本身已闭环 */
+    }
   }
   return run
+}
+
+// ── 后台启动与停止（v2） ──────────────────────────────────────────
+
+/**
+ * 后台启动一个工作流：立即返回 run（status='running'），脚本在后台跑，
+ * 终态经 host.onSettle 注回。runtime 自持每 run 一个 AbortController——
+ * stopWorkflowRun / abortWorkflowRunsForSession 都靠它收敛。
+ *
+ * 与 ZCode CreateWorkflow 的 `status:"backgrounded"` 同口径：调用方拿到
+ * run 即可回确认文本，不等待、不轮询。executeWorkflowScript 的注册段
+ * （run 创建 + 注册表写入）在首个 await 之前同步完成，所以下方必然查得到。
+ */
+export function launchWorkflowRun(input: ExecuteWorkflowInput): WorkflowRun {
+  const controller = new AbortController()
+  const host: WorkflowHostPort = {
+    ...input.host,
+    signal: controller.signal,
+    onSettle: (run) => {
+      runControllers.delete(run.id)
+      input.host.onSettle?.(run)
+    },
+  }
+  void executeWorkflowScript({ ...input, host })
+  const started = listWorkflowRuns(input.sessionId).find(
+    (r) => r.toolCallId === input.toolCallId && r.status === 'running',
+  )
+  if (!started) throw new Error('workflow launch failed: run not registered')
+  runControllers.set(started.id, controller)
+  return started
+}
+
+/** 停止单个运行：掐断在飞子代理 + 阻止后续派发；归档由执行侧 finally 完成 */
+export function stopWorkflowRun(runId: string): boolean {
+  const controller = runControllers.get(runId)
+  if (!controller) return false
+  controller.abort(new Error('[aborted] 工作流已被用户停止'))
+  return true
+}
+
+/** 会话级收敛：停止会话 = 停止该会话所有在跑工作流（兑现工具描述的承诺） */
+export function abortWorkflowRunsForSession(sessionId: string): number {
+  let stopped = 0
+  for (const run of listRunningWorkflowRuns(sessionId)) {
+    if (stopWorkflowRun(run.id)) stopped += 1
+  }
+  return stopped
 }
 
 // ── 报告 ──────────────────────────────────────────────────────────
@@ -382,6 +463,29 @@ export function formatWorkflowRunReport(run: WorkflowRun): string {
     lines.push('', '向用户汇报工作流结果时：如实转述各步骤产出与失败项，不要复述本报告的机械格式。')
   }
   return lines.join('\n')
+}
+
+/**
+ * 面向注回队列的工作流完成通知（与 <subagent-notification> 同一信封消费）。
+ * 正文给模型够用即可：状态 + 失败项 + 最终结果/错误；完整步骤明细在工作流卡片上，
+ * 不必塞进通知把上下文撑爆。上限与 SUBAGENT_NOTIFICATION_RESULT_CAP 对齐（4000）。
+ */
+export const WORKFLOW_NOTIFICATION_CAP = 4000
+
+export function formatWorkflowNotification(run: WorkflowRun): string {
+  const statusText = run.status === 'completed' ? '已完成' : run.status === 'failed' ? '失败' : '已停止'
+  const failed = run.steps.filter((s) => s.status !== 'completed')
+  const lines: string[] = []
+  lines.push(`工作流「${run.name}」${statusText}（共 ${run.steps.length} 步${failed.length ? `，${failed.length} 步未完成` : ''}）`)
+  for (const step of failed.slice(0, 8)) {
+    lines.push(`- ${step.status === 'aborted' ? '⏹' : '❌'} ${step.name}${step.excerpt ? `：${step.excerpt.replace(/\n+/g, ' ').slice(0, 120)}` : ''}`)
+  }
+  if (failed.length > 8) lines.push(`- …另有 ${failed.length - 8} 步未完成`)
+  if (run.status === 'completed' && run.result) lines.push('', run.result)
+  if (run.error) lines.push('', `错误：${run.error}`)
+  lines.push('', '请向用户如实总结工作流结果（含失败项）；完整步骤明细已在对话的工作流卡片上，不要复述本通知的机械格式。')
+  const body = lines.join('\n').slice(0, WORKFLOW_NOTIFICATION_CAP)
+  return `<workflow-notification runId="${run.id}" name="${run.name.replace(/"/g, '')}" status="${run.status}">\n${body}\n</workflow-notification>`
 }
 
 /** UI 专用尾巴（随 __EDIT_DIFF__ 同一模式：发模型前剥离，渲染器解析） */
