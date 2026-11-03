@@ -328,6 +328,10 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
 
   // Approval dropdown state（Agent 操作审批：手动 / 自动 / 完全访问）
   const [showApprovalMenu, setShowApprovalMenu] = useState(false)
+  // 完全访问切换确认（对齐 ZCode 的 YOLO 门）：点「完全访问」先弹风险确认，
+  // 勾选「我已了解风险」才能放行；每次切换都重新勾，不记忆。
+  const [fullAccessConfirm, setFullAccessConfirm] = useState(false)
+  const [fullAccessAck, setFullAccessAck] = useState(false)
   const approvalMenuRef = useRef<HTMLDivElement>(null)
   const approvalTriggerRef = useRef<HTMLButtonElement>(null)
 
@@ -1843,7 +1847,17 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
                       <button
                         type="button"
                         key={item.id}
-                        onClick={() => { settings.updateSettings({ approvalMode: item.id }); setShowApprovalMenu(false) }}
+                        onClick={() => {
+                          // 降档/平档切换即时生效；升到完全访问先过风险确认门
+                          if (isFull && approvalMode !== 'full') {
+                            setFullAccessAck(false)
+                            setFullAccessConfirm(true)
+                            setShowApprovalMenu(false)
+                            return
+                          }
+                          settings.updateSettings({ approvalMode: item.id })
+                          setShowApprovalMenu(false)
+                        }}
                         className={`w-full flex items-start gap-2.5 px-3 py-2.5 max-md:py-3.5 text-left transition-colors ${
                           active
                             ? vibe ? 'bg-white/10' : 'bg-dark-surfaceContainerHigh'
@@ -2312,6 +2326,69 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
           onConfirm={confirmPendingFolder}
           onCancel={rejectPendingFolder}
         />
+      )}
+
+      {/* 完全访问切换确认（对齐 ZCode 的 YOLO 门）：风险说明 + 「我已了解风险」复选框，
+          确认按钮在勾选前置灰；每次切换都重新勾——这是唯一的升档摩擦，不记忆、不跳过。 */}
+      {fullAccessConfirm && (
+        <div
+          className={`fixed z-[70] flex items-center justify-center animate-fade-in ${
+            vibe ? 'inset-0 bg-black/50 backdrop-blur-sm' : 'inset-x-0 bottom-0 top-11 bg-black/60'
+          }`}
+          onClick={() => setFullAccessConfirm(false)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="approval-full-confirm-title"
+            className="w-[400px] max-w-[calc(100vw-2rem)] bg-dark-surfaceDim rounded-md3-xl border border-dark-onSurfaceVariant/10 flex flex-col shadow-elevation-3 animate-pop-in"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-5 py-4 border-b border-dark-onSurfaceVariant/10">
+              <div className="flex items-center gap-2">
+                <TriangleAlert size={18} className="text-md-warning" />
+                <h2 id="approval-full-confirm-title" className="text-base font-semibold">{t('chat.approvalFullConfirmTitle')}</h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setFullAccessConfirm(false)}
+                aria-label={t('common.close')}
+                className="md-focus w-7 h-7 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-dark-onSurfaceVariant"
+              >
+                <X size={14} />
+              </button>
+            </div>
+            <div className="px-5 py-4">
+              <p className="text-sm text-dark-onSurfaceVariant leading-relaxed">{t('chat.approvalFullConfirmBody')}</p>
+              <label className="mt-3 flex items-start gap-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={fullAccessAck}
+                  onChange={(e) => setFullAccessAck(e.target.checked)}
+                  className="mt-0.5 w-5 h-5 flex-shrink-0 accent-md-warning"
+                />
+                <span className="text-sm">{t('chat.approvalFullConfirmCheckbox')}</span>
+              </label>
+            </div>
+            <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-dark-onSurfaceVariant/10">
+              <button
+                type="button"
+                onClick={() => setFullAccessConfirm(false)}
+                className="md-focus px-4 py-2 rounded-md3-sm text-sm text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh transition-colors"
+              >
+                {t('common.cancel')}
+              </button>
+              <button
+                type="button"
+                disabled={!fullAccessAck}
+                onClick={() => { settings.updateSettings({ approvalMode: 'full' }); setFullAccessConfirm(false) }}
+                className="md-focus px-4 py-2 rounded-md3-sm text-sm font-medium transition-colors bg-md-warning text-dark-surfaceDim hover:bg-md-warning/90 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {t('chat.approvalFullConfirmConfirm')}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

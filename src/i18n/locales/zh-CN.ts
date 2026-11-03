@@ -776,6 +776,10 @@
     approvalAutoDesc: '让 AI 审核并批准重要操作',
     approvalFullTitle: '完全访问',
     approvalFullDesc: '无需询问，直接在你的电脑上运行',
+    approvalFullConfirmTitle: '切换到完全访问？',
+    approvalFullConfirmBody: '完全访问下，AI 无需确认即可执行任何操作——包括写文件、运行命令与操控电脑。请只在你完全信任当前任务时使用。',
+    approvalFullConfirmCheckbox: '我已了解风险，允许 AI 在无确认的情况下执行任何操作',
+    approvalFullConfirmConfirm: '切换到完全访问',
     // Harness 兼容模式（新对话可选一次，开始后锁定）
     harnessAria: '选择 harness 模式',
     harnessGroupDefault: '模式',
@@ -997,6 +1001,7 @@
       allowAlways: '本会话始终允许',
       allowSessionCapability: '本会话始终允许（不再逐次询问）',
       allowSessionWorkflow: '本会话始终允许（工作流不再询问）',
+      dangerOnceHint: '危险命令仅允许这一次——同类命令再次出现时会重新询问',
       hint: '选择会记入对话记录',
       awaitHostHint: '请在系统弹窗中完成确认',
       expired: '审批已超时，按拒绝处理',

@@ -85,18 +85,18 @@ const APPROVAL_OPTIONS: Array<{ decision: PermissionDecision; labelKey: string; 
 function ApprovalOptionList({
   vibe,
   onResolve,
-  allowSessionLabel,
+  options,
+  hint,
 }: {
   vibe: boolean
   onResolve: (decision: PermissionDecision) => () => void
-  allowSessionLabel: string
+  /** 审批选项（顺序即语义）。调用方按风险裁剪：危险命令不给「本会话始终允许」。 */
+  options: Array<{ decision: PermissionDecision; label: string; Icon: typeof Check }>
+  /** 选项区下方的补充说明（如危险命令的单次语义） */
+  hint?: string
 }) {
   const { t } = useTranslation()
-  const [selected, setSelected] = useState<PermissionDecision>('allow_once')
-  const options = useMemo(
-    () => APPROVAL_OPTIONS.map((option) => (option.decision === 'allow_session' ? { ...option, label: allowSessionLabel } : { ...option, label: t(option.labelKey) })),
-    [t, allowSessionLabel]
-  )
+  const [selected, setSelected] = useState<PermissionDecision>(options[0]?.decision ?? 'allow_once')
 
   const commit = (decision: PermissionDecision) => onResolve(decision)()
 
@@ -106,7 +106,7 @@ function ApprovalOptionList({
       aria-label={t('chat.permission.title')}
       className="border-t border-current/10 px-4 py-3"
       onKeyDown={(e) => {
-        if (e.key === '1' || e.key === '2' || e.key === '3') {
+        if (['1', '2', '3'].includes(e.key) && Number(e.key) <= options.length) {
           e.preventDefault()
           commit(options[Number(e.key) - 1]!.decision)
           return
@@ -149,7 +149,7 @@ function ApprovalOptionList({
           </button>
         )
       })}
-      <div className={`mt-2 text-xs opacity-70 ${vibe ? '' : ''}`}>{t('chat.permission.hint')}</div>
+      <div className="mt-2 text-xs opacity-70">{hint ?? t('chat.permission.hint')}</div>
     </div>
   )
 }
@@ -235,7 +235,10 @@ function WorkflowPermissionCard({ request, onResolve, interactive = true, vibe =
         <ApprovalOptionList
           vibe={vibe}
           onResolve={resolve}
-          allowSessionLabel={t('chat.permission.allowSessionWorkflow')}
+          options={APPROVAL_OPTIONS.map((option) => ({
+            ...option,
+            label: t(option.decision === 'allow_session' ? 'chat.permission.allowSessionWorkflow' : option.labelKey),
+          }))}
         />
       ) : status === 'pending' ? (
         <div className="flex items-center gap-2 border-t border-current/10 px-4 py-2 text-ui-xs">
@@ -284,6 +287,13 @@ export function PermissionCard({ request, onResolve, interactive = true, vibe = 
   const resolve = (decision: PermissionDecision) => () => onResolve?.(request.id, decision)
   const toolLabel = t(`tools.${request.tool}`, { defaultValue: request.tool })
   const showActions = status === 'pending' && interactive
+  // 危险命令只给「允许一次」：内容每条都不同的高危命令不能有持久闸门
+  // （对齐 ZCode guarded 的 user-once——该次审批不提供总是允许、不写规则）。
+  // 浏览/桌面的「本会话允许」是能力级授权，不在裁剪之列。
+  const dangerOnce = preview.kind === 'command' && preview.risk === 'dangerous'
+  const approvalOptions = APPROVAL_OPTIONS
+    .filter((option) => !(dangerOnce && option.decision === 'allow_session'))
+    .map((option) => ({ ...option, label: t(option.decision === 'allow_session' ? 'chat.permission.allowAlways' : option.labelKey) }))
 
   // 工作流确认：画得出静态图才换版式；图空（脚本没写成字面形态）时回落通用卡
   if (request.tool === 'create_workflow' && preview.graph && preview.graph.phases.length > 0) {
@@ -335,7 +345,8 @@ export function PermissionCard({ request, onResolve, interactive = true, vibe = 
         <ApprovalOptionList
           vibe={vibe}
           onResolve={resolve}
-          allowSessionLabel={t('chat.permission.allowAlways')}
+          options={approvalOptions}
+          hint={dangerOnce ? t('chat.permission.dangerOnceHint') : undefined}
         />
       ) : status === 'pending' ? (
         <div className="flex items-center gap-2 border-t border-current/10 px-4 py-2 text-xs">

@@ -776,6 +776,10 @@
     approvalAutoDesc: 'Let AI review and approve important operations',
     approvalFullTitle: 'Full access',
     approvalFullDesc: 'No questions asked — runs directly on your computer',
+    approvalFullConfirmTitle: 'Switch to Full Access?',
+    approvalFullConfirmBody: 'With Full Access the AI executes anything without asking — including writing files, running commands and controlling this computer. Only use it when you fully trust the current task.',
+    approvalFullConfirmCheckbox: 'I understand the risk — let the AI act without confirmation',
+    approvalFullConfirmConfirm: 'Switch to Full Access',
     // Harness 兼容模式（新对话可选一次，开始后锁定）
     harnessAria: 'Select harness mode',
     harnessGroupDefault: 'Mode',
@@ -997,6 +1001,7 @@
     /** Agent 动作（浏览器 / 桌面）专用选项：一句话说明它能免掉什么 */
     allowSessionCapability: 'Allow for this whole session (stop asking each time)',
     allowSessionWorkflow: 'Always allow this session (stop asking about workflows)',
+    dangerOnceHint: 'Dangerous commands are allowed once only — the same command will ask again',
       hint: 'Your choice is recorded in this chat',
       awaitHostHint: 'Confirm in the system dialog to continue',
       expired: 'Approval timed out — treated as denied',
