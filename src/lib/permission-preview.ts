@@ -14,12 +14,32 @@ import type { Message } from '../types/agent'
 
 export type PermissionRiskLevel = 'dangerous' | 'warning' | 'info'
 export type PermissionPreviewKind = 'command' | 'file' | 'network' | 'mcp' | 'browser' | 'computer' | 'generic'
-export type PermissionDecision = 'deny' | 'allow_once' | 'allow_session'
+/**
+ * 审批决策。前三档是原有语义；后两档（权限三期）写项目级持久规则：
+ *  - allow_project：本项目内同类操作以后都放行
+ *  - deny_always  ：本项目内同类操作以后都拒绝（连 full 档也不绕过）
+ * 危险命令的卡片会过滤掉这两个选项，保持 user-once。
+ */
+export type PermissionDecision = 'deny' | 'allow_once' | 'allow_session' | 'allow_project' | 'deny_always'
 /** 审批请求生命周期：待批准 / 已批准或已拒绝 / 已超时（阶段二宿主 fail-closed 时用） */
 export type PermissionRequestStatus = 'pending' | 'resolved' | 'expired'
 
 /** 会触发审批确认的工具（agent-core 的弹窗分支只覆盖命令执行、文件写入与 Agent 动作） */
 export const APPROVAL_GATED_TOOLS = ['execute_command', 'write_file', 'search_replace', 'edit_file'] as const
+
+/** 是否是有持久规则选项的决策（本地卡片据此写 settings.permissionRules） */
+export function isPersistentDecision(decision: PermissionDecision): boolean {
+  return decision === 'allow_project' || decision === 'deny_always'
+}
+
+/** 审批结果 → loop 需要的授权范围；项目级规则只放行本次，后续由规则引擎命中 */
+export function decisionToScope(decision: PermissionDecision): 'once' | 'session' {
+  return decision === 'allow_session' ? 'session' : 'once'
+}
+
+export function decisionApproves(decision: PermissionDecision): boolean {
+  return decision === 'allow_once' || decision === 'allow_session' || decision === 'allow_project'
+}
 
 /** MCP 工具命名约定：mcp__<server>__<tool> */
 const MCP_PREFIX = 'mcp__'
@@ -352,7 +372,7 @@ export function parsePermissionAudit(content: string): PermissionAuditRecord | n
     const raw = JSON.parse(content.slice(PERMISSION_AUDIT_PREFIX.length)) as Partial<PermissionAuditRecord>
     if (
       !raw ||
-      (raw.decision !== 'deny' && raw.decision !== 'allow_once' && raw.decision !== 'allow_session') ||
+      !['deny', 'deny_always', 'allow_once', 'allow_session', 'allow_project'].includes(raw.decision as string) ||
       typeof raw.tool !== 'string' ||
       typeof raw.target !== 'string' ||
       typeof raw.at !== 'number'
@@ -360,7 +380,7 @@ export function parsePermissionAudit(content: string): PermissionAuditRecord | n
       return null
     }
     return {
-      decision: raw.decision,
+      decision: raw.decision as PermissionDecision,
       tool: raw.tool,
       target: raw.target,
       risk: raw.risk === 'dangerous' || raw.risk === 'warning' ? raw.risk : 'info',

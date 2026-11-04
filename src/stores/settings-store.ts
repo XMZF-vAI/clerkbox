@@ -5,6 +5,11 @@ import { normalizeEffort } from '../types/agent'
 import { guessApiCompat, guessPresetByBaseUrl, fallbackNameFromBaseUrl } from '../lib/provider-catalog'
 import { ipc } from '../lib/ipc-client'
 import { sharedStorage } from '../lib/shared-storage'
+import {
+  upsertPermissionRule as upsertRule,
+  removePermissionRule as removeRule,
+  type PermissionRule,
+} from '../lib/permission-rules'
 
 interface SettingsState extends AppSettings {
   showSettings: boolean
@@ -22,6 +27,10 @@ interface SettingsState extends AppSettings {
   removeProviderModel: (providerId: string, modelId: string) => void
   /** 设为当前生效：把该提供商的连接信息 + 模型写入派生字段 */
   activateModel: (providerId: string, modelId: string) => void
+  /** 新增/覆盖一条项目级权限规则（纯函数 upsert，不 mutate 原数组） */
+  upsertPermissionRule: (rule: PermissionRule) => void
+  /** 删除一条项目级权限规则 */
+  removePermissionRule: (id: string) => void
 }
 
 const defaultSettings: AppSettings = {
@@ -61,6 +70,7 @@ const defaultSettings: AppSettings = {
   closeBehavior: 'tray',
   recentSessionsLimit: 5,
   mcpServers: [],
+  permissionRules: [],
 }
 
 const apiKeyWriteQueues = new Map<string, Promise<void>>()
@@ -211,6 +221,14 @@ export const useSettingsStore = create<SettingsState>()(
         const p = get().providers.find((x) => x.id === providerId)
         if (p) set(applyActive(p, modelId))
       },
+
+      upsertPermissionRule: (rule) => set((state) => ({
+        permissionRules: upsertRule(state.permissionRules ?? [], rule),
+      })),
+
+      removePermissionRule: (id) => set((state) => ({
+        permissionRules: removeRule(state.permissionRules ?? [], id),
+      })),
     }),
     {
       name: 'clerkbox-settings',
@@ -249,6 +267,8 @@ export const useSettingsStore = create<SettingsState>()(
           appFont: p.appFont ?? defaultSettings.appFont,
           // 旧版本没有界面模式字段，回落编程模式
           interfaceMode: p.interfaceMode ?? defaultSettings.interfaceMode,
+          // 旧版本没有持久权限规则：回落空数组（宁可重新问，也不让脏数据变成放行）
+          permissionRules: Array.isArray(p.permissionRules) ? p.permissionRules : [],
           // Agent 动作能力：老用户没有这两个字段，一律按关闭处理。
           // 这里必须用 ?? false 而不是透传：undefined 会被工具注册表当成「没配置」，
           // 语义上等价于开启，与 fail-closed 相悖。

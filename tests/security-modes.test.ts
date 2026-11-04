@@ -47,9 +47,9 @@ describe('完全访问切换的风险确认门', () => {
 })
 
 describe('危险命令的 user-once 语义', () => {
-  it('审批卡对危险命令裁掉「本会话始终允许」', () => {
+  it('审批卡对危险命令裁掉所有持久/会话级选项（只留允许一次/拒绝）', () => {
     expect(permissionCard).toContain("preview.kind === 'command' && preview.risk === 'dangerous'")
-    expect(permissionCard).toContain("!(dangerOnce && option.decision === 'allow_session')")
+    expect(permissionCard).toContain("!(dangerOnce && ['allow_session', 'allow_project', 'deny_always'].includes(option.decision))")
   })
 
   it('能力级授权不受影响：浏览/桌面的会话允许仍然存在', () => {
@@ -67,7 +67,7 @@ describe('三档在 loop 里的判定分支', () => {
   it('manual：危险命令与目录外都确认；auto：危险命令仍兜底；full：全部免问', () => {
     expect(loop).toContain("toolName === 'execute_command' && approvalMode !== 'full'")
     expect(loop).toContain('isDangerousCommand(cmd)')
-    expect(loop).toContain("approvalMode === 'manual' && workingDir && commandCwd && !isPathInside(commandCwd, workingDir)")
+    expect(loop).toContain("approvalMode === 'manual' && !ruleAllows && workingDir && commandCwd && !isPathInside(commandCwd, workingDir)")
   })
 
   it('create_workflow / resume_workflow 门仅 full 档免问（其余档脚本必过目）', () => {
@@ -78,15 +78,16 @@ describe('三档在 loop 里的判定分支', () => {
 })
 
 describe('manual 档的写确认（变更前确认语义）', () => {
-  it('manual 档每一次写文件都先问：走对话内确认卡（diff 预览），原生弹窗只作 fallback', () => {
-    expect(loop).toContain("approvalMode === 'manual' && workingDir")
+  it('manual 档每一次写文件都先问：走统一 askPermission（卡优先、原生框 fallback）', () => {
+    expect(loop).toContain("approvalMode === 'manual' && !ruleAllows && workingDir")
     expect(loop).toContain("reason: 'file-write' as const")
+    expect(loop).toContain('askPermission(ports, {')
     expect(loop).toContain('ports.permission.confirmInChat ? await ports.permission.confirmInChat(request) : null')
   })
 
   it('auto/full 档不新增写确认（语义不变）', () => {
     // manual 分支整体包在 approvalMode === 'manual' 里；auto 分支不存在写确认
-    const manualBlock = loop.slice(loop.indexOf("if (approvalMode === 'manual' && workingDir)"), loop.indexOf('return { allowed: true }', loop.indexOf("if (approvalMode === 'manual' && workingDir)")))
+    const manualBlock = loop.slice(loop.indexOf("if (approvalMode === 'manual' && !ruleAllows && workingDir)"), loop.indexOf('return { allowed: true }', loop.indexOf("if (approvalMode === 'manual' && !ruleAllows && workingDir)")))
     expect(manualBlock).toContain("reason: 'file-write' as const")
   })
 

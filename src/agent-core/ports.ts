@@ -41,6 +41,7 @@ export type AgentSettings = Pick<
   | 'approvalMode' | 'baseUrl' | 'apiKey' | 'directFetch' | 'maxInputTokens'
   | 'agentsMdEnabled' | 'claudeMdCompat'
   | 'browserUseEnabled' | 'computerUseEnabled'
+  | 'permissionRules'
 >
 
 /** 模型流式调用：装配层负责 openChatStream（或 P3 主进程内直调 api-proxy）与传输配置。 */
@@ -118,11 +119,12 @@ export interface PermissionApproval {
 export interface AgentPermissionPort {
   confirm(request: AgentPermissionRequest): Promise<PermissionApproval>
   /**
-   * 可选：把确认**搬进对话内**渲染（而不是系统弹窗）。
+   * 对话内确认（权限三期起的**默认路径**）：把审批挂进渲染层的本地待批队列，
+   * 由 PermissionApprovalCard 画同一张卡（富预览 / 写文件 diff / 流程图 / 键盘选项）。
    *
-   * 只有工作流确认需要它——那张卡要画流程图，原生弹窗画不出来。未装配、或实现
-   * 决定不接管（例如非 workflow-script 的请求）时返回 `null`，调用方原样退回
-   * `confirm`，既有门的行为一字不改。
+   * 未装配、或实现决定不接管时返回 `null`，askPermission 回落到 `confirm`。
+   * 主进程宿主不装配此端口——它的 permission.requested 事件本来就是对话内卡片，
+   * 两条路径最终都收敛到 UI 卡，不再出现系统弹窗造成的观感割裂。
    */
   confirmInChat?(request: AgentPermissionRequest): Promise<PermissionApproval | null>
 }

@@ -293,6 +293,11 @@ export interface ToolDefinition {
   name: string
   description: string
   parameters: object
+  /**
+   * 可选：该工具可能产生的结构化错误码（报告 05 P0-1 的类型锚点）。
+   * 当前只有契约层读取，执行期仍返回可读 string；全量双轨重构时据此收敛。
+   */
+  errorCodes?: Array<import('../lib/tool-contract').ToolErrorCode>
 }
 
 export interface CompactionResult {
@@ -483,6 +488,8 @@ export interface AppSettings {
   recentSessionsLimit: number
   /** MCP 服务器列表（配置随设置持久化，连接由主进程 McpManager 管理） */
   mcpServers: McpServerConfig[]
+  /** 项目级持久权限规则（allow/deny），随设置持久化、重启后仍生效 */
+  permissionRules?: import('../lib/permission-rules').PermissionRule[]
 }
 
 /** OpenAI-compatible stream chunk delta */

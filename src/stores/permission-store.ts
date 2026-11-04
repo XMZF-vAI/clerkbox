@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import type { PermissionApproval, PermissionReason } from '../agent-core/ports'
-import type { PermissionDecision } from '../lib/permission-preview'
+import { decisionApproves, decisionToScope, type PermissionDecision } from '../lib/permission-preview'
 
 /**
  * 审批请求的**两条数据源**（批次 B · C2 阶段二 + 工作流 UI 对齐）：
@@ -132,7 +132,9 @@ export function resolveLocalPermission(
   const resolve = localResolvers.get(key)
   if (resolve) {
     localResolvers.delete(key)
-    resolve({ approved: decision !== 'deny', scope: decision === 'allow_session' ? 'session' : 'once' })
+    // 项目级规则只放行本次，后续同类操作由 checkToolPermission 的规则引擎命中，
+    // 不塞进会话级放行集合（那条路径是内存态，重启即失）。
+    resolve({ approved: decisionApproves(decision), scope: decisionToScope(decision) })
   }
   usePermissionStore.getState().localSettle(sessionId, requestId)
 }

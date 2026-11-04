@@ -165,7 +165,9 @@ export function useAgent(sessionId: string) {
       compact: (sid, messages, boundaryMessageId) => useChatStore.getState().compactSession(sid, messages, boundaryMessageId),
     },
     permission: {
-      // 渲染层宿主走原生确认框，文案由 loop 一并给出，两种模式措辞一致。
+      // 权限三期：所有审批默认走对话内卡片（confirmInChat 已对所有 reason 开放）。
+      // 这里保留原生确认框实现，仅作为宿主不接管时的 fallback（例如 WebUI 只读视图、
+      // 或未来某个端口不装配 confirmInChat）。日常路径不再出现系统弹窗造成的观感割裂。
       confirm: async (request) => {
         // Agent 动作（浏览器 / 桌面）单独一套三选项：
         // 一个任务里连续十几个写动作，两按钮框等于每一步都要人点一次，且无处可放
@@ -188,10 +190,11 @@ export function useAgent(sessionId: string) {
         // 命令执行 / 文件写入：保持既有两按钮语义，不受 Agent 动作需求影响
         return { approved: await ipc.confirmDialog(request.title, request.body), scope: 'once' }
       },
-      // 对话内确认：只有工作流确认需要（那张卡要画流程图，原生弹窗画不出来）。
-      // 其他场景返回 null，loop 原样退回上面的原生弹窗——既有门的行为不变。
+      // 对话内确认：所有权限 reason 统一挂进 permission-store 的本地待批队列，
+      // 由 PermissionApprovalCard 渲染同一张卡（富预览 / 写文件 diff / 流程图 /
+      // 键盘 1/2/3）。用户点完 resolveLocalPermission 兑现 promise，loop 继续。
+      // 会话停止时 cancelLocalPermissions 会把挂起项兑现为拒绝，绝不把 loop 挂死。
       confirmInChat: async (request) => {
-        if (request.reason !== 'workflow-script') return null
         return requestLocalPermission({ sessionId, requestId: makeId(), ...request })
       },
     },
@@ -600,7 +603,8 @@ export function useAgent(sessionId: string) {
   // 工作流在会话空闲时 settle → ctx.requestWake() → 这里发起一次「无用户消息的续跑」：
   // initialMessages 用现有会话消息，run 的迭代顶部 drain 会把通知队列注入模型，
   // 模型向用户总结工作流结果。运行中 settle 的通知不唤醒（活跃 run 的下一轮迭代顶
-  // 自然消费）；主进程宿主本轮不装配 requestWake，通知等下条消息注入（与后台子代理同现状）。
+  // 自然消费）；主进程宿主在 agent-host 的 buildPorts 里装配同语义的 wakeIdleSession，
+  // 两种宿主模式都不再出现「跑完没反应」。
   const wakeFnRef = useRef<(() => void) | null>(null)
   const wakeSession = useCallback(async (): Promise<void> => {
     const state = useChatStore.getState()

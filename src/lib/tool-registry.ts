@@ -8,6 +8,7 @@ import { BROWSER_TOOLS, executeBrowserTool } from './browser-tools'
 import { COMPUTER_TOOLS, executeComputerTool } from './computer-tools'
 import { WORKFLOW_TOOLS, executeWorkflowTool } from './workflow-tools'
 import { computeEditDiff, type EditDiffMeta, type EditDiffLine } from './edit-diff'
+import { applyToolDescriptionGuides } from './tool-contract'
 export type { EditDiffMeta, EditDiffLine }
 import type { WorkflowProgressSnapshot } from './workflow-runtime'
 import type { ToolDefinition, MemoryEntry, TodoItem, UserQuestion, ReadFileSnapshot, HarnessMode, FileMutation, ToolResultImage } from '../types/agent'
@@ -762,7 +763,10 @@ class ToolRegistry {
   getDefinitionsForMode(mode: HarnessMode): ToolDefinition[] {
     const visible = this.builtinDefinitions.filter((t) => this.isAgentActionDefinitionVisible(t.name))
     if (mode === 'default') {
-      return this.mcpDefinitions.length === 0 ? visible : [...visible, ...this.mcpDefinitions]
+      // 描述三要素（When to use / When NOT / 失败语义）只追加在 default 模式：
+      // harness 兼容模式各自有简短描述哲学，不灌模板话。返回新对象，不 mutate 注册表。
+      const guided = applyToolDescriptionGuides(visible)
+      return this.mcpDefinitions.length === 0 ? guided : [...guided, ...this.mcpDefinitions]
     }
     const content = HARNESS_MODE_CONTENT[mode]
     const transform = content.transformTools

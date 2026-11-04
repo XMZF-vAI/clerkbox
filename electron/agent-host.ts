@@ -322,9 +322,26 @@ export class AgentSessionManager {
     this.emit(s, { type: 'message.added', sessionId: s.sessionId, message })
   }
 
+  /**
+   * 空闲唤醒（主进程宿主版）：后台子代理/工作流 settle 后由 ctx.requestWake 触发。
+   *
+   * 与渲染层 wakeSession 同语义但更轻——复用 startRun 的 wake 分支（不落 user 消息、
+   * 以现有历史起步），把守卫放在这里：正在跑 / 通知队列为空 / 无设置快照一律不唤醒。
+   * 唤醒轮失败也不打扰用户：通知留在队列，随下一条用户消息注入。
+   */
+  private wakeIdleSession(s: HostSession): void {
+    const ctx = this.contexts.get(s.sessionId)
+    if (s.run || ctx.pendingSubagentNotifications.length === 0) return
+    const cmd = this.snapshots.get(s.sessionId)
+    if (!cmd?.settings) return
+    void this.startRun(s, { ...cmd, content: '' }, { wake: true }).catch(() => undefined)
+  }
+
   private buildPorts(s: HostSession, cmd: Extract<AgentCommand, { type: 'run' }>, settings: AgentSettings): AgentPorts {
     const sessionId = s.sessionId
     const ctx = this.contexts.get(sessionId)
+    // 唤醒入口常驻：ctx 是会话级单例，后台任务可能在两轮 run 之间 settle
+    ctx.requestWake = () => this.wakeIdleSession(s)
 
     return {
       sessionId,
@@ -819,7 +836,7 @@ export class AgentSessionManager {
   private async startRun(
     s: HostSession,
     cmd: Extract<AgentCommand, { type: 'run' }>,
-    meta: { remote?: boolean } = {}
+    meta: { remote?: boolean; wake?: boolean } = {}
   ): Promise<{ ok: boolean; error?: string }> {
     // 设置快照：宿主不读渲染层 persist，凭据只存在于本地窗口下发的那份快照里。
     // 因此远程 run 一律**忽略**命令自带的 settings（否则等于让远程端指定上游地址与 Key），
@@ -871,7 +888,7 @@ export class AgentSessionManager {
 
     this.emit(s, { type: 'run.started', sessionId, runId, ts: Date.now() })
 
-    const userMsg: Message = {
+    const userMsg: Message | null = meta.wake ? null : {
       id: makeId(),
       role: 'user',
       content: cmd.content,
@@ -880,11 +897,13 @@ export class AgentSessionManager {
       ...(cmd.taskMode ? { taskMode: cmd.taskMode } : {}),
       ...(cmd.skills && cmd.skills.length > 0 ? { skills: cmd.skills } : {}),
     }
-    this.persistMessage(s, userMsg)
+    if (userMsg) this.persistMessage(s, userMsg)
 
-    // addMessage 落库是异步的，刚写入的这条通常还查不到；按 id 判定而不是全表去重
+    // addMessage 落库是异步的，刚写入的这条通常还查不到；按 id 判定而不是全表去重。
+    // wake 轮没有用户消息：直接以现有历史起步，iteration 顶部的 drain 会把通知注入。
     const history = await this.loadMessages(sessionId)
-    const initialMessages = history.some((m) => m.id === userMsg.id) ? history : [...history, userMsg]
+    const initialMessages = !userMsg ? history
+      : history.some((m) => m.id === userMsg.id) ? history : [...history, userMsg]
     const ports = this.buildPorts(s, resolvedCmd, settings)
 
     try {

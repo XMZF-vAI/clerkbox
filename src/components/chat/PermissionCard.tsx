@@ -6,11 +6,14 @@ import { useChatStore } from '../../stores/chat-store'
 import { agentClient } from '../../lib/agent-client'
 import { isWebUIMode } from '../../lib/ipc-client'
 import { usePermissionStore, resolveLocalPermission, type HostPermission, type LocalPermission } from '../../stores/permission-store'
+import { useSettingsStore } from '../../stores/settings-store'
+import { buildSuggestedRule } from '../../lib/permission-rules'
 import { makeId } from '../../agent-core/loop'
 import { ipc } from '../../lib/ipc-client'
 import { computeEditDiff, type EditDiffMeta } from '../../lib/edit-diff'
 import {
   buildPermissionPreview,
+  decisionToScope,
   findPendingApprovalCall,
   formatPermissionAuditContent,
   type PermissionAuditRecord,
@@ -58,8 +61,10 @@ const RISK_ICON: Record<PermissionRiskLevel, typeof ShieldAlert> = {
 
 const DECISION_LABEL_KEY: Record<PermissionDecision, string> = {
   deny: 'chat.permission.resultDeny',
+  deny_always: 'chat.permission.resultDenyAlways',
   allow_once: 'chat.permission.resultAllowOnce',
   allow_session: 'chat.permission.resultAllowAlways',
+  allow_project: 'chat.permission.resultAllowProject',
 }
 
 function toneFor(risk: PermissionRiskLevel, vibe: boolean): ToneSet {
@@ -67,12 +72,42 @@ function toneFor(risk: PermissionRiskLevel, vibe: boolean): ToneSet {
   return risk === 'dangerous' ? PERMISSION_TONES.confirmation : PERMISSION_TONES.ask
 }
 
-/** 三个选项的固定顺序。序号即键盘快捷键（1/2/3 直接提交），顺序本身就是语义。 */
+/**
+ * 选项顺序即语义（序号 = 键盘快捷键）：一次性 → 会话级 → 项目级 → 拒绝。
+ * 项目级规则（allow_project / deny_always）只对可生成稳定 subject 的工具出现，
+ * 危险命令、浏览器/桌面动作、工作流/MCP 一律裁掉（见 buildApprovalOptions）。
+ */
 const APPROVAL_OPTIONS: Array<{ decision: PermissionDecision; labelKey: string; Icon: typeof Check }> = [
   { decision: 'allow_once', labelKey: 'chat.permission.allowOnce', Icon: Check },
   { decision: 'allow_session', labelKey: 'chat.permission.allowAlways', Icon: ShieldCheck },
+  { decision: 'allow_project', labelKey: 'chat.permission.allowProject', Icon: ShieldCheck },
+  { decision: 'deny_always', labelKey: 'chat.permission.denyAlways', Icon: Ban },
   { decision: 'deny', labelKey: 'chat.permission.deny', Icon: Ban },
 ]
+
+/** 是否允许该预览写出项目级规则（稳定 subject、非高危、非能力级授权） */
+function supportsProjectRules(preview: { kind: string; risk: string }): boolean {
+  if (preview.kind === 'command' && preview.risk === 'dangerous') return false
+  return preview.kind === 'command' || preview.kind === 'file'
+}
+
+/**
+ * 项目级决策 → 写一条持久规则（两张卡片共用）。规则数据存在渲染层的
+ * settings persist 里：宿主模式（主进程）的 loop 用的是 run 命令下发的
+ * settings 快照，下一轮 run 起就会命中；当前这次仍由 promise 放行/拒绝。
+ */
+function persistProjectRule(
+  decision: PermissionDecision,
+  target: { tool: string; args: Record<string, unknown>; workingDir: string }
+): void {
+  if (decision !== 'allow_project' && decision !== 'deny_always') return
+  const rule = buildSuggestedRule(
+    target,
+    decision === 'allow_project' ? 'allow' : 'deny',
+    target.workingDir
+  )
+  if (rule) useSettingsStore.getState().upsertPermissionRule(rule)
+}
 
 /**
  * 写文件 / 局部替换审批的变更预览：与执行期同一套 computeEditDiff——
@@ -376,9 +411,11 @@ export function PermissionCard({ request, onResolve, interactive = true, vibe = 
   // （对齐 ZCode guarded 的 user-once——该次审批不提供总是允许、不写规则）。
   // 浏览/桌面的「本会话允许」是能力级授权，不在裁剪之列。
   const dangerOnce = preview.kind === 'command' && preview.risk === 'dangerous'
+  const projectRules = supportsProjectRules(preview)
   const approvalOptions = APPROVAL_OPTIONS
-    .filter((option) => !(dangerOnce && option.decision === 'allow_session'))
-    .map((option) => ({ ...option, label: t(option.decision === 'allow_session' ? 'chat.permission.allowAlways' : option.labelKey) }))
+    .filter((option) => !(dangerOnce && ['allow_session', 'allow_project', 'deny_always'].includes(option.decision)))
+    .filter((option) => projectRules || !['allow_project', 'deny_always'].includes(option.decision))
+    .map((option) => ({ ...option, label: t(option.labelKey) }))
 
   // 工作流确认：画得出静态图才换版式；图空（脚本没写成字面形态）时回落通用卡
   if (request.tool === 'create_workflow' && preview.graph && preview.graph.phases.length > 0) {
@@ -490,14 +527,16 @@ function HostPermissionCard({ request, vibe }: { request: HostPermission; vibe: 
   )
 
   const resolve = (decision: PermissionDecision) => {
+    // 项目级规则由渲染层 settings 落盘（宿主下一轮 run 的 settings 快照会带上）
+    persistProjectRule(decision, { tool: request.tool, args: request.args, workingDir: request.workingDir })
     // 只回布尔给宿主不够：「本会话允许」要让它记住匹配键，否则后台无人看管的 run
     // 会带着同一个目标一次次撞回 120s 超时
     void agentClient.send({
       type: 'permission.resolve',
       sessionId: request.sessionId,
       requestId: request.requestId,
-      approved: decision !== 'deny',
-      scope: decision === 'allow_session' ? 'session' : 'once',
+      approved: decision === 'allow_once' || decision === 'allow_session' || decision === 'allow_project',
+      scope: decisionToScope(decision),
     })
     // 乐观收尾；宿主的 permission.settled 到达时再 settle 一次是幂等的
     usePermissionStore.getState().settle(request.sessionId, request.requestId)
@@ -520,9 +559,12 @@ function HostPermissionCard({ request, vibe }: { request: HostPermission; vibe: 
 }
 
 /**
- * 渲染层本地待批（工作流确认）：loop 在同进程里等 promise，这里负责画卡与兑现。
- * 数据源是 permission-store 的 `localBySession`——不是消息扫描推断出来的镜像态，
- * 所以卡片真的拥有放行权（interactive）。
+ * 渲染层本地待批（权限三期起覆盖所有 reason）：loop 在同进程里等 promise，
+ * 这里负责画卡与兑现。数据源是 permission-store 的 `localBySession`——不是消息
+ * 扫描推断出来的镜像态，所以卡片真的拥有放行权（interactive）。
+ *
+ * 用户选了项目级选项时，在同一处写 settings.permissionRules（persist 落盘）：
+ * 规则是纯数据，不经过 IPC，也不改会话内存，重启后由 checkToolPermission 命中。
  */
 const NO_LOCAL: LocalPermission[] = []
 
@@ -545,6 +587,9 @@ function LocalPermissionCard({ request, vibe }: { request: LocalPermission; vibe
   )
 
   const handleResolve = (id: string, decision: PermissionDecision) => {
+    // 项目级选项：先落规则（同步 set，下一次 checkToolPermission 立刻能命中），
+    // 再兑现 promise。危险命令/能力级动作不会走到这里——选项已被裁掉。
+    persistProjectRule(decision, { tool: request.tool, args: request.args, workingDir: request.workingDir })
     // 先兑现 promise（loop 立刻继续/中止），再补一条对话留痕
     resolveLocalPermission(request.sessionId, id, decision)
     const at = Date.now()
@@ -614,6 +659,7 @@ export function PermissionApprovalCard({ sessionId, vibe = false }: { sessionId:
 
   const handleResolve = (id: string, decision: PermissionDecision) => {
     setAnswered({ requestId: id, decision })
+    persistProjectRule(decision, { tool: request.tool, args: request.args ?? {}, workingDir })
     if (decision === 'allow_session') {
       const grantKey = request.preview.grantKey
       setGrants((current) => {

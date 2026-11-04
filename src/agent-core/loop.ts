@@ -23,6 +23,7 @@ import { compactConversation, findKeepBoundaryIndex } from '../lib/compact'
 import { getApiVisibleMessages } from '../lib/context-usage'
 import { HARNESS_MODE_CONTENT, normalizeHarnessMode } from '../lib/harness-modes'
 import { isDangerousCommand } from '../lib/permission-engine'
+import { matchPermissionRule } from '../lib/permission-rules'
 import { isPathInside, isSystemPath, resolveToolPath, normalizePathForComparison } from '../lib/path-safety'
 import { SYSTEM_PROMPT, CLERKBOX_PROMPT, PLAN_MODE_PROMPT, SPEC_MODE_PROMPT, GOAL_MODE_PROMPT, GOAL_EVALUATOR_PROMPT } from '../lib/prompts'
 import { renderSkillCatalog, type SkillCatalogEntry } from '../lib/skill-catalog'
@@ -43,7 +44,7 @@ import type {
   StreamingToolCall,
   TokenUsage,
 } from '../types/agent'
-import type { AgentPorts, AgentSettings } from './ports'
+import type { AgentPorts, AgentSettings, PermissionApproval } from './ports'
 import {
   registerSubagentControl,
   unregisterSubagentControl,
@@ -958,6 +959,21 @@ async function buildAPIMessages(
   return cleaned
 }
 
+/**
+ * 统一审批入口：优先走对话内确认卡，宿主不接管（返回 null）或没装配时回落到原生确认框。
+ *
+ * 权限三期之前只有工作流/写文件确认走卡，命令/系统目录/浏览器动作仍是系统弹窗，
+ * 观感割裂。现在所有权限门共用这一条路径：渲染层宿主的 confirmInChat 已对所有
+ * reason 开放，主进程宿主没有这个端口则自动回落事件流驱动的对话内卡（agent-host）。
+ */
+async function askPermission(
+  ports: AgentPorts,
+  request: Parameters<AgentPorts['permission']['confirm']>[0]
+): Promise<PermissionApproval> {
+  const inChat = ports.permission.confirmInChat ? await ports.permission.confirmInChat(request) : null
+  return inChat ?? (await ports.permission.confirm(request))
+}
+
 /** Check permission for a tool call.
  *  Agent allowlists and denylists can further restrict access, never elevate it.
  *  审批档位（settings.approvalMode）控制确认策略：
@@ -1040,6 +1056,22 @@ export async function checkToolPermission(
     return { allowed: false, reason: i18n.t('agent.specReadOnly', { label }) }
   }
 
+  // ── 项目级持久规则（权限三期）──
+  // 位置刻意在所有审批门之前、plan/spec 只读约束之后：
+  //  - deny 必须能覆盖 full 档直通（修 ZCode 瀑布里 disallowedTools 排在 yolo 之后的历史顺序问题）；
+  //  - 但绝不能提升 plan/spec 的只读边界（任务期的限制由用户显式发起，规则不该推翻）。
+  // allow 命中只免「同类确认」，不越过能力开关与子 agent 拦截——那两道仍在各自分支里。
+  const ruleTarget = {
+    tool: toolName,
+    args,
+    workingDir: getWorkingDir(ports, ctx),
+  }
+  const ruleHit = matchPermissionRule(ports.settings.permissionRules ?? [], ruleTarget, ruleTarget.workingDir)
+  if (ruleHit?.verdict === 'deny') {
+    return { allowed: false, reason: i18n.t('agent.deniedByProjectRule') }
+  }
+  const ruleAllows = ruleHit?.verdict === 'allow'
+
   // ── Agent 动作（Browser Use / Computer Use）门禁 ──
   // 三道，顺序即 fail-closed 的强度：
   //   1. 能力开关关 → 直接拒（设置里没开，模型看到什么、点了什么都不算数）
@@ -1071,7 +1103,7 @@ export async function checkToolPermission(
     const grantKey = agentActionGrantKey(agentAction)
     if (ctx.grantedAgentActions.has(grantKey)) return { allowed: true }
 
-    const approval = await ports.permission.confirm({
+    const approval = await askPermission(ports, {
       tool: toolName,
       args,
       reason: agentAction === 'computer' ? 'computer-control' : 'browser-control',
@@ -1107,9 +1139,8 @@ export async function checkToolPermission(
       title: i18n.t('agent.confirmWorkflowTitle'),
       body: i18n.t('agent.confirmWorkflowBody', { name: String(args.name || args.runId || '未命名工作流') }),
     }
-    // 优先走对话内确认（那张卡要画流程图，原生弹窗画不出）；宿主不接管时原样退回弹窗
-    const inChat = ports.permission.confirmInChat ? await ports.permission.confirmInChat(request) : null
-    const approval = inChat ?? (await ports.permission.confirm(request))
+    // 统一入口：对话内卡优先，宿主不接管时回落原生框
+    const approval = await askPermission(ports, request)
     if (!approval.approved) {
       return { allowed: false, reason: i18n.t('agent.deniedCancelWorkflow') }
     }
@@ -1127,7 +1158,7 @@ export async function checkToolPermission(
       // 危险命令确认前：标记 confirm-danger + 通知（仅当用户不在此会话时）
       ports.store.setStatus(sessionId, 'confirm-danger')
       ports.ui.notify(sessionId, 'confirm-danger', i18n.t('agent.notifyDangerCommand', { command: cmd.slice(0, 100) }))
-      const { approved: confirmed } = await ports.permission.confirm({
+      const { approved: confirmed } = await askPermission(ports, {
         tool: toolName,
         args,
         reason: 'dangerous-command',
@@ -1142,9 +1173,9 @@ export async function checkToolPermission(
         return { allowed: false, reason: i18n.t('agent.deniedCancelDanger') }
       }
     }
-    // auto 档：AI 已自审该操作，目录外执行免确认；manual 档仍弹窗
-    if (approvalMode === 'manual' && workingDir && commandCwd && !isPathInside(commandCwd, workingDir)) {
-      const { approved: confirmed } = await ports.permission.confirm({
+    // auto 档：AI 已自审该操作，目录外执行免确认；manual 档仍确认（项目规则 allow 免打扰）
+    if (approvalMode === 'manual' && !ruleAllows && workingDir && commandCwd && !isPathInside(commandCwd, workingDir)) {
+      const { approved: confirmed } = await askPermission(ports, {
         tool: toolName,
         args,
         reason: 'outside-cwd',
@@ -1163,7 +1194,7 @@ export async function checkToolPermission(
     const path = resolveToolPath(workingDir, args.path)
     // 系统目录写入：manual/auto 都弹窗（最后一道防线，仅 full 档放行）
     if (isSystemPath(path)) {
-      const { approved: confirmed } = await ports.permission.confirm({
+      const { approved: confirmed } = await askPermission(ports, {
         tool: toolName,
         args,
         reason: 'system-dir',
@@ -1181,7 +1212,7 @@ export async function checkToolPermission(
     // manual 档 = 变更前确认：**每一次写文件都先问**（ZCode build 档同款语义），
     // 走对话内确认卡——卡里用执行期同一套 diff 渲染将要落盘的变更，
     // 用户批准的是看得见的内容。原生弹窗画不出 diff，只作 fallback。
-    if (approvalMode === 'manual' && workingDir) {
+    if (approvalMode === 'manual' && !ruleAllows && workingDir) {
       const isOutside = !isPathInside(path, workingDir)
       const request = {
         tool: toolName,
@@ -1194,12 +1225,11 @@ export async function checkToolPermission(
           ? i18n.t('agent.confirmOutsideWriteBody', { path, workingDir })
           : i18n.t('agent.confirmWriteBody', { path }),
       }
-      const inChat = ports.permission.confirmInChat ? await ports.permission.confirmInChat(request) : null
-      const approval = inChat ?? (await ports.permission.confirm({
+      const approval = await askPermission(ports, {
         ...request,
         reason: isOutside ? 'outside-write' : 'file-write',
         title: isOutside ? i18n.t('agent.confirmOutsideWriteTitle') : request.title,
-      }))
+      })
       if (!approval.approved) {
         return { allowed: false, reason: i18n.t(isOutside ? 'agent.deniedCancelOutsideWrite' : 'agent.deniedCancelWrite') }
       }
@@ -2359,6 +2389,19 @@ function buildSubagentTaskPrompt(ports: AgentPorts, ctx: SessionContext, prompt:
   return prompt
 }
 
+/**
+ * 后台子代理终态：入通知队列 + 请求空闲唤醒。
+ *
+ * 工作流 settle 早就有 requestWake（v2），后台子代理此前只入队列、必须等用户
+ * 发下一条消息才被 drain 消费——体感是「跑完了没反应」。这里复用同一个
+ * ctx.requestWake：渲染层宿主持有 wakeSession（守卫齐全：非 streaming / 无
+ * controller / 队列非空 / 模式与凭据），主进程宿主没装配则自然降级为下条消息注入。
+ */
+function pushSubagentNotification(ctx: SessionContext, text: string): void {
+  ctx.pendingSubagentNotifications.push(text)
+  ctx.requestWake?.()
+}
+
 /** 统一的后台子代理完成/失败/停止通知格式（与前台结果回传同一套字段语义） */
 function formatSubagentNotification(input: {
   runId: string
@@ -2524,7 +2567,7 @@ export async function runSubAgentLoop(
     if (result.aborted || controller.signal.aborted) {
       ports.ui.abortSubAgentRun(sessionId, subAgentId)
       if (background) {
-        ctx.pendingSubagentNotifications.push(formatSubagentNotification({
+        pushSubagentNotification(ctx, formatSubagentNotification({
           runId: subAgentId, agentName: agent.name, agentType: agent.agentType,
           status: 'aborted', body: i18n.t('agent.subAgentStoppedBody'),
         }))
@@ -2541,7 +2584,7 @@ export async function runSubAgentLoop(
       const usageLine = usage
         ? `\n\n<usage>subagent_tokens: ${usage.totalTokens}, tool_uses: ${usage.toolCalls}, duration_ms: ${usage.durationMs}</usage>`
         : ''
-      ctx.pendingSubagentNotifications.push(formatSubagentNotification({
+      pushSubagentNotification(ctx, formatSubagentNotification({
         runId: subAgentId, agentName: agent.name, agentType: agent.agentType,
         status: 'completed',
         body: `${(result.text || '(no text output)').slice(0, SUBAGENT_NOTIFICATION_RESULT_CAP)}${usageLine}`,
@@ -2554,7 +2597,7 @@ export async function runSubAgentLoop(
     if (controller.signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
       ports.ui.abortSubAgentRun(sessionId, subAgentId)
       if (background) {
-        ctx.pendingSubagentNotifications.push(formatSubagentNotification({
+        pushSubagentNotification(ctx, formatSubagentNotification({
           runId: subAgentId, agentName: agent.name, agentType: agent.agentType,
           status: 'aborted', body: i18n.t('agent.subAgentStoppedBody'),
         }))
@@ -2564,7 +2607,7 @@ export async function runSubAgentLoop(
     const errMsg = err instanceof Error ? err.message : String(err)
     ports.ui.failSubAgentRun(sessionId, subAgentId, errMsg)
     if (background) {
-      ctx.pendingSubagentNotifications.push(formatSubagentNotification({
+      pushSubagentNotification(ctx, formatSubagentNotification({
         runId: subAgentId, agentName: agent.name, agentType: agent.agentType,
         status: 'failed', body: errMsg,
       }))
