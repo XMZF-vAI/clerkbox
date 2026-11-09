@@ -13,6 +13,7 @@ import ProvidersSection from './ProvidersSection'
 import McpSection from './McpSection'
 import TokenUsageStats from './TokenUsageStats'
 import ConfirmDialog from '../ui/ConfirmDialog'
+import { useModalAccessibility } from '../../hooks/use-modal-accessibility'
 import { ipc } from '../../lib/ipc-client'
 
 import APP_ICON from '../../assets/icon.png'
@@ -64,8 +65,11 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
   const [testError, setTestError] = useState('')
   const [showResetConfirmation, setShowResetConfirmation] = useState(false)
   const titleId = useId()
-  const dialogRef = useRef<HTMLDivElement>(null)
   const closeButtonRef = useRef<HTMLButtonElement>(null)
+  const dialogRef = useModalAccessibility(() => {
+    if (tabStack.length > 0) setTabStack([])
+    else onClose()
+  }, closeButtonRef)
 
   useEffect(() => {
     if (useSettingsStore.getState().pendingSettingsTab) {
@@ -78,24 +82,6 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
     activeProvider?.models.find((m) => m.id === settings.activeModelId)?.label ||
     settings.model ||
     t('settings.api.noActive')
-
-  useEffect(() => {
-    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    closeButtonRef.current?.focus()
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        if (tabStack.length > 0) setTabStack([])
-        else onClose()
-        return
-      }
-    }
-    document.addEventListener('keydown', handleKeyDown)
-    return () => {
-      document.removeEventListener('keydown', handleKeyDown)
-      if (previousFocus && document.contains(previousFocus)) previousFocus.focus()
-    }
-  }, [onClose, tabStack.length])
 
   const handleTestConnection = async () => {
     setTestStatus('testing')
@@ -242,7 +228,7 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
             {/* 详情：与桌面 SettingsPage 完全一致，只是放在滚动容器内 */}
             {activeTab === 'api' && (
               <div className="space-y-5">
-                <div className="flex items-center gap-3 px-4 py-3 rounded-md3-md bg-md-primary/8 border border-md-primary/20">
+                <div className="flex items-center gap-3 px-4 py-3 rounded-md3-md bg-md-primary/[0.08] border border-md-primary/20">
                   <Cpu size={16} className="text-md-primary flex-shrink-0" />
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">

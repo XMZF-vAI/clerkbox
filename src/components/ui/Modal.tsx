@@ -1,4 +1,6 @@
-import { useEffect, useId, useRef, type ReactNode } from 'react'
+import { useId, type ReactNode } from 'react'
+import { useModalAccessibility } from '../../hooks/use-modal-accessibility'
+export { useOverlayKeyboardLock } from '../../hooks/use-modal-accessibility'
 import { createPortal } from 'react-dom'
 import { X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -12,29 +14,9 @@ import { useVibeStore } from '../../stores/vibe-store'
  * ② 经 portal 挂到 body —— 侧栏与工作台容器都带 transform，会把 fixed 的坐标系重定义掉，
  *    与 `MessageItem.tsx` 的浮层同一个理由。
  *
- * 弹窗栈：远程访问之上还能叠一层机器人管理。两层各自监听 keydown 会互相抢焦点，
- * 且按一次 Esc 会同时关掉两个窗口，所以这里用模块级栈保证「只有栈顶响应键盘」。
+ * 与设置页、确认框共用键盘栈，保证只有栈顶响应 Escape / Tab。
+ * 保留 useOverlayKeyboardLock 导出，兼容机器人管理与绑定面板。
  */
-const modalStack: string[] = []
-
-/** 浮层之上又叠了一层「非 Modal」的确认框（ConfirmDialog）时计数，>0 表示 Modal 要让出键盘 */
-let overlayLocks = 0
-
-/**
- * 二次确认框打开期间挂住 Modal 的键盘响应。
- *
- * 不这么做的话：Esc 会被 Modal 的监听器先收到（它注册得更早），一次按键连弹窗一起关掉，
- * 用户还没确认删除就已经看不到确认框了。Tab 循环同理，会让焦点在两层之间乱跳。
- */
-export function useOverlayKeyboardLock(active: boolean) {
-  useEffect(() => {
-    if (!active) return
-    overlayLocks += 1
-    return () => {
-      overlayLocks -= 1
-    }
-  }, [active])
-}
 
 interface ModalProps {
   title: string
@@ -69,48 +51,7 @@ export default function Modal({
   const isVibeMode = useVibeStore((s) => s.isVibeMode)
   const titleId = useId()
   const descId = useId()
-  const panelRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    const id = titleId
-    modalStack.push(id)
-    const previousFocus =
-      document.activeElement instanceof HTMLElement ? document.activeElement : null
-    // 焦点进对话框：落在面板本身，Tab 从第一个可聚焦元素开始，Esc 立刻可用
-    panelRef.current?.focus()
-
-    const isTop = () => modalStack[modalStack.length - 1] === id
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (!isTop() || overlayLocks > 0) return
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        onClose()
-        return
-      }
-      if (e.key !== 'Tab') return
-      const focusable = panelRef.current?.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-      )
-      if (!focusable || focusable.length === 0) return
-      const first = focusable[0]
-      const last = focusable[focusable.length - 1]
-      if (e.shiftKey && document.activeElement === first) {
-        e.preventDefault()
-        last.focus()
-      } else if (!e.shiftKey && document.activeElement === last) {
-        e.preventDefault()
-        first.focus()
-      }
-    }
-    document.addEventListener('keydown', handleKeyDown)
-    return () => {
-      document.removeEventListener('keydown', handleKeyDown)
-      const at = modalStack.indexOf(id)
-      if (at >= 0) modalStack.splice(at, 1)
-      // 关闭后把焦点还给触发元素（与 ConfirmDialog 一致；元素已卸载则不动）
-      if (previousFocus && document.contains(previousFocus)) previousFocus.focus()
-    }
-  }, [onClose, titleId])
+  const panelRef = useModalAccessibility(onClose, undefined, { respectOverlayLock: true })
 
   const panel = (
     <div

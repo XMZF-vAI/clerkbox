@@ -1,28 +1,47 @@
 import { useMemo, useState } from 'react'
 import { CircleHelp, Check, ChevronDown } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { useInteractiveStore } from '../../stores/interactive-store'
+import { useInteractiveStore, type PendingQuestion } from '../../stores/interactive-store'
+
+type QuestionChoice = { kind: 'option'; label: string } | { kind: 'other' }
 
 export default function QuestionCard({ sessionId, vibe = false }: { sessionId: string; vibe?: boolean }) {
-  const { t } = useTranslation()
   const pending = useInteractiveStore((state) => state.pendingQuestions[sessionId])
   const resolveQuestion = useInteractiveStore((state) => state.resolveQuestion)
-  const [selected, setSelected] = useState<Record<string, string>>({})
+  if (!pending) return null
+
+  // 同请求折叠只隐藏内容；换请求/会话则同步重建整个表单，不能复用 q1 等问题 ID 的旧答案。
+  return <QuestionForm key={JSON.stringify([sessionId, pending.id])} sessionId={sessionId} pending={pending} resolveQuestion={resolveQuestion} vibe={vibe} />
+}
+
+function QuestionForm({ sessionId, pending, resolveQuestion, vibe }: {
+  sessionId: string
+  pending: PendingQuestion
+  resolveQuestion: (sessionId: string, requestId: string, answers: Record<string, string[]>) => void
+  vibe: boolean
+}) {
+  const { t } = useTranslation()
+  const [selected, setSelected] = useState<Record<string, QuestionChoice>>({})
   const [other, setOther] = useState<Record<string, string>>({})
   const [expanded, setExpanded] = useState(true)
 
   const answers = useMemo(() => {
-    if (!pending) return {}
     return Object.fromEntries(pending.questions.map((question) => {
       const choice = selected[question.id]
-      return [question.id, choice === '__other__' ? ((other[question.id] || '').trim() ? [(other[question.id] || '').trim()] : []) : choice ? [choice] : []]
+      const answer = choice?.kind === 'other'
+        ? (other[question.id] || '').trim()
+        : choice?.kind === 'option' && question.options.some((option) => option.label === choice.label)
+          ? choice.label
+          : ''
+      return [question.id, answer ? [answer] : []]
     })) as Record<string, string[]>
   }, [other, pending, selected])
 
-  if (!pending) return null
-
-  const submit = () => resolveQuestion(sessionId, pending.id, answers)
   const answered = pending.questions.every((question) => (answers[question.id] || []).length > 0)
+  const submit = () => {
+    if (!answered) return
+    resolveQuestion(sessionId, pending.id, answers)
+  }
   // 已答数 / 总数（进度展示真实作答进度，而不是恒等的 n/n）
   const answeredCount = pending.questions.filter((question) => (answers[question.id] || []).length > 0).length
 
@@ -44,18 +63,18 @@ export default function QuestionCard({ sessionId, vibe = false }: { sessionId: s
       {expanded && (
         <div className="space-y-4 border-t border-current/10 px-4 pb-4 pt-3">
           {pending.questions.map((question) => {
-            const value = selected[question.id] || ''
+            const value = selected[question.id]
             return (
               <div key={question.id} className="space-y-2">
                 <div className="text-sm font-medium">{question.question}</div>
                 <div className="grid gap-2">
                   {question.options.map((option) => {
-                    const active = value === option.label
+                    const active = value?.kind === 'option' && value.label === option.label
                     return (
                       <button
                         type="button"
                         key={option.label}
-                        onClick={() => setSelected((state) => ({ ...state, [question.id]: option.label }))}
+                        onClick={() => setSelected((state) => ({ ...state, [question.id]: { kind: 'option', label: option.label } }))}
                         className={`flex min-h-11 items-start gap-3 rounded-md3-sm border px-3 py-2 text-left transition-colors ${
                           active
                             ? vibe ? 'border-white/60 bg-white/15' : 'border-md-primary bg-md-primary/10'
@@ -74,15 +93,15 @@ export default function QuestionCard({ sessionId, vibe = false }: { sessionId: s
                   })}
                   <button
                     type="button"
-                    onClick={() => setSelected((state) => ({ ...state, [question.id]: '__other__' }))}
+                    onClick={() => setSelected((state) => ({ ...state, [question.id]: { kind: 'other' } }))}
                     className={`flex min-h-11 items-center gap-3 rounded-md3-sm border px-3 py-2 text-left transition-colors ${
-                      value === '__other__' ? vibe ? 'border-white/60 bg-white/15' : 'border-md-primary bg-md-primary/10' : vibe ? 'border-white/15 bg-white/5 hover:bg-white/10' : 'border-dark-onSurfaceVariant/10 bg-dark-surfaceContainer/40 hover:bg-dark-surfaceContainer'
+                      value?.kind === 'other' ? vibe ? 'border-white/60 bg-white/15' : 'border-md-primary bg-md-primary/10' : vibe ? 'border-white/15 bg-white/5 hover:bg-white/10' : 'border-dark-onSurfaceVariant/10 bg-dark-surfaceContainer/40 hover:bg-dark-surfaceContainer'
                     }`}
                   >
-                    <span className={`flex size-4 shrink-0 items-center justify-center rounded-full border ${value === '__other__' ? 'border-md-primary bg-md-primary text-white' : 'border-current/25'}`}>{value === '__other__' && <Check size={11} />}</span>
+                    <span className={`flex size-4 shrink-0 items-center justify-center rounded-full border ${value?.kind === 'other' ? 'border-md-primary bg-md-primary text-white' : 'border-current/25'}`}>{value?.kind === 'other' && <Check size={11} />}</span>
                     <span className="text-sm">{t('question.other')}</span>
                   </button>
-                  {value === '__other__' && (
+                  {value?.kind === 'other' && (
                     <input
                       autoFocus
                       value={other[question.id] || ''}

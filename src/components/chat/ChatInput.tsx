@@ -3,7 +3,7 @@ import { Send, Brain, FolderOpen, ChevronDown, ChevronRight, ArrowLeft, Square, 
 import { useTranslation } from 'react-i18next'
 import { useSettingsStore } from '../../stores/settings-store'
 import { useJouleStore } from '../../stores/joule-store'
-import { useChatStore, type QueuedMessageItem } from '../../stores/chat-store'
+import { useChatStore, EMPTY_CHAT_DRAFT, hasChatDraft, type QueuedMessageItem } from '../../stores/chat-store'
 import { useSkillsStore } from '../../stores/skills-store'
 import { useMcpStore } from '../../stores/mcp-store'
 import { useGoalStore } from '../../stores/goal-store'
@@ -160,7 +160,8 @@ function QueuedAttachmentBadges({ item, vibe }: { item: QueuedMessageItem; vibe:
 }
 
 interface ChatInputProps {
-  onSend: (content: string, attachments?: MessageAttachment[], taskMode?: TaskMode, skills?: MessageSkillSnapshot[]) => void
+  sessionId: string
+  onSend: (content: string, attachments?: MessageAttachment[], taskMode?: TaskMode, skills?: MessageSkillSnapshot[]) => Promise<boolean>
   onManualCompact?: (instructions?: string) => void | Promise<void>
   isCompacting?: boolean
   onStop?: () => void
@@ -173,20 +174,23 @@ interface ChatInputProps {
   vibe?: boolean
 }
 
-export default function ChatInput({ onSend, onManualCompact, isCompacting, onStop, isStreaming, onSendNow, onEnqueueQueued, variant = 'default', vibe = false }: ChatInputProps) {
+export default function ChatInput({ sessionId, onSend, onManualCompact, isCompacting, onStop, isStreaming, onSendNow, onEnqueueQueued, variant = 'default', vibe = false }: ChatInputProps) {
   const { t } = useTranslation()
-  const [content, setContent] = useState('')
-  // 任务工作流芯片（/ 命令菜单选择的 Spec/Plan/Goal，随下一条消息一次性生效）
-  const [taskMode, setTaskMode] = useState<TaskMode | null>(null)
-  // 上下文压缩芯片（/ 命令菜单选择的「压缩」，回车触发手动压缩，输入文本作为可选压缩重点）
-  const [compactMode, setCompactMode] = useState(false)
+  const activeSessionId = sessionId
+  const draft = useChatStore((state) => state.drafts[sessionId] ?? EMPTY_CHAT_DRAFT)
+  const submitting = useChatStore((state) => state.draftSubmitting[sessionId] ?? false)
+  const { content, taskMode, compactMode, attachments } = draft
+  const setContent = (value: string | ((current: string) => string)) => {
+    const current = useChatStore.getState().drafts[sessionId] ?? EMPTY_CHAT_DRAFT
+    useChatStore.getState().updateDraft(sessionId, { content: typeof value === 'function' ? value(current.content) : value })
+  }
+  const setTaskMode = (value: TaskMode | null) => useChatStore.getState().updateDraft(sessionId, { taskMode: value })
+  const setCompactMode = (value: boolean) => useChatStore.getState().updateDraft(sessionId, { compactMode: value })
+  const [pendingQueuedEdit, setPendingQueuedEdit] = useState<QueuedMessageItem | null>(null)
   const [folderSelecting, setFolderSelecting] = useState(false)
   const [attachSelecting, setAttachSelecting] = useState(false)
   const [dragging, setDragging] = useState(false)
-  // 附件列表（图片 base64 / 文件路径引用）。用 ref 镜像最新值，
-  // 保证多文件批量异步添加时上限校验读到的是同步最新列表（闭包里的 state 会过期）。
-  const [attachments, setAttachments] = useState<MessageAttachment[]>([])
-  const attachmentsRef = useRef<MessageAttachment[]>([])
+  const currentAttachments = () => useChatStore.getState().drafts[sessionId]?.attachments ?? []
   const remoteFileInputRef = useRef<HTMLInputElement>(null)
   const [webuiCapabilities, setWebuiCapabilities] = useState<WebUICapabilities | null>(null)
   const [remoteFolderPickerOpen, setRemoteFolderPickerOpen] = useState(false)
@@ -195,12 +199,11 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
   const [remoteFolderLoading, setRemoteFolderLoading] = useState(false)
 
   const commitAttachments = (next: MessageAttachment[]) => {
-    attachmentsRef.current = next
-    setAttachments(next)
+    useChatStore.getState().updateDraft(sessionId, { attachments: next })
   }
 
   const addImageAttachment = (dataUrl: string, name: string, path?: string) => {
-    const prev = attachmentsRef.current
+    const prev = currentAttachments()
     const images = prev.filter((a) => a.kind === 'image')
     const totalBytes = images.reduce((sum, a) => sum + (a.dataUrl?.length ?? 0), 0) + dataUrl.length
     if (images.length >= MAX_IMAGES || totalBytes > MAX_TOTAL_IMAGE_BYTES) {
@@ -219,11 +222,11 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
   }
 
   const addFileAttachment = (name: string, path: string) => {
-    commitAttachments([...attachmentsRef.current, { id: genAttachmentId(), kind: 'file', name, path }])
+    commitAttachments([...currentAttachments(), { id: genAttachmentId(), kind: 'file', name, path }])
   }
 
   const removeAttachment = (id: string) => {
-    commitAttachments(attachmentsRef.current.filter((a) => a.id !== id))
+    commitAttachments(currentAttachments().filter((a) => a.id !== id))
   }
 
   const webuiUploadEnabled = isWebUIMode
@@ -253,10 +256,9 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
   const jouleNotice = useJouleStore((s) => s.notice)
   const dismissJouleNotice = useJouleStore((s) => s.dismissNotice)
   const jouleUnlocked = !!joulePlan && (jouleSubscription?.expiresAt ?? 0) > Date.now() && jouleStatus !== 'needs_reauth'
-  const { sessions, activeSessionId, createSession, updateSessionWorkingDir, setSessionHarnessMode, recentsFolders, pushRecentFolder } = useChatStore(
+  const { sessions, createSession, updateSessionWorkingDir, setSessionHarnessMode, recentsFolders, pushRecentFolder } = useChatStore(
     useShallow((s) => ({
       sessions: s.sessions,
-      activeSessionId: s.activeSessionId,
       createSession: s.createSession,
       updateSessionWorkingDir: s.updateSessionWorkingDir,
       setSessionHarnessMode: s.setSessionHarnessMode,
@@ -416,14 +418,18 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
   }
 
   /** 排队消息三个操作：编辑（回填输入框并移出队列）/ 立即发送（中断并立即发出）/ 删除 */
-  const handleQueuedEdit = (item: QueuedMessageItem) => {
-    if (!activeSessionId) return
-    useChatStore.getState().removeQueuedMessage(activeSessionId, item.id)
-    // 本地队列只是视图：宿主模式下必须同时撤回，否则被删的那条仍会被发出去
+  const applyQueuedEdit = (item: QueuedMessageItem) => {
+    const state = useChatStore.getState()
+    if (!activeSessionId || state.draftSubmitting[sessionId]) return
+    if (!state.queuedMessages[sessionId]?.some((queued) => queued.id === item.id)) return
+    state.removeQueuedMessage(activeSessionId, item.id)
     void hostQueue.remove(activeSessionId, item.id)
-    setContent(item.content)
-    setTaskMode(item.taskMode ?? null)
-    if (item.attachments?.length) commitAttachments(item.attachments)
+    state.updateDraft(sessionId, {
+      content: item.content,
+      taskMode: item.taskMode ?? null,
+      compactMode: false,
+      attachments: item.attachments ?? [],
+    })
     requestAnimationFrame(() => {
       if (textareaRef.current) {
         textareaRef.current.style.height = 'auto'
@@ -432,6 +438,36 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
       }
     })
   }
+
+  const handleQueuedEdit = (item: QueuedMessageItem) => {
+    if (hasChatDraft(useChatStore.getState().drafts[sessionId])) setPendingQueuedEdit(item)
+    else applyQueuedEdit(item)
+  }
+
+  const submitDraft = async (text: string, files?: MessageAttachment[], mode?: TaskMode, skills?: MessageSkillSnapshot[]) => {
+    const state = useChatStore.getState()
+    if (state.draftSubmitting[sessionId]) return
+    const sentDraft = state.drafts[sessionId] ?? EMPTY_CHAT_DRAFT
+    state.setDraftSubmitting(sessionId, true)
+    try {
+      if (await onSend(text, files, mode, skills)) {
+        useChatStore.getState().clearDraft(sessionId, sentDraft)
+      }
+    } catch (error) {
+      if (useChatStore.getState().sessions.some((session) => session.id === sessionId)) {
+        useChatStore.getState().setSessionError(sessionId, error instanceof Error ? error.message : String(error))
+      }
+    } finally {
+      useChatStore.getState().setDraftSubmitting(sessionId, false)
+    }
+  }
+
+  useLayoutEffect(() => {
+    const textarea = textareaRef.current
+    if (!textarea) return
+    textarea.style.height = 'auto'
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`
+  }, [content])
 
   const handleQueuedSendNow = (item: QueuedMessageItem) => {
     onSendNow?.(item)
@@ -445,6 +481,7 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
   }
 
   const handleSend = () => {
+    if (useChatStore.getState().draftSubmitting[sessionId]) return
     const trimmed = content.trim()
     // AI 运行/压缩中：消息进入排队组件（可编辑/立即发送/删除，运行结束后 FIFO 自动发出）。
     // 排队条目按普通消息的完整语义入队（附件/任务芯片/技能快照原样保留，发出时透传）。
@@ -476,10 +513,7 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
       void hostQueue.enqueue(activeSessionId, queuedItem)
       // 兜住"入队瞬间 run 恰好结束"的竞态：flush 自带空闲守卫，忙碌时跳过
       onEnqueueQueued?.()
-      setContent('')
-      setTaskMode(null)
-      setCompactMode(false)
-      commitAttachments([])
+      useChatStore.getState().clearDraft(sessionId, draft)
       if (textareaRef.current) {
         textareaRef.current.style.height = 'auto'
       }
@@ -491,15 +525,12 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
     //  无参数的 /goal 不在此处理（走命令菜单的芯片流程，用户接着输入条件正文）
     if (/^\/goal\s+\S/i.test(trimmed)) {
       const goalArg = trimmed.replace(/^\/goal\s+/i, '').trim()
-      setContent('')
-      if (textareaRef.current) {
-        textareaRef.current.style.height = 'auto'
-      }
       if (/^(clear|stop|off|reset|cancel)$/i.test(goalArg)) {
         if (activeSessionId) useGoalStore.getState().clearGoal(activeSessionId)
+        setContent('')
         return
       }
-      onSend(goalArg, undefined, 'goal', undefined)
+      void submitDraft(goalArg, attachments.length ? attachments : undefined, 'goal', undefined)
       return
     }
     // 压缩模式：回车执行手动压缩（输入文本作为可选自定义指令），不走普通消息发送
@@ -535,18 +566,12 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
           ...activeSkills.filter((s) => s.id !== matchedSkill.id),
           matchedSkill,
         ].map(({ id, name, icon, slug }) => ({ id, name, icon, slug }))
-        onSend(
+        void submitDraft(
           rest,
           attachments.length ? attachments : undefined,
           taskMode ?? undefined,
           skillSnapshots
         )
-        setContent('')
-        setTaskMode(null)
-        commitAttachments([])
-        if (textareaRef.current) {
-          textareaRef.current.style.height = 'auto'
-        }
         return
       }
     }
@@ -566,18 +591,12 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
       icon,
       slug,
     }))
-    onSend(
+    void submitDraft(
       trimmed,
       attachments.length ? attachments : undefined,
       taskMode ?? undefined,
       skillSnapshots.length ? skillSnapshots : undefined
     )
-    setContent('')
-    setTaskMode(null)
-    commitAttachments([])
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto'
-    }
   }
 
   const attachRemoteFile = async (file: File) => {
@@ -2250,7 +2269,7 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
           <button
             type="button"
             onClick={isStreaming ? onStop : handleSend}
-            disabled={isCompacting || (!isStreaming && !compactMode && !content.trim() && attachments.length === 0)}
+            disabled={isCompacting || (!isStreaming && (submitting || (!compactMode && !content.trim() && attachments.length === 0)))}
             aria-label={isStreaming ? t('chat.stopResponseAria') : t('chat.sendMessageAria')}
             className={`chat-toolbar-send h-9 w-9 max-md:h-12 max-md:w-12 flex-shrink-0 flex items-center justify-center rounded-full transition-colors disabled:opacity-30 disabled:cursor-not-allowed ${
               isStreaming
@@ -2260,7 +2279,7 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
                   : 'bg-md-primary text-md-onPrimary hover:bg-md-primary/90'
             }`}
           >
-            {isCompacting
+            {isCompacting || (submitting && !isStreaming)
               ? <Loader2 size={isMobile ? 18 : 14} className="animate-spin" />
               : isStreaming
                 ? <Square size={isMobile ? 18 : 14} />
@@ -2317,6 +2336,15 @@ export default function ChatInput({ onSend, onManualCompact, isCompacting, onSto
       )}
 
       {/* 新文件夹授权弹窗 */}
+      {pendingQueuedEdit && (
+        <ConfirmDialog
+          title={t('chat.queuedEditReplaceTitle')}
+          message={t('chat.queuedEditReplaceBody')}
+          variant="danger"
+          onConfirm={() => { applyQueuedEdit(pendingQueuedEdit); setPendingQueuedEdit(null) }}
+          onCancel={() => setPendingQueuedEdit(null)}
+        />
+      )}
       {pendingFolder && (
         <ConfirmDialog
           title={t('chat.folderPermissionTitle')}

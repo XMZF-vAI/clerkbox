@@ -1,4 +1,5 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useId } from 'react'
+import { useModalAccessibility } from '../../hooks/use-modal-accessibility'
 import {
   Plus, Trash2, Pencil, X, Check, AlertCircle, Loader2, Plug, FileJson, RefreshCw,
 } from 'lucide-react'
@@ -118,8 +119,9 @@ function ServerDialog({
   onSave: (server: McpServerConfig) => void
 }) {
   const { t } = useTranslation()
-  const dialogRef = useRef<HTMLDivElement>(null)
   const nameRef = useRef<HTMLInputElement>(null)
+  const dialogRef = useModalAccessibility(onClose, nameRef)
+  const titleId = useId()
   const [name, setName] = useState(initial?.name ?? '')
   const [transport, setTransport] = useState<McpTransportType>(initial?.transport ?? 'stdio')
   const [command, setCommand] = useState(initial?.command ?? '')
@@ -186,24 +188,18 @@ function ServerDialog({
     onSave(config)
   }
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Escape') {
-      e.stopPropagation()
-      onClose()
-    }
-  }
-
   return (
-    <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/50 rounded-md3-xl p-4" onKeyDown={handleKeyDown}>
+    <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/50 rounded-md3-xl p-4">
       <div
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
+        aria-labelledby={titleId}
         tabIndex={-1}
         className="w-full max-w-md max-h-full overflow-y-auto bg-dark-surfaceDim rounded-md3-lg border border-dark-onSurfaceVariant/10 p-5 space-y-4"
       >
         <div className="flex items-center justify-between">
-          <h3 className="text-sm font-semibold">{initial ? t('settings.mcp.editServer') : t('settings.mcp.addServer')}</h3>
+          <h3 id={titleId} className="text-sm font-semibold">{initial ? t('settings.mcp.editServer') : t('settings.mcp.addServer')}</h3>
           <button
             type="button"
             onClick={onClose}
@@ -216,7 +212,7 @@ function ServerDialog({
 
         <div>
           <label className="block text-xs text-dark-onSurfaceVariant mb-1">{t('settings.mcp.serverName')}</label>
-          <input ref={nameRef} className={inputCls} value={name} onChange={(e) => setName(e.target.value)} placeholder={t('settings.mcp.namePlaceholder')} autoFocus />
+          <input ref={nameRef} className={inputCls} value={name} onChange={(e) => setName(e.target.value)} placeholder={t('settings.mcp.namePlaceholder')} />
         </div>
 
         <div>
@@ -326,13 +322,9 @@ function ImportDialog({
   const { t } = useTranslation()
   const [text, setText] = useState('')
   const [error, setError] = useState('')
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Escape') {
-      e.stopPropagation()
-      onClose()
-    }
-  }
+  const textRef = useRef<HTMLTextAreaElement>(null)
+  const dialogRef = useModalAccessibility(onClose, textRef)
+  const titleId = useId()
 
   const handleImport = () => {
     const { servers, error } = parseMcpJson(text)
@@ -344,15 +336,17 @@ function ImportDialog({
   }
 
   return (
-    <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/50 rounded-md3-xl p-4" onKeyDown={handleKeyDown}>
+    <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/50 rounded-md3-xl p-4">
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
+        aria-labelledby={titleId}
         tabIndex={-1}
         className="w-full max-w-md max-h-full overflow-y-auto bg-dark-surfaceDim rounded-md3-lg border border-dark-onSurfaceVariant/10 p-5 space-y-4"
       >
         <div className="flex items-center justify-between">
-          <h3 className="text-sm font-semibold">{t('settings.mcp.importTitle')}</h3>
+          <h3 id={titleId} className="text-sm font-semibold">{t('settings.mcp.importTitle')}</h3>
           <button
             type="button"
             onClick={onClose}
@@ -369,7 +363,7 @@ function ImportDialog({
           value={text}
           onChange={(e) => { setText(e.target.value); setError('') }}
           placeholder={'{\n  "mcpServers": {\n    "filesystem": {\n      "command": "npx",\n      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path"]\n    }\n  }\n}'}
-          autoFocus
+          ref={textRef}
         />
         {error && (
           <div role="alert" className="flex items-center gap-1.5 text-xs text-md-error">
@@ -419,6 +413,9 @@ export default function McpSection() {
   const [editing, setEditing] = useState<McpServerConfig | 'new' | null>(null)
   const [showImport, setShowImport] = useState(false)
   const [removing, setRemoving] = useState<string | null>(null)
+  const removeCancelRef = useRef<HTMLButtonElement>(null)
+  const removeDialogRef = useModalAccessibility(() => setRemoving(null), removeCancelRef, { active: removing !== null })
+  const removeMessageId = useId()
 
   const saveServer = (server: McpServerConfig) => {
     const exists = settings.mcpServers.some((s) => s.id === server.id)
@@ -553,13 +550,13 @@ export default function McpSection() {
       {/* 删除确认 */}
       {removing && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div role="alertdialog" aria-modal="true" className="w-full max-w-xs bg-dark-surfaceDim rounded-md3-lg border border-dark-onSurfaceVariant/10 p-5 space-y-4">
-            <p className="text-sm">{t('settings.mcp.removeConfirm')}</p>
+          <div ref={removeDialogRef} role="alertdialog" aria-modal="true" aria-label={t('settings.mcp.removeServer')} aria-describedby={removeMessageId} tabIndex={-1} className="w-full max-w-xs bg-dark-surfaceDim rounded-md3-lg border border-dark-onSurfaceVariant/10 p-5 space-y-4">
+            <p id={removeMessageId} className="text-sm">{t('settings.mcp.removeConfirm')}</p>
             <div className="flex justify-end gap-2">
-              <button type="button" onClick={() => setRemoving(null)} className="px-3 py-1.5 rounded-md3-sm text-xs text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh transition-colors">
+              <button ref={removeCancelRef} type="button" onClick={() => setRemoving(null)} className="px-3 py-1.5 rounded-md3-sm text-xs text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh transition-colors">
                 {t('common.cancel')}
               </button>
-              <button type="button" onClick={() => removeServer(removing)} className="px-3 py-1.5 bg-md-error text-white rounded-md3-sm text-xs font-medium hover:bg-md-error/90 transition-colors">
+              <button type="button" onClick={() => removeServer(removing)} className="px-3 py-1.5 bg-md-error text-md-onError rounded-md3-sm text-xs font-medium hover:bg-md-error/90 transition-colors">
                 {t('settings.mcp.removeServer')}
               </button>
             </div>

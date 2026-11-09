@@ -83,8 +83,26 @@ export function setSessionAbortController(sessionId: string, controller: AbortCo
   }
 }
 
+export interface ChatDraft {
+  content: string
+  attachments: MessageAttachment[]
+  taskMode: TaskMode | null
+  compactMode: boolean
+}
+
+export const EMPTY_CHAT_DRAFT: ChatDraft = { content: '', attachments: [], taskMode: null, compactMode: false }
+
+export function hasChatDraft(draft?: ChatDraft): boolean {
+  return !!draft && (!!draft.content || draft.attachments.length > 0 || !!draft.taskMode || draft.compactMode)
+}
+
 interface ChatState {
   sessions: Session[]
+  drafts: Record<string, ChatDraft>
+  draftSubmitting: Record<string, boolean>
+  updateDraft: (sessionId: string, patch: Partial<ChatDraft>) => void
+  clearDraft: (sessionId: string, expected: ChatDraft) => void
+  setDraftSubmitting: (sessionId: string, submitting: boolean) => void
   activeSessionId: string | null
   // 当前所有正在 streaming 的会话 id 集合（支持多会话并发）
   streamingSessionIds: Set<string>
@@ -208,6 +226,22 @@ const isPristineSession = (s: Session): boolean =>
 
 export const useChatStore = create<ChatState>((set, get) => ({
   sessions: [],
+  drafts: {},
+  draftSubmitting: {},
+  updateDraft: (sessionId, patch) => set((state) => {
+    if (!state.sessions.some((session) => session.id === sessionId)) return state
+    return { drafts: { ...state.drafts, [sessionId]: { ...(state.drafts[sessionId] ?? EMPTY_CHAT_DRAFT), ...patch } } }
+  }),
+  clearDraft: (sessionId, expected) => set((state) => {
+    if (state.drafts[sessionId] !== expected) return state
+    const drafts = { ...state.drafts }
+    delete drafts[sessionId]
+    return { drafts }
+  }),
+  setDraftSubmitting: (sessionId, submitting) => set((state) => {
+    if (!state.sessions.some((session) => session.id === sessionId)) return state
+    return { draftSubmitting: { ...state.draftSubmitting, [sessionId]: submitting } }
+  }),
   activeSessionId: null,
   streamingSessionIds: new Set(),
   sessionStatus: {},
@@ -406,9 +440,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // 首条消息落库时由 dbAddMessage 的自愈逻辑补建会话行。
       // 顺带清掉内存里其他空会话（连点新建只保留最新一个），
       // 若历史版本把它们写进过 DB 也一并删除。
-      const cleanedSessions = state.sessions.filter((s) => !isEmptySession(s))
+      const cleanedSessions = state.sessions.filter((s) => !isEmptySession(s) || hasChatDraft(state.drafts[s.id]) || state.draftSubmitting[s.id])
       for (const s of state.sessions) {
-        if (isEmptySession(s)) {
+        if (isEmptySession(s) && !hasChatDraft(state.drafts[s.id]) && !state.draftSubmitting[s.id]) {
           logPersistenceFailure('delete empty session', ipc.dbDeleteSession(s.id))
         }
       }
@@ -438,7 +472,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((state) => {
       // 切走时清掉非 active 的空会话（没说过话的会话不配留在历史记录里）
       const cleanedSessions = state.sessions.map((s) => {
-        if (s.id !== id && isEmptySession(s)) {
+        if (s.id !== id && isEmptySession(s) && !hasChatDraft(state.drafts[s.id]) && !state.draftSubmitting[s.id]) {
           logPersistenceFailure('delete empty session', ipc.dbDeleteSession(s.id))
           return null
         }
@@ -671,7 +705,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // 宿主回灌的错误横幅数据源同样按会话隔离，会话没了要一并清掉
       const nextErrors = { ...state.sessionErrors }
       delete nextErrors[id]
+      const drafts = { ...state.drafts }
+      const draftSubmitting = { ...state.draftSubmitting }
+      delete drafts[id]
+      delete draftSubmitting[id]
       return {
+        drafts,
+        draftSubmitting,
         sessions: filtered,
         sessionStatus: nextStatus,
         queuedMessages: nextQueued,

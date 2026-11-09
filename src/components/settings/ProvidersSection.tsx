@@ -12,6 +12,8 @@ import {
 } from '../../lib/provider-catalog'
 import { ipc } from '../../lib/ipc-client'
 import ConfirmDialog from '../ui/ConfirmDialog'
+import { useModalAccessibility } from '../../hooks/use-modal-accessibility'
+import { useProviderConnectionTest } from '../../hooks/use-provider-connection-test'
 import type { ApiCompat, ModelProvider, ProviderModel, ReasoningEffort } from '../../types/agent'
 import { REASONING_EFFORTS } from '../../types/agent'
 import type { FetchedModel } from '../../types/ipc'
@@ -29,56 +31,6 @@ const thinkingModeOf = (m: ProviderModel): ThinkingMode =>
 
 const inputCls =
   'w-full px-3 py-2 bg-dark-surfaceContainerHighest rounded-md3-sm text-sm border border-dark-onSurfaceVariant/10 outline-none focus:border-md-primary/40 transition-colors'
-
-/** Keep transient modal focus and keyboard behavior consistent across settings dialogs. */
-function useModalAccessibility(onClose: () => void, initialFocus: { current: HTMLElement | null }) {
-  const dialogRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    const dialog = dialogRef.current
-    const focusableSelector = [
-      'button:not([disabled])',
-      '[href]',
-      'input:not([disabled])',
-      'select:not([disabled])',
-      'textarea:not([disabled])',
-      '[tabindex]:not([tabindex="-1"])',
-    ].join(',')
-
-    if (initialFocus.current) initialFocus.current.focus()
-    else dialog?.focus()
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault()
-        event.stopPropagation()
-        onClose()
-        return
-      }
-      if (event.key !== 'Tab' || !dialog) return
-
-      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(focusableSelector))
-      if (focusable.length === 0) return
-      const first = focusable[0]
-      const last = focusable[focusable.length - 1]
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault()
-        last.focus()
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault()
-        first.focus()
-      }
-    }
-
-    document.addEventListener('keydown', onKeyDown, true)
-    return () => {
-      document.removeEventListener('keydown', onKeyDown, true)
-      if (previousFocus && document.contains(previousFocus)) previousFocus.focus()
-    }
-  }, [initialFocus, onClose])
-
-  return dialogRef
-}
 
 const GROUP_LABEL_KEY: Record<ProviderGroup, string> = {
   official: 'settings.providers.groupOfficial',
@@ -166,8 +118,7 @@ export default function ProvidersSection() {
 function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onPickModels: () => void }) {
   const { t } = useTranslation()
   const settings = useSettingsStore()
-  const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'ok' | 'error'>('idle')
-  const [testMsg, setTestMsg] = useState('')
+  const { testStatus, testMsg, testConnection } = useProviderConnectionTest(provider.id)
   const [manualId, setManualId] = useState('')
   const [renaming, setRenaming] = useState(false)
   const [nameDraft, setNameDraft] = useState(provider.name)
@@ -182,72 +133,6 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
 
   const patch = (partial: Partial<ModelProvider>) =>
     settings.upsertProvider({ ...provider, ...partial })
-
-  const testConnection = async () => {
-    setTestStatus('testing')
-    setTestMsg('')
-    const cfg = {
-      baseUrl: provider.baseUrl,
-      apiKey: provider.apiKey,
-      apiCompat: provider.apiCompat,
-    }
-    const res = await ipc.apiTestConnection(cfg)
-    if ('error' in res) {
-      setTestMsg(res.error)
-      setTestStatus('error')
-      return
-    }
-    // 连通性通过；无模型则直接出结果
-    if (provider.models.length === 0) {
-      setTestMsg(`${res.latencyMs}ms`)
-      setTestStatus('ok')
-      return
-    }
-    // 连接成功先立即报一声，图片探测完成后再补结果（不憋到最后一起报）
-    setTestMsg(`${res.latencyMs}ms · ${t('settings.api.visionProbing')}`)
-    setTestStatus('ok')
-    // 对全部已启用模型并行探测图片输入支持
-    const visionErrorRe = /image|vision|multimodal|multi-modal|modality|视觉|图片|image_url/i
-    const results = await Promise.allSettled(
-      provider.models.map((m) => ipc.apiTestVision(cfg, m.id))
-    )
-    let unknown = 0
-    let changed = false
-    const updatedModels = provider.models.map((m, i) => {
-      const r = results[i]
-      if (r.status !== 'fulfilled') {
-        unknown += 1
-        return m
-      }
-      const v = r.value
-      if (v.ok) {
-        // 内容判定：说出图里颜色→支持；明确说看不到→不支持；瞎猜颜色等歧义回复→无法判定保持现值
-        if (v.supported === null) {
-          unknown += 1
-          return m
-        }
-        if (m.supportsImages !== v.supported) changed = true
-        return { ...m, supportsImages: v.supported }
-      }
-      const rejectedForImages =
-        typeof v.status === 'number' &&
-        v.status >= 400 && v.status < 500 &&
-        visionErrorRe.test(v.error)
-      if (rejectedForImages) {
-        if (m.supportsImages) changed = true
-        return { ...m, supportsImages: false }
-      }
-      // 网络错误/超时/鉴权/限流/5xx/与图片无关的 4xx：无法判定，保持现值
-      unknown += 1
-      return m
-    })
-    if (changed) settings.setProviderModels(provider.id, updatedModels)
-    const supported = updatedModels.filter((m) => m.supportsImages === true).length
-    let msg = `${res.latencyMs}ms · ${t('settings.api.visionSummary', { supported, total: provider.models.length })}`
-    if (unknown > 0) msg += ` · ${t('settings.api.visionUnknown', { count: unknown })}`
-    setTestMsg(msg)
-    setTestStatus('ok')
-  }
 
   const addManualModel = () => {
     const id = manualId.trim()
@@ -281,7 +166,7 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
     <div
       className={`rounded-md3-md border transition-colors ${
         isActiveProvider
-          ? 'border-md-primary/40 bg-md-primary/8'
+          ? 'border-md-primary/40 bg-md-primary/[0.08]'
           : 'border-dark-onSurfaceVariant/10 bg-dark-surfaceContainerHigh'
       }`}
     >

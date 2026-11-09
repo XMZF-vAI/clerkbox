@@ -27,10 +27,10 @@ function StatCard({ icon: Icon, label, value, hint, accent }: StatCardProps) {
     info: 'text-md-info',
   }
   const bgMap: Record<StatCardProps['accent'], string> = {
-    primary: 'bg-md-primary/8 border-md-primary/20',
-    success: 'bg-md-success/8 border-md-success/20',
-    warning: 'bg-md-warning/8 border-md-warning/20',
-    info: 'bg-md-info/8 border-md-info/20',
+    primary: 'bg-md-primary/[0.08] border-md-primary/20',
+    success: 'bg-md-success/[0.08] border-md-success/20',
+    warning: 'bg-md-warning/[0.08] border-md-warning/20',
+    info: 'bg-md-info/[0.08] border-md-info/20',
   }
   return (
     <div className={`p-3 rounded-md3-md border ${bgMap[accent]}`}>

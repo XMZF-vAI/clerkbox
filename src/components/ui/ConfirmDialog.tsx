@@ -1,4 +1,5 @@
-import { useEffect, useRef } from 'react'
+import { useId, useRef } from 'react'
+import { useModalAccessibility } from '../../hooks/use-modal-accessibility'
 import { AlertTriangle, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useVibeStore } from '../../stores/vibe-store'
@@ -26,42 +27,11 @@ export default function ConfirmDialog({
   const isVibeMode = useVibeStore((s) => s.isVibeMode)
   const finalConfirmText = confirmText || t('confirmDialog.confirm')
   const finalCancelText = cancelText || t('confirmDialog.cancel')
-  const dialogRef = useRef<HTMLDivElement>(null)
+  const titleId = useId()
+  const messageId = useId()
   const cancelButtonRef = useRef<HTMLButtonElement>(null)
   const confirmButtonRef = useRef<HTMLButtonElement>(null)
-  const previousFocusRef = useRef<HTMLElement | null>(null)
-
-  useEffect(() => {
-    previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    ;(variant === 'danger' ? cancelButtonRef.current : confirmButtonRef.current)?.focus()
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        onCancel()
-        return
-      }
-      if (e.key !== 'Tab') return
-      const focusable = dialogRef.current?.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-      )
-      if (!focusable || focusable.length === 0) return
-      const first = focusable[0]
-      const last = focusable[focusable.length - 1]
-      if (e.shiftKey && document.activeElement === first) {
-        e.preventDefault()
-        last.focus()
-      } else if (!e.shiftKey && document.activeElement === last) {
-        e.preventDefault()
-        first.focus()
-      }
-    }
-    document.addEventListener('keydown', handleKeyDown)
-    return () => {
-      document.removeEventListener('keydown', handleKeyDown)
-      const previousFocus = previousFocusRef.current
-      if (previousFocus && document.contains(previousFocus)) previousFocus.focus()
-    }
-  }, [onCancel, variant])
+  const dialogRef = useModalAccessibility(onCancel, variant === 'danger' ? cancelButtonRef : confirmButtonRef)
 
   return (
     // 普通模式下让出标题栏区域（top-11），保证窗口控制按钮始终可见可用；
@@ -74,8 +44,9 @@ export default function ConfirmDialog({
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
-        aria-labelledby="confirm-dialog-title"
-        aria-describedby="confirm-dialog-message"
+        aria-labelledby={titleId}
+        aria-describedby={messageId}
+        tabIndex={-1}
         className="w-[400px] max-w-[calc(100vw-2rem)] bg-dark-surfaceDim rounded-md3-xl border border-dark-onSurfaceVariant/10 flex flex-col shadow-elevation-3 animate-pop-in"
         onClick={(e) => e.stopPropagation()}
       >
@@ -85,7 +56,7 @@ export default function ConfirmDialog({
             {variant === 'danger' && (
               <AlertTriangle size={18} className="text-md-error" />
             )}
-            <h2 id="confirm-dialog-title" className="text-base font-semibold">{title}</h2>
+            <h2 id={titleId} className="text-base font-semibold">{title}</h2>
           </div>
           <button
             ref={cancelButtonRef}
@@ -100,7 +71,7 @@ export default function ConfirmDialog({
 
         {/* Body */}
         <div className="px-5 py-4">
-          <p id="confirm-dialog-message" className="text-sm text-dark-onSurfaceVariant leading-relaxed">{message}</p>
+          <p id={messageId} className="text-sm text-dark-onSurfaceVariant leading-relaxed">{message}</p>
         </div>
 
         {/* Footer */}
@@ -118,7 +89,7 @@ export default function ConfirmDialog({
             onClick={onConfirm}
             className={`md-focus px-4 py-2 rounded-md3-sm text-sm font-medium transition-colors ${
               variant === 'danger'
-                ? 'bg-md-error text-white hover:bg-md-error/90'
+                ? 'bg-md-error text-md-onError hover:bg-md-error/90'
                 : 'bg-md-primary text-md-onPrimary hover:bg-md-primary/90'
             }`}
           >

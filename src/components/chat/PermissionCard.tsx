@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Ban, Check, ChevronDown, ChevronRight, ChevronUp, Clock, GitBranch, ShieldAlert, ShieldCheck, ShieldQuestion } from 'lucide-react'
 import { DiffLineList } from './tool-renderers/ToolShell'
@@ -192,7 +192,7 @@ function FileDiffPreview({ tool, path, args, vibe }: {
  * 看清全部后果；三个并排按钮则把「允许一次」和「本会话始终允许」做成同权重的邻居，
  * 点错的代价不对称却看不出来。
  *
- * 交互：点一次选中，再点一次提交；1/2/3 直接提交；上下键移动；回车确认。
+ * 交互：点一次选中，再点一次提交；数字键直接提交；Tab/上下键移动焦点；Enter/Space 确认焦点项。
  * 默认停在「允许一次」—— 这是唯一无副作用的那个选项。
  */
 function ApprovalOptionList({
@@ -210,35 +210,17 @@ function ApprovalOptionList({
 }) {
   const { t } = useTranslation()
   const [selected, setSelected] = useState<PermissionDecision>(options[0]?.decision ?? 'allow_once')
+  const buttons = useRef<Array<HTMLButtonElement | null>>([])
+  // pointerdown 早于 focus：保留点击前的选择，避免 focus 同步选中后首次点击就提交。
+  const pointerSelection = useRef<PermissionDecision | null>(null)
 
   const commit = (decision: PermissionDecision) => onResolve(decision)()
 
   return (
     <div
-      role="listbox"
+      role="group"
       aria-label={t('chat.permission.title')}
       className="border-t border-current/10 px-4 py-3"
-      onKeyDown={(e) => {
-        if (['1', '2', '3'].includes(e.key) && Number(e.key) <= options.length) {
-          e.preventDefault()
-          commit(options[Number(e.key) - 1]!.decision)
-          return
-        }
-        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-          e.preventDefault()
-          const delta = e.key === 'ArrowDown' ? 1 : -1
-          setSelected((current) => {
-            const index = options.findIndex((option) => option.decision === current)
-            const next = (index + delta + options.length) % options.length
-            return options[next]!.decision
-          })
-          return
-        }
-        if (e.key === 'Enter') {
-          e.preventDefault()
-          commit(selected)
-        }
-      }}
     >
       {options.map((option, index) => {
         const isSelected = option.decision === selected
@@ -247,10 +229,31 @@ function ApprovalOptionList({
           <button
             key={option.decision}
             type="button"
-            role="option"
-            aria-selected={isSelected}
-            onClick={() => (isSelected ? commit(option.decision) : setSelected(option.decision))}
-            className={`flex w-full items-center gap-3 rounded-md3-sm px-3 py-2 text-left transition-colors focus-visible:outline-none ${
+            ref={(button) => { buttons.current[index] = button }}
+            aria-pressed={isSelected}
+            onPointerDown={() => { pointerSelection.current = selected }}
+            onPointerCancel={() => { pointerSelection.current = null }}
+            onFocus={() => setSelected(option.decision)}
+            onKeyDown={(e) => {
+              if (/^[1-9]$/.test(e.key) && Number(e.key) <= options.length) {
+                e.preventDefault()
+                const target = Number(e.key) - 1
+                buttons.current[target]?.focus()
+                commit(options[target]!.decision)
+              } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                e.preventDefault()
+                const delta = e.key === 'ArrowDown' ? 1 : -1
+                buttons.current[(index + delta + options.length) % options.length]?.focus()
+              }
+              // Enter/Space 交给原生 button 的 click，始终提交真实焦点项；Tab 保持原生遍历。
+            }}
+            onClick={(e) => {
+              const wasSelected = (pointerSelection.current ?? selected) === option.decision
+              pointerSelection.current = null
+              if (e.detail === 0 || wasSelected) commit(option.decision)
+              else setSelected(option.decision)
+            }}
+            className={`flex w-full items-center gap-3 rounded-md3-sm px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-current ${
               isSelected
                 ? vibe ? 'bg-white/15' : 'bg-dark-surfaceContainerHigh'
                 : vibe ? 'hover:bg-white/8' : 'hover:bg-dark-surfaceContainerHigh/60'
@@ -351,6 +354,7 @@ function WorkflowPermissionCard({ request, onResolve, interactive = true, vibe =
 
       {showActions ? (
         <ApprovalOptionList
+          key={request.id}
           vibe={vibe}
           onResolve={resolve}
           options={APPROVAL_OPTIONS.map((option) => ({
@@ -474,6 +478,7 @@ export function PermissionCard({ request, onResolve, interactive = true, vibe = 
 
       {showActions ? (
         <ApprovalOptionList
+          key={request.id}
           vibe={vibe}
           onResolve={resolve}
           options={approvalOptions}

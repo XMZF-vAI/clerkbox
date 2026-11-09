@@ -12,6 +12,7 @@ import ProvidersSection from './ProvidersSection'
 import McpSection from './McpSection'
 import TokenUsageStats from './TokenUsageStats'
 import ConfirmDialog from '../ui/ConfirmDialog'
+import { useModalAccessibility } from '../../hooks/use-modal-accessibility'
 
 import APP_ICON from '../../assets/icon.png'
 
@@ -51,8 +52,8 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
   const [encPass2, setEncPass2] = useState('')
   const [encError, setEncError] = useState('')
   const titleId = useId()
-  const dialogRef = useRef<HTMLDivElement>(null)
   const closeButtonRef = useRef<HTMLButtonElement>(null)
+  const dialogRef = useModalAccessibility(onClose, closeButtonRef)
 
   // 消费后立即清空标记，下次打开设置页回到默认 tab
   useEffect(() => {
@@ -66,46 +67,6 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
     activeProvider?.models.find((m) => m.id === settings.activeModelId)?.label ||
     settings.model ||
     t('settings.api.noActive')
-
-  useEffect(() => {
-    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    const dialog = dialogRef.current
-    const focusableSelector = [
-      'button:not([disabled])',
-      '[href]',
-      'input:not([disabled])',
-      'select:not([disabled])',
-      'textarea:not([disabled])',
-      '[tabindex]:not([tabindex="-1"])',
-    ].join(',')
-    closeButtonRef.current?.focus()
-
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        onClose()
-        return
-      }
-      if (e.key !== 'Tab' || !dialog) return
-
-      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(focusableSelector))
-      if (focusable.length === 0) return
-      const first = focusable[0]
-      const last = focusable[focusable.length - 1]
-      if (e.shiftKey && document.activeElement === first) {
-        e.preventDefault()
-        last.focus()
-      } else if (!e.shiftKey && document.activeElement === last) {
-        e.preventDefault()
-        first.focus()
-      }
-    }
-    document.addEventListener('keydown', handleKeyDown)
-    return () => {
-      document.removeEventListener('keydown', handleKeyDown)
-      if (previousFocus && document.contains(previousFocus)) previousFocus.focus()
-    }
-  }, [onClose])
 
   // 走主进程代理，两种协议共用一条路径（直连由 provider.directFetch 单独控制）
   const handleTestConnection = async () => {
@@ -216,7 +177,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
             {activeTab === 'api' && (
               <div className="space-y-5">
                 {/* 当前生效 */}
-                <div className="flex items-center gap-3 px-4 py-3 rounded-md3-md bg-md-primary/8 border border-md-primary/20">
+                <div className="flex items-center gap-3 px-4 py-3 rounded-md3-md bg-md-primary/[0.08] border border-md-primary/20">
                   <Cpu size={16} className="text-md-primary flex-shrink-0" />
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">

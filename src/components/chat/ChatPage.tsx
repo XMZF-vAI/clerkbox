@@ -95,8 +95,8 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
     taskMode?: TaskMode,
     skills?: MessageSkillSnapshot[]
   ) => {
-    if (!sessionId) return
-    await sendMessage(content, attachments, taskMode, skills)
+    if (!sessionId) return false
+    return sendMessage(content, attachments, taskMode, skills)
   }
 
   // 重试：先按 ZCode 的 retryTurn 语义「截断这一轮再原样重发」，而不是在原地叠一份重复提问。
@@ -105,7 +105,7 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
     () => [...messages].reverse().find((m) => m.role === 'user'),
     [messages]
   )
-  const [rewindRetry, setRewindRetry] = useState(false)
+  const [rewindRetry, setRewindRetry] = useState<{ sessionId: string; messageId: string } | null>(null)
   // 会话仍在运行 / 正在压缩 / 无用户消息时不提供重发，避免重复入队与并发发送
   const canRetry =
     !!lastUserMessage &&
@@ -119,7 +119,7 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
       void sendMessage(lastUserMessage.content, lastUserMessage.attachments, lastUserMessage.taskMode, lastUserMessage.skills)
       return
     }
-    setRewindRetry(true)
+    setRewindRetry({ sessionId, messageId: lastUserMessage.id })
   }, [sessionId, lastUserMessage, canRetry, sendMessage])
 
   /** 编辑重发：撤回成功后用既有的发送路径发出新文本（附件/任务档/技能沿用原那条） */
@@ -162,7 +162,7 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
             )}
             {/* Centered input */}
             <div className={vibe ? '' : 'mt-2'}>
-              <ChatInput
+              <ChatInput key={sessionId} sessionId={sessionId}
                 onSend={handleSend}
                 onStop={abort}
                 onManualCompact={manualCompact}
@@ -196,14 +196,14 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
         <QuestionCard sessionId={sessionId} vibe={vibe} />
         <PermissionApprovalCard sessionId={sessionId} vibe={vibe} />
         {errorBanner}
-        <ChatInput onSend={handleSend} onStop={abort} onManualCompact={manualCompact} isCompacting={isCompacting} isStreaming={isCurrentSessionStreaming} onSendNow={sendQueuedNow} onEnqueueQueued={requestQueuedFlush} vibe={vibe} />
+        <ChatInput key={sessionId} sessionId={sessionId} onSend={handleSend} onStop={abort} onManualCompact={manualCompact} isCompacting={isCompacting} isStreaming={isCurrentSessionStreaming} onSendNow={sendQueuedNow} onEnqueueQueued={requestQueuedFlush} vibe={vibe} />
       </div>
-      {rewindRetry && lastUserMessage && (
+      {rewindRetry?.sessionId === sessionId && rewindRetry.messageId === lastUserMessage?.id && lastUserMessage && (
         <RewindDialog
           sessionId={sessionId}
           anchor={lastUserMessage}
           mode="retry"
-          onClose={() => setRewindRetry(false)}
+          onClose={() => setRewindRetry(null)}
           onResend={handleResend}
         />
       )}

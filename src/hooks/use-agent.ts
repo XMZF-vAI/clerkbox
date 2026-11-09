@@ -115,12 +115,15 @@ export function useAgent(sessionId: string) {
   const setStreaming = useChatStore((s) => s.setStreaming)
   const compactSession = useChatStore((s) => s.compactSession)
   const setSessionStatus = useChatStore((s) => s.setSessionStatus)
-  // 宿主模式下的运行期失败经事件回流到 store；本地路径仍用下面的 error state
-  const hostError = useChatStore((s) => s.sessionErrors[sessionId])
+  const error = useChatStore((s) => s.sessionErrors[sessionId])
+  const setError = useCallback((message: string | null) => {
+    if (useChatStore.getState().sessions.some((session) => session.id === sessionId)) {
+      useChatStore.getState().setSessionError(sessionId, message ?? undefined)
+    }
+  }, [sessionId])
   // 「本次运行」状态按 sessionId 隔离（per-session 并发）：多会话同时跑 ReAct 循环时，
   // 后台会话的 run 仍持有自己的 SessionContext（token 锚点/读取快照/任务模式）。
   const contextsRef = useRef(new SessionContextStore())
-  const [error, setError] = useState<string | null>(null)
   /** 手动压缩进行中（/压缩 命令）：输入栏即时反馈 + 锁定，防止压缩期间并发发送 */
   const [isCompacting, setIsCompacting] = useState(false)
   const isCompactingRef = useRef(false)
@@ -279,7 +282,18 @@ export function useAgent(sessionId: string) {
       // 先问模式，再决定用哪套守卫：宿主模式下的凭据留在主进程（设置快照），
       // 浏览器视图手里没有 Key 是常态而不是错配——把本地凭据守卫排在前面，
       // 就会把「交给宿主跑」的远程界面谎报成「缺少 API 密钥」。
-      const hostMode = (await agentClient.ensureMode()) === 'main'
+      let hostMode: boolean
+      try {
+        hostMode = (await agentClient.ensureMode()) === 'main'
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err))
+        return false
+      }
+      if (!useChatStore.getState().sessions.some((session) => session.id === sessionId)) return false
+      if (getSessionAbortController(sessionId)) {
+        setError(i18n.t('agent.busy'))
+        return false
+      }
       if (!hostMode) {
         if (!settings.baseUrl) {
           setError(i18n.t('agent.needBaseUrl'))
@@ -310,8 +324,9 @@ export function useAgent(sessionId: string) {
           skillReminder: buildRelevantSkillReminder(content, catalog) ?? undefined,
           goal: useGoalStore.getState().bySession[sessionId] ?? null,
           todos: useTodoStore.getState().bySession[sessionId] ?? [],
-        })
+        }).catch((err: unknown) => ({ ok: false, error: err instanceof Error ? err.message : String(err) }))
         if (!res.ok) setError(hostRejectionText(res.error))
+        else setError(null)
         return res.ok
       }
 
@@ -362,52 +377,46 @@ export function useAgent(sessionId: string) {
       // 未命中不注入任何内容）。与用户手动激活（skills 快照）互补。
       const skillReminder = buildRelevantSkillReminder(content, useSkillsStore.getState().getSkillCatalog()) ?? undefined
 
-      try {
-        await runReactLoop(makePorts(), ctx, contextMessages, controller, taskMode, skillReminder)
-      } catch (err) {
-        if (controller.signal.aborted) {
-          abortedByUser = true
-          return false
-        }
-        const msg = err instanceof Error ? err.message : String(err)
-        setError(msg)
-        addMessage(sessionId, {
-          id: makeId(),
-          role: 'assistant',
-          content: i18n.t('agent.sendFailed', { message: msg }),
-          timestamp: Date.now(),
-        })
-        // 标记 error 状态 + 系统通知（仅当用户不在此会话时）
-        setSessionStatus(sessionId, 'error')
-        notifyIfNotViewing(sessionId, 'error', msg.slice(0, 200))
-        return false
-      } finally {
-        ctx.requestWorkingDir = undefined
-        ctx.activeTaskMode = null
-        // Do not clear a controller installed by a newer request for this session.
-        if (getSessionAbortController(sessionId) === controller) {
-          setSessionAbortController(sessionId, null)
-        }
-        // 仅清当前会话的 streaming 状态，不影响其他并发会话
-        useChatStore.getState().setStreaming(false, sessionId)
-        // 用户主动 abort：直接清状态，不发通知
-        if (abortedByUser) {
-          setSessionStatus(sessionId, null)
-        } else {
-          // 正常完成或异常：若状态仍是 working（说明没被 catch 标成 error），发"完成"通知
-          const cur = useChatStore.getState().sessionStatus[sessionId]
-          if (cur === 'working') {
+      // 受理后立即返回；生成结果通过会话状态回流，不能让输入框等待整轮执行。
+      void (async () => {
+        try {
+          await runReactLoop(makePorts(), ctx, contextMessages, controller, taskMode, skillReminder)
+        } catch (err) {
+          if (controller.signal.aborted) {
+            abortedByUser = true
+            return
+          }
+          const msg = err instanceof Error ? err.message : String(err)
+          setError(msg)
+          addMessage(sessionId, {
+            id: makeId(),
+            role: 'assistant',
+            content: i18n.t('agent.sendFailed', { message: msg }),
+            timestamp: Date.now(),
+          })
+          setSessionStatus(sessionId, 'error')
+          notifyIfNotViewing(sessionId, 'error', msg.slice(0, 200))
+        } finally {
+          ctx.requestWorkingDir = undefined
+          ctx.activeTaskMode = null
+          if (getSessionAbortController(sessionId) === controller) {
+            setSessionAbortController(sessionId, null)
+          }
+          useChatStore.getState().setStreaming(false, sessionId)
+          if (abortedByUser || controller.signal.aborted) {
             setSessionStatus(sessionId, null)
-            notifyIfNotViewing(sessionId, 'done')
-          }
-          // 若是 error，catch 块已发通知，这里不再重复
-          // 排队消息自动发送：仅正常完成时触发（用户中断/出错时队列保留，
-          // 避免停不下来或错误循环）；error 状态时上方 if 未命中，不会走到这里
-          if (useChatStore.getState().sessionStatus[sessionId] !== 'error') {
-            scheduleQueuedFlush()
+          } else {
+            const cur = useChatStore.getState().sessionStatus[sessionId]
+            if (cur === 'working') {
+              setSessionStatus(sessionId, null)
+              notifyIfNotViewing(sessionId, 'done')
+            }
+            if (useChatStore.getState().sessionStatus[sessionId] !== 'error') {
+              scheduleQueuedFlush()
+            }
           }
         }
-      }
+      })()
       return true
     },
     [sessionId, settings, makePorts, addMessage, updateMessage, setStreaming, setSessionStatus]
@@ -747,5 +756,5 @@ export function useAgent(sessionId: string) {
     })
   }, [sessionId])
 
-  return { sendMessage, abort, manualCompact, isCompacting, error: hostError ?? error, sendQueuedNow, requestQueuedFlush: scheduleQueuedFlush }
+  return { sendMessage, abort, manualCompact, isCompacting, error, sendQueuedNow, requestQueuedFlush: scheduleQueuedFlush }
 }
