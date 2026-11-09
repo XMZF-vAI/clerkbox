@@ -11,7 +11,7 @@
 [![Electron](https://img.shields.io/badge/Electron-42-47848F?style=flat-square)](https://www.electronjs.org/)
 [![React](https://img.shields.io/badge/React-19-61DAFB?style=flat-square)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6-3178C6?style=flat-square)](https://www.typescriptlang.org/)
-[![Platform](https://img.shields.io/badge/platform-Windows-0078D4?style=flat-square)](#download-and-install)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-0078D4?style=flat-square)](#download-and-install)
 
 </div>
 
@@ -19,7 +19,7 @@
 
 ---
 
-> ClerkBox is a local-first AI desktop workbench. It brings multi-provider chat, a ReAct tool loop, sub-agent orchestration, reusable skills, long-term memory, and VIBE immersive mode together in a native Windows app, so you can search, write, code, and automate from a single panel.
+> ClerkBox is a local-first AI desktop workbench. It brings multi-provider chat, a ReAct tool loop, sub-agent orchestration, reusable skills, long-term memory, and VIBE immersive mode together in a cross-platform desktop app (Windows / macOS / Linux), so you can search, write, code, and automate from a single panel.
 
 > ClerkBox is built by [XMZF Studio](https://github.com/XMZF-vAI) — the author is a 7th-grade student. Bug reports and ideas are very welcome via Issues.
 
@@ -39,9 +39,16 @@
 - [MCP Servers](#mcp-servers)
 - [Long-Term Memory](#long-term-memory)
 - [Workbench Panel](#workbench-panel)
+- [Git Integration (Coding Mode)](#git-integration-coding-mode)
+- [Desktop Control & Agent Browser](#desktop-control--agent-browser)
+- [Message Rewind & File Rollback](#message-rewind--file-rollback)
+- [Interface Modes](#interface-modes)
+- [Scheduled Tasks](#scheduled-tasks)
+- [Harness Compatibility Modes](#harness-compatibility-modes)
+- [Workflow Orchestration](#workflow-orchestration)
+- [IM Bot Remote Control](#im-bot-remote-control)
 - [/goal Mode](#goal-mode)
 - [WebUI Remote Access](#webui-remote-access)
-- [AGENTS.md Project Instructions](#agentsmd-project-instructions)
 - [VIBE Immersive Mode](#vibe-immersive-mode)
 - [Theme & Appearance](#theme--appearance)
 - [Project Structure](#project-structure)
@@ -57,13 +64,18 @@
 
 | Capability | Description |
 | --- | --- |
-| **Multi-provider presets** | 23 built-in providers (Joule / OpenAI / Anthropic / Gemini / DeepSeek / Qwen / Zhipu GLM / Ollama, etc.). Each provider pulls its model list from `/models` automatically. Custom endpoints with OpenAI or Anthropic protocol supported. |
-| **ReAct tool loop** | Reason → call tools → observe → reason again, up to 100 iterations with an automatic wrap-up summary, abortable at any time. |
+| **Multi-provider presets** | 22 built-in provider presets (Joule / OpenAI / Anthropic / Gemini / DeepSeek / Qwen / Zhipu GLM / Ollama, etc.), plus custom endpoints. Each provider pulls its model list from `/models` automatically. OpenAI or Anthropic protocol supported. |
+| **ReAct tool loop** | Reason → call tools → observe → reason again, up to 500 iterations with an automatic wrap-up summary, abortable at any time. |
 | **MCP tool ecosystem** | Connect Model Context Protocol servers and inject external tools into the conversation; one-click install from the MCP Hub China marketplace in the extension store. |
-| **Approval modes** | TRAE-style manual / auto / full approval tiers, plus a `/` command menu for the Spec / Plan / Goal workflows. |
+| **Approval modes** | manual / auto / full approval tiers, plus a `/` command menu for the Spec / Plan / Goal workflows; switching to full access needs a risk-confirmation gate. |
+| **Permission rules & approval cards** | In-chat approval cards preview the command / write diff; allow / deny rules can be persisted per project and survive restarts; dangerous commands only ever offer "allow once", and deny wins over full access. |
 | **Sub-agent orchestration** | Built-in read-only Scout and full-tool General assistant, plus custom sub-agents via frontmatter with isolated contexts. |
 | **Skills auto-discovery** | Full skill catalog injected into context — the AI discovers and loads skills on demand without manual activation; extension store / MCP Hub / 6 bundled preset skills out of the box. |
 | **/goal mode** | Session goals are evaluated every round (in-progress / achieved / impossible) and the agent auto-continues; the AI can proactively produce TodoList plan cards and ask questions on key decisions. |
+| **Scheduled tasks** | Daily / weekday / weekly / monthly local scheduled tasks; the AI may propose changes, which only take effect after you confirm them. |
+| **Harness compatibility modes** | Switch the prompt and tool conventions above the input box: besides the default, compatible with Codex / Grok Build / DeepSeek (dsh) / ZCode styles. |
+| **Workflow orchestration** | The AI writes a multi-step task as an orchestration script and dispatches sub-agents in the background; scripts can be saved and re-run, and a failed run can resume from its journal (completed steps cost zero tokens). |
+| **IM bot remote control** | Bind Weixin / Feishu / Telegram / WeCom and drive tasks from a phone chat; the bot shares the same sessions as the desktop app, and credentials are encrypted at the OS level. |
 | **Workbench panel** | Trae-style right-side workbench: file tree / terminal / browser / sub-agents in one place. |
 | **Long-term memory** | `user` / `feedback` / `project` / `reference` memory entries persist across sessions. |
 | **Thinking & per-model tuning** | Per-model thinking toggle / tiers (low / medium / high), temperature and token limits; model picker groups models by thinking capability. |
@@ -281,6 +293,7 @@ The agent can call the following tools to get work done:
 | Tool | Description |
 | --- | --- |
 | `read_file` | Paginated file reading (`offset` / `limit`), 50KB max per call, with a resume hint when truncated |
+| `read_image` | Reads structured metadata of an image file (format, pixel dimensions, file size, top-5 dominant colors); it is not visual recognition |
 | `write_file` | Write a file (subject to the permission engine and approval mode) |
 | `search_replace` | Precise string-match local edit (no line numbers; CRLF normalization, staleness detection, fuzzy-miss suggestions) |
 | `list_dir` | List directory contents |
@@ -300,7 +313,11 @@ The agent can call the following tools to get work done:
 | --- | --- |
 | `execute_command` | Execute shell commands (dangerous commands auto-blocked; 120s default timeout, 600s max; output over 50KB spills to a file) |
 | `spawn_agent` | Spawn a sub-agent for a subtask |
+| `send_message_to_agent` | Send a follow-up message to an existing sub-agent (steers it if running, resumes it with its context if finished) |
 | `save_memory` | Write a long-term memory entry |
+| `search_memory` | Search long-term memory entries by keyword or type |
+| `question` | Ask the user 1-3 multiple-choice questions and wait for the answers (for key decisions) |
+| `todowrite` | Maintain the task checklist for the current task (used for multi-step work) |
 | MCP tools | Tools exposed by connected MCP servers register dynamically and run in the same loop as built-ins |
 
 ### Security Mechanisms
@@ -308,7 +325,7 @@ The agent can call the following tools to get work done:
 - **Approval modes**: manual (confirm each time) / auto (whitelist pass-through) / full (allow all), TRAE-style
 - **Dangerous command blocking**: `DANGEROUS_PATTERNS` blacklist covers `rm -rf`, `format`, fork bombs, `Stop-Computer`, etc.
 - **Write whitelist**: Plan mode only allows writes under `.clerkbox/plan/`
-- **Path validation**: all file operations must stay within the current working directory (cross-platform path comparison unified in `path-safety.ts`)
+- **Path validation**: path traversal (`..`), UNC network shares, NTFS alternate data streams (ADS) and Windows device names are rejected; relative paths resolve against the session working directory, absolute paths are used as given (cross-directory reads and writes remain subject to the permission engine and approval mode)
 - **Doom-loop guard**: repeated identical tool calls are refused automatically
 - **URL scheme validation**: `openExternal` only allows `http://` / `https://`
 
@@ -484,6 +501,86 @@ The panel shares the same working directory as the conversation and can be colla
 
 ---
 
+## Git Integration (Coding Mode)
+
+Switching the interface mode to "Coding" lights up the Git capability surface; "General" hides all of it and the UI stays focused on results:
+
+- **Branch switcher**: a chip above the input shows the current branch and change count; the popover searches / switches / creates branches; hidden automatically when the session folder is not a Git repository
+- **Change review**: the workbench Git panel shows unstaged / staged changes and per-file diffs, supports multi-select commits and one-click push (auto-linked to the first remote when there is no upstream)
+- **Commit graph**: a swim-lane SVG commit graph (branches converging / merges forking are colour-coded), 50 commits per page with scroll loading; click a row for details
+- **Safety boundary**: the main-process git service calls the CLI with the shell disabled and normalises git stderr into stable error codes; none of these channels are exposed to the remote WebUI
+
+---
+
+## Desktop Control & Agent Browser
+
+Both capabilities act as the user on this machine and are **fail-closed by default** (they only get a channel when you turn them on in settings):
+
+- **Computer Use**: the AI synthesises real keyboard and mouse events to drive desktop tasks; an on-screen trail plus a status badge shows "controlling your computer", Escape is a global kill switch, and the approval tier is separate from ordinary commands
+- **Agent browser**: a separate, controlled browser partition where the AI can navigate / click / fill forms / read pages; the workbench panel shows the operation live, and sessions are isolated from each other
+- Every action enters the same approval flow as ordinary tools; the remote WebUI can never trigger them
+
+---
+
+## Message Rewind & File Rollback
+
+- **Rewind**: rewind / edit-and-resend / retry from any turn; the conversation is physically truncated (a rewind is a real delete, there is no hidden branch)
+- **File rollback**: a snapshot is taken before every write, and rewinding rolls the file back by path; content fingerprints are compared before rolling back
+- **Safety first**: files changed externally after the snapshot are marked `external_modified`, refused for automatic rollback, and listed for you to handle; execution goes through a transaction log with reverse-order compensation, and an interruption can be recovered
+
+---
+
+## Interface Modes
+
+A pill switch to the right of the brand bar in the sidebar toggles **Coding / General** in one click (`Ctrl+Shift+U`):
+
+- **Coding mode**: full technical detail — commands, diffs, the Git surface, working directory hints
+- **General mode**: focused on task progress and result summaries; command lines and Git details are hidden, and greetings / placeholders switch to work-oriented copy
+- The mode is a pure presentation preference; it changes neither the agent's permissions nor its capabilities (aligned with ZCode's interface-mode architecture)
+
+---
+
+## Scheduled Tasks
+
+Local scheduled tasks, a first-class citizen of agent orchestration:
+
+- A task list plus a sidebar entry; tasks fire on schedule, run in the chosen session, and push the result back
+- Daily / weekday / weekly / monthly cycles, with a configurable time of day
+- The AI may propose task changes (create / modify / pause), and **every proposal takes effect only after you confirm it**; a sidebar badge shows how many are waiting
+
+---
+
+## Harness Compatibility Modes
+
+Pick the prompt and tool conventions above the input box; the choice locks after the first message:
+
+- **Default**: ClerkBox's native harness
+- **Compatible tiers**: prompt and tool-call conventions in the style of Codex / Grok Build / DeepSeek (dsh) / ZCode, so users of other CLIs can start without friction
+
+---
+
+## Workflow Orchestration
+
+Write a multi-step task as an orchestration script and let it run in the background:
+
+- **Scripted**: the AI writes a workflow script with the `agent()` / `parallel()` / `phase()` / `log()` primitives
+- **Parallel**: steps inside `parallel()` dispatch sub-agents concurrently and report progress segment by segment (the card shows a swim-lane diagram; the script source can be expanded)
+- **Save and re-run**: workflows can be stored under `<working directory>/.clerkbox/workflows/` and reused by name; a failed run can resume from its journal, and already-completed steps cost zero tokens
+- **Writes still need approval**: steps that write files or run commands go through the approval card as usual, and dangerous steps never get an "always allow for this session" option
+
+---
+
+## IM Bot Remote Control
+
+Connect Weixin / Feishu / Telegram / WeCom to this machine and drive tasks from a phone chat:
+
+- **Chat is the interface**: send a message to the bot and it runs in a session on this machine; the result comes back to the same chat
+- **Same sessions as the desktop**: the phone and the desktop see the same sessions and messages, not a separate copy
+- **Encrypted credentials**: IM account credentials are stored with OS-level encryption (safeStorage); bind codes are single-use
+- **Approvals on the phone too**: the approval card for a dangerous command is pushed to the chat, where a short list of numbers approves or denies it; the scope stops at "this once" and never silently widens to "always allow for this session"
+
+---
+
 ## /goal Mode
 
 Modeled after Claude Code's goal mechanism, long tasks keep moving on their own:
@@ -525,6 +622,9 @@ ClerkBox ships with a built-in web server that exposes the full UI to any browse
 - The WebUI binds to `127.0.0.1` with a random port by default, so it is only reachable from this machine; after ticking "Allow LAN access" it binds to `0.0.0.0` and any device on the same LAN can reach it. For public deployment, use a reverse proxy with HTTPS
 - Browser WebUI cannot open the host's native file-picker dialogs, so it uses browser uploads and a host-folder browser instead. Uploads default to 10MB per file and can be adjusted with `CLERKBOX_WEBUI_MAX_UPLOAD_MB` (1-100MB)
 - API keys are kept in OS-level encryption (safeStorage) and never enter the shared store in plaintext
+- **The remote view does not read local files by default**: the workbench file panel, VIBE wallpapers and approval diff previews all need file read access, which you have to enable explicitly with "Allow remote browsing of local files". Those channels accept arbitrary paths, so a leaked token exposes file contents — enable them only on a trusted network
+- **The remote view cannot run the agent on your machine**: agent orchestration, dangerous-command approvals, rewind / rollback, MCP tool execution and Git writes are desktop-only; the remote view can only watch. API keys are never sent to the remote side either
+- For server deployments, `CLERKBOX_WEBUI_AUTO=1` starts the WebUI automatically and `CLERKBOX_WEBUI_ALLOW_FILE_ACCESS=1` grants remote file read access (not granted by default)
 
 ---
 
@@ -577,8 +677,13 @@ Built-in MD3 palette presets: Violet (default), Blue, Green, Orange, Pink, Teal,
 ClerkBox/
 ├── electron/                    # Electron main process
 │   ├── main.ts                  # main entry (IPC, filesystem, command execution, etc.)
+│   ├── agent-host.ts            # host-mode agent orchestration (event stream, approvals, compaction, queue)
+│   ├── db.ts                    # session storage (SQLite primary store + JSON fallback and merge)
 │   ├── api-proxy.ts             # model API proxy (streaming chat, connection test)
 │   ├── webui-server.ts          # WebUI server (HTTP + SSE + token auth)
+│   ├── mcp-manager.ts           # MCP server connections and tool calls
+│   ├── updater.ts               # auto-update state machine
+│   ├── im-bots/                 # Weixin / Feishu / Telegram / WeCom remote control
 │   └── preload.ts               # preload script (contextBridge)
 ├── src/                         # renderer process (React app)
 │   ├── components/
@@ -588,6 +693,7 @@ ClerkBox/
 │   │   ├── settings/            # settings panel
 │   │   ├── ui/                  # generic UI components
 │   │   └── vibe/                # VIBE mode components
+│   ├── agent-core/              # agent core shared with the main process (ReAct loop, event protocol)
 │   ├── hooks/
 │   │   └── use-agent.ts         # core agent hook (ReAct loop, streaming, tool dispatch)
 │   ├── lib/                     # core libraries
@@ -654,7 +760,7 @@ electron-builder configuration lives in the `build` field of [package.json](pack
 
 ### Data Storage
 
-- Session history: local JSON (one file per session ID)
+- Session history: local SQLite (sql.js WASM, in-memory database with debounced atomic persistence); if the WASM is unavailable the store falls back to a JSON database in the same folder, and on recovery the two are merged by id so neither side loses data
 - App config: Zustand persist + localStorage (cross-mode via main-process KV bridge)
 - Long-term memory: Markdown files + frontmatter index
 - Skills & agents: Markdown files
@@ -697,6 +803,17 @@ electron-builder configuration lives in the `build` field of [package.json](pack
 - Context usage indicator with manual compaction
 - VIBE upgrade (background single / slideshow / glass modes + system audio)
 - Skill marketplace search coverage improvements
+- Scheduled tasks (daily / weekday / weekly / monthly + AI change proposals awaiting approval)
+- Harness compatibility modes (Codex / Grok Build / DeepSeek (dsh) / ZCode styles)
+- Desktop control Computer Use (real keyboard/mouse synthesis + Escape kill switch + on-screen trail)
+- Agent browser (separate controlled partition + live operation view)
+- Message rewind & file rollback (pre-write snapshot + content fingerprint + transaction log)
+- Coding / General interface mode switch (presentation only, aligned with ZCode interface mode)
+- Git integration (branch switch / change review / commit & push / swim-lane graph, coding mode only)
+- SQLite session storage (sql.js primary store + JSON fallback with incremental merge on recovery)
+- Persisted permission rules and write-approval diff cards (per-project allow / deny, survives restarts)
+- Workflow orchestration (create / save / resume + parallel sub-agents + journal-based continuation)
+- IM bot remote control (Weixin / Feishu / Telegram / WeCom + approvals and questions from the phone)
 
 ---
 

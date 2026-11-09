@@ -11,14 +11,17 @@ import { fileURLToPath } from 'node:url'
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const { version } = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
 
-// license.txt 为 GBK 字节流，用 latin1 读写做 1:1 字节替换，避免任何编码转换
-const tmpl = readFileSync(join(root, 'build', 'license.txt.tmpl')).toString('latin1')
+// NSIS 靠 BOM 判定许可文本编码：无 BOM 时按构建机 ANSI 代码页解码，中文协议在非 936
+// 代码页上就是乱码。electron-builder 只有多语言 license_*.txt 分支会补 BOM，自动探测到的
+// 单文件 build/license.txt 原样交给 MUI_PAGE_LICENSE，所以 BOM 必须由这里写入。
+const tmpl = readFileSync(join(root, 'build', 'license.txt.tmpl'), 'utf8').replace(/^\uFEFF/, '')
 if (!tmpl.includes('{{VERSION}}')) {
   console.error('[sync-version] build/license.txt.tmpl 缺少 {{VERSION}} 占位符')
   process.exit(1)
 }
 writeFileSync(
   join(root, 'build', 'license.txt'),
-  Buffer.from(tmpl.replaceAll('{{VERSION}}', version), 'latin1'),
+  `\uFEFF${tmpl.replaceAll('{{VERSION}}', version).replace(/\r?\n/g, '\r\n')}`,
+  'utf8',
 )
 console.log(`[sync-version] build/license.txt -> v${version}`)

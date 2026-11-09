@@ -11,7 +11,7 @@
 [![Electron](https://img.shields.io/badge/Electron-42-47848F?style=flat-square)](https://www.electronjs.org/)
 [![React](https://img.shields.io/badge/React-19-61DAFB?style=flat-square)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6-3178C6?style=flat-square)](https://www.typescriptlang.org/)
-[![Platform](https://img.shields.io/badge/platform-Windows-0078D4?style=flat-square)](#下载与安装)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-0078D4?style=flat-square)](#下载与安装)
 
 </div>
 
@@ -19,7 +19,7 @@
 
 ---
 
-> ClerkBox 是一个本地优先的 AI 桌面工作台。它把多供应商对话、ReAct 工具循环、子 Agent 编排、Skills 技能、长期记忆与 VIBE 沉浸模式整合进一个 Windows 原生应用，让你在同一个面板里完成搜索、写作、编码与自动化。
+> ClerkBox 是一个本地优先的 AI 桌面工作台。它把多供应商对话、ReAct 工具循环、子 Agent 编排、Skills 技能、长期记忆与 VIBE 沉浸模式整合进一个跨平台桌面应用（Windows / macOS / Linux），让你在同一个面板里完成搜索、写作、编码与自动化。
 
 > ClerkBox 由 [XMZF Studio](https://github.com/XMZF-vAI) 出品，作者是一名初一学生。欢迎试用，发现 bug 或者有想法请直接提 Issue。
 
@@ -45,9 +45,10 @@
 - [界面模式](#界面模式)
 - [定时任务](#定时任务)
 - [Harness 兼容模式](#harness-兼容模式)
+- [工作流编排](#工作流编排)
+- [IM 机器人遥控](#im-机器人遥控)
 - [/goal 目标模式](#goal-目标模式)
 - [WebUI 远程访问](#webui-远程访问)
-- [AGENTS.md 项目指令](#agentsmd-项目指令)
 - [VIBE 沉浸模式](#vibe-沉浸模式)
 - [主题与外观](#主题与外观)
 - [项目结构](#项目结构)
@@ -63,10 +64,11 @@
 
 | 能力 | 说明 |
 | --- | --- |
-| **多供应商预设** | 内置 23 家供应商（Joule / OpenAI / Anthropic / Gemini / DeepSeek / 通义千问 / 智谱 GLM / Ollama 等），每个供应商自动从 `/models` 拉取可用模型；支持自定义端点与 OpenAI / Anthropic 双协议 |
-| **ReAct 工具循环** | 推理 → 工具调用 → 观察 → 再推理，最多 100 轮，轮次用尽自动收尾总结，可任意时刻中止 |
+| **多供应商预设** | 内置 22 家供应商预设（Joule / OpenAI / Anthropic / Gemini / DeepSeek / 通义千问 / 智谱 GLM / Ollama 等），另含自定义端点；每个供应商自动从 `/models` 拉取可用模型，支持 OpenAI / Anthropic 双协议 |
+| **ReAct 工具循环** | 推理 → 工具调用 → 观察 → 再推理，最多 500 轮，轮次用尽自动收尾总结，可任意时刻中止 |
 | **MCP 工具生态** | 接入 Model Context Protocol 服务器，外部工具动态注入对话；扩展商店可一键安装 MCP Hub 中国版的服务器 |
-| **审批模式** | TRAE 风格 manual / auto / full 三档审批，`/` 命令菜单直达 Spec / Plan / Goal 工作流 |
+| **审批模式** | manual / auto / full 三档审批，`/` 命令菜单直达 Spec / Plan / Goal 工作流；升到「完全访问」需过风险确认门 |
+| **权限规则与审批卡** | 对话内审批卡预览命令 / 写入 diff，可按项目持久化 allow / deny 规则（重启仍生效）；危险命令只给「允许一次」，deny 优先于完全访问 |
 | **子 Agent 编排** | 内置只读侦察兵与全工具通用助手，支持 frontmatter 自定义 Agent，独立上下文隔离 |
 | **Skills 技能自动发现** | 全量技能目录注入，AI 免手动激活即可发现并按需加载技能；扩展商店 / MCP Hub / 6 个内置预置技能开箱即用 |
 | **/goal 目标模式** | 会话目标每轮自动评估（进行中 / 已达成 / 无法完成）并驱动自动续跑；AI 可主动产出 TodoList 计划卡片、就关键决策提问 |
@@ -76,8 +78,10 @@
 | **Agent 浏览器** | AI 驱动的内嵌受控浏览器：导航、点击、填表、读取页面，操作过程可视化呈现 |
 | **消息撤回与文件回滚** | 撤回本轮对话并按「写入前快照 + 内容指纹」回滚 AI 改过的文件；外部改过的文件拒绝自动回滚，绝不瞎猜 |
 | **界面模式** | 编程 / 通用双模式一键切换：编程模式展示命令、代码与 Git 能力面，通用模式聚焦任务结果与摘要 |
-| **定时任务** | cron / 间隔双形态的本地定时任务，AI 可提交任务变更提案、用户确认后生效 |
-| **Harness 兼容模式** | 输入框上方一键切换提示词与工具约定：默认之外兼容 Codex / grok-build / DeepSeek 等风格 |
+| **定时任务** | 每天 / 工作日 / 每周 / 每月 四种周期的本地定时任务，AI 可提交任务变更提案、用户确认后生效 |
+| **Harness 兼容模式** | 输入框上方一键切换提示词与工具约定：默认之外兼容 Codex / Grok Build / DeepSeek（dsh）/ ZCode 等风格 |
+| **工作流编排** | AI 把多步骤任务写成编排脚本，后台派发子 Agent 并行执行；脚本可保存复跑，失败运行可从 journal 续跑（已完成步骤零 token 复用） |
+| **IM 机器人遥控** | 绑定微信 / 飞书 / Telegram / 企业微信后，用手机聊天即可下发任务、查看结果；与桌面端共用同一份会话，凭据操作系统级加密 |
 | **长期记忆** | user / feedback / project / reference 四类记忆条目，跨会话延续上下文 |
 | **思考与模型调优** | 每个模型独立配置思考开关 / 档位（low / medium / high）、温度与 token 上限，模型选择器按思考能力自动分组 |
 | **AGENTS.md 项目指令** | 自动读取工作目录根目录的 `AGENTS.md` 注入系统提示词；可回退 `CLAUDE.md` |
@@ -294,6 +298,7 @@ Agent 可调用以下工具完成实际任务：
 | 工具 | 说明 |
 | --- | --- |
 | `read_file` | 分页读取文件（`offset` / `limit`），单次最多 50KB，截断时返回续读提示 |
+| `read_image` | 读取图片的结构化元信息（格式、像素尺寸、文件大小、主色占比 Top5），不做视觉识别 |
 | `write_file` | 写入文件（受权限引擎与审批模式约束） |
 | `search_replace` | 精确字符串匹配的局部编辑（无需行号；CRLF 归一化、过期检测、模糊匹配错误提示） |
 | `list_dir` | 列出目录内容 |
@@ -313,7 +318,11 @@ Agent 可调用以下工具完成实际任务：
 | --- | --- |
 | `execute_command` | 执行 shell 命令（危险命令自动拦截；默认 120 秒超时，最长 600 秒；超过 50KB 的输出自动转存为文件） |
 | `spawn_agent` | 派生子 Agent 处理子任务 |
+| `send_message_to_agent` | 给已派生的子 Agent 追加消息（运行中即转向，已完成则带上下文续跑） |
 | `save_memory` | 写入长期记忆条目 |
+| `search_memory` | 按关键词或类型检索长期记忆条目 |
+| `question` | 向用户提 1-3 个带选项的问题并等待回答（用于关键决策确认） |
+| `todowrite` | 维护当前任务的待办清单（多步任务用） |
 | MCP 工具 | 已连接 MCP 服务器暴露的工具动态注入，与内置工具同一循环调用 |
 
 ### 安全机制
@@ -321,7 +330,7 @@ Agent 可调用以下工具完成实际任务：
 - **审批模式**：manual（逐次确认）/ auto（白名单自动放行）/ full（全部放行）三档，TRAE 风格
 - **危险命令拦截**：`DANGEROUS_PATTERNS` 黑名单覆盖 `rm -rf`、`format`、`fork bomb`、`Stop-Computer` 等
 - **写入白名单**：Plan 模式仅允许写入 `.clerkbox/plan/` 目录
-- **路径校验**：所有文件操作路径必须在当前工作目录内（跨平台路径比较规则收敛于 `path-safety.ts` 单一来源）
+- **路径校验**：拒绝路径穿越（`..`）、UNC 网络共享、NTFS 命名流（ADS）与 Windows 设备名；相对路径按会话工作目录解析，绝对路径按原样使用（跨目录读写受权限引擎与审批模式约束）
 - **重复调用拦截**：连续相同工具调用自动拒绝，避免 doom-loop 空转
 - **URL scheme 校验**：`openExternal` 仅允许 `http://` / `https://`
 
@@ -539,9 +548,10 @@ Trae 风格的右侧工作台，把 Agent 的工作现场集中在一处（Workb
 
 ## 定时任务
 
-本地 cron / 间隔双形态定时任务，AI 编排的一等公民：
+本地定时任务，AI 编排的一等公民：
 
 - 任务列表 + 侧边栏入口，到点自动以所选会话执行并推送结果
+- 周期支持每天 / 工作日 / 每周 / 每月四档，可指定时刻
 - AI 可提交任务变更提案（新建 / 修改 / 暂停），**一律待用户确认后生效**，侧边栏角标提示待审数量
 
 ---
@@ -551,7 +561,29 @@ Trae 风格的右侧工作台，把 Agent 的工作现场集中在一处（Workb
 输入框上方选择提示词与工具约定，首条消息发送后锁定：
 
 - **默认**：ClerkBox 原生 harness
-- **兼容档**：Codex / grok-build / DeepSeek 等风格的提示词与工具调用约定，方便习惯其它 CLI 的用户无缝上手
+- **兼容档**：Codex / Grok Build / DeepSeek（dsh）/ ZCode 等风格的提示词与工具调用约定，方便习惯其它 CLI 的用户无缝上手
+
+---
+
+## 工作流编排
+
+把多步骤任务写成一份编排脚本，交给后台并行推进：
+
+- **脚本化**：AI 用 `agent()` / `parallel()` / `phase()` / `log()` 四个原语把任务写成工作流脚本
+- **并行执行**：`parallel()` 里的步骤并发派发子 Agent，逐段汇报进度（卡片内含泳道流程图，可展开看脚本原文）
+- **能存能复跑**：工作流可存进 `<工作目录>/.clerkbox/workflows/` 并按名字复用；失败运行可从 journal 续跑，已完成步骤零 token 复用
+- **写操作仍要批**：涉及写文件/执行命令的步骤照常走审批卡，危险步骤不给「本会话始终允许」
+
+---
+
+## IM 机器人遥控
+
+把微信 / 飞书 / Telegram / 企业微信接到本机上，用手机聊天驱动任务：
+
+- **私聊即用**：给机器人发消息就在本机开会话执行，结果回到同一个聊天窗口
+- **共用同一份会话**：手机端与桌面端看到的是同一份会话与消息，不是另一套数据
+- **凭据加密**：IM 账号凭据走操作系统级加密存储（safeStorage），绑定码一次一用
+- **审批也在手机上**：危险命令的审批卡会推送到聊天窗口，手机上一串序号即可批准或拒绝；批准范围只到「仅本次」，不会顺手给「本会话始终允许」
 
 ---
 
@@ -596,6 +628,9 @@ ClerkBox 内置 Web 服务，可以把完整界面暴露给浏览器，实现远
 - WebUI 默认仅监听 `127.0.0.1` 的随机端口，仅供本机访问；勾选「允许局域网访问」后才绑定 `0.0.0.0`，同一局域网内设备可访问；公网部署建议配合反向代理与 HTTPS
 - 浏览器 WebUI 无法弹出主机原生文件选择对话框，因此统一使用网页文件上传和主机工作目录浏览器；单文件上传默认限制为 10MB（可用 `CLERKBOX_WEBUI_MAX_UPLOAD_MB` 调整，范围 1-100MB）
 - API Key 由操作系统级加密（safeStorage）保管，不会明文进入共享存储
+- **远程默认不读本机文件**：工作台文件面板、VIBE 壁纸与审批变更预览都需要读文件能力，需在弹窗里显式打开「允许远程浏览本机文件」；这些通道能按任意路径读取文件，令牌泄露即等于交出文件内容，请仅在可信网络下开启
+- **远程不能替你在本机跑 Agent**：Agent 编排、危险命令审批、撤回回滚、MCP 工具执行、Git 写操作全部只在桌面端生效，远程视图只能旁观；WebUI 也不向远程下发 API Key
+- 服务器部署可用 `CLERKBOX_WEBUI_AUTO=1` 自动启动，用 `CLERKBOX_WEBUI_ALLOW_FILE_ACCESS=1` 授予远程文件读取能力（默认不授予）
 
 ---
 
@@ -648,8 +683,13 @@ ClerkBox 采用 Material Design 3 色彩引擎，支持动态主题生成。
 ClerkBox/
 ├── electron/                    # Electron 主进程
 │   ├── main.ts                  # 主进程入口（IPC、文件系统、命令执行等）
+│   ├── agent-host.ts            # 宿主模式 Agent 编排（事件流、审批、压缩、队列）
+│   ├── db.ts                    # 会话存储（SQLite 主库 + JSON 降级与合并）
 │   ├── api-proxy.ts             # 模型 API 代理（流式对话、连接测试）
 │   ├── webui-server.ts          # WebUI 服务器（HTTP + SSE + token 认证）
+│   ├── mcp-manager.ts           # MCP 服务器连接与工具调用
+│   ├── updater.ts               # 自动更新状态机
+│   ├── im-bots/                 # 微信 / 飞书 / Telegram / 企业微信 遥控
 │   └── preload.ts               # 预加载脚本（contextBridge）
 ├── src/                         # 渲染进程（React 应用）
 │   ├── components/
@@ -659,6 +699,7 @@ ClerkBox/
 │   │   ├── settings/            # 设置面板
 │   │   ├── ui/                  # 通用 UI 组件
 │   │   └── vibe/                # VIBE 模式组件
+│   ├── agent-core/              # 与主进程共用的 Agent 核心（ReAct 循环、事件协议）
 │   ├── hooks/
 │   │   └── use-agent.ts         # 核心 Agent Hook（ReAct 循环、流式、工具调度）
 │   ├── lib/                     # 核心库
@@ -725,7 +766,7 @@ electron-builder 配置见 [package.json](package.json) 的 `build` 字段。
 
 ### 数据存储
 
-- 会话历史：本地 JSON（按会话 ID 分文件）
+- 会话历史：本地 SQLite（sql.js WASM，内存库 + 防抖原子落盘）；WASM 不可用时降级为同目录 JSON 库，恢复后按 id 增量合并回 SQLite，两侧数据都不丢
 - 应用配置：Zustand persist + localStorage（跨模式走主进程 KV 桥接）
 - 长期记忆：Markdown 文件 + frontmatter 索引
 - 技能与 Agent：Markdown 文件
@@ -768,13 +809,17 @@ electron-builder 配置见 [package.json](package.json) 的 `build` 字段。
 - 上下文用量指示器与手动压缩
 - 氛围模式升级（背景单图 / 轮播 / 玻璃三模式 + 系统音频）
 - 技能市场搜索覆盖率改进
-- 定时任务（cron / 间隔 + AI 变更提案待审流）
-- Harness 兼容模式（Codex / grok-build / DeepSeek 等风格）
+- 定时任务（每天 / 工作日 / 每周 / 每月 + AI 变更提案待审流）
+- Harness 兼容模式（Codex / Grok Build / DeepSeek（dsh）/ ZCode 等风格）
 - 桌面操控 Computer Use（真实键鼠合成 + Escape 熔断 + 屏幕残影提示）
 - Agent 浏览器（独立分区受控浏览 + 操作现场可视化）
 - 消息撤回与文件回滚（写入前快照 + 内容指纹 + 事务日志）
 - 编程 / 通用界面模式切换（纯展示层，对齐 ZCode interface mode）
 - Git 集成（分支切换 / 变更审查 / 提交推送 / 泳道图谱，编程模式专属）
+- 会话存储 SQLite 化（sql.js 主库 + JSON 降级与增量合并恢复）
+- 权限规则持久化与写审批 diff 卡（按项目 allow / deny，重启仍生效）
+- 工作流编排（create / save / resume + 子 Agent 并行 + journal 续跑）
+- IM 机器人遥控（微信 / 飞书 / Telegram / 企业微信 + 手机审批与提问）
 
 ---
 

@@ -104,6 +104,12 @@
       "node_modules/node-pty/**",
       "node_modules/sql.js/dist/*.wasm"
     ],
+    "extraResources": [
+      {
+        "from": "LICENSE",
+        "to": "LICENSE"
+      }
+    ],
     "win": {
       "target": [
         "nsis"
