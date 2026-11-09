@@ -189,6 +189,54 @@ function restoreLegacyJson(legacyPath: string): void {
   }
 }
 
+/**
+ * 降级元信息（BE-02）：把「这份 JSON 是降级期间用的」记在库本身，恢复时才能识别并增量合并，
+ * 而不是把降级期间的新写入当成历史残留丢掉。
+ *
+ * 刻意**不在降级那一刻写文件**：降级路径的既有不变量是「有现成的 JSON 就绝不碰它」
+ * （tests/db.test.ts 逐字节比对），标记等到第一次真实写入时再随写落盘。
+ * 一次写入都没发生的降级没有增量要合并，也就不需要标记。
+ */
+interface DegradedMeta {
+  degradedFromSqliteAt: number
+  degradedBaseRevision: number
+  degradedSqliteMeta?: { exists: boolean; size?: number; mtimeMs?: number }
+}
+
+function makeDegradedMeta(legacyPath: string, sqlitePath: string): DegradedMeta | undefined {
+  try {
+    const db: LegacyDatabase = fs.existsSync(legacyPath)
+      ? parseLegacyJson(fs.readFileSync(legacyPath, 'utf-8'))
+      : { sessions: [], messages: {}, recentsFolders: [], revision: 0 }
+    // 连续降级（上一次还没恢复）：保留原标记/基线/墓碑，重置会把已记录的删除抹掉
+    if (db.degradedFromSqliteAt != null) {
+      return {
+        degradedFromSqliteAt: db.degradedFromSqliteAt,
+        degradedBaseRevision: db.degradedBaseRevision ?? db.revision ?? 0,
+        degradedSqliteMeta: db.degradedSqliteMeta,
+      }
+    }
+    const meta: DegradedMeta = {
+      degradedFromSqliteAt: Date.now(),
+      degradedBaseRevision: db.revision ?? 0,
+    }
+    try {
+      if (fs.existsSync(sqlitePath)) {
+        const st = fs.statSync(sqlitePath)
+        meta.degradedSqliteMeta = { exists: true, size: st.size, mtimeMs: st.mtimeMs }
+      } else {
+        meta.degradedSqliteMeta = { exists: false }
+      }
+    } catch {
+      meta.degradedSqliteMeta = { exists: false }
+    }
+    return meta
+  } catch (error) {
+    console.error('[db] 读取降级标记失败（恢复时将无法自动合并）:', error)
+    return undefined
+  }
+}
+
 // ── 旧 JSON 格式读取（迁移与降级引擎共用的宽容解析，语义同原 readDb）──
 
 interface LegacyDatabase {
@@ -196,11 +244,199 @@ interface LegacyDatabase {
   messages: Record<string, Row[]>
   recentsFolders?: string[]
   revision?: number
+  // BE-02 降级标记：只有降级分支会写。恢复时据此把「降级期间写过的 JSON」增量合并回 SQLite，
+  // 而不是当成历史迁移残留忽略。缺字段（老文件/纯迁移残留）一律按「未降级」处理。
+  degradedFromSqliteAt?: number
+  /** 进入降级那一刻的 revision：恢复时 revision 未超过它 = 降级期间一笔没写，JSON 只是旧快照 */
+  degradedBaseRevision?: number
+  /** 降级时 SQLite 文件的可获得元信息（存在性/大小/mtime），供诊断分叉来源 */
+  degradedSqliteMeta?: { exists: boolean; size?: number; mtimeMs?: number }
+  /** 降级期间的删除墓碑：恢复合并时据此区分「SQLite 有而 JSON 没有」是删掉的还是 SQLite 侧新增的 */
+  degradedTombstones?: { sessions: string[]; messages: string[] }
+}
+
+/** 墓碑宽容解析：外来写入/半截状态都不许把整个引擎打回降级 */
+function parseTombstones(value: unknown): { sessions: string[]; messages: string[] } {
+  const pick = (arr: unknown): string[] =>
+    Array.isArray(arr) ? arr.filter((x): x is string => typeof x === 'string' && x.length > 0) : []
+  if (!isRecord(value)) return { sessions: [], messages: [] }
+  return { sessions: pick(value.sessions), messages: pick(value.messages) }
+}
+
+/** 读一行（sql.js exec 不接受 undefined 绑定，统一转字符串） */
+function selectOne(db: SqlJsDatabase, sql: string, params: (string | number)[] = []): Row | undefined {
+  const result = db.exec(sql, params)
+  if (result.length === 0 || !result[0]) return undefined
+  const { columns, values } = result[0]
+  const first = values[0]
+  if (!first) return undefined
+  const row: Row = {}
+  columns.forEach((col, i) => { row[col] = first[i] as unknown })
+  return row
+}
+
+/** 把当前 SQLite 内容导出成旧 JSON 形状：降级恢复后用它把 JSON 侧也拉到同一水位 */
+function exportSqliteAsLegacy(db: SqlJsDatabase, recents: string[], revision: number): LegacyDatabase {
+  const sessions: Row[] = []
+  const sessionResult = db.exec('SELECT data FROM sessions')
+  if (sessionResult[0]) {
+    for (const value of sessionResult[0].values) {
+      const raw = asString(value[0])
+      try { sessions.push(JSON.parse(raw) as Row) } catch { /* 坏行跳过，不让导出整体失败 */ }
+    }
+  }
+  const messages: Record<string, Row[]> = {}
+  const messageResult = db.exec('SELECT data FROM messages ORDER BY rowid')
+  if (messageResult[0]) {
+    for (const value of messageResult[0].values) {
+      const raw = asString(value[0])
+      try {
+        const row = JSON.parse(raw) as Row
+        const sid = typeof row.session_id === 'string' ? row.session_id : ''
+        if (!sid) continue
+        if (!messages[sid]) messages[sid] = []
+        messages[sid]!.push(row)
+      } catch { /* 同上 */ }
+    }
+  }
+  return { sessions, messages, recentsFolders: recents, revision }
+}
+
+/**
+ * 降级恢复时的增量合并（BE-02）。
+ *
+ * 两侧都是「完整行集合」，所以合并 = 按 id 取并集：SQLite 侧有、JSON 侧没有的（降级前写入的
+ * 新历史）原样保留；只有同 id 冲突才比新旧（updated_at / timestamp 新者胜出，败者整行进冲突
+ * 备份文件，不丢）。降级期间的删除靠墓碑生效：墓碑命中的行从 SQLite 侧删掉。
+ *
+ * 任何一步抛错都 ROLLBACK：两侧文件都不删、不改，合并要么整体生效要么整体没发生。
+ */
+function mergeDegradedJsonIntoSqlite(
+  db: SqlJsDatabase,
+  legacyPath: string
+): { merged: boolean; inserted: number; conflicts: number } {
+  if (!fs.existsSync(legacyPath)) return { merged: false, inserted: 0, conflicts: 0 }
+  let legacy: LegacyDatabase
+  try {
+    legacy = parseLegacyJson(fs.readFileSync(legacyPath, 'utf-8'))
+  } catch {
+    return { merged: false, inserted: 0, conflicts: 0 }
+  }
+  // 没有降级标记 = 纯历史迁移残留：那份 JSON 由既有的「空库才导入」路径处理，不是分叉
+  if (legacy.degradedFromSqliteAt == null) return { merged: false, inserted: 0, conflicts: 0 }
+
+  const tombstones = legacy.degradedTombstones ?? { sessions: [], messages: [] }
+  const conflicts: Row[] = []
+  let inserted = 0
+  let mergedRecents: string[] = []
+  let mergedRevision = 0
+
+  db.run('BEGIN')
+  try {
+    for (const s of legacy.sessions) {
+      const id = typeof s.id === 'string' ? s.id : ''
+      if (!id) continue
+      const existing = selectOne(db, 'SELECT id, updated_at, data FROM sessions WHERE id = ?', [id])
+      if (!existing) {
+        db.run('INSERT OR REPLACE INTO sessions (id, title, updated_at, data) VALUES (?, ?, ?, ?)', [
+          id, asString(s.title), asNumber(s.updated_at), JSON.stringify(s),
+        ])
+        inserted += 1
+        continue
+      }
+      const jsonTs = asNumber(s.updated_at)
+      if (jsonTs > asNumber(existing.updated_at)) {
+        conflicts.push(JSON.parse(asString(existing.data)) as Row)
+        db.run('UPDATE sessions SET title = ?, updated_at = ?, data = ? WHERE id = ?', [
+          asString(s.title), jsonTs, JSON.stringify(s), id,
+        ])
+      }
+    }
+
+    for (const [fallbackSessionId, msgs] of Object.entries(legacy.messages)) {
+      for (const m of msgs) {
+        const id = typeof m.id === 'string' ? m.id : ''
+        if (!id) continue
+        const sid = typeof m.session_id === 'string' && m.session_id ? m.session_id : fallbackSessionId
+        const row = { ...m, session_id: sid }
+        const existing = selectOne(db, 'SELECT id, timestamp, data FROM messages WHERE id = ?', [id])
+        if (!existing) {
+          db.run('INSERT OR REPLACE INTO messages (id, session_id, timestamp, data) VALUES (?, ?, ?, ?)', [
+            id, sid, asNumber(m.timestamp), JSON.stringify(row),
+          ])
+          inserted += 1
+          continue
+        }
+        const jsonTs = asNumber(m.timestamp)
+        if (jsonTs > asNumber(existing.timestamp)) {
+          conflicts.push(JSON.parse(asString(existing.data)) as Row)
+          db.run('UPDATE messages SET session_id = ?, timestamp = ?, data = ? WHERE id = ?', [
+            sid, jsonTs, JSON.stringify(row), id,
+          ])
+        }
+      }
+    }
+
+    // 墓碑优先于并集：降级期间删掉的行，SQLite 侧必须跟着消失
+    for (const sid of tombstones.sessions) {
+      db.run('DELETE FROM messages WHERE session_id = ?', [sid])
+      db.run('DELETE FROM sessions WHERE id = ?', [sid])
+    }
+    for (const mid of tombstones.messages) {
+      db.run('DELETE FROM messages WHERE id = ?', [mid])
+    }
+
+    const recentsRaw = selectOne(db, `SELECT value FROM kv WHERE key = 'recentsFolders'`)?.value
+    const sqliteRecents = parseRecentsValue(recentsRaw)
+    mergedRecents = [...new Set([...sqliteRecents, ...(legacy.recentsFolders ?? [])])].slice(0, 8)
+    db.run(`INSERT OR REPLACE INTO kv (key, value) VALUES ('recentsFolders', ?)`, [
+      JSON.stringify(mergedRecents),
+    ])
+    const revisionRaw = selectOne(db, `SELECT value FROM kv WHERE key = 'revision'`)?.value
+    const sqliteRevision = typeof revisionRaw === 'string' ? Number(revisionRaw) || 0 : 0
+    mergedRevision = Math.max(sqliteRevision, legacy.revision ?? 0) + 1
+    db.run(`INSERT OR REPLACE INTO kv (key, value) VALUES ('revision', ?)`, [String(mergedRevision)])
+    db.run('COMMIT')
+  } catch (error) {
+    try { db.run('ROLLBACK') } catch { /* 回滚失败也不掩盖原始错误 */ }
+    throw error
+  }
+
+  const stamp = Date.now()
+  // 原 JSON 原样留一份：合并过程本身出错时还能人工核对（既有风格是只留副本、从不删）
+  try {
+    writeFileAtomic(`${legacyPath}.reconciled-${stamp}.bak`, fs.readFileSync(legacyPath))
+  } catch (error) {
+    console.error('[db] 合并前备份 JSON 失败（合并本身已完成）:', error)
+  }
+  if (conflicts.length > 0) {
+    try {
+      writeFileAtomic(`${legacyPath}.conflicts-${stamp}.json`, JSON.stringify(conflicts, null, 2))
+    } catch (error) {
+      console.error('[db] 冲突备份写入失败:', error)
+    }
+  }
+  // 把 JSON 侧也拉到合并后的水位：下一次再降级时拿到的不是更旧的快照
+  try {
+    const exported = exportSqliteAsLegacy(db, mergedRecents, mergedRevision)
+    writeFileAtomic(legacyPath, JSON.stringify(exported, null, 2))
+  } catch (error) {
+    console.error('[db] 回写合并后的 JSON 快照失败（SQLite 侧已合并，数据不丢）:', error)
+  }
+  console.log(`[db] merged degraded JSON into SQLite (${inserted} inserted, ${conflicts.length} conflicts)`)
+  return { merged: true, inserted, conflicts: conflicts.length }
 }
 
 function parseLegacyJson(text: string): LegacyDatabase {
   const parsed: unknown = JSON.parse(text)
   if (!isRecord(parsed)) throw new Error('Database root must be an object')
+  const meta = isRecord(parsed.degradedSqliteMeta)
+    ? {
+        exists: parsed.degradedSqliteMeta.exists === true,
+        size: typeof parsed.degradedSqliteMeta.size === 'number' ? parsed.degradedSqliteMeta.size : undefined,
+        mtimeMs: typeof parsed.degradedSqliteMeta.mtimeMs === 'number' ? parsed.degradedSqliteMeta.mtimeMs : undefined,
+      }
+    : undefined
   return {
     sessions: Array.isArray(parsed.sessions) ? parsed.sessions.filter(isRecord) : [],
     messages: isRecord(parsed.messages)
@@ -215,6 +451,10 @@ function parseLegacyJson(text: string): LegacyDatabase {
       ? parsed.recentsFolders.filter((f): f is string => typeof f === 'string')
       : [],
     revision: typeof parsed.revision === 'number' ? parsed.revision : 0,
+    degradedFromSqliteAt: typeof parsed.degradedFromSqliteAt === 'number' ? parsed.degradedFromSqliteAt : undefined,
+    degradedBaseRevision: typeof parsed.degradedBaseRevision === 'number' ? parsed.degradedBaseRevision : undefined,
+    degradedSqliteMeta: meta,
+    degradedTombstones: parseTombstones(parsed.degradedTombstones),
   }
 }
 
@@ -597,7 +837,7 @@ class JsonChatStore implements ChatStore {
   readonly kind = 'json' as const
   private writeQueue: Promise<void> = Promise.resolve()
 
-  constructor(private readonly filePath: string) {}
+  constructor(private readonly filePath: string, private readonly degradedMeta?: DegradedMeta) {}
 
   private enqueue(fn: () => void): Promise<void> {
     const write = this.writeQueue.then(fn)
@@ -629,6 +869,12 @@ class JsonChatStore implements ChatStore {
   }
 
   private writeDb(db: LegacyDatabase): void {
+    // 降级标记随第一次真实写入落盘，降级本身不碰文件
+    if (this.degradedMeta && db.degradedFromSqliteAt == null) {
+      db.degradedFromSqliteAt = this.degradedMeta.degradedFromSqliteAt
+      db.degradedBaseRevision = this.degradedMeta.degradedBaseRevision
+      db.degradedSqliteMeta = this.degradedMeta.degradedSqliteMeta
+    }
     db.revision = (db.revision || 0) + 1
     writeFileAtomic(this.filePath, JSON.stringify(db, null, 2))
   }
@@ -636,6 +882,17 @@ class JsonChatStore implements ChatStore {
   private touch(db: LegacyDatabase, sessionId: string, ts: number): void {
     const session = db.sessions.find((s) => s.id === sessionId)
     if (session) session.updated_at = ts
+  }
+
+  private messageIds(rows: Row[] | undefined): string[] {
+    return (rows ?? []).map((m) => m.id).filter((id): id is string => typeof id === 'string' && id.length > 0)
+  }
+
+  /** 降级期间的删除必须留墓碑：否则恢复时无法区分「SQLite 有而 JSON 没有」是删掉的还是 SQLite 侧新增的 */
+  private addTombstones(db: LegacyDatabase, sessionId: string | null, messageIds: string[]): void {
+    const t = db.degradedTombstones ?? (db.degradedTombstones = { sessions: [], messages: [] })
+    if (sessionId && !t.sessions.includes(sessionId)) t.sessions.push(sessionId)
+    for (const id of messageIds) if (!t.messages.includes(id)) t.messages.push(id)
   }
 
   flush(): void { /* JSON 引擎每次写入即落盘，无需 flush */ }
@@ -667,6 +924,7 @@ class JsonChatStore implements ChatStore {
   async deleteSession(id: string): Promise<void> {
     await this.enqueue(() => {
       const db = this.readDb()
+      this.addTombstones(db, id, this.messageIds(db.messages[id]))
       db.sessions = db.sessions.filter((s) => s.id !== id)
       delete db.messages[id]
       this.writeDb(db)
@@ -775,6 +1033,7 @@ class JsonChatStore implements ChatStore {
       if (!msgs) return
       const idx = msgs.findIndex((m) => m.id === beforeId)
       if (idx === -1) return
+      this.addTombstones(db, null, this.messageIds(msgs.slice(0, idx)))
       db.messages[sessionId] = msgs.slice(idx)
       this.writeDb(db)
     })
@@ -783,6 +1042,7 @@ class JsonChatStore implements ChatStore {
   async clearMessages(sessionId: string): Promise<void> {
     await this.enqueue(() => {
       const db = this.readDb()
+      this.addTombstones(db, null, this.messageIds(db.messages[sessionId]))
       db.messages[sessionId] = []
       this.writeDb(db)
     })
@@ -795,6 +1055,7 @@ class JsonChatStore implements ChatStore {
       if (!msgs) return
       const idx = msgs.findIndex((m) => m.id === fromId)
       if (idx === -1) return
+      this.addTombstones(db, null, this.messageIds(msgs.slice(0, idx)))
       db.messages[sessionId] = msgs.slice(0, idx)
       this.touch(db, sessionId, Date.now())
       this.writeDb(db)
@@ -828,6 +1089,9 @@ class JsonChatStore implements ChatStore {
         }
       }
       const db = this.readDb()
+      const kept = new Set(rows.map((r) => r.id))
+      // 压缩整段替换：被摘掉的旧消息在恢复时要从 SQLite 侧一并删掉，否则它们会复活
+      this.addTombstones(db, null, this.messageIds(db.messages[sessionId]).filter((id) => !kept.has(id)))
       db.messages[sessionId] = [...rows]
       if (rows.length > 0 && !db.sessions.some((s) => s.id === sessionId)) {
         const last = rows[rows.length - 1]!
@@ -899,6 +1163,15 @@ export async function createChatStore(options: CreateChatStoreOptions): Promise<
       db.run(SCHEMA_SQL)
     }
 
+    // 降级恢复：JSON 侧带着降级标记时，先把增量并回 SQLite（BE-02）。
+    // 必须跑在「空库才导入旧 JSON」之前——降级后的 JSON 已经是合并结果的一部分，
+    // 走那条路径只会把它当成历史残留改名归档，分叉就永远留在库里。
+    try {
+      mergeDegradedJsonIntoSqlite(db, legacyPath)
+    } catch (error) {
+      console.error('[db] 降级恢复合并失败，保持两侧原样等下次启动重试:', error)
+    }
+
     // 迁移触发条件：库是新建的、或损坏重建后为空的，且旧 JSON 存在
     const empty =
       db.exec('SELECT COUNT(*) FROM sessions')[0]?.values[0]?.[0] === 0 &&
@@ -966,7 +1239,10 @@ export async function createChatStore(options: CreateChatStoreOptions): Promise<
     // 现在：库文件原地保留，只还原一份 JSON 副本继续干活。
     console.error('[db] SQLite init/migrate failed, falling back to legacy JSON store (sqlite file kept):', error)
     restoreLegacyJson(legacyPath)
-    return new JsonChatStore(legacyPath)
+    // 降级标记：这一次降级期间写入的内容，恢复时要并回 SQLite（BE-02）。
+    // 不带标记的话，恢复时这份 JSON 只会被当成历史迁移残留，新增消息直接看不见。
+    const degradedMeta = makeDegradedMeta(legacyPath, sqlitePath)
+    return new JsonChatStore(legacyPath, degradedMeta)
   }
 }
 

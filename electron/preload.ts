@@ -357,8 +357,8 @@ contextBridge.exposeInMainWorld('clerkbox', {
   homeDir: ipcRenderer.sendSync('getHomeDir'),
 
   // WebUI 控制
-  startWebUI: (lanAccess?: boolean): Promise<{ port: number; token: string; url: string } | { error: string }> =>
-    ipcRenderer.invoke('startWebUI', lanAccess === true),
+  startWebUI: (lanAccess?: boolean, fileAccess?: boolean): Promise<{ port: number; token: string; url: string } | { error: string }> =>
+    ipcRenderer.invoke('startWebUI', lanAccess === true, fileAccess === true),
   stopWebUI: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('stopWebUI'),
   getWebUIStatus: (): Promise<{ running: boolean; url?: string }> => ipcRenderer.invoke('getWebUIStatus'),
   getLanAddresses: (): Promise<string[]> => ipcRenderer.invoke('getLanAddresses'),

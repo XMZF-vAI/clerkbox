@@ -41,7 +41,7 @@ const MAX_API_KEY_BYTES = 16 * 1024
 const MAX_BASE_URL_LENGTH = 4_096
 
 /** 在途请求：requestId → AbortController */
-const inflight = new Map<string, AbortController>()
+const inflight = new Map<string, { controller: AbortController; owner: string }>()
 const userAborted = new Set<string>()
 
 // ── 视觉能力探测辅助 ──
@@ -397,7 +397,7 @@ export function registerApiProxyHandlers() {
       if (!wc.isDestroyed()) wc.send('apiChunk', { requestId, ...payload })
     }
     // 后台跑，不阻塞 invoke 返回
-    startChatStream(cfg, body, requestId, send)
+    startChatStream(cfg, body, requestId, send, `wc:${wc.id}`)
     return { requestId }
   })
 
@@ -411,15 +411,20 @@ export function registerApiProxyHandlers() {
  * 发起流式对话的核心逻辑。IPC 与 WebUI 共用此函数。
  * 分片通过 send 回调推回（IPC 走 webContents.send，WebUI 走 SSE res.write）。
  * 负载：{chunk?} | {done: true} | {error}
+ *
+ * owner 标记这条流属于谁（`wc:<webContents id>` / 'host' / 'webui'）。桌面窗口刷新只该
+ * 掐掉它自己的流：宿主、IM 机器人与 WebUI 的后台任务共用这张 inflight 表，按窗口一刀切
+ * 会把正在生成的任务一起截断。
  */
 export function startChatStream(
   cfg: ApiConnConfig,
   body: unknown,
   requestId: string,
-  send: (payload: Record<string, unknown>) => void
+  send: (payload: Record<string, unknown>) => void,
+  owner: string
 ): void {
   const controller = new AbortController()
-  inflight.set(requestId, controller)
+  inflight.set(requestId, { controller, owner })
 
   void (async () => {
     let timer: NodeJS.Timeout | undefined
@@ -524,24 +529,37 @@ export function startChatStream(
 /** 中止指定在途请求。IPC 与 WebUI 共用。 */
 export function abortChatStream(requestId: string): void {
   if (inflight.has(requestId)) userAborted.add(requestId)
-  inflight.get(requestId)?.abort()
+  inflight.get(requestId)?.controller.abort()
   inflight.delete(requestId)
 }
 
-/** 窗口销毁 / reload 时清理所有在途请求，避免流写向已销毁的 webContents */
-export function abortAllApiRequests() {
-  for (const [requestId, ac] of inflight) {
-    userAborted.add(requestId)
-    ac.abort()
+/**
+ * 按归属中止：只结束这个拥有者的流，其余渠道继续跑。
+ * 刻意不进 userAborted——那不是用户按了停止，而是接收端没了，调用方该收到 error
+ * 而不是 done，否则半截回答会被当成正常结束落库。
+ */
+export function abortApiRequestsForOwner(owner: string): void {
+  for (const [requestId, entry] of inflight) {
+    if (entry.owner !== owner) continue
+    entry.controller.abort(new Error('Stream interrupted: receiver went away'))
+    inflight.delete(requestId)
   }
-  inflight.clear()
 }
 
-/** 绑定窗口生命周期清理 */
-export function bindApiProxyCleanup(win: BrowserWindow) {
-  win.webContents.on('destroyed', abortAllApiRequests)
+/** 应用退出时的全局清理：此时所有接收端都要没了，不区分归属 */
+export function abortAllApiRequests(): void {
+  for (const [requestId, entry] of inflight) {
+    entry.controller.abort(new Error('Stream interrupted: application quitting'))
+    inflight.delete(requestId)
+  }
+}
+
+/** 绑定窗口生命周期清理：只收这个窗口自己发起的流 */
+export function bindApiProxyCleanup(win: BrowserWindow): void {
+  const owner = `wc:${win.webContents.id}`
+  win.webContents.on('destroyed', () => abortApiRequestsForOwner(owner))
   // reload 会让渲染进程丢掉订阅，旧流的分片没人收，直接掐掉
   win.webContents.on('did-start-navigation', (_e, _url, _isInPlace, isMainFrame) => {
-    if (isMainFrame) abortAllApiRequests()
+    if (isMainFrame) abortApiRequestsForOwner(owner)
   })
 }

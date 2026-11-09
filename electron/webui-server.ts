@@ -52,6 +52,14 @@ export const REMOTE_INVOKE_BLOCKLIST: readonly string[] = [
   // 文件删除（改动回滚收掉本轮新建的文件）：按调用方给定的路径删本机文件，
   // 与 executeCommand 同档危险，不对远程暴露。
   'deleteFile',
+  // 通用文件写入：rewind / 渲染层工具 / 工作流落盘都走它，路径与内容全由调用方给定。
+  // 远程视图不跑渲染层 agent（Key 从不下发），没有正当调用方；留着等于把 deleteFile
+  // 封掉之后又开了一扇「覆盖任意可写文件」的门。
+  'writeFile',
+  // 直接调用本机已连接的 MCP 工具：绕过 Agent 审批链，等价于「持 token 即可以用户身份
+  // 执行任意已启用工具」（文件系统、数据库、内部 API 都可能挂在 MCP 上）。
+  // mcpSync / mcpTest 已按「按配置拉起子进程」封禁，执行入口同样不能留。
+  'mcpCallTool',
   // 伪终端（node-pty）
   'ptyCreate',
   'ptyWrite',
@@ -143,6 +151,27 @@ export const REMOTE_INVOKE_BLOCKLIST: readonly string[] = [
 ]
 
 /**
+ * 远程文件读取能力：默认拒绝，由用户在「远程访问」弹窗里显式打开后才放行。
+ *
+ * 为什么不直接进黑名单：工作台文件面板（desktopOnly: false）与 VIBE 壁纸在浏览器端
+ * 确实要靠这几条通道读本机文件，一刀切会砍掉既有功能。为什么不照旧全放：这几条通道
+ * 接受任意绝对路径，assertSafePath 只挡 NUL/UNC/ADS/设备名，不限制目录——token 泄漏
+ * 就等于把 ~/.ssh、浏览器凭据库、项目 .env 全部交出去，与 loadApiKeys 进黑名单的理由
+ * 完全一致。于是按「明确能力授权」处理：默认关，用户自己决定要不要把本机文件系统
+ * 交给远程视图。写入与 MCP 执行没有对应的远程功能，直接进黑名单，不给开关。
+ */
+export const REMOTE_FILE_CHANNELS: readonly string[] = [
+  'readFile',
+  'readFileBase64',
+  'readImageFileBase64',
+  'listDir',
+  'fileExists',
+]
+
+/** 由 startWebUI 写入、stopWebUI 清零：服务不在跑时这道门没有意义，但状态不能残留到下次启动 */
+let remoteFileAccess = false
+
+/**
  * 受双重门控的宿主命令通道：传输层看地址（remoteAgentCommandAllowed），
  * 策略层看命令类型（见 electron/agent-host.ts 的远程规则：不带凭据、审批只认本地窗口）。
  */
@@ -203,7 +232,9 @@ function handleAgentEvents(req: http.IncomingMessage, res: http.ServerResponse):
   const heartbeat = setInterval(() => {
     if (!res.writableEnded) res.write(': ping\n\n')
   }, 25_000)
-  req.on('close', () => {
+  // 断连判定必须挂在响应上：Node 16+ 的 req 'close' 表示请求体收完，浏览器关掉标签页时
+  // 它不再触发（实测 Node 24 只有 res 'close' 会），挂 req 等于上游模型请求永远收不到中止。
+  res.on('close', () => {
     clearInterval(heartbeat)
     agentEventClients.delete(res)
   })
@@ -380,12 +411,15 @@ export async function getLanAddresses(): Promise<string[]> {
   return fallback
 }
 
-export async function startWebUI(options: { lanAccess?: boolean } = {}): Promise<{ port: number; token: string; url: string }> {
+export async function startWebUI(options: { lanAccess?: boolean; fileAccess?: boolean } = {}): Promise<{ port: number; token: string; url: string }> {
   if (server) {
     return { port: currentPort, token: currentToken, url: `http://localhost:${currentPort}/?token=${currentToken}` }
   }
 
   currentToken = crypto.randomBytes(32).toString('hex')
+  // 服务器部署（CLERKBOX_WEBUI_AUTO）没有界面可点，用环境变量给同一个能力授权；
+  // 界面启动时由调用方传用户设置，两条路都不会默认打开本机文件读取。
+  remoteFileAccess = options.fileAccess ?? process.env.CLERKBOX_WEBUI_ALLOW_FILE_ACCESS === '1'
   // 默认仅绑定本机回环地址；显式开启局域网访问后才绑定所有网卡。
   // 绑定 0.0.0.0 意味着同一网络内任何设备都可尝试访问，依赖随机 token 认证。
   const host = options.lanAccess ? '0.0.0.0' : '127.0.0.1'
@@ -422,6 +456,7 @@ export function stopWebUI(): void {
     server = null
     currentToken = ''
     currentPort = 0
+    remoteFileAccess = false
   }
 }
 
@@ -622,6 +657,12 @@ async function handleInvoke(req: http.IncomingMessage, res: http.ServerResponse)
       return
     }
 
+    // 远程文件读取：默认拒绝，用户在「远程访问」里显式打开后才放行（见 REMOTE_FILE_CHANNELS）
+    if (REMOTE_FILE_CHANNELS.includes(method) && !remoteFileAccess) {
+      sendJson(res, 403, { error: 'Remote file access is disabled; enable it in the Remote Access dialog' })
+      return
+    }
+
     // 宿主命令通道：默认只允许本机回环触发（远程视图本身走 agent:snapshot + SSE，不受影响）
     if (REMOTE_AGENT_GATED_CHANNELS.includes(method) && !remoteAgentCommandAllowed(req.socket.remoteAddress)) {
       sendJson(res, 403, { error: 'Remote agent run is disabled; enable it with CLERKBOX_WEBUI_ALLOW_REMOTE_RUN=1' })
@@ -699,8 +740,8 @@ async function handleChatStream(req: http.IncomingMessage, res: http.ServerRespo
       }
     })
 
-    // 客户端断开时中止上游请求
-    req.on('close', () => {
+    // 客户端断开时中止上游请求（同上：只有 res 'close' 能反映响应连接断开）
+    res.on('close', () => {
       abortChatStreamFn?.(requestId)
     })
   } catch (e) {

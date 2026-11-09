@@ -81,7 +81,7 @@ export function installAgentHostBridge(): void {
       return (await handler(null, ...args)) as T
     },
     startChatStream: (cfg, body, requestId, emit) => {
-      startChatStream(cfg, body, requestId, (payload) => emit(payload as never))
+      startChatStream(cfg, body, requestId, (payload) => emit(payload as never), 'host')
     },
     abortChatStream: (requestId) => abortChatStream(requestId),
   })
@@ -114,7 +114,7 @@ function hostModelStream(
     wake?.()
   }
   const requestId = `host-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
-  startChatStream(cfg as ApiConnConfig, body, requestId, enqueue)
+  startChatStream(cfg as ApiConnConfig, body, requestId, enqueue, 'host')
 
   const onAbort = () => {
     abortChatStream(requestId)
@@ -142,6 +142,15 @@ function hostModelStream(
       }
     },
   })
+}
+
+/** 消息集合是否一致（按 id 与顺序）：压缩提交前用它复核开头那份快照有没有过期 */
+function sameMessageSet(a: Message[], b: Message[]): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i]?.id !== b[i]?.id) return false
+  }
+  return true
 }
 
 interface HostSession {
@@ -175,6 +184,10 @@ interface HostSession {
   /** 运行期消息镜像：StorePort 的 updateMessage 只有 id，需要回查原消息 */
   messages: Map<string, Message>
   lastUsage?: TokenUsage
+  /** 手动压缩进行中：与 run 共用同一把会话锁，压缩期间的新任务只能排队 */
+  compacting?: boolean
+  /** 会话已被删除：此后所有写入与事件都必须停手，否则会凭空把会话复活 */
+  dropped?: boolean
 }
 
 /** getSession 端口是同步签名，宿主侧用这份缓存承载异步读到的会话字段（工作目录 / harness 等） */
@@ -228,6 +241,8 @@ export class AgentSessionManager {
    * 现在：事件无条件广播，裁剪只在合并窗口外发一次 resync 让渲染层整会话重拉。
    */
   private emit(s: HostSession, event: AgentEvent): void {
+    // 会话已删：事件再发出去就是渲染层凭空重建一个已被用户删掉的会话
+    if (s.dropped) return
     const seq = s.seq.next()
     s.ring.push({ seq, event })
     this.broadcast({ seq, event })
@@ -304,6 +319,8 @@ export class AgentSessionManager {
 
   /** 宿主独占运行期写入：先落库再广播，渲染层看到的消息都已持久 */
   private persistMessage(s: HostSession, message: Message): void {
+    // 会话已删：迟到的写入会重建用户已经删掉的会话与消息
+    if (s.dropped) return
     s.messages.set(message.id, message)
     void this.store.addMessage(messageToRow(message, s.sessionId) as never).catch((err) => {
       console.error('[agent-host] addMessage failed:', err)
@@ -829,6 +846,7 @@ export class AgentSessionManager {
   }
 
   private setQueue(s: HostSession, items: QueuedMessageItem[]): void {
+    if (s.dropped) return
     s.queue = items
     this.emit(s, { type: 'queue.snapshot', sessionId: s.sessionId, items })
   }
@@ -838,6 +856,8 @@ export class AgentSessionManager {
     cmd: Extract<AgentCommand, { type: 'run' }>,
     meta: { remote?: boolean; wake?: boolean } = {}
   ): Promise<{ ok: boolean; error?: string }> {
+    // 会话已删：不再受理任何新运行（否则会在已删除的会话上重建一整套运行态）
+    if (s.dropped) return { ok: false, error: 'session-dropped' }
     // 设置快照：宿主不读渲染层 persist，凭据只存在于本地窗口下发的那份快照里。
     // 因此远程 run 一律**忽略**命令自带的 settings（否则等于让远程端指定上游地址与 Key），
     // 改用本会话最近一次本地快照；没有快照就明确拒绝，而不是拿远程自带的配置去跑。
@@ -858,8 +878,10 @@ export class AgentSessionManager {
     if (meta.remote && base.approvalMode !== 'manual') {
       console.log(`[agent-host][audit] remote run downgraded approval ${base.approvalMode} -> manual session=${s.sessionId}`)
     }
-    if (s.run) {
-      // 已在跑：按排队语义并入队列，而不是并发两个 run 抢同一会话状态
+    if (s.run || s.compacting) {
+      // 已在跑（或正在压缩）：按排队语义并入队列，而不是并发两个 run 抢同一会话状态。
+      // 压缩与 run 共用这把锁：压缩结束时会用旧快照整段替换消息，压缩期间并发跑一轮
+      // 就等于用旧快照覆盖新消息。
       this.setQueue(s, [...s.queue, {
         id: makeId(),
         content: cmd.content,
@@ -945,7 +967,7 @@ export class AgentSessionManager {
 
   /** FIFO 取队首发送；入口守卫拦下的（缺配置等）放回队首，不丢消息 */
   private async flushQueue(s: HostSession): Promise<void> {
-    if (s.run || s.queue.length === 0) return
+    if (s.run || s.compacting || s.dropped || s.queue.length === 0) return
     const cmd = this.snapshots.get(s.sessionId)
     if (!cmd) return
     const next = s.queue[0]
@@ -962,13 +984,16 @@ export class AgentSessionManager {
 
   private async manualCompact(s: HostSession, instructions?: string): Promise<void> {
     const sessionId = s.sessionId
-    if (s.run) return
+    // 与 run 共用同一把会话锁：压缩结束会拿开头的消息快照整段替换本会话消息，
+    // 压缩期间并发跑一轮（或别处撤回回滚）就等于用旧快照覆盖新消息。
+    if (s.run || s.compacting || s.dropped) return
     const cmd = this.snapshots.get(sessionId)
     if (!cmd?.settings) return
     const messages = await this.loadMessages(sessionId)
     if (messages.length === 0) return
     const ctx = this.contexts.get(sessionId)
     const placeholderId = makeId()
+    s.compacting = true
     this.emit(s, {
       type: 'message.added',
       sessionId,
@@ -976,6 +1001,19 @@ export class AgentSessionManager {
     })
     try {
       const result = await compactConversation(messages, cmd.settings, ctx.readFiles, instructions?.trim() || undefined, 'manual')
+      // 提交前复核快照：摘要生成期间会话若被改过（撤回、文件回滚、外部写入），
+      // 拿旧快照整段替换会把这些改动一起抹掉——宁可放弃这次压缩，也不能丢消息
+      const current = await this.loadMessages(sessionId)
+      if (!sameMessageSet(messages, current)) {
+        console.warn('[agent-host] 压缩期间会话内容已变化，放弃本次压缩')
+        this.emit(s, {
+          type: 'message.updated',
+          sessionId,
+          messageId: placeholderId,
+          updates: { content: i18n.t('chat.compactFailed'), _isCompacting: false },
+        })
+        return
+      }
       const keepStart = findKeepBoundaryIndex(messages)
       const newMessages = [
         ...messages.slice(0, keepStart),
@@ -997,6 +1035,10 @@ export class AgentSessionManager {
         messageId: placeholderId,
         updates: { content: i18n.t('chat.compactFailed'), _isCompacting: false },
       })
+    } finally {
+      s.compacting = false
+      // 压缩期间排队的任务在这里放行（压缩独占了这把会话锁）
+      void this.flushQueue(s)
     }
   }
 
@@ -1035,9 +1077,23 @@ export class AgentSessionManager {
   dropSession(sessionId: string): void {
     const s = this.sessions.get(sessionId)
     if (s) {
+      // 先立碑：此后所有写入与事件都停手，否则迟到的回调会把用户删掉的会话复活
+      s.dropped = true
       s.run?.controller.abort()
-      for (const p of s.pendingPermissions.values()) clearTimeout(p.timer)
-      for (const q of s.pendingQuestions.values()) clearTimeout(q.timer)
+      // 待批按拒绝兑现：只清 timer 不 resolve 的话，等待审批的 Promise 永远不返回，
+      // ReAct 循环的闭包与外部等待者一起悬挂
+      for (const pending of s.pendingPermissions.values()) {
+        clearTimeout(pending.timer)
+        pending.resolve({ approved: false, scope: 'once' })
+      }
+      s.pendingPermissions.clear()
+      // 待答按空答案兑现：同上，resolve({}) 让提问方按「没答上来」继续收尾
+      for (const pending of s.pendingQuestions.values()) {
+        clearTimeout(pending.timer)
+        pending.resolve({})
+      }
+      s.pendingQuestions.clear()
+      s.queue = []
       this.sessions.delete(sessionId)
     }
     this.contexts.delete(sessionId)
@@ -1046,7 +1102,7 @@ export class AgentSessionManager {
   }
 
   /** 诊断与单测用的运行态摘要 */
-  inspect(): Array<{ sessionId: string; status: RunStatus; queued: number; pendingPermissions: number; lastSeq: number; hasRun: boolean }> {
+  inspect(): Array<{ sessionId: string; status: RunStatus; queued: number; pendingPermissions: number; lastSeq: number; hasRun: boolean; compacting: boolean }> {
     return [...this.sessions.values()].map((s) => ({
       sessionId: s.sessionId,
       status: s.status,
@@ -1054,6 +1110,7 @@ export class AgentSessionManager {
       pendingPermissions: s.pendingPermissions.size,
       lastSeq: s.seq.get(),
       hasRun: !!s.run,
+      compacting: !!s.compacting,
     }))
   }
 

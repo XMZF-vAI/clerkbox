@@ -783,8 +783,8 @@ agentBrowserEnsurePanel: (sessionId?: string): Promise<boolean> =>
   },
 
   // WebUI 控制（仅 Electron 模式可用）
-  startWebUI: (lanAccess?: boolean): Promise<{ port: number; token: string; url: string } | { error: string }> =>
-    isElectron ? window.clerkbox.startWebUI(lanAccess === true) : Promise.resolve({ error: 'Already in WebUI mode' }),
+  startWebUI: (lanAccess?: boolean, fileAccess?: boolean): Promise<{ port: number; token: string; url: string } | { error: string }> =>
+    isElectron ? window.clerkbox.startWebUI(lanAccess === true, fileAccess === true) : Promise.resolve({ error: 'Already in WebUI mode' }),
   stopWebUI: (): Promise<{ ok: boolean }> =>
     isElectron ? window.clerkbox.stopWebUI() : Promise.resolve({ ok: false }),
   getWebUIStatus: (): Promise<{ running: boolean; url?: string }> =>

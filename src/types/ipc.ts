@@ -613,7 +613,7 @@ export interface ClerkBoxAPI {
   platform: string
   homeDir: string
   // WebUI 控制
-  startWebUI: (lanAccess?: boolean) => Promise<{ port: number; token: string; url: string } | { error: string }>
+  startWebUI: (lanAccess?: boolean, fileAccess?: boolean) => Promise<{ port: number; token: string; url: string } | { error: string }>
   stopWebUI: () => Promise<{ ok: boolean }>
   getWebUIStatus: () => Promise<{ running: boolean; url?: string }>
   getLanAddresses: () => Promise<string[]>

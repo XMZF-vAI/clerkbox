@@ -54,12 +54,13 @@ export default function RemoteAccessDialog({ onClose }: RemoteAccessDialogProps)
   const [webuiStarting, setWebuiStarting] = useState(false)
   const [webuiInfo, setWebuiInfo] = useState<WebUIRuntime | null>(null)
   const [webuiCopied, setWebuiCopied] = useState(false)
-  const [webuiRestarting, setWebuiRestarting] = useState(false)
+  const [webuiRestarting, setWebuiRestarting] = useState<'lan' | 'file' | null>(null)
   // 二维码内容：仅在「允许局域网访问」且检测到局域网 IP 时才生成（绝不指向 localhost）
   const [webuiQrUrl, setWebuiQrUrl] = useState<string | null>(null)
   // 开启了局域网访问但没探测到可用网卡地址
   const [webuiLanMissing, setWebuiLanMissing] = useState(false)
   const webuiLanAccess = useSettingsStore((s) => s.webuiLanAccess)
+  const webuiFileAccess = useSettingsStore((s) => s.webuiFileAccess)
   const updateSettings = useSettingsStore((s) => s.updateSettings)
 
   const [botsOpen, setBotsOpen] = useState(false)
@@ -74,8 +75,8 @@ export default function RemoteAccessDialog({ onClose }: RemoteAccessDialogProps)
   }
 
   /** 起服务并刷新二维码：返回 null 表示主进程给了错误（调用方按错误分支提示） */
-  const startWebUIService = async (lanAccess: boolean): Promise<WebUIRuntime | null> => {
-    const result = await ipc.startWebUI(lanAccess)
+  const startWebUIService = async (lanAccess: boolean, fileAccess: boolean): Promise<WebUIRuntime | null> => {
+    const result = await ipc.startWebUI(lanAccess, fileAccess)
     if ('error' in result && result.error) return null
     if (!('url' in result)) return null
     const runtime: WebUIRuntime = { port: result.port, token: result.token, url: result.url }
@@ -113,7 +114,7 @@ export default function RemoteAccessDialog({ onClose }: RemoteAccessDialogProps)
     if (webuiStarting) return
     setWebuiStarting(true)
     try {
-      const runtime = await startWebUIService(webuiLanAccess)
+      const runtime = await startWebUIService(webuiLanAccess, webuiFileAccess)
       if (!runtime) alert(t('remoteAccess.webuiError'))
     } catch {
       alert(t('remoteAccess.webuiError'))
@@ -122,20 +123,30 @@ export default function RemoteAccessDialog({ onClose }: RemoteAccessDialogProps)
     }
   }
 
-  // 切换局域网访问：写设置后重启 WebUI 以应用新的绑定范围（127.0.0.1 ↔ 0.0.0.0）
-  const handleToggleLanAccess = async () => {
+  // 两个开关都改变主进程的服务态（绑定范围 / 文件读取授权），写设置后重启 WebUI 才生效
+  const restartWebUI = async (kind: 'lan' | 'file', lanAccess: boolean, fileAccess: boolean) => {
     if (webuiRestarting) return
-    setWebuiRestarting(true)
-    const next = !webuiLanAccess
-    updateSettings({ webuiLanAccess: next })
+    setWebuiRestarting(kind)
     try {
       await ipc.stopWebUI()
-      await startWebUIService(next)
+      await startWebUIService(lanAccess, fileAccess)
     } catch {
       /* 重启失败时保留原状态，用户可手动重试（与搬运前一致） */
     } finally {
-      setWebuiRestarting(false)
+      setWebuiRestarting(null)
     }
+  }
+
+  const handleToggleLanAccess = () => {
+    const next = !webuiLanAccess
+    updateSettings({ webuiLanAccess: next })
+    void restartWebUI('lan', next, webuiFileAccess)
+  }
+
+  const handleToggleFileAccess = () => {
+    const next = !webuiFileAccess
+    updateSettings({ webuiFileAccess: next })
+    void restartWebUI('file', webuiLanAccess, next)
   }
 
   const handleStopWebUI = async () => {
@@ -236,20 +247,38 @@ export default function RemoteAccessDialog({ onClose }: RemoteAccessDialogProps)
                 <p className="text-ui-xs text-dark-onSurfaceVariant/60 mb-3">{t('remoteAccess.webuiSecurityNote')}</p>
 
                 {/* 局域网访问开关：默认仅本机 127.0.0.1；开启后绑定 0.0.0.0 并重启服务 */}
-                <div className="mb-4 p-2.5 rounded-md3-md bg-dark-surfaceContainerHigh">
+                <div className="mb-2 p-2.5 rounded-md3-md bg-dark-surfaceContainerHigh">
                   <label className="flex items-center gap-2 cursor-pointer">
                     <input
                       type="checkbox"
                       checked={webuiLanAccess}
                       onChange={handleToggleLanAccess}
-                      disabled={webuiRestarting}
+                      disabled={webuiRestarting !== null}
                       className="accent-md-primary"
                     />
                     <span className="text-ui-xs text-dark-onSurface">{t('remoteAccess.webuiLanAccess')}</span>
-                    {webuiRestarting && <Loader2 size={12} className="animate-spin text-dark-onSurfaceVariant/60" />}
+                    {webuiRestarting === 'lan' && <Loader2 size={12} className="animate-spin text-dark-onSurfaceVariant/60" />}
                   </label>
                   <p className="text-ui-xs text-dark-onSurfaceVariant/60 leading-relaxed mt-1">
-                    {webuiRestarting ? t('remoteAccess.webuiRestarting') : t('remoteAccess.webuiLanHint')}
+                    {webuiRestarting === 'lan' ? t('remoteAccess.webuiRestarting') : t('remoteAccess.webuiLanHint')}
+                  </p>
+                </div>
+
+                {/* 本机文件读取授权：默认关。远程文件面板/壁纸/审批预览都靠它，令牌泄露时它是最大的泄漏面 */}
+                <div className="mb-4 p-2.5 rounded-md3-md bg-dark-surfaceContainerHigh">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={webuiFileAccess}
+                      onChange={handleToggleFileAccess}
+                      disabled={webuiRestarting !== null}
+                      className="accent-md-primary"
+                    />
+                    <span className="text-ui-xs text-dark-onSurface">{t('remoteAccess.webuiFileAccess')}</span>
+                    {webuiRestarting === 'file' && <Loader2 size={12} className="animate-spin text-dark-onSurfaceVariant/60" />}
+                  </label>
+                  <p className="text-ui-xs text-dark-onSurfaceVariant/60 leading-relaxed mt-1">
+                    {webuiRestarting === 'file' ? t('remoteAccess.webuiFileRestarting') : t('remoteAccess.webuiFileHint')}
                   </p>
                 </div>
 

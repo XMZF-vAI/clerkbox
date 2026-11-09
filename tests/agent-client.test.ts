@@ -137,6 +137,56 @@ describe('事件按序、不重、不丢', () => {
     f.push(1)
     expect(reached).toEqual(['second'])
   })
+
+  /**
+   * 回归点（BE-04）：宿主的 seq 是每个会话各自从 1 数起的，客户端却只有一个全局游标。
+   * A 会话把游标推到 1 之后，B 会话的第 1 号事件就被「seq <= lastSeq」判成重复丢掉——
+   * 表现是「任务在跑但界面什么都不动」，审批事件也会一起消失。
+   */
+  it('多会话交错时各会话按自己的序号收事件，不被别的会话吃掉', async () => {
+    const f = fakeTransport()
+    const client = createAgentClient(f.transport)
+    await client.start()
+    const seen: string[] = []
+    client.subscribe((event, seq) => seen.push(`${event.sessionId}#${seq}`))
+
+    f.push(1, { type: 'run.started', sessionId: 's1', runId: 'r1', ts: 1 })
+    f.push(1, { type: 'run.started', sessionId: 's2', runId: 'r2', ts: 2 })
+    f.push(2, { type: 'run.started', sessionId: 's1', runId: 'r1', ts: 3 })
+    f.push(2, { type: 'run.started', sessionId: 's2', runId: 'r2', ts: 4 })
+
+    expect(seen).toEqual(['s1#1', 's2#1', 's1#2', 's2#2'])
+    expect(client.getState().sessionSeqs).toEqual({ s1: 2, s2: 2 })
+  })
+
+  it('一个会话把序号推高之后，另一个会话的低序号事件照样送达', async () => {
+    const f = fakeTransport()
+    const client = createAgentClient(f.transport)
+    await client.start()
+    const seen: string[] = []
+    client.subscribe((event, seq) => seen.push(`${event.sessionId}#${seq}`))
+
+    for (let i = 1; i <= 100; i += 1) {
+      f.push(i, { type: 'run.started', sessionId: 's1', runId: 'r1', ts: i })
+    }
+    f.push(1, { type: 'run.started', sessionId: 's2', runId: 'r2', ts: 1 })
+
+    expect(seen.filter((s) => s.startsWith('s2'))).toEqual(['s2#1'])
+    expect(seen.filter((s) => s.startsWith('s1')).length).toBe(100)
+  })
+
+  it('同一会话内的重复与回退事件仍然被丢弃（去重语义不变）', async () => {
+    const f = fakeTransport()
+    const client = createAgentClient(f.transport)
+    await client.start()
+    const seen: number[] = []
+    client.subscribe((_e, seq) => seen.push(seq))
+    f.push(1)
+    f.push(1)
+    f.push(0)
+    f.push(2)
+    expect(seen).toEqual([1, 2])
+  })
 })
 
 describe('断线退避重连', () => {

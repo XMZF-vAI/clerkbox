@@ -473,6 +473,12 @@ export interface AppSettings {
   /** WebUI 是否绑定 0.0.0.0 允许局域网访问（默认 false 仅本机 127.0.0.1） */
   webuiLanAccess: boolean
   /**
+   * 远程视图能否读本机文件（工作台文件面板、VIBE 壁纸、审批 diff 预览）。
+   * 默认 false：这几条通道接受任意绝对路径，令牌泄漏即等于交出凭据文件，
+   * 必须由用户显式授权。写入与 MCP 执行不受此开关影响，一律不对远程开放。
+   */
+  webuiFileAccess: boolean
+  /**
    * 是否允许 AI 驱动内置浏览器（Browser Use）。
    * 默认 false：它能让模型访问并操作网页，是外部输入面，必须由用户显式打开。
    */

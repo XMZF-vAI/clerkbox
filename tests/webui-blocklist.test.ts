@@ -5,7 +5,7 @@ import * as path from 'path'
 // webui-server 顶部 import { app } from 'electron'（仅启动 WebUI 时用），测试里打桩
 vi.mock('electron', () => ({ app: { getPath: () => '' } }))
 
-import { REMOTE_INVOKE_BLOCKLIST, safeTokenEquals } from '../electron/webui-server'
+import { REMOTE_INVOKE_BLOCKLIST, REMOTE_FILE_CHANNELS, safeTokenEquals } from '../electron/webui-server'
 import { BOTS_IPC_CHANNELS } from '../electron/im-bots/types'
 
 /**
@@ -83,8 +83,7 @@ describe('WebUI 远程调用黑名单', () => {
     expect(REMOTE_INVOKE_BLOCKLIST).toContain('computerUse:command')
   })
 
-  it('新增的桌面能力通道默认在黑名单里（防止后人加 handler 时忘了同步）', () => {
-    const dir = path.join(process.cwd(), 'electron')
+  it('新增的桌面能力通道默认在黑名单里（防止后人加 handler 时忘了同步）', () => {    const dir = path.join(process.cwd(), 'electron')
     const found = new Set<string>()
     for (const name of fs.readdirSync(dir)) {
       if (!name.endsWith('.ts')) continue
@@ -173,6 +172,51 @@ describe('IM 机器人远程调用守卫', () => {
     // webContents.send 的通道名（bots:changed / bots:status / bots:weixinQr）不在其中。
     for (const event of ['bots:changed', 'bots:status', 'bots:weixinQr']) {
       expect(REMOTE_INVOKE_BLOCKLIST.includes(event)).toBe(false)
+    }
+  })
+})
+
+/**
+ * BE-01：远程黑名单原先漏掉本机文件与 MCP 能力。
+ *
+ * 读通道（readFile / readFileBase64 / listDir…）不直接拉黑——工作台文件面板与壁纸预览
+ * 在浏览器端确实要用；改为默认拒绝、由用户显式授权（REMOTE_FILE_CHANNELS）。
+ * 写通道与 MCP 执行没有任何正当远程调用方，一律进黑名单。
+ */
+describe('WebUI 远程文件与 MCP 能力边界', () => {
+  it('通用文件写入与 MCP 工具执行被拦下（不留等价能力的后门）', () => {
+    expect(REMOTE_INVOKE_BLOCKLIST).toContain('writeFile')
+    expect(REMOTE_INVOKE_BLOCKLIST).toContain('mcpCallTool')
+    expect(REMOTE_INVOKE_BLOCKLIST).toContain('deleteFile')
+  })
+
+  it('文件读取通道走「显式授权」而不是静默放行', () => {
+    for (const channel of ['readFile', 'readFileBase64', 'readImageFileBase64', 'listDir', 'fileExists']) {
+      expect(REMOTE_FILE_CHANNELS, channel).toContain(channel)
+    }
+  })
+
+  it('被授权的通道不进黑名单：授权开关与黑名单是两道独立的门', () => {
+    for (const channel of REMOTE_FILE_CHANNELS) {
+      expect(REMOTE_INVOKE_BLOCKLIST, channel).not.toContain(channel)
+    }
+  })
+
+  it('凡是以路径参数读写本机文件的 handler，都必须进黑名单或文件授权表', () => {
+    const dir = path.join(process.cwd(), 'electron')
+    const found = new Set<string>()
+    for (const name of fs.readdirSync(dir)) {
+      if (!name.endsWith('.ts')) continue
+      const source = fs.readFileSync(path.join(dir, name), 'utf-8')
+      for (const match of source.matchAll(/ipcMain\.handle\(\s*['"]([A-Za-z][\w]*)['"]/g)) {
+        if (match[1]) found.add(match[1])
+      }
+    }
+    // 这几条是「路径由调用方给定」的通用文件能力：要么禁，要么受授权表约束
+    const pathBearing = ['readFile', 'readFileBase64', 'readImageFileBase64', 'writeFile', 'deleteFile', 'listDir', 'fileExists']
+    for (const channel of pathBearing) {
+      const covered = REMOTE_INVOKE_BLOCKLIST.includes(channel) || REMOTE_FILE_CHANNELS.includes(channel)
+      expect(covered, channel).toBe(true)
     }
   })
 })

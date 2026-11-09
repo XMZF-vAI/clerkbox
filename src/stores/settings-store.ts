@@ -62,6 +62,7 @@ const defaultSettings: AppSettings = {
   agentsMdEnabled: true,
   claudeMdCompat: true,
   webuiLanAccess: false,
+  webuiFileAccess: false,
   // Agent 动作能力默认全关（fail-closed）：浏览器能访问外部网页，桌面能合成真实键鼠事件，
   // 两者都必须由用户在设置里显式打开，不能靠「上次开着」延续
   browserUseEnabled: false,

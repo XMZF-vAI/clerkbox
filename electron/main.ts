@@ -894,7 +894,7 @@ function registerIpcHandlers(chatStore: ChatStore) {
 
   // 流式对话桥接：WebUI 的 /api/chat-stream 走 SSE，复用 startChatStream / abortChatStream
   setStreamHandlers(
-    (cfg, body, requestId, send) => startChatStream(cfg as ApiConnConfig, body, requestId, send),
+    (cfg, body, requestId, send) => startChatStream(cfg as ApiConnConfig, body, requestId, send, 'webui'),
     abortChatStream
   )
 
@@ -2697,9 +2697,9 @@ function registerIpcHandlers(chatStore: ChatStore) {
   })
 
   // ── WebUI 控制 ──
-  ipcMain.handle('startWebUI', async (_event, lanAccess?: boolean) => {
+  ipcMain.handle('startWebUI', async (_event, lanAccess?: boolean, fileAccess?: boolean) => {
     try {
-      return await startWebUI({ lanAccess: lanAccess === true })
+      return await startWebUI({ lanAccess: lanAccess === true, fileAccess: fileAccess === true })
     } catch (e) {
       return { error: e instanceof Error ? e.message : String(e) }
     }
