@@ -544,7 +544,11 @@ export class AgentSessionManager {
             return null
           }
         },
-        runShell: (command, cwd) => ipc.executeCommandWithShell(command, cwd, 'cmd'),
+        // 主进程宿主：按宿主平台选 shell。Windows 用 cmd.exe，macOS/Linux 用 /bin/sh
+        // （executeCommandWithShell 在 POSIX 上会把 cmd/powershell 兜底到 /bin/sh，
+        // 但这里直接传 'sh' 更明确，避免依赖兜底）。
+        runShell: (command, cwd) =>
+          ipc.executeCommandWithShell(command, cwd, process.platform === 'win32' ? 'cmd' : 'sh'),
         buildMemoryPrompt: (workingDir, homeDir) => buildMemoryPrompt(workingDir, homeDir),
       },
       emit: (event) => this.emit(s, event),

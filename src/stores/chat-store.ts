@@ -176,11 +176,12 @@ const getDefaultWorkDirBase = (): { base: string; sep: string } => {
     // 使用 ipc 抽象层，兼容 Electron 与 WebUI 两种模式
     const platform = ipc.platform()
     const home = ipc.homeDir() || ''
-    if (platform === 'darwin') return { base: home ? `${home}/clerkbox-work` : '/tmp/clerkbox-work', sep: '/' }
-    if (platform === 'linux') return { base: home ? `${home}/clerkbox-work` : '/tmp/clerkbox-work', sep: '/' }
-    return { base: home ? `${home}\\clerkbox-work` : 'C:\\clerkbox-work', sep: '\\' }
+    if (platform === 'win32') return { base: home ? `${home}\\clerkbox-work` : 'C:\\clerkbox-work', sep: '\\' }
+    // darwin / linux / 平台未知（WebUI 首次加载时 /api/platform 尚未返回）统一用 POSIX：
+    // 未知若兜底成 C:\\ 会在 Linux 宿主上生成无法创建的 Windows 路径。
+    return { base: home ? `${home}/clerkbox-work` : '/tmp/clerkbox-work', sep: '/' }
   } catch {
-    return { base: 'C:\\clerkbox-work', sep: '\\' }
+    return { base: '/tmp/clerkbox-work', sep: '/' }
   }
 }
 

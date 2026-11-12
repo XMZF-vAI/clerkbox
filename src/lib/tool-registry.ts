@@ -175,18 +175,18 @@ const shellTools: ToolDefinition[] = [
   {
     name: 'execute_command',
     description:
-      'Execute a command in the terminal. Windows defaults to cmd.exe (use shell=powershell for PowerShell cmdlets).\n' +
+      'Execute a command in the terminal. On Windows the default is cmd.exe (use shell=powershell for PowerShell cmdlets); on macOS/Linux the default is the POSIX shell /bin/sh (use shell=bash or shell=zsh for a specific POSIX shell).\n' +
       'Usage:\n' +
       '- Prefer the dedicated tools instead of shell commands: read_file over cat/type, write_file/search_replace over echo/Set-Content/Out-File, search_files/search_content over find/Select-String. Reserve this tool for running programs, git, npm, package managers, and other system operations.\n' +
       '- Commands time out after 120000 ms by default; pass timeout (ms, max 600000) for long-running commands. On timeout the process tree is killed and the captured output is returned.\n' +
       '- Output over 50000 chars is truncated and the full output is saved to a file whose path is returned — use read_file with offset/limit to inspect it instead of re-running the command.\n' +
-      '- cmd notes: quote paths containing spaces with double quotes; chain commands with &&; %% for a literal %. PowerShell notes: URLs containing & must be quoted; use single-quoted strings to avoid $ expansion.',
+      '- cmd notes: quote paths containing spaces with double quotes; chain commands with &&; %% for a literal %. PowerShell notes: URLs containing & must be quoted; use single-quoted strings to avoid $ expansion. POSIX notes: single-quote paths with spaces; use && to chain; /bin/sh -c is used by default.',
     parameters: {
       type: 'object',
       properties: {
         command: { type: 'string', description: 'The command to execute' },
         cwd: { type: 'string', description: 'Working directory (optional, defaults to the current project directory)' },
-        shell: { type: 'string', description: 'Shell type: cmd (default) or powershell. Use cmd for simple commands, powershell for cmdlets/object pipelines', enum: ['cmd', 'powershell'] },
+        shell: { type: 'string', description: 'Shell type: Windows uses cmd (default) or powershell; macOS/Linux uses sh (default), bash or zsh. cmd/powershell on POSIX fall back to /bin/sh for compatibility.', enum: ['cmd', 'powershell', 'sh', 'bash', 'zsh'] },
         timeout: { type: 'number', description: 'Timeout in milliseconds (default 120000, max 600000). The process tree is killed when it expires.' },
       },
       required: ['command'],
@@ -443,19 +443,34 @@ function escapePS(s: string): string {
   return s.replace(/`/g, '``').replace(/\$/g, '`$').replace(/"/g, '`"')
 }
 
-/** Escape a string for interpolation into a PowerShell single-quoted string (rg 调用用）。
+/** Escape a string for interpolation into a PowerShell single-quoted string (rg 调用用)。
  *  单引号字符串内唯一的特殊字符就是 ' 本身，双写即可转义。 */
 function escapePSsingle(s: string): string {
   return s.replace(/'/g, "''")
 }
 
-// ── Ripgrep 探测（进程内缓存；不可用则搜索工具回退 PowerShell）──
+/** POSIX sh 单引号转义：把 ' 变成 '\''（结束引号、转义一个单引号、重新开启引号）。
+ *  PowerShell 的 '' 双写在 sh 里含义不同（会吞掉单引号），所以两套必须分开。 */
+function escapeSHsingle(s: string): string {
+  return s.replace(/'/g, "'\\''")
+}
+
+/** 当前宿主是否 Windows。tool-registry 会同时跑在渲染层（Electron/WebUI）与主进程
+ *  agent-host 内；ipc.platform() 三种模式都能返回宿主平台（见 ipc-client.ts）。 */
+function isWinPlatform(): boolean {
+  return ipc.platform() === 'win32'
+}
+
+// ── Ripgrep 探测（进程内缓存；不可用则按平台回退）──
 
 let rgAvailable: boolean | null = null
 async function detectRipgrep(): Promise<boolean> {
   if (rgAvailable !== null) return rgAvailable
   try {
-    const r = await ipc.executeCommandWithShell('rg --version', undefined, 'cmd')
+    // 走跨平台 executeCommand（Windows=cmd.exe / POSIX=/bin/sh），
+    // 不能用 executeCommandWithShell('cmd')——旧写法在 macOS/Linux 上必失败，
+    // 会把 rgAvailable 永久缓存成 false。
+    const r = await ipc.executeCommand('rg --version')
     rgAvailable = r.exitCode === 0
   } catch {
     rgAvailable = false
@@ -1010,35 +1025,46 @@ class ToolRegistry {
       case 'search_files': {
         const pattern = String(args.pattern)
         const path = String(args.path)
+        const win = isWinPlatform()
         try {
-          // 优先 ripgrep（快、尊重 .gitignore）；不可用回退 PowerShell
+          let result: { stdout: string; stderr: string; exitCode: number }
           if (await detectRipgrep()) {
-            const cmd = `rg --files '${escapePSsingle(path)}' --glob '${escapePSsingle(pattern)}' --hidden --no-messages`
-            const result = await ipc.executeCommandWithShell(cmd, path, 'powershell')
-            const lines = result.stdout.split('\n').map((l) => l.trim()).filter(Boolean)
-            if (lines.length === 0) {
-              return result.exitCode !== 0 && result.stderr.trim()
-                ? `Error: file search failed - ${result.stderr.trim()}`
-                : `No files matching "${pattern}" found`
-            }
-            const shown = lines.slice(0, SEARCH_MAX_ENTRIES)
-            const tail = lines.length > SEARCH_MAX_ENTRIES
-              ? `\n(${lines.length} files found, showing first ${SEARCH_MAX_ENTRIES}. Refine the pattern or path to narrow the results.)`
-              : ''
-            return shown.join('\n') + tail
+            // rg 命令用单引号包裹路径/pattern。Windows 下 cmd.exe 不认单引号，
+            // 仍走 PowerShell（既有行为）；POSIX 下走跨平台 executeCommand(/bin/sh)。
+            const q = win ? escapePSsingle : escapeSHsingle
+            const cmd = `rg --files '${q(path)}' --glob '${q(pattern)}' --hidden --no-messages`
+            result = win
+              ? await ipc.executeCommandWithShell(cmd, path, 'powershell')
+              : await ipc.executeCommand(cmd, undefined)
+          } else if (win) {
+            const safePath = escapePS(path)
+            const safePattern = escapePS(pattern)
+            result = await ipc.executeCommandWithShell(
+              `Get-ChildItem -Path "${safePath}" -Filter "${safePattern}" -Recurse -File | Select-Object -First ${SEARCH_MAX_ENTRIES} FullName | Format-Table -HideTableHeaders`,
+              path,
+              'powershell'
+            )
+          } else {
+            // POSIX 无 rg：用 find 回退。path 可能是不存在的目录或普通文件，
+            // 故不作为 cwd 传给 spawn（否则 ENOTDIR），一律用绝对路径作 find 起点。
+            const q = escapeSHsingle
+            result = await ipc.executeCommand(
+              `find '${q(path)}' -type f -name '${q(pattern)}' -print 2>/dev/null | head -n ${SEARCH_MAX_ENTRIES}`,
+              undefined
+            )
           }
-          const safePath = escapePS(path)
-          const safePattern = escapePS(pattern)
-          const result = await ipc.executeCommandWithShell(
-            `Get-ChildItem -Path "${safePath}" -Filter "${safePattern}" -Recurse -File | Select-Object -First ${SEARCH_MAX_ENTRIES} FullName | Format-Table -HideTableHeaders`,
-            path,
-            'powershell'
-          )
-          if (result.exitCode !== 0) {
-            return `Error: search failed - ${result.stderr}`
+          const lines = result.stdout.split('\n').map((l) => l.trim()).filter(Boolean)
+          if (result.exitCode !== 0 && lines.length === 0 && result.stderr.trim()) {
+            return `Error: file search failed - ${result.stderr.trim()}`
           }
-          const files = result.stdout.trim()
-          return files || `No files matching "${pattern}" found`
+          if (lines.length === 0) {
+            return `No files matching "${pattern}" found`
+          }
+          const shown = lines.slice(0, SEARCH_MAX_ENTRIES)
+          const tail = lines.length > SEARCH_MAX_ENTRIES
+            ? `\n(${lines.length} files found, showing first ${SEARCH_MAX_ENTRIES}. Refine the pattern or path to narrow the results.)`
+            : ''
+          return shown.join('\n') + tail
         } catch (e) {
           return `Error: file search failed - ${e instanceof Error ? e.message : String(e)}`
         }
@@ -1048,44 +1074,56 @@ class ToolRegistry {
         const path = String(args.path)
         const filePattern = args.filePattern ? String(args.filePattern) : ''
         const ignoreCase = args.ignoreCase === true
+        const win = isWinPlatform()
         try {
-          // 优先 ripgrep（快、尊重 .gitignore、输出稳定）；不可用回退 PowerShell Select-String
+          let result: { stdout: string; stderr: string; exitCode: number }
           if (await detectRipgrep()) {
+            const q = win ? escapePSsingle : escapeSHsingle
             const parts = ['rg --line-number --no-heading --color never --hidden --no-messages']
             if (ignoreCase) parts.push('-i')
-            if (filePattern) parts.push(`--glob '${escapePSsingle(filePattern)}'`)
-            parts.push(`-e '${escapePSsingle(pattern)}'`)
-            parts.push(`'${escapePSsingle(path)}'`)
-            const result = await ipc.executeCommandWithShell(parts.join(' '), path, 'powershell')
-            const lines = result.stdout.split('\n').map((l) => (l.length > SEARCH_MAX_LINE_CHARS ? l.slice(0, SEARCH_MAX_LINE_CHARS) + '... [truncated]' : l)).filter((l) => l.trim())
-            if (lines.length === 0) {
-              return result.exitCode !== 0 && result.stderr.trim()
-                ? `Error: content search failed - ${result.stderr.trim()}`
-                : `No matches found for "${pattern}"`
-            }
-            const shown = lines.slice(0, SEARCH_MAX_ENTRIES)
-            const tail = lines.length > SEARCH_MAX_ENTRIES
-              ? `\n(${lines.length} matches, showing first ${SEARCH_MAX_ENTRIES}. Use a more specific pattern, path or filePattern.)`
-              : ''
-            return shown.join('\n') + tail
+            if (filePattern) parts.push(`--glob '${q(filePattern)}'`)
+            parts.push(`-e '${q(pattern)}'`)
+            parts.push(`'${q(path)}'`)
+            const cmd = parts.join(' ')
+            result = win
+              ? await ipc.executeCommandWithShell(cmd, path, 'powershell')
+              : await ipc.executeCommand(cmd, undefined)
+          } else if (win) {
+            const safePath = escapePS(path)
+            const safePattern = escapePS(pattern)
+            const safeFilePattern = escapePS(filePattern || '*')
+            const cmd = filePattern
+              ? `Get-ChildItem -Path "${safePath}" -Filter "${safeFilePattern}" -Recurse -File | Select-String -Pattern "${safePattern}" | Select-Object -First 30 | ForEach-Object { "$($_.Filename):$($_.LineNumber): $($_.Line.Trim())" }`
+              : `Select-String -Path "${safePath}\\*" -Pattern "${safePattern}" -Recurse | Select-Object -First 30 | ForEach-Object { "$($_.Filename):$($_.LineNumber): $($_.Line.Trim())" }`
+            result = await ipc.executeCommandWithShell(cmd, path, 'powershell')
+          } else {
+            // POSIX 无 rg：grep -rn 回退。用 --include 实现 filePattern，
+            // 路径/pattern 全部 sh 单引号转义；不作为 cwd 传 spawn 以避免 ENOTDIR。
+            const q = escapeSHsingle
+            const grepParts = ['grep', '-r', '-n', '--color', 'never']
+            if (ignoreCase) grepParts.push('-i')
+            if (filePattern) grepParts.push(`--include='${q(filePattern)}'`)
+            grepParts.push(`-e '${q(pattern)}'`)
+            grepParts.push(`'${q(path)}'`)
+            result = await ipc.executeCommand(
+              `${grepParts.join(' ')} 2>/dev/null | head -n ${SEARCH_MAX_ENTRIES}`,
+              undefined
+            )
           }
-          const safePath = escapePS(path)
-          const safePattern = escapePS(pattern)
-          const safeFilePattern = escapePS(filePattern || '*')
-          const cmd = filePattern
-            ? `Get-ChildItem -Path "${safePath}" -Filter "${safeFilePattern}" -Recurse -File | Select-String -Pattern "${safePattern}" | Select-Object -First 30 | ForEach-Object { "$($_.Filename):$($_.LineNumber): $($_.Line.Trim())" }`
-            : `Select-String -Path "${safePath}\\*" -Pattern "${safePattern}" -Recurse | Select-Object -First 30 | ForEach-Object { "$($_.Filename):$($_.LineNumber): $($_.Line.Trim())" }`
-          const result = await ipc.executeCommandWithShell(cmd, path, 'powershell')
-          if (result.exitCode !== 0) {
-            if (!result.stdout.trim() && !result.stderr.trim()) {
-              return `No matches found for "${pattern}"`
-            }
-            if (!result.stdout.trim()) {
-              return `Error: content search failed - ${result.stderr}`
-            }
+          const lines = result.stdout.split('\n').map((l) => (l.length > SEARCH_MAX_LINE_CHARS ? l.slice(0, SEARCH_MAX_LINE_CHARS) + '... [truncated]' : l)).filter((l) => l.trim())
+          // 无匹配时 rg/grep 的 exitCode=1，但 stderr 为空（rg 用 --no-messages、
+          // POSIX 回退用 2>/dev/null）；仅当「无任何输出且 stderr 有内容」才判为错误。
+          if (result.exitCode !== 0 && lines.length === 0 && result.stderr.trim()) {
+            return `Error: content search failed - ${result.stderr.trim()}`
           }
-          const matches = result.stdout.trim()
-          return matches || `No matches found for "${pattern}"`
+          if (lines.length === 0) {
+            return `No matches found for "${pattern}"`
+          }
+          const shown = lines.slice(0, SEARCH_MAX_ENTRIES)
+          const tail = lines.length > SEARCH_MAX_ENTRIES
+            ? `\n(${lines.length} matches, showing first ${SEARCH_MAX_ENTRIES}. Use a more specific pattern, path or filePattern.)`
+            : ''
+          return shown.join('\n') + tail
         } catch (e) {
           return `Error: content search failed - ${e instanceof Error ? e.message : String(e)}`
         }
@@ -1093,7 +1131,10 @@ class ToolRegistry {
       case 'execute_command': {
         const command = String(args.command)
         const cwd = args.cwd ? String(args.cwd) : undefined
-        const shellType = args.shell ? String(args.shell) : 'cmd'
+        // Windows 默认 cmd.exe；macOS/Linux 默认 /bin/sh（handler 会把 cmd/powershell
+        // 也兜底到 /bin/sh，所以显式指定时不会 ENOENT）。
+        const defaultShell = isWinPlatform() ? 'cmd' : 'sh'
+        const shellType = args.shell ? String(args.shell) : defaultShell
         const timeoutMs = Math.min(
           Number.isFinite(Number(args.timeout)) && Number(args.timeout) > 0 ? Math.floor(Number(args.timeout)) : COMMAND_DEFAULT_TIMEOUT_MS,
           COMMAND_MAX_TIMEOUT_MS

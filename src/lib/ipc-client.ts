@@ -769,7 +769,14 @@ agentBrowserEnsurePanel: (sessionId?: string): Promise<boolean> =>
   // 所以 WebUI 模式用缓存值（首次访问时异步拉取并缓存）
   platform: (): string => {
     if (isElectron) return window.clerkbox.platform
-    return cachedPlatform
+    if (cachedPlatform) return cachedPlatform
+    // 主进程宿主模式（无 window）：/api/platform 的异步预取不会执行，cachedPlatform
+    // 恒为空。此时直接读 Node 的 process.platform，否则工具层会把 Windows 宿主
+    // 误判成 POSIX，生成 find/grep 命令而回归。
+    if (typeof window === 'undefined' && typeof process !== 'undefined' && process.platform) {
+      return process.platform
+    }
+    return ''
   },
   homeDir: (): string => {
     if (isElectron) return window.clerkbox.homeDir

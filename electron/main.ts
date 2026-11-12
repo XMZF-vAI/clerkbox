@@ -1475,7 +1475,9 @@ function registerIpcHandlers(chatStore: ChatStore) {
     { regex: /\brmdir\s+\/[sq]/i, reason: '递归删除目录命令被禁止' },
     { regex: /\bdel\s+\/(?:[sq]|f\s+\/s\s+\/q)/i, reason: '强制删除命令被禁止' },
     { regex: /\b(?:Remove-Item|ri)\b.*-(?:Recurse|r)\b.*-(?:Force|f)\b/i, reason: '递归强制删除命令被禁止' },
-    { regex: /\b(?:mkfs|format)\b/i, reason: '格式化文件系统命令被禁止' },
+    // 按命令名/真实格式化用法匹配：不能裸匹配 "format"，否则 PowerShell 的
+    // `Format-Table -HideTableHeaders`（search_files 回退命令）会被误判为磁盘格式化。
+    { regex: /\bmkfs(?:\.\w+)?\b|\bformat\s+[a-z]:/i, reason: '格式化文件系统命令被禁止' },
     { regex: /\btaskkill\b.*\/f\b/i, reason: '强制结束进程命令被禁止' },
   ]
 
@@ -1638,20 +1640,34 @@ function registerIpcHandlers(chatStore: ChatStore) {
       if (blockReason) {
         return { stdout: '', stderr: `命令被主进程拒绝：${blockReason}`, exitCode: -1 }
       }
-      if (shellType !== 'cmd' && shellType !== 'powershell') {
-        return { stdout: '', stderr: 'Unsupported shell type', exitCode: -1 }
+      const isWin = process.platform === 'win32'
+      // Windows 只认 cmd/powershell；POSIX 上允许 cmd/powershell（作为 /bin/sh 的兜底，
+      // 兼容旧调用点与硬编码 'cmd' 的 runShell）以及显式的 bash/zsh。
+      const posixShells: Record<string, string> = { bash: '/bin/bash', zsh: '/bin/zsh', sh: '/bin/sh' }
+      let shellPath: string
+      let shellArgs: string[]
+      if (isWin) {
+        if (shellType !== 'cmd' && shellType !== 'powershell') {
+          return { stdout: '', stderr: 'Unsupported shell type', exitCode: -1 }
+        }
+        const isPS = shellType === 'powershell'
+        shellPath = isPS ? 'powershell.exe' : 'cmd.exe'
+        // 强制 UTF-8 控制台代码页（仅 Windows）
+        const shellCmd = isPS
+          ? `& { [Console]::OutputEncoding=[Text.Encoding]::UTF8; chcp 65001 > $null; ${command} }`
+          : `chcp 65001 >nul 2>&1 && ${command}`
+        shellArgs = isPS ? ['-NoProfile', '-Command', shellCmd] : ['/c', shellCmd]
+      } else {
+        // macOS / Linux：cmd/powershell 在 POSIX 上不存在，统一兜底到 /bin/sh -c，
+        // 不注入任何 Windows 语法（chcp / >nul / & { }），与 executeCommand handler 保持一致。
+        shellPath = posixShells[shellType] || '/bin/sh'
+        shellArgs = ['-c', command]
       }
-      const isPS = shellType === 'powershell'
-      const shellPath = isPS ? 'powershell.exe' : 'cmd.exe'
-      // 强制 UTF-8 控制台代码页
-      const shellCmd = isPS
-        ? `& { [Console]::OutputEncoding=[Text.Encoding]::UTF8; chcp 65001 > $null; ${command} }`
-        : `chcp 65001 >nul 2>&1 && ${command}`
       const MAX_BUFFER = 10 * 1024 * 1024
       // 可调超时：默认 120s，钳制到 1s ~ 600s（防误传导致永久挂起或秒杀正常命令）
       const TIMEOUT_MS = Math.min(Math.max(Number(timeoutMs) || 120_000, 1_000), 600_000)
       return new Promise((resolve) => {
-        const child = spawn(shellPath, isPS ? ['-NoProfile', '-Command', shellCmd] : ['/c', shellCmd], {
+        const child = spawn(shellPath, shellArgs, {
           cwd,
           env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
           windowsHide: true,

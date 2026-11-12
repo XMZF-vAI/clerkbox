@@ -77,12 +77,15 @@ function getOsDescription(): string {
   return navigator.platform || 'unknown'
 }
 
-/** 平台感知的可用 shell 描述（与 prompts.ts 的 Shell selection 段口径一致） */
+/** 平台感知的可用 shell 描述（与 prompts.ts 的 Shell selection 段口径一致）。
+ *  必须取「宿主」平台：WebUI 模式下命令在服务端宿主执行，window.clerkbox 不存在，
+ *  旧实现会兜底成 cmd.exe/PowerShell，误导模型在 Linux/macOS 宿主上用错 shell。 */
 function getShellDescription(): string {
-  const platform = window.clerkbox?.platform
+  const platform = ipc.platform()
   if (platform === 'darwin') return 'zsh, bash'
   if (platform === 'linux') return 'bash, sh'
-  return 'cmd.exe, PowerShell'
+  if (platform === 'win32') return 'cmd.exe, PowerShell'
+  return 'sh (POSIX)'
 }
 
 export function useAgent(sessionId: string) {
@@ -245,7 +248,9 @@ export function useAgent(sessionId: string) {
       },
     },
     env: {
-      platform: navigator.platform || 'unknown',
+      // 宿主平台（WebUI 下命令在服务端执行，navigator.platform 是浏览器客户端平台，
+      // 会误导模型）。ipc.platform() 由 /api/platform 返回宿主 process.platform。
+      platform: ipc.platform() || (typeof navigator !== 'undefined' ? navigator.platform : 'unknown'),
       osDescription: getOsDescription(),
       shellDescription: getShellDescription(),
       // Vite 注入的开发态标记（agent-core 侧不能直接用 import.meta，主进程为 CommonJS）
@@ -260,7 +265,10 @@ export function useAgent(sessionId: string) {
           return null
         }
       },
-      runShell: (command, cwd) => ipc.executeCommandWithShell(command, cwd, 'cmd'),
+      // 渲染层宿主：按宿主平台选 shell（WebUI 下 ipc.platform() 返回服务端宿主平台，
+      // 非浏览器客户端平台）。Windows=cmd.exe，macOS/Linux=/bin/sh。
+      runShell: (command, cwd) =>
+        ipc.executeCommandWithShell(command, cwd, ipc.platform() === 'win32' ? 'cmd' : 'sh'),
       buildMemoryPrompt: (workingDir, homeDir) => buildMemoryPrompt(workingDir, homeDir),
     },
     emit: () => { /* P1 渲染层宿主直写 store；P3 起接 'agent:event' 通道 */ },

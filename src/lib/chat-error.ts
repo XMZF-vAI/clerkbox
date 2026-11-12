@@ -47,12 +47,18 @@ export function buildDiagnosticPayload(params: {
   timestamp: number
 }): string {
   const { code, message, sessionId, timestamp } = params
+  const platform = typeof navigator !== 'undefined' ? navigator.platform : 'unknown'
+  // 主进程日志文件位置随平台不同，诊断文本不能写死 Windows 的 %APPDATA%。
+  const isWin = /win/i.test(platform)
+  const logPath = isWin
+    ? '%APPDATA%\\clerkbox\\logs\\main.log'
+    : '~/Library/Logs/clerkbox/main.log (macOS) or ~/.config/clerkbox/logs/main.log (Linux)'
   return [
     `code=${code}`,
     `time=${new Date(timestamp).toISOString()}`,
     `session=${sessionId || 'unknown'}`,
-    `platform=${typeof navigator !== 'undefined' ? navigator.platform : 'unknown'}`,
-    `log=%APPDATA%\\clerkbox\\logs\\main.log`,
+    `platform=${platform}`,
+    `log=${logPath}`,
     '',
     message.slice(0, 2000),
   ].join('\n')

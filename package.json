@@ -85,6 +85,7 @@
     "appId": "com.xmzf.clerkbox",
     "productName": "ClerkBox",
     "npmRebuild": false,
+    "afterPack": "scripts/after-pack.cjs",
     "directories": {
       "output": "release-out",
       "buildResources": "build"

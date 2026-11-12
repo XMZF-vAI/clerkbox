@@ -9,12 +9,20 @@
 
 /**
  * 当前运行平台 —— 模块加载时确定一次（平台运行期不变，不破坏静态前缀缓存）。
- * WebUI 模式跑在浏览器里 window.clerkbox 不存在，兜底 win32 文案。
+ * 取「宿主」平台而非浏览器客户端平台：
+ *  - Electron 渲染层：window.clerkbox.platform 由 preload 同步注入（主进程 process.platform）。
+ *  - 主进程 agent-host：无 window，直接读 process.platform。
+ *  - WebUI 浏览器：window.clerkbox 不存在，改用 ipc.platform()（由 /api/platform 返回宿主平台，
+ *    见 ipc-client.ts；异步缓存为空时临时兜底，不改变静态段字节稳定性——同一宿主最终一致）。
+ * 旧实现一律兜底 'win32'，会让 Linux/macOS WebUI 用户收到 cmd/PowerShell 指引。
  */
+import { ipc } from './ipc-client'
+
 const PLATFORM: string =
-  typeof window !== 'undefined' && window.clerkbox?.platform
-    ? window.clerkbox.platform
-    : 'win32'
+  (typeof window !== 'undefined' && window.clerkbox?.platform) ||
+  (typeof process !== 'undefined' && process.platform) ||
+  ipc.platform() ||
+  'win32'
 
 /** 平台专属 shell 选择指引（超时行为是跨平台公共句，由 SYSTEM_PROMPT 尾接） */
 const SHELL_SELECTION: Record<string, string> = {
@@ -72,6 +80,7 @@ export const SYSTEM_PROMPT = `You are ClerkBox, a capable AI agent running on th
 - question asks the user 1-3 multiple-choice questions. Use it for genuine decision points, never to request permission to continue.
 
 # Shell selection (execute_command)
+The authoritative host platform and available shells are in the "## Environment" section of this conversation (resolved live per request) — if they differ from the hints below, follow the Environment section. The execute_command tool also accepts an explicit shell parameter (cmd/powershell on Windows; sh/bash/zsh on macOS/Linux).
 ${shellSelection}
 - Commands time out and get killed after 120s by default — pass a larger timeout (ms, max 600000) for long-running operations.
 
