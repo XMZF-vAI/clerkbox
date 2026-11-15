@@ -234,7 +234,7 @@ Build artifacts land in `release-out/`:
 ## Quick Start
 
 1. **First launch**: complete the welcome tour, choose a theme and color scheme
-2. **Add a provider**: go to **Settings → API Config → Add Provider**, pick one of the 22 presets, and enter your API key. Model IDs auto-populate from the provider's `/models` endpoint.
+2. **Configure a model**: when no model is configured, click **Sign in to Joule** on the desktop home screen to open its dedicated panel, then click the sign-in button in the panel to complete browser authorization and select an available model. Use **Settings → Account** to manage Joule afterward. You can also use **Settings → API Configuration → Add Provider** to connect another service or a local model and enter any required connection details and API key. Model IDs auto-populate from the provider's `/models` endpoint.
 3. **Pick a working directory**: click the button at the bottom of the sidebar to choose a project folder
 4. **(Optional) Add AGENTS.md**: drop an `AGENTS.md` at the working-directory root to describe your project stack and conventions
 5. **Start chatting**: type your request, for example:
@@ -524,8 +524,9 @@ Both capabilities act as the user on this machine and are **fail-closed by defau
 
 ## Message Rewind & File Rollback
 
-- **Rewind**: rewind / edit-and-resend / retry from any turn; the conversation is physically truncated (a rewind is a real delete, there is no hidden branch)
-- **File rollback**: a snapshot is taken before every write, and rewinding rolls the file back by path; content fingerprints are compared before rolling back
+- **Rewind**: select any real user message, preview and confirm deleting that message and everything after it. Restore its text, attachments and task mode to the original conversation's draft. Existing drafts are protected. Deleted history cannot be recovered.
+- **Edit and retry**: available on the latest turn, preserving the original attachments, task mode and skills when resending.
+- **File rollback**: files are kept by default; select rollback explicitly to restore the earliest snapshot per path in the selected range, after checking the latest tracked content fingerprint. Rewind waits until runs, compaction and queued messages are resolved; changed history requires a fresh preview.
 - **Safety first**: files changed externally after the snapshot are marked `external_modified`, refused for automatic rollback, and listed for you to handle; execution goes through a transaction log with reverse-order compensation, and an interruption can be recovered
 
 ---
