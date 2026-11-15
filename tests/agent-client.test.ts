@@ -52,10 +52,11 @@ describe('模式判定', () => {
     expect(client.getState()).toMatchObject({ mode: 'renderer', connection: 'offline' })
   })
 
-  it('模式查询失败按 renderer 回落，不把界面悬空', async () => {
+  it('模式查询失败保持未知，不能猜成 renderer 并执行另一套循环', async () => {
     const f = fakeTransport({ mode: async () => { throw new Error('no channel') } })
     const client = createAgentClient(f.transport)
-    await expect(client.start()).resolves.toBe(false)
+    await expect(client.ensureMode()).rejects.toThrow('no channel')
+    expect(client.getState().mode).toBeNull()
     expect(client.getState().connection).toBe('offline')
   })
 
@@ -74,6 +75,44 @@ describe('模式判定', () => {
     await client.start()
     await client.start()
     expect(f.calls.snapshotSince).toEqual([0])
+  })
+
+  it('冷启动的并发 ensureMode 全部等待同一份模式结果', async () => {
+    let resolve!: (mode: 'main') => void
+    const mode = vi.fn(() => new Promise<'main'>((done) => { resolve = done }))
+    const f = fakeTransport({ mode })
+    const client = createAgentClient(f.transport)
+    const starting = client.start()
+    let secondSettled = false
+    const first = client.ensureMode()
+    const second = client.ensureMode().then((value) => { secondSettled = true; return value })
+    await Promise.resolve()
+    expect(secondSettled).toBe(false)
+    expect(mode).toHaveBeenCalledTimes(1)
+    resolve('main')
+    await expect(Promise.all([starting, first, second])).resolves.toEqual([true, 'main', 'main'])
+    expect(f.calls.snapshotSince).toEqual([0])
+  })
+
+  it('初始化期间 stop 后迟到的模式结果不能重新挂接订阅', async () => {
+    let resolve!: (mode: 'main') => void
+    const f = fakeTransport({ mode: () => new Promise<'main'>((done) => { resolve = done }) })
+    const client = createAgentClient(f.transport)
+    const pending = client.ensureMode()
+    client.stop()
+    resolve('main')
+    await expect(pending).rejects.toThrow('agent-start-cancelled')
+    expect(f.subscribed()).toBe(false)
+    expect(client.getState().mode).toBeNull()
+  })
+
+  it('模式查询失败后允许重新查询恢复，不缓存错误的 renderer 模式', async () => {
+    const mode = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValue('main')
+    const f = fakeTransport({ mode })
+    const client = createAgentClient(f.transport)
+    await expect(client.ensureMode()).rejects.toThrow('offline')
+    await expect(client.ensureMode()).resolves.toBe('main')
+    expect(mode).toHaveBeenCalledTimes(2)
   })
 })
 
@@ -190,6 +229,26 @@ describe('事件按序、不重、不丢', () => {
 })
 
 describe('断线退避重连', () => {
+  it('A 的快照进行中又请求 B，B 的权威读回不能被合并丢掉', async () => {
+    let release!: () => void
+    const requests: Array<string | undefined> = []
+    const f = fakeTransport({
+      snapshot: async (sessionId) => {
+        requests.push(sessionId)
+        if (sessionId === 'a') await new Promise<void>((resolve) => { release = resolve })
+        return emptySnapshot
+      },
+    })
+    const client = createAgentClient(f.transport)
+    await client.start()
+    const a = client.resync('a')
+    const b = client.resync('b')
+    expect(requests).toEqual([undefined, 'a'])
+    release()
+    await Promise.all([a, b])
+    expect(requests).toEqual([undefined, 'a', 'b'])
+  })
+
   it('补发失败进入 reconnecting，按指数退避重试直至恢复', async () => {
     vi.useFakeTimers()
     let fail = true

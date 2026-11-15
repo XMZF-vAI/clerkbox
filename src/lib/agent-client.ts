@@ -86,6 +86,8 @@ export function createAgentClient(
   let unsubEvents: (() => void) | null = null
   let retryTimer: ReturnType<typeof setTimeout> | null = null
   let started = false
+  let starting: Promise<boolean> | null = null
+  let lifecycle = 0
   let resyncing: Promise<void> | null = null
   /** 上次补发针对的会话：退避重试要接着补同一个会话，换成别的会把洞留在原地 */
   let resyncTarget: string | undefined = undefined
@@ -122,8 +124,14 @@ export function createAgentClient(
    * 不带时只能整环重放（sinceSeq=0），多会话下靠各会话自己的去重挡掉重复。
    */
   function resync(sessionId?: string): Promise<void> {
-    if (resyncing) return resyncing
+    if (resyncing) {
+      if (resyncTarget === sessionId) return resyncing
+      const version = lifecycle
+      // 不同会话的读回不能被正在进行的另一会话请求吞掉。
+      return resyncing.then(() => version === lifecycle ? resync(sessionId) : undefined)
+    }
     resyncTarget = sessionId
+    const version = lifecycle
     const call = (async () => {
       try {
         if (sessionId) {
@@ -135,6 +143,7 @@ export function createAgentClient(
         attempt = 0
         if (mode === 'main') setConnection('connected')
       } catch (err) {
+        if (version !== lifecycle) return
         console.warn('[agent-client] 补发失败，退避重试：', err instanceof Error ? err.message : err)
         setConnection('reconnecting')
         scheduleRetry()
@@ -213,31 +222,49 @@ export function createAgentClient(
     flushPending(cursor)
   }
 
-  async function startInner(): Promise<boolean> {
-    if (started) return mode === 'main'
-    started = true
-    const resolved = await transport.mode().catch(() => 'renderer' as const)
-    mode = resolved
-    if (resolved !== 'main') {
-      // renderer 模式下不建订阅：省一份常驻开销，也避免把 no-op 通道当"已连接"
-      setConnection('offline')
-      return false
-    }
-    unsubEvents = transport.onEvent(handlePayload)
-    setConnection('connected')
-    // 冷启动与 F5 都靠这一次把窗口期内产生的事件补回来（各会话从 0 起，即整环回放）
-    await resync()
-    return true
+  function startInner(): Promise<boolean> {
+    if (starting) return starting
+    if (started) return Promise.resolve(mode === 'main')
+    const version = ++lifecycle
+    const call = (async () => {
+      // 通信失败不是 renderer 的证据：静默回落会让同一任务在两处运行。
+      const resolved = await transport.mode()
+      if (version !== lifecycle) return false
+      mode = resolved
+      started = true
+      if (resolved !== 'main') {
+        setConnection('offline')
+        return false
+      }
+      unsubEvents = transport.onEvent(handlePayload)
+      setConnection('connected')
+      await resync()
+      return version === lifecycle
+    })()
+    starting = call
+    const clearStarting = () => { if (starting === call) starting = null }
+    void call.then(clearStarting, () => {
+      if (version === lifecycle) {
+        started = false
+        mode = null
+        setConnection('offline')
+      }
+      clearStarting()
+    })
+    return call
   }
 
   return {
     start: startInner,
     async ensureMode() {
-      if (!started) await startInner()
-      return mode ?? 'renderer'
+      await startInner()
+      if (mode === null) throw new Error('agent-start-cancelled')
+      return mode
     },
     stop() {
+      lifecycle += 1
       started = false
+      starting = null
       clearRetry()
       for (const cursor of cursors.values()) {
         clearCursorTimer(cursor)

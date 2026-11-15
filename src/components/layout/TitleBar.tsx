@@ -1,4 +1,4 @@
-import { Minus, Square, X, Sparkles, Copy, PanelLeft, PanelRight } from 'lucide-react'
+import { Minus, Square, X, Sparkles, Copy, PanelLeft, PanelRight, FolderOpen } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useVibeStore } from '../../stores/vibe-store'
@@ -7,6 +7,8 @@ import ContextUsageIndicator from '../chat/ContextUsageIndicator'
 import JouleQuotaButton from '../joule/JouleQuotaButton'
 import UpdateBadge from './UpdateBadge'
 import { isWebUIMode } from '../../lib/ipc-client'
+import { useChatStore } from '../../stores/chat-store'
+import { useUIStore } from '../../stores/ui-store'
 
 interface TitleBarProps {
   onToggleSidebar: () => void
@@ -17,6 +19,15 @@ export default function TitleBar({ onToggleSidebar, sidebarVisible }: TitleBarPr
   const { t } = useTranslation()
   const vibeMode = useVibeStore((s) => s.isVibeMode)
   const toggleVibeMode = useVibeStore((s) => s.toggleVibeMode)
+  const sessionTitle = useChatStore((s) => s.sessions.find((session) => session.id === s.activeSessionId)?.title)
+  const workingDir = useChatStore((s) => {
+    const session = s.sessions.find((item) => item.id === s.activeSessionId)
+    return session?.workingDir
+  })
+  const showSkillStore = useUIStore((s) => s.showSkillStore)
+  const showScheduledTasks = useUIStore((s) => s.showScheduledTasks)
+  const pageTitle = showScheduledTasks ? t('scheduledTasks.title') : showSkillStore ? t('sidebar.skills') : sessionTitle || t('sidebar.newChat')
+  const workingDirLabel = workingDir?.split(/[\\/]/).filter(Boolean).pop() || workingDir
   // 工作台面板显隐：激活态高亮按钮
   const { visible: workbenchVisible, toggleVisible: toggleWorkbench } = useWorkbench()
   // mac：窗口控制走系统红绿灯（左上角），自绘三键隐藏，左侧为红绿灯留位
@@ -32,11 +43,11 @@ export default function TitleBar({ onToggleSidebar, sidebarVisible }: TitleBarPr
 
   return (
     <div
-      className="relative z-30 h-11 max-md:h-14 flex items-center justify-between px-4 max-md:px-3 bg-dark-surface/80 backdrop-blur-md border-b border-dark-onSurfaceVariant/10 select-none"
+      className="relative z-30 h-11 shrink-0 max-md:h-14 flex items-center justify-between gap-3 px-3 max-md:gap-1 max-md:px-2 bg-dark-surface/90 border-b border-dark-onSurfaceVariant/10 select-none"
       style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
     >
       <div
-        className={`flex items-center gap-3 ${isMac ? 'ml-[84px]' : ''}`}
+        className={`flex min-w-0 flex-1 items-center gap-2 ${isMac ? 'ml-[84px]' : ''}`}
         style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
       >
         <button
@@ -49,26 +60,30 @@ export default function TitleBar({ onToggleSidebar, sidebarVisible }: TitleBarPr
         >
           <PanelLeft size={16} />
         </button>
-        {/* 版本号标签：自动更新入口（检测/下载进度/就绪重启，悬浮显示更新内容） */}
-        <UpdateBadge />
+        <div className="flex min-w-0 items-center gap-2.5">
+          <span className="truncate text-ui-xs font-medium text-dark-onSurface" title={pageTitle}>{pageTitle}</span>
+          {!showSkillStore && !showScheduledTasks && workingDir && (
+            <span title={workingDir} className="hidden xl:flex min-w-0 max-w-52 items-center gap-1.5 border-l border-dark-onSurfaceVariant/15 pl-2.5 text-ui-xs text-dark-onSurfaceVariant/60">
+              <FolderOpen size={13} className="shrink-0" aria-hidden="true" />
+              <span className="truncate">{workingDirLabel}</span>
+            </span>
+          )}
+        </div>
       </div>
 
-      <div className="flex items-center gap-1" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-        {/* 氛围模式 toggle：默认紧凑「氛围」标签，悬停展开为完整入口文案 */}
+      <div className="flex shrink-0 items-center gap-1 max-md:gap-0" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+        <div className="mr-1 hidden md:block"><UpdateBadge /></div>
         <button
           type="button"
           onClick={() => toggleVibeMode()}
-          className="md-focus group h-7 max-md:h-10 max-md:px-3 flex items-center px-2 mr-2 rounded-md3-sm bg-md-tertiary/15 text-md-tertiary hover:bg-md-tertiary/25 transition-colors"
+          className="md-focus h-8 max-md:h-11 max-md:w-11 flex shrink-0 items-center justify-center gap-1.5 px-2 rounded-md3-sm text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh transition-colors"
           title={t('titlebar.vibeEnter')}
           aria-label={t('titlebar.vibeToggleAria')}
           aria-pressed={vibeMode}
         >
-          <Sparkles size={14} className="shrink-0 transition-transform duration-300 ease-out group-hover:rotate-12 group-hover:scale-110" />
-          <span className="text-xs font-medium whitespace-nowrap overflow-hidden ml-1 max-w-10 opacity-100 group-hover:max-w-0 group-hover:opacity-0 group-hover:ml-0 transition-all duration-300 ease-out">
+          <Sparkles size={15} className="shrink-0" />
+          <span className="hidden lg:inline text-ui-xs font-medium whitespace-nowrap">
             {t('titlebar.vibeCompact')}
-          </span>
-          <span className="text-xs font-medium whitespace-nowrap overflow-hidden max-w-0 opacity-0 group-hover:max-w-32 group-hover:opacity-100 group-hover:ml-1 transition-all duration-300 ease-out">
-            {t('titlebar.vibeEnter')}
           </span>
         </button>
 

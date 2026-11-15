@@ -20,6 +20,7 @@ export type StorePatch =
   /** 流式增量：应用侧按 messageId 追加到已有内容，重复投递不在此处去重 */
   | { kind: 'stream-delta'; sessionId: string; messageId: string; text: string }
   | { kind: 'set-queue'; sessionId: string; items: QueuedMessageItem[] }
+  | { kind: 'set-compacting'; sessionId: string; compacting: boolean }
   | { kind: 'set-todos'; sessionId: string; items: TodoItem[] }
   | { kind: 'set-goal'; sessionId: string; goal: SessionGoal | null }
   | { kind: 'upsert-subagent-run'; sessionId: string; run: SubAgentRun }
@@ -87,6 +88,8 @@ export function planAgentEvent(event: AgentEvent): StorePatch[] {
       return []
     case 'queue.snapshot':
       return [{ kind: 'set-queue', sessionId: event.sessionId, items: event.items }]
+    case 'compaction.status':
+      return [{ kind: 'set-compacting', sessionId: event.sessionId, compacting: event.compacting }]
     case 'permission.requested': {
       const patches: StorePatch[] = [{ kind: 'set-status', sessionId: event.sessionId, status: 'confirm-danger' }]
       // 只带 preview 字符串的精简事件维持镜像态，不长出一张点不动的半卡片

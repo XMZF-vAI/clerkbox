@@ -774,6 +774,8 @@ class SqliteChatStore implements ChatStore {
       throw error
     }
     this.afterMutation()
+    // 撤回之后会回收快照；先落下截断结果，缩短旧历史仍在磁盘的窗口。
+    this.flush()
   }
 
   /** 合并写入消息行的指定列（未出现在 patch 里的键保持原值） */
@@ -1055,7 +1057,8 @@ class JsonChatStore implements ChatStore {
       if (!msgs) return
       const idx = msgs.findIndex((m) => m.id === fromId)
       if (idx === -1) return
-      this.addTombstones(db, null, this.messageIds(msgs.slice(0, idx)))
+      // 恢复 SQLite 时也要删除被撤回的尾段，不能把保留下来的前缀标成已删除。
+      this.addTombstones(db, null, this.messageIds(msgs.slice(idx)))
       db.messages[sessionId] = msgs.slice(0, idx)
       this.touch(db, sessionId, Date.now())
       this.writeDb(db)

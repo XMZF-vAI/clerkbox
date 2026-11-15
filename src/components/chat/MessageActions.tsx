@@ -5,7 +5,7 @@
  * - **只在 hover / focus-within 时出现**，触屏（max-md）常驻 —— 键盘用户 Tab 进来也要看得见。
  * - 图标按钮不带文字，`aria-label` + `<span className="sr-only">` + 原生 `title` 三处同一个词，
  *   且文案一律走 i18n（ZCode 在 ConversationRowView 里明确禁止硬编码语言）。
- * - 动作条是消息行这个 `group/msg` 的子元素，不是气泡的子元素：
+ * - 动作条是消息行这个 `message-action-scope` 的子元素，不是气泡的子元素：
  *   挂在气泡里就只有压在气泡上才亮，挂在这一行上则整行都是热区。
  */
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
@@ -21,11 +21,11 @@ interface MessageActionsProps {
   className?: string
 }
 
-/** 一条消息的动作条容器。父级必须带 `group/msg`，否则按钮永远不会显出来。 */
+/** 一条消息的动作条容器。父级以 `message-action-scope` 标记悬停与焦点范围。 */
 export function MessageActions({ children, vibe = false, className = '' }: MessageActionsProps) {
   return (
     <div
-      className={`flex items-center gap-1 mt-0.5 opacity-0 group-hover/msg:opacity-100 group-focus-within/msg:opacity-100 transition-opacity max-md:opacity-100 ${
+      className={`message-action-bar flex items-center gap-1 mt-0.5 transition-opacity ${
         vibe ? 'text-white/60' : 'text-dark-onSurfaceVariant/55'
       } ${className}`}
     >
@@ -69,8 +69,9 @@ export function MessageActionButton({
         onClick={onClick}
         disabled={disabled}
         aria-label={label}
+        aria-description={disabled ? disabledReason : undefined}
         aria-pressed={active || undefined}
-        className={`w-6 h-6 flex items-center justify-center rounded-md3-xs transition-colors ${
+        className={`md-focus w-6 h-6 max-md:w-11 max-md:h-11 [@media(pointer:coarse)]:min-w-11 [@media(pointer:coarse)]:min-h-11 touch-manipulation flex items-center justify-center rounded-md3-xs transition-colors ${
           disabled
             ? 'opacity-40 cursor-not-allowed'
             : vibe

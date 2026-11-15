@@ -25,6 +25,7 @@ function applyPatch(patch: StorePatch): void {
   switch (patch.kind) {
     case 'set-streaming':
       chat.setStreaming(patch.on, patch.sessionId)
+      if (!patch.on) chat.setStopping(patch.sessionId, false)
       return
     case 'set-status':
       chat.setSessionStatus(patch.sessionId, patch.status)
@@ -41,6 +42,9 @@ function applyPatch(patch: StorePatch): void {
       return
     case 'set-queue':
       chat.setQueuedMessages(patch.sessionId, patch.items)
+      return
+    case 'set-compacting':
+      chat.setCompacting(patch.sessionId, patch.compacting)
       return
     case 'set-todos':
       useTodoStore.getState().setTodos(patch.sessionId, patch.items)
@@ -112,6 +116,14 @@ function applyPatch(patch: StorePatch): void {
 
 /** 一条宿主事件 → 应用全部补丁。单条补丁出错不影响后续事件投递 */
 export function applyAgentEvent(event: AgentEvent): void {
+  if (event.type === 'resync' && event.reason?.startsWith('rewind:') && event.reason !== 'rewind:workspace') {
+    // 其他窗口也必须使旧分支上的在途 DB 读失效，并清掉已移除轮次的运行卡片。
+    useChatStore.setState((state) => ({
+      rewindRevisions: { ...state.rewindRevisions, [event.sessionId]: (state.rewindRevisions[event.sessionId] ?? 0) + 1 },
+    }))
+    useAgentRunsStore.getState().clearSession(event.sessionId)
+    useChatStore.getState().setSessionError(event.sessionId, undefined)
+  }
   for (const patch of planAgentEvent(event)) {
     try {
       applyPatch(patch)
@@ -121,6 +133,7 @@ export function applyAgentEvent(event: AgentEvent): void {
   }
   // 危险确认与提问由宿主挂起等待回执；本轮收尾时本地对话框不该留着
   if (event.type === 'run.completed' || event.type === 'run.aborted' || event.type === 'resync') {
+    useChatStore.getState().setStopping(event.sessionId, false)
     useInteractiveStore.getState().cancelQuestion(event.sessionId)
     // 宿主正常会先发 settled 再收尾；这条兜底防漏发把待批卡片永久留在界面上
     usePermissionStore.getState().clearSession(event.sessionId)
@@ -131,18 +144,17 @@ export function applyAgentEvent(event: AgentEvent): void {
 let subscribed: (() => void) | null = null
 
 /**
- * 挂接宿主事件流（App 启动时调用一次）。非宿主模式下不订阅，重复调用幂等。
+ * 先接应用侧再启动传输：启动的整环回放也必须有人消费。
  */
 export async function attachAgentEvents(): Promise<boolean> {
-  const on = await agentClient.start()
-  if (!on) {
-    subscribed?.()
-    subscribed = null
+  if (!subscribed) subscribed = agentClient.subscribe(applyAgentEvent)
+  try {
+    return await agentClient.start()
+  } catch (error) {
+    // 保留应用侧订阅；用户下一次操作可重新初始化，不会丢掉恢复后的事件。
+    console.warn('[agent-apply] 宿主模式暂未确认:', error)
     return false
   }
-  if (subscribed) return true
-  subscribed = agentClient.subscribe(applyAgentEvent)
-  return true
 }
 
 export function detachAgentEvents(): void {

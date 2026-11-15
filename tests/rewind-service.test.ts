@@ -5,9 +5,9 @@
  * 先读全快照再动盘、写失败逆序补偿、文件事务成功之后才提交对话截断、
  * 抢占不到运行中的会话就整体不动。这四条是这套功能唯一会伤到用户数据的地方。
  */
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { executeRewind, type RewindIo } from '../src/lib/rewind-service'
-import { contentFingerprint } from '../src/lib/rewind'
+import { buildRewindPlan, contentFingerprint, rewindHistoryVersion } from '../src/lib/rewind'
 import type { FileCheckpoint, Message } from '../src/types/agent'
 
 function anchor(checkpoints: FileCheckpoint[], extra: Partial<Message> = {}): Message {
@@ -295,9 +295,109 @@ describe('执行顺序不变式', () => {
       abortActiveRun: async () => true,
     })
     expect(outcome.ok).toBe(true)
-    // 第一次读只为确认锚点可撤回，第二次（抢占后）才是截断依据：收尾消息一并被删掉
-    expect(reads).toBe(2)
+    // 抢占后重读包含收尾消息；计划完成后再次确认历史没有被改写。
+    expect(reads).toBeGreaterThanOrEqual(2)
     expect(outcome.removedMessages).toBe(2)
+  })
+})
+
+describe('历史撤回的预览和提交', () => {
+  it('历史中多轮改同一个文件时，恢复第一次写入前的内容并校验最后一次写入', async () => {
+    const first = cp({ id: 'c1', path: '/p/a.ts', afterHash: contentFingerprint('middle') })
+    const last = cp({ id: 'c2', path: '/p/a.ts', afterHash: contentFingerprint('latest') })
+    const messages: Message[] = [
+      { id: 'kept', role: 'user', content: '之前的任务', timestamp: 0 },
+      anchor([first]),
+      { id: 'a1', role: 'assistant', content: '第一轮完成', timestamp: 2 },
+      anchor([last], { id: 'u2', timestamp: 3 }),
+      { id: 'a2', role: 'assistant', content: '第二轮完成', timestamp: 4 },
+    ]
+    const io = makeIo({ files: { '/p/a.ts': 'latest' }, snapshots: { 'c1.txt': 'original', 'c2.txt': 'middle' } })
+    const outcome = await executeRewind(io, {
+      getMessages: async () => messages, anchorMessageId: 'u1', scope: 'both',
+      expectedHistoryVersion: rewindHistoryVersion(messages),
+    })
+    expect(outcome).toMatchObject({ ok: true, removedMessages: 4 })
+    expect(io.files['/p/a.ts']).toBe('original')
+    expect(io.log.filter((line) => line === 'write:/p/a.ts')).toHaveLength(1)
+    expect(first.afterHash).toBe(contentFingerprint('middle'))
+    expect(io.truncated).toEqual(['u1'])
+  })
+
+  it('预览后历史新增消息时拒绝，任何文件和消息都不修改', async () => {
+    const before = [anchor([cp({ id: 'c1', path: '/p/a.ts' })])]
+    const after: Message[] = [...before, { id: 'u2', role: 'user', content: '新任务', timestamp: 2 }]
+    const io = makeIo()
+    const outcome = await executeRewind(io, {
+      getMessages: async () => after, anchorMessageId: 'u1', scope: 'both', expectedHistoryVersion: rewindHistoryVersion(before),
+    })
+    expect(outcome).toMatchObject({ ok: false, error: 'history-changed' })
+    expect(io.log).toEqual([])
+  })
+
+  it('版本包括消息正文及附件元数据，不能只比较数量和id', async () => {
+    const before = [anchor([])]
+    const changed = [anchor([], { attachments: [{ id: 'f', kind: 'file', name: 'task.txt', path: '/p/task.txt' }] })]
+    expect(rewindHistoryVersion(before)).not.toBe(rewindHistoryVersion(changed))
+    const io = makeIo()
+    expect(await executeRewind(io, {
+      getMessages: async () => changed, anchorMessageId: 'u1', scope: 'conversation', expectedHistoryVersion: rewindHistoryVersion(before),
+    })).toMatchObject({ ok: false, error: 'history-changed' })
+    expect(io.truncated).toEqual([])
+  })
+
+  it('读计划期间历史被改写也拒绝提交', async () => {
+    let messages = [anchor([cp({ id: 'c1', path: '/p/a.ts' })])]
+    const io = makeIo({ files: { '/p/a.ts': 'after' }, snapshots: { 'c1.txt': 'before' } })
+    const read = io.readFile
+    io.readFile = async (path) => {
+      messages = [...messages, anchor([], { id: 'u2', content: '新增任务' })]
+      return read(path)
+    }
+    const outcome = await executeRewind(io, { getMessages: async () => messages, anchorMessageId: 'u1', scope: 'both' })
+    expect(outcome).toMatchObject({ ok: false, error: 'history-changed' })
+    expect(io.files['/p/a.ts']).toBe('after')
+    expect(io.truncated).toEqual([])
+  })
+
+  it('只撤对话即使磁盘/快照不可读也可预览与提交', async () => {
+    const messages = [anchor([cp({ id: 'c1', path: '/p/a.ts' })], { mutationGaps: [{ toolName: 'shell', reason: 'shell' }] })]
+    const io = makeIo()
+    io.readFile = vi.fn(async () => { throw new Error('disk unavailable') })
+    io.readSnapshot = vi.fn(async () => { throw new Error('snapshot unavailable') })
+    const plan = await buildRewindPlan({ messages, fromIndex: 0, scope: 'conversation', readFile: io.readFile, readSnapshot: io.readSnapshot })
+    expect(plan).toMatchObject({ canApply: true, removedMessages: 1, safeFiles: [], unsafeFiles: [], historyVersion: rewindHistoryVersion(messages) })
+    expect(await executeRewind(io, {
+      getMessages: async () => messages, anchorMessageId: 'u1', scope: 'conversation', expectedHistoryVersion: plan.historyVersion,
+    })).toMatchObject({ ok: true, removedMessages: 1 })
+    expect(io.readFile).not.toHaveBeenCalled()
+    expect(io.readSnapshot).not.toHaveBeenCalled()
+  })
+
+  it('提交前文件再次被外部修改，不能覆盖用户新内容', async () => {
+    const messages = [anchor([cp({ id: 'c1', path: '/p/a.ts' })])]
+    const io = makeIo({ files: { '/p/a.ts': 'after' }, snapshots: { 'c1.txt': 'before' } })
+    let reads = 0
+    const originalRead = io.readFile
+    io.readFile = async (path) => {
+      if (++reads === 2) io.files[path] = '用户刚保存的内容'
+      return originalRead(path)
+    }
+    expect(await executeRewind(io, { getMessages: async () => messages, anchorMessageId: 'u1', scope: 'both' }))
+      .toMatchObject({ ok: false, error: 'plan-blocked' })
+    expect(io.files['/p/a.ts']).toBe('用户刚保存的内容')
+    expect(io.truncated).toEqual([])
+  })
+
+  it('快照回收失败仍然报告已成功提交的撤回', async () => {
+    const io = makeIo()
+    io.dropSnapshots = async () => { throw new Error('cleanup denied') }
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      expect(await executeRewind(io, { getMessages: async () => [anchor([])], anchorMessageId: 'u1', scope: 'conversation' }))
+        .toMatchObject({ ok: true, removedMessages: 1 })
+      expect(io.truncated).toEqual(['u1'])
+    } finally { log.mockRestore() }
   })
 })
 

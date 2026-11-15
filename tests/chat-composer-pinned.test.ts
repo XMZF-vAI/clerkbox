@@ -52,7 +52,9 @@ describe('输入框钉在底部', () => {
       'utf8',
     )
     expect(app).toContain('h-screen')
-    // main 用 min-h-0 才能让子级收缩
-    expect(app).toContain('className="flex-1 min-h-0 overflow-hidden"')
+    // The shared main now also names the stable workspace and VIBE skin.
+    // Assert the height contract without depending on incidental class order.
+    const mainClasses = app.match(/<main className=\{`([^`]+)`\}/)?.[1] ?? ''
+    expect(mainClasses.split(/\s+/)).toEqual(expect.arrayContaining(['flex-1', 'min-h-0', 'overflow-hidden']))
   })
 })

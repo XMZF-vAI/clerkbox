@@ -8,11 +8,15 @@ interface UIState {
   commandPaletteOpen: boolean
   /** 桌面端侧边栏折叠态（从 App 提升到 store，供快捷键/命令面板驱动） */
   sidebarCollapsed: boolean
+  /** VIBE 会话抽屉独立于常规侧栏偏好。 */
+  vibeSidebarOpen: boolean
   setShowTaskPanel: (show: boolean) => void
   setShowSkillStore: (show: boolean) => void
   setShowScheduledTasks: (show: boolean) => void
   setCommandPaletteOpen: (open: boolean) => void
   toggleSidebar: () => void
+  toggleVibeSidebar: () => void
+  setVibeSidebarOpen: (open: boolean) => void
 }
 
 export const useUIStore = create<UIState>((set) => ({
@@ -21,9 +25,12 @@ export const useUIStore = create<UIState>((set) => ({
   showScheduledTasks: false,
   commandPaletteOpen: false,
   sidebarCollapsed: false,
+  vibeSidebarOpen: false,
   setShowTaskPanel: (show) => set({ showTaskPanel: show }),
   setShowSkillStore: (show) => set({ showSkillStore: show, ...(show ? { showScheduledTasks: false } : {}) }),
   setShowScheduledTasks: (show) => set({ showScheduledTasks: show, ...(show ? { showSkillStore: false } : {}) }),
   setCommandPaletteOpen: (open) => set({ commandPaletteOpen: open }),
   toggleSidebar: () => set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
+  toggleVibeSidebar: () => set((state) => ({ vibeSidebarOpen: !state.vibeSidebarOpen })),
+  setVibeSidebarOpen: (open) => set({ vibeSidebarOpen: open }),
 }))

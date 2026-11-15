@@ -16,18 +16,30 @@ export type SessionStatus = 'working' | 'error' | 'confirm-danger'
  */
 const sessionAbortControllers = new Map<string, AbortController>()
 
-function logPersistenceFailure(operation: string, promise: Promise<unknown>): void {
+const sessionMessageWrites = new Map<string, Set<Promise<unknown>>>()
+
+function logPersistenceFailure(operation: string, promise: Promise<unknown>, sessionId?: string): void {
+  if (sessionId) {
+    let writes = sessionMessageWrites.get(sessionId)
+    if (!writes) sessionMessageWrites.set(sessionId, writes = new Set())
+    writes.add(promise)
+    const done = () => {
+      writes.delete(promise)
+      if (writes.size === 0 && sessionMessageWrites.get(sessionId) === writes) sessionMessageWrites.delete(sessionId)
+    }
+    void promise.then(done, done)
+  }
   void promise.catch((error) => console.error(`[chat-store] ${operation} failed:`, error))
 }
 
 const pendingMessageWrites = new Map<string, { sessionId: string; timer: ReturnType<typeof setTimeout> }>()
 
-function persistMessageUpdate(message: Message): void {
-  logPersistenceFailure('update message', ipc.dbUpdateMessage(...messageUpdateArgs(message)))
+function persistMessageUpdate(sessionId: string, message: Message): void {
+  logPersistenceFailure('update message', ipc.dbUpdateMessage(...messageUpdateArgs(message)), sessionId)
   // 回滚快照三列不在 dbUpdateMessage 的位置参数签名里，走增量补丁通道。
   // 只在消息确实带这几列时才发：普通流式更新一条都不多写。
   const patch = messageRewindPatch(message)
-  if (patch) logPersistenceFailure('patch message rewind', ipc.dbPatchMessage(message.id, patch))
+  if (patch) logPersistenceFailure('patch message rewind', ipc.dbPatchMessage(message.id, patch), sessionId)
 }
 
 function scheduleMessagePersistence(sessionId: string, message: Message, immediately: boolean): void {
@@ -38,13 +50,13 @@ function scheduleMessagePersistence(sessionId: string, message: Message, immedia
   }
 
   if (immediately) {
-    persistMessageUpdate(message)
+    persistMessageUpdate(sessionId, message)
     return
   }
 
   const timer = setTimeout(() => {
     pendingMessageWrites.delete(message.id)
-    persistMessageUpdate(message)
+    persistMessageUpdate(sessionId, message)
   }, 300)
   pendingMessageWrites.set(message.id, { sessionId, timer })
 }
@@ -54,6 +66,20 @@ function cancelPendingMessageWrites(sessionId: string): void {
     if (pending.sessionId !== sessionId) continue
     clearTimeout(pending.timer)
     pendingMessageWrites.delete(messageId)
+  }
+}
+
+/** 撤回前刷完本会话的延迟与在途写入，防止截断后迟到写入恢复旧历史。 */
+export async function flushSessionMessageWrites(sessionId: string): Promise<void> {
+  for (const [messageId, pending] of pendingMessageWrites) {
+    if (pending.sessionId !== sessionId) continue
+    clearTimeout(pending.timer)
+    pendingMessageWrites.delete(messageId)
+    const message = useChatStore.getState().sessions.find((s) => s.id === sessionId)?.messages.find((m) => m.id === messageId)
+    if (message) persistMessageUpdate(sessionId, message)
+  }
+  while (sessionMessageWrites.get(sessionId)?.size) {
+    await Promise.all([...sessionMessageWrites.get(sessionId)!])
   }
 }
 
@@ -106,6 +132,14 @@ interface ChatState {
   activeSessionId: string | null
   // 当前所有正在 streaming 的会话 id 集合（支持多会话并发）
   streamingSessionIds: Set<string>
+  compactingSessionIds: Set<string>
+  stoppingSessionIds: Set<string>
+  rewindingSessionIds: Set<string>
+  /** 已提交的历史回退次数，同时使在途的旧 DB 读取失效。 */
+  rewindRevisions: Record<string, number>
+  setRewinding: (sessionId: string, rewinding: boolean) => void
+  setCompacting: (sessionId: string, compacting: boolean) => void
+  setStopping: (sessionId: string, stopping: boolean) => void
   // per-session 工作状态：用于侧边栏 loading 圈显示与系统通知触发
   sessionStatus: Record<string, SessionStatus>
   // per-session 排队消息：AI 运行中用户发送的消息，run 正常结束后 FIFO 逐条自动发出。
@@ -230,21 +264,46 @@ export const useChatStore = create<ChatState>((set, get) => ({
   drafts: {},
   draftSubmitting: {},
   updateDraft: (sessionId, patch) => set((state) => {
-    if (!state.sessions.some((session) => session.id === sessionId)) return state
+    if (state.rewindingSessionIds.has(sessionId) || !state.sessions.some((session) => session.id === sessionId)) return state
     return { drafts: { ...state.drafts, [sessionId]: { ...(state.drafts[sessionId] ?? EMPTY_CHAT_DRAFT), ...patch } } }
   }),
   clearDraft: (sessionId, expected) => set((state) => {
-    if (state.drafts[sessionId] !== expected) return state
+    if (state.rewindingSessionIds.has(sessionId) || state.drafts[sessionId] !== expected) return state
     const drafts = { ...state.drafts }
     delete drafts[sessionId]
     return { drafts }
   }),
   setDraftSubmitting: (sessionId, submitting) => set((state) => {
-    if (!state.sessions.some((session) => session.id === sessionId)) return state
+    if ((submitting && state.rewindingSessionIds.has(sessionId)) || !state.sessions.some((session) => session.id === sessionId)) return state
     return { draftSubmitting: { ...state.draftSubmitting, [sessionId]: submitting } }
   }),
   activeSessionId: null,
   streamingSessionIds: new Set(),
+  compactingSessionIds: new Set(),
+  stoppingSessionIds: new Set(),
+  rewindingSessionIds: new Set(),
+  rewindRevisions: {},
+  setRewinding: (sessionId, rewinding) => set((state) => {
+    if (state.rewindingSessionIds.has(sessionId) === rewinding) return state
+    const next = new Set(state.rewindingSessionIds)
+    if (rewinding) next.add(sessionId)
+    else next.delete(sessionId)
+    return { rewindingSessionIds: next }
+  }),
+  setCompacting: (sessionId, compacting) => set((state) => {
+    if (state.compactingSessionIds.has(sessionId) === compacting) return state
+    const next = new Set(state.compactingSessionIds)
+    if (compacting) next.add(sessionId)
+    else next.delete(sessionId)
+    return { compactingSessionIds: next }
+  }),
+  setStopping: (sessionId, stopping) => set((state) => {
+    if (state.stoppingSessionIds.has(sessionId) === stopping) return state
+    const next = new Set(state.stoppingSessionIds)
+    if (stopping) next.add(sessionId)
+    else next.delete(sessionId)
+    return { stoppingSessionIds: next }
+  }),
   sessionStatus: {},
   queuedMessages: {},
   recentsFolders: [],
@@ -252,9 +311,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
   sessionErrors: {},
 
   enqueueQueuedMessage: (sessionId, item) =>
-    set((state) => ({
-      queuedMessages: { ...state.queuedMessages, [sessionId]: [...(state.queuedMessages[sessionId] ?? []), item] },
-    })),
+    set((state) => {
+      if (state.rewindingSessionIds.has(sessionId)) return state
+      if (state.queuedMessages[sessionId]?.some((queued) => queued.id === item.id)) return state
+      return { queuedMessages: { ...state.queuedMessages, [sessionId]: [...(state.queuedMessages[sessionId] ?? []), item] } }
+    }),
 
   removeQueuedMessage: (sessionId, id) =>
     set((state) => {
@@ -264,6 +325,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }),
 
   dequeueQueuedMessage: (sessionId) => {
+    if (get().rewindingSessionIds.has(sessionId)) return undefined
     const queue = get().queuedMessages[sessionId]
     if (!queue || queue.length === 0) return undefined
     const [head, ...rest] = queue
@@ -272,9 +334,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   requeueQueuedMessage: (sessionId, item) =>
-    set((state) => ({
-      queuedMessages: { ...state.queuedMessages, [sessionId]: [item, ...(state.queuedMessages[sessionId] ?? [])] },
-    })),
+    set((state) => {
+      if (!state.sessions.some((session) => session.id === sessionId)) return state
+      if (state.queuedMessages[sessionId]?.some((queued) => queued.id === item.id)) return state
+      return { queuedMessages: { ...state.queuedMessages, [sessionId]: [item, ...(state.queuedMessages[sessionId] ?? [])] } }
+    }),
 
   loadFromDb: async () => {
     try {
@@ -318,6 +382,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   syncFromDb: async () => {
+    const rewindRevisions = get().rewindRevisions
     try {
       // 廉价短路：DB 全局修订号未变 → 无任何写入，跳过全量比对
       const revision = await ipc.dbGetRevision()
@@ -337,7 +402,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       for (const row of rows) {
         seen.add(row.id)
         const local = localMap.get(row.id)
-        if (streaming.has(row.id) && local) {
+        if ((streaming.has(row.id) || state.rewindingSessionIds.has(row.id)) && local) {
           // 流式中：保留本地内存状态
           merged.push(local)
           continue
@@ -347,6 +412,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (row.title === NEW_SESSION_TITLE) {
           const msgRows = await ipc.dbGetMessages(row.id)
           if (msgRows.length === 0) {
+            const latest = get()
+            if (latest.rewindingSessionIds.has(row.id) || hasChatDraft(latest.drafts[row.id]) || latest.draftSubmitting[row.id] ||
+                latest.rewindRevisions[row.id] !== rewindRevisions[row.id]) {
+              const current = latest.sessions.find((session) => session.id === row.id)
+              if (current) merged.push(current)
+              continue
+            }
             logPersistenceFailure('delete empty session', ipc.dbDeleteSession(row.id))
             continue
           }
@@ -396,7 +468,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // 同步 recentsFolders
       const recentsFolders = await ipc.dbGetRecents().catch(() => state.recentsFolders)
 
-      set({ sessions: merged, recentsFolders })
+      set((current) => ({
+        sessions: merged.map((session) =>
+          current.rewindingSessionIds.has(session.id) || current.rewindRevisions[session.id] !== rewindRevisions[session.id]
+            ? current.sessions.find((s) => s.id === session.id)
+            : session
+        ).filter((s): s is Session => !!s),
+        recentsFolders,
+      }))
       lastSyncedRevision = revision
     } catch (e) {
       console.error('[chat-store] syncFromDb failed:', e)
@@ -404,6 +483,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   reloadSessionFromDb: async (sessionId) => {
+    const rewindRevision = get().rewindRevisions[sessionId]
     try {
       const [msgRows, sessionRows] = await Promise.all([
         ipc.dbGetMessages(sessionId),
@@ -414,7 +494,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const row = sessionRows.find((r) => r.id === sessionId)
       const restored = row ? restoreWorkDirs(row) : {}
       const messages = mapMessageRows(msgRows)
-      set((state) => ({
+      set((state) => state.rewindRevisions[sessionId] !== rewindRevision ? state : ({
         sessions: state.sessions.map((item) =>
           item.id !== sessionId
             ? item
@@ -441,9 +521,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // 首条消息落库时由 dbAddMessage 的自愈逻辑补建会话行。
       // 顺带清掉内存里其他空会话（连点新建只保留最新一个），
       // 若历史版本把它们写进过 DB 也一并删除。
-      const cleanedSessions = state.sessions.filter((s) => !isEmptySession(s) || hasChatDraft(state.drafts[s.id]) || state.draftSubmitting[s.id])
+      const cleanedSessions = state.sessions.filter((s) => !isEmptySession(s) || hasChatDraft(state.drafts[s.id]) || state.draftSubmitting[s.id] || state.rewindingSessionIds.has(s.id))
       for (const s of state.sessions) {
-        if (isEmptySession(s) && !hasChatDraft(state.drafts[s.id]) && !state.draftSubmitting[s.id]) {
+        if (isEmptySession(s) && !hasChatDraft(state.drafts[s.id]) && !state.draftSubmitting[s.id] && !state.rewindingSessionIds.has(s.id)) {
           logPersistenceFailure('delete empty session', ipc.dbDeleteSession(s.id))
         }
       }
@@ -473,7 +553,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((state) => {
       // 切走时清掉非 active 的空会话（没说过话的会话不配留在历史记录里）
       const cleanedSessions = state.sessions.map((s) => {
-        if (s.id !== id && isEmptySession(s) && !hasChatDraft(state.drafts[s.id]) && !state.draftSubmitting[s.id]) {
+        if (s.id !== id && isEmptySession(s) && !hasChatDraft(state.drafts[s.id]) && !state.draftSubmitting[s.id] && !state.rewindingSessionIds.has(s.id)) {
           logPersistenceFailure('delete empty session', ipc.dbDeleteSession(s.id))
           return null
         }
@@ -511,9 +591,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         working_dir: sessionBefore.workingDir ?? null,
         default_work_dir: sessionBefore.defaultWorkDir ?? null,
         harness_mode: sessionBefore.harnessMode ?? 'default',
-      }))
+      }), sessionId)
     }
-    logPersistenceFailure('add message', ipc.dbAddMessage(messageToRow(message, sessionId)))
+    logPersistenceFailure('add message', ipc.dbAddMessage(messageToRow(message, sessionId)), sessionId)
     // Auto-update session title from first user message
     const session = get().sessions.find((s) => s.id === sessionId)
     if (session && session.title === NEW_SESSION_TITLE && message.role === 'user') {
@@ -523,7 +603,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           s.id === sessionId ? { ...s, title: newTitle } : s
         ),
       }))
-      logPersistenceFailure('update session title', ipc.dbUpdateSessionTitle(sessionId, newTitle, Date.now()))
+      logPersistenceFailure('update session title', ipc.dbUpdateSessionTitle(sessionId, newTitle, Date.now()), sessionId)
     }
   },
 
@@ -670,6 +750,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   deleteSession: (id) =>
     set((state) => {
+      if (state.rewindingSessionIds.has(id)) return state
       cancelPendingMessageWrites(id)
       const filtered = state.sessions.filter((s) => s.id !== id)
       logPersistenceFailure('delete session', ipc.dbDeleteSession(id))
@@ -703,21 +784,33 @@ export const useChatStore = create<ChatState>((set, get) => ({
       delete nextQueued[id]
       const nextStreaming = new Set(state.streamingSessionIds)
       nextStreaming.delete(id)
+      const compactingSessionIds = new Set(state.compactingSessionIds)
+      const stoppingSessionIds = new Set(state.stoppingSessionIds)
+      const rewindingSessionIds = new Set(state.rewindingSessionIds)
+      compactingSessionIds.delete(id)
+      stoppingSessionIds.delete(id)
+      rewindingSessionIds.delete(id)
       // 宿主回灌的错误横幅数据源同样按会话隔离，会话没了要一并清掉
       const nextErrors = { ...state.sessionErrors }
       delete nextErrors[id]
       const drafts = { ...state.drafts }
       const draftSubmitting = { ...state.draftSubmitting }
+      const rewindRevisions = { ...state.rewindRevisions }
       delete drafts[id]
       delete draftSubmitting[id]
+      delete rewindRevisions[id]
       return {
         drafts,
         draftSubmitting,
+        rewindRevisions,
         sessions: filtered,
         sessionStatus: nextStatus,
         queuedMessages: nextQueued,
         sessionErrors: nextErrors,
         streamingSessionIds: nextStreaming,
+        compactingSessionIds,
+        stoppingSessionIds,
+        rewindingSessionIds,
         activeSessionId:
           state.activeSessionId === id
             ? filtered.length > 0
@@ -749,6 +842,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     logPersistenceFailure('compact messages', ipc.dbCompactMessages(
       sessionId,
       newMessages.map((msg) => messageToRow(msg, sessionId))
-    ))
+    ), sessionId)
   },
 }))

@@ -10,16 +10,29 @@ import { agentClient } from './agent-client'
 import type { AgentCommand } from '../agent-core/protocol'
 import type { QueuedMessageItem } from '../stores/chat-store'
 
-async function dispatch(cmd: AgentCommand): Promise<void> {
-  if ((await agentClient.ensureMode()) !== 'main') return
-  const res = await agentClient.send(cmd)
-  if (!res.ok) console.warn(`[host-queue] ${cmd.type} 未被受理:`, res.error)
+export type HostQueueResult =
+  | { status: 'accepted'; mode: 'main' | 'renderer' }
+  | { status: 'rejected'; error: string }
+  | { status: 'unknown'; error: string }
+
+async function dispatch(cmd: AgentCommand): Promise<HostQueueResult> {
+  try {
+    if ((await agentClient.ensureMode()) !== 'main') return { status: 'accepted', mode: 'renderer' }
+    const res = await agentClient.send(cmd)
+    return res.ok
+      ? { status: 'accepted', mode: 'main' }
+      : { status: 'rejected', error: res.error || 'queue-command-rejected' }
+  } catch (error) {
+    // 可能已执行、仅回执丢失。只拉权威状态，绝不在这里重发原命令。
+    void agentClient.resync(cmd.sessionId).catch(() => undefined)
+    return { status: 'unknown', error: error instanceof Error ? error.message : String(error) }
+  }
 }
 
 export const hostQueue = {
-  enqueue: (sessionId: string, item: QueuedMessageItem): Promise<void> =>
+  enqueue: (sessionId: string, item: QueuedMessageItem): Promise<HostQueueResult> =>
     dispatch({ type: 'queue.enqueue', sessionId, item }),
-  remove: (sessionId: string, id: string): Promise<void> => dispatch({ type: 'queue.remove', sessionId, id }),
+  remove: (sessionId: string, id: string): Promise<HostQueueResult> => dispatch({ type: 'queue.remove', sessionId, id }),
   /** 立即发送：id 指定要插队的那一条（宿主会先把它提到队首再中断当前轮） */
-  flush: (sessionId: string, id?: string): Promise<void> => dispatch({ type: 'queue.flush', sessionId, id }),
+  flush: (sessionId: string, id?: string): Promise<HostQueueResult> => dispatch({ type: 'queue.flush', sessionId, id }),
 }

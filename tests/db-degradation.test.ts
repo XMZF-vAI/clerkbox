@@ -50,6 +50,30 @@ const legacyFixture = (messageTimestamp = 1000, content = '旧内容') => ({
  * 彻底看不见（会话侧的历史也同样看不见，因为降级读的是过期快照）。
  */
 describe('BE-02 降级写入在恢复后并回 SQLite', () => {
+  it.each(['m1', 'm3'])('降级撤回 %s 及后续：恢复 SQLite 和重启后保留前缀、尾段不复活', async (anchorId) => {
+    const fixture = legacyFixture()
+    fixture.messages.s1.push(
+      { id: 'm3', session_id: 's1', role: 'user', content: '第二轮问题', timestamp: 1002 },
+      { id: 'm4', session_id: 's1', role: 'assistant', content: '第二轮回答', timestamp: 1003 },
+    )
+    writeLegacy(fixture)
+    const sqlite = await createChatStore({ userDataDir: workDir, wasmBinary: loadWasm() })
+    sqlite.flush()
+    writeLegacy(fixture)
+    const degraded = await createChatStore({ userDataDir: workDir })
+    expect(degraded.kind).toBe('json')
+    await degraded.deleteMessagesFrom('s1', anchorId)
+    const keptIds = anchorId === 'm1' ? [] : ['m1', 'm2']
+    expect((await degraded.getMessages('s1')).map((m) => m.id)).toEqual(keptIds)
+
+    const recovered = await createChatStore({ userDataDir: workDir, wasmBinary: loadWasm() })
+    expect(recovered.kind).toBe('sqlite')
+    expect((await recovered.getMessages('s1')).map((m) => m.id)).toEqual(keptIds)
+    recovered.flush()
+    const restarted = await createChatStore({ userDataDir: workDir, wasmBinary: loadWasm() })
+    expect((await restarted.getMessages('s1')).map((m) => m.id)).toEqual(keptIds)
+  })
+
   it('降级期间新增的会话与消息，恢复后与原 SQLite 数据同时存在', async () => {
     // 正常期：SQLite 里有 s1 与 m1
     const sqlite = await createChatStore({ userDataDir: workDir, wasmBinary: loadWasm() })

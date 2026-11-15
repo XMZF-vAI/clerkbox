@@ -35,10 +35,10 @@ import type { AgentPermissionRequest, AgentPorts, AgentSettings, PermissionAppro
 import type { MessageRow, SessionRow } from '../src/types/ipc'
 import { deriveSessionTitle, mapMessageRows, messageRewindPatch, messageToRow, messageUpdateArgs, NEW_SESSION_TITLE } from '../src/lib/chat-row'
 import type { Message, RewindScope, Session, SubAgentRun, TodoItem, TokenUsage } from '../src/types/agent'
-import { buildRewindPlan } from '../src/lib/rewind'
+import { buildRewindPlan, isRewindableUserMessage } from '../src/lib/rewind'
 import { buildRewindIo, executeRewind } from '../src/lib/rewind-service'
 import { saveFileMutation } from '../src/lib/checkpoint-recorder'
-import { abortWorkflowRunsForSession, stopWorkflowRun } from '../src/lib/workflow-runtime'
+import { abortWorkflowRunsForSession, listRunningWorkflowRuns, stopWorkflowRun } from '../src/lib/workflow-runtime'
 import { getWorkflowJournal } from './workflow-journal'
 import type { QueuedMessageItem } from '../src/stores/chat-store'
 
@@ -163,6 +163,8 @@ interface HostSession {
   status: RunStatus
   error?: string
   queue: QueuedMessageItem[]
+  /** 近期入队身份：回执丢失后重复确认同一条不能重复执行。 */
+  receivedQueueIds: Set<string>
   pendingPermissions: Map<string, {
     /** 回给 loop 的审批结果：带范围，loop 才知道要不要记会话级放行 */
     resolve: (v: PermissionApproval) => void
@@ -186,6 +188,10 @@ interface HostSession {
   lastUsage?: TokenUsage
   /** 手动压缩进行中：与 run 共用同一把会话锁，压缩期间的新任务只能排队 */
   compacting?: boolean
+  /** 撤回受理时同步占锁；读库、文件恢复与截断期间禁止新的运行或压缩写入。 */
+  rewinding?: boolean
+  /** run 收尾不等于异步落库已完成，撤回必须等这些写入结清后再取历史。 */
+  pendingWrites: Set<Promise<void>>
   /** 会话已被删除：此后所有写入与事件都必须停手，否则会凭空把会话复活 */
   dropped?: boolean
 }
@@ -195,6 +201,7 @@ const sessionCache = new Map<string, Session | undefined>()
 
 export class AgentSessionManager {
   private readonly sessions = new Map<string, HostSession>()
+  private readonly droppedSessions = new Set<string>()
   private readonly contexts = new SessionContextStore()
   /** 宿主不读渲染层的 zustand persist（localStorage），故设置与技能目录靠首次 run 下发后复用 */
   private readonly snapshots = new Map<string, Extract<AgentCommand, { type: 'run' }>>()
@@ -220,6 +227,7 @@ export class AgentSessionManager {
         lastResyncAt: 0,
         status: 'idle',
         queue: [],
+        receivedQueueIds: new Set(),
         pendingPermissions: new Map(),
         sessionGrants: new Set(),
         pendingQuestions: new Map(),
@@ -227,6 +235,7 @@ export class AgentSessionManager {
         goal: null,
         subRuns: new Map(),
         messages: new Map(),
+        pendingWrites: new Set(),
       }
       this.sessions.set(sessionId, s)
     }
@@ -287,6 +296,13 @@ export class AgentSessionManager {
     return mapMessageRows((await this.store.getMessages(sessionId)) as unknown as MessageRow[])
   }
 
+  private trackWrite(s: HostSession, write: Promise<unknown>, label: string): void {
+    const pending = write.then(() => undefined, (err) => {
+      console.error(`[agent-host] ${label} failed:`, err)
+    }).finally(() => s.pendingWrites.delete(pending))
+    s.pendingWrites.add(pending)
+  }
+
   /** 与渲染层 createEmptySession 同一口径：老行缺 default_work_dir 时按创建时间确定性回填 */
   private static backfillDefaultWorkDir(row: SessionRow): string {
     const home = os.homedir()
@@ -322,9 +338,7 @@ export class AgentSessionManager {
     // 会话已删：迟到的写入会重建用户已经删掉的会话与消息
     if (s.dropped) return
     s.messages.set(message.id, message)
-    void this.store.addMessage(messageToRow(message, s.sessionId) as never).catch((err) => {
-      console.error('[agent-host] addMessage failed:', err)
-    })
+    this.trackWrite(s, this.store.addMessage(messageToRow(message, s.sessionId) as never), 'addMessage')
     // 首条用户消息定标题：本地路径由渲染层做同一件事，宿主模式必须宿主自己来做，
     // 否则无人看管跑完的后台会话会全留成「新会话」。标题规则与渲染层共用一个函数。
     if (message.role === 'user') {
@@ -347,6 +361,7 @@ export class AgentSessionManager {
    * 唤醒轮失败也不打扰用户：通知留在队列，随下一条用户消息注入。
    */
   private wakeIdleSession(s: HostSession): void {
+    if (s.dropped || s.rewinding || s.compacting) return
     const ctx = this.contexts.get(s.sessionId)
     if (s.run || ctx.pendingSubagentNotifications.length === 0) return
     const cmd = this.snapshots.get(s.sessionId)
@@ -383,21 +398,18 @@ export class AgentSessionManager {
         getSession: () => sessionCache.get(sessionId),
         addMessage: (_sid, message) => this.persistMessage(s, message),
         updateMessage: (_sid, msgId, updates) => {
+          if (s.dropped) return
           const prev = s.messages.get(msgId)
           let deltaText: string | null = null
           if (prev) {
             const next = { ...prev, ...updates }
             s.messages.set(msgId, next)
             // 落库参数走 chat-row 的同一份编码：手抄一份列顺序正是这个模块要避免的漂移
-            void this.store
-              .updateMessage(...messageUpdateArgs(next))
-              .catch((err) => console.error('[agent-host] updateMessage failed:', err))
+            this.trackWrite(s, this.store.updateMessage(...messageUpdateArgs(next)), 'updateMessage')
             // 回滚快照三列不在这份编码里（dbUpdateMessage 是位置参数签名），走增量补丁通道
             const patch = messageRewindPatch(next)
             if (patch) {
-              void this.store
-                .patchMessage(msgId, patch as never)
-                .catch((err) => console.error('[agent-host] patchMessage(rewind) failed:', err))
+              this.trackWrite(s, this.store.patchMessage(msgId, patch as never), 'patchMessage(rewind)')
             }
             // 流式正文改走 stream.delta：updateMessage 携带的是「已累计的全文」，
             // 按 20fps 把全文跨进程推一遍是 O(n²) 的字节量（4000 字回答能推到兆级）。
@@ -427,8 +439,8 @@ export class AgentSessionManager {
           this.emit(s, { type: 'run.status', sessionId, status: s.status, error: s.error })
         },
         compact: (_sid, messages, boundaryMessageId) => {
-          void this.store.compactMessages(sessionId, messages.map((m) => messageToRow(m, sessionId)) as never)
-            .catch((err) => console.error('[agent-host] compact failed:', err))
+          if (s.dropped) return
+          this.trackWrite(s, this.store.compactMessages(sessionId, messages.map((m) => messageToRow(m, sessionId)) as never), 'compact')
           s.messages = new Map(messages.map((m) => [m.id, m]))
           ctx.readFiles = new Map()
           // 原子重写整段历史：逐条广播既贵又易错，让渲染层整会话重拉。
@@ -712,6 +724,9 @@ export class AgentSessionManager {
     if (meta.remote && (cmd.type === 'rewind.apply' || cmd.type === 'rewind.preview')) {
       return { ok: false, error: 'rewind-local-only' }
     }
+    if ((cmd.type === 'rewind.apply' || cmd.type === 'rewind.preview') && this.droppedSessions.has(cmd.sessionId)) {
+      return { ok: false, error: 'session-dropped' }
+    }
     const s = this.session(cmd.sessionId)
     switch (cmd.type) {
       case 'run':
@@ -726,12 +741,25 @@ export class AgentSessionManager {
         return { ok: true }
       }
       case 'queue.enqueue':
+        if (s.dropped) return { ok: false, error: 'session-dropped' }
+        if (s.receivedQueueIds.has(cmd.item.id) || s.queue.some((item) => item.id === cmd.item.id)) return { ok: true }
+        s.receivedQueueIds.add(cmd.item.id)
+        if (s.receivedQueueIds.size > 1000) {
+          const oldest = s.receivedQueueIds.values().next().value
+          if (oldest) s.receivedQueueIds.delete(oldest)
+        }
         this.setQueue(s, [...s.queue, cmd.item])
+        // 入队时原 run 可能刚好结束；由真源处理空闲放行，renderer 不再另发一轮。
+        void this.flushQueue(s)
         return { ok: true }
       case 'queue.remove':
+        if (!s.queue.some((item) => item.id === cmd.id)) return { ok: false, error: 'queue-item-missing' }
         this.setQueue(s, s.queue.filter((item) => item.id !== cmd.id))
         return { ok: true }
       case 'queue.flush': {
+        if (s.rewinding) return { ok: false, error: 'session-busy' }
+        if (cmd.id && !s.queue.some((item) => item.id === cmd.id)) return { ok: false, error: 'queue-item-missing' }
+        if (!this.snapshots.get(s.sessionId)?.settings) return { ok: false, error: MISSING_SETTINGS }
         // 「立即发送」指定某一条时先把它提到队首，否则只能按 FIFO 发第一条
         if (cmd.id) {
           const index = s.queue.findIndex((item) => item.id === cmd.id)
@@ -744,6 +772,8 @@ export class AgentSessionManager {
         // 立即发送队首：先中断当前 run 并等它释放，与渲染层 sendQueuedNow 语义一致
         if (s.run) {
           s.run.controller.abort()
+          abortWorkflowRunsForSession(s.sessionId)
+          void ipc.cancelSessionCommands(s.sessionId).catch(() => undefined)
           for (let i = 0; i < 100 && s.run; i++) await new Promise((r) => setTimeout(r, 50))
         }
         void this.flushQueue(s)
@@ -763,12 +793,18 @@ export class AgentSessionManager {
         return { ok: true }
       }
       case 'manual.compact':
+        if (s.dropped) return { ok: false, error: 'session-dropped' }
+        if (s.run || s.compacting || s.rewinding) return { ok: false, error: 'compaction-busy' }
+        if (!this.snapshots.get(s.sessionId)?.settings) return { ok: false, error: 'compaction-unavailable' }
+        // 受理时同步占锁；异步读库不能给第二条指令留下并发窗口。
+        s.compacting = true
+        this.emit(s, { type: 'compaction.status', sessionId: s.sessionId, compacting: true })
         void this.manualCompact(s, cmd.instructions)
         return { ok: true }
       case 'rewind.preview':
         return this.rewind(s, cmd.anchorMessageId, cmd.scope, false)
       case 'rewind.apply':
-        return this.rewind(s, cmd.anchorMessageId, cmd.scope, true)
+        return this.rewind(s, cmd.anchorMessageId, cmd.scope, true, cmd.expectedHistoryVersion)
       case 'subagent.stop': {
         // 单子代理取消：只中止该 run 的循环，父轮与其它子代理不受影响。
         // 本地注册表查不到 = 该 run 不在本进程运行（已终态或跨进程），如实回执。
@@ -800,53 +836,113 @@ export class AgentSessionManager {
     s: HostSession,
     anchorMessageId: string,
     scope: RewindScope,
-    apply: boolean
+    apply: boolean,
+    expectedHistoryVersion?: string
   ): Promise<AgentCommandResult> {
     const sessionId = s.sessionId
+    if (s.dropped) return { ok: false, error: 'session-dropped' }
+    if (apply) {
+      const ctx = this.contexts.peek(sessionId)
+      const backgroundRunning = [...(ctx?.subagentRuns.values() ?? [])].some((run) => run.running)
+        || listRunningWorkflowRuns(sessionId).length > 0
+      // 不通过 abort 抢占：run 的 finally 会自动 flush 队列，等停的空隙可能另起一轮。
+      // 必须在第一次 await 前占锁，双击撤回、压缩与新 run 都看同一份互斥状态。
+      if (s.rewinding || s.run || s.compacting || s.queue.length > 0 || backgroundRunning) {
+        return { ok: false, error: 'session-busy' }
+      }
+      s.rewinding = true
+    }
+    const assertPresent = () => {
+      if (s.dropped) throw new Error('session-dropped')
+    }
     const io = buildRewindIo(sessionId, {
       addNoticeRow: async (message) => {
+        assertPresent()
         await this.store.addMessage(messageToRow(message, sessionId) as never)
+        assertPresent()
         s.messages.set(message.id, message)
       },
     })
-
-    if (apply) {
-      const outcome = await executeRewind(io, {
-        // 交给执行器在抢占之后重读：run 收尾时还会落几条消息，截断点必须看得见它们
-        getMessages: () => this.loadMessages(sessionId),
-        anchorMessageId,
-        scope,
-        // 运行中的会话必须先确实停下：截断一个还在被写历史的锚点是未定义行为
-        abortActiveRun: async () => {
-          if (!s.run) return true
-          s.run.controller.abort()
-          void ipc.cancelSessionCommands(sessionId).catch(() => { /* 主进程未注册该 handler 时无害 */ })
-          for (let i = 0; i < 200 && s.run; i++) await new Promise((r) => setTimeout(r, 50))
-          return !s.run
-        },
-      })
-      if (outcome.ok) {
-        if (scope !== 'workspace') s.messages.clear()
-        // 刻意不清 ctx.readFiles：本项目的过期检测是**内容比对**（见 tool-registry 的 staleness 注释），
-        // 回滚把文件还原成正好被读过的那份内容，保留缓存与保留事实是一致的；
-        // 而本轮中途读到的那些版本已经对不上，会被同一条检测正确拒绝。
-        // 渲染层宿主没有这条清理路径，两种模式必须同构，所以两边都不清。
-        this.emit(s, { type: 'resync', sessionId, reason: `rewind:${scope}` })
-      }
-      return { ok: outcome.ok, error: outcome.error, outcome }
+    // DB 变更走本 manager 的 store，并在提交前再核对删除状态；文件 IO 仍复用公共实现。
+    io.truncate = async (fromId) => {
+      assertPresent()
+      await this.store.deleteMessagesFrom(sessionId, fromId)
+    }
+    io.markReverted = async (messageId) => {
+      assertPresent()
+      await this.store.patchMessage(messageId, { files_reverted: 1 })
     }
 
-    const messages = await this.loadMessages(sessionId)
-    const fromIndex = messages.findIndex((m) => m.id === anchorMessageId)
-    if (fromIndex < 0) return { ok: false, error: 'no-checkpoint' }
-    const plan = await buildRewindPlan({
-      messages,
-      fromIndex,
-      scope,
-      readFile: io.readFile,
-      readSnapshot: io.readSnapshot,
-    })
-    return { ok: true, plan }
+    try {
+      if (apply) {
+        // 前一轮 fire-and-forget 的落库可能还在飞；先结清，防止截断后迟到的 addMessage 复活尾段。
+        while (s.pendingWrites.size > 0) await Promise.all([...s.pendingWrites])
+        assertPresent()
+        const outcome = await executeRewind(io, {
+          getMessages: () => this.loadMessages(sessionId),
+          anchorMessageId,
+          scope,
+          expectedHistoryVersion,
+          abortActiveRun: async () => !s.dropped && !s.run && !s.compacting,
+          isCancelled: () => !!s.dropped,
+        })
+        if (s.dropped) return { ok: false, error: 'session-dropped' }
+        if (outcome.ok) {
+          s.messages.clear()
+          try {
+            const messages = await this.loadMessages(sessionId)
+            s.messages = new Map(messages.map((message) => [message.id, message]))
+          } catch (err) {
+            // 提交已经完成，镜像重读失败也必须清旧环并通知重拉，不能回放被截断的分支。
+            console.error('[agent-host] reload after rewind failed:', err)
+          }
+          assertPresent()
+          s.status = 'idle'
+          s.error = undefined
+          if (scope !== 'workspace') {
+            const ctx = this.contexts.peek(sessionId)
+            if (ctx) {
+              ctx.tokenTracker.reset()
+              ctx.readFiles.clear()
+              ctx.beginRewindTurn(null)
+              ctx.pendingSubagentNotifications.length = 0
+              ctx.subagentRuns.clear()
+            }
+            s.subRuns.clear()
+            s.lastUsage = undefined
+          }
+          // seq 保持单调，但旧分支的 message/stream 事件必须整环清掉；重连只可回放 resync。
+          s.ring = []
+          s.lastResyncAt = 0
+          this.emit(s, { type: 'resync', sessionId, reason: `rewind:${scope}` })
+        }
+        return { ok: outcome.ok, error: outcome.error, outcome }
+      }
+
+      const messages = await this.loadMessages(sessionId)
+      assertPresent()
+      const fromIndex = messages.findIndex((m) => m.id === anchorMessageId)
+      if (fromIndex < 0 || !isRewindableUserMessage(messages[fromIndex]!)) return { ok: false, error: 'no-checkpoint' }
+      const plan = await buildRewindPlan({
+        messages,
+        fromIndex,
+        scope,
+        readFile: io.readFile,
+        readSnapshot: io.readSnapshot,
+      })
+      assertPresent()
+      return { ok: true, plan }
+    } catch (err) {
+      if (s.dropped) return { ok: false, error: 'session-dropped' }
+      console.error('[agent-host] rewind failed:', err)
+      return { ok: false, error: 'write-failed' }
+    } finally {
+      if (apply) {
+        s.rewinding = false
+        // 执行期间新收到的消息照常排队，锁释放后才允许发送。
+        if (!s.error) void this.flushQueue(s)
+      }
+    }
   }
 
   private setQueue(s: HostSession, items: QueuedMessageItem[]): void {
@@ -882,10 +978,12 @@ export class AgentSessionManager {
     if (meta.remote && base.approvalMode !== 'manual') {
       console.log(`[agent-host][audit] remote run downgraded approval ${base.approvalMode} -> manual session=${s.sessionId}`)
     }
-    if (s.run || s.compacting) {
+    if (s.run || s.compacting || s.rewinding) {
       // 已在跑（或正在压缩）：按排队语义并入队列，而不是并发两个 run 抢同一会话状态。
       // 压缩与 run 共用这把锁：压缩结束时会用旧快照整段替换消息，压缩期间并发跑一轮
       // 就等于用旧快照覆盖新消息。
+      // 历史会话可能刚重启还没有 run 快照；撤回期间收到的首条 run 仍需能在解锁后发送。
+      if (s.rewinding && !cached) this.snapshots.set(s.sessionId, resolvedCmd)
       this.setQueue(s, [...s.queue, {
         id: makeId(),
         content: cmd.content,
@@ -904,39 +1002,53 @@ export class AgentSessionManager {
     s.run = { runId, controller, startedAt: Date.now() }
     s.status = 'working'
     s.error = undefined
-
-    const ctx = this.contexts.get(sessionId)
-    const session = await this.refreshSession(sessionId)
-    ctx.requestWorkingDir = session?.workingDir
-    ctx.activeTaskMode = cmd.taskMode ?? null
-    if (cmd.goal) s.goal = cmd.goal as unknown as Record<string, unknown>
-    if (cmd.todos) s.todos = cmd.todos
-
     this.emit(s, { type: 'run.started', sessionId, runId, ts: Date.now() })
 
-    const userMsg: Message | null = meta.wake ? null : {
-      id: makeId(),
-      role: 'user',
-      content: cmd.content,
-      timestamp: Date.now(),
-      ...(cmd.attachments && cmd.attachments.length > 0 ? { attachments: cmd.attachments } : {}),
-      ...(cmd.taskMode ? { taskMode: cmd.taskMode } : {}),
-      ...(cmd.skills && cmd.skills.length > 0 ? { skills: cmd.skills } : {}),
-    }
-    if (userMsg) this.persistMessage(s, userMsg)
+    // 回执只表示受理。生成失败经事件回流，不能让输入框等待整轮，
+    // 也不能让队列把已经落库的用户消息当成「没发出去」再发一遍。
+    void this.executeRun(s, resolvedCmd, settings, controller, runId, meta)
+    return { ok: true }
+  }
 
-    // addMessage 落库是异步的，刚写入的这条通常还查不到；按 id 判定而不是全表去重。
-    // wake 轮没有用户消息：直接以现有历史起步，iteration 顶部的 drain 会把通知注入。
-    const history = await this.loadMessages(sessionId)
-    const initialMessages = !userMsg ? history
-      : history.some((m) => m.id === userMsg.id) ? history : [...history, userMsg]
-    const ports = this.buildPorts(s, resolvedCmd, settings)
-
+  private async executeRun(
+    s: HostSession,
+    cmd: Extract<AgentCommand, { type: 'run' }>,
+    settings: AgentSettings,
+    controller: AbortController,
+    runId: string,
+    meta: { remote?: boolean; wake?: boolean }
+  ): Promise<void> {
+    const sessionId = s.sessionId
+    const ctx = this.contexts.get(sessionId)
     try {
-      await runReactLoop(ports, ctx, initialMessages, controller, resolvedCmd.taskMode, resolvedCmd.skillReminder)
-      return { ok: true }
+      const session = await this.refreshSession(sessionId)
+      if (s.dropped) return
+      ctx.requestWorkingDir = session?.workingDir
+      ctx.activeTaskMode = cmd.taskMode ?? null
+      if (cmd.goal) s.goal = cmd.goal as unknown as Record<string, unknown>
+      if (cmd.todos) s.todos = cmd.todos
+
+      const userMsg: Message | null = meta.wake ? null : {
+        id: makeId(),
+        role: 'user',
+        content: cmd.content,
+        timestamp: Date.now(),
+        ...(cmd.attachments && cmd.attachments.length > 0 ? { attachments: cmd.attachments } : {}),
+        ...(cmd.taskMode ? { taskMode: cmd.taskMode } : {}),
+        ...(cmd.skills && cmd.skills.length > 0 ? { skills: cmd.skills } : {}),
+      }
+      if (userMsg) this.persistMessage(s, userMsg)
+
+      // addMessage 落库是异步的，刚写入的这条通常还查不到；按 id 判定而不是全表去重。
+      // wake 轮没有用户消息：直接以现有历史起步，iteration 顶部的 drain 会把通知注入。
+      const history = await this.loadMessages(sessionId)
+      if (s.dropped) return
+      const initialMessages = !userMsg ? history
+        : history.some((m) => m.id === userMsg.id) ? history : [...history, userMsg]
+      const ports = this.buildPorts(s, cmd, settings)
+      await runReactLoop(ports, ctx, initialMessages, controller, cmd.taskMode, cmd.skillReminder)
     } catch (err) {
-      if (controller.signal.aborted) return { ok: true }
+      if (controller.signal.aborted || s.dropped) return
       const msg = err instanceof Error ? err.message : String(err)
       s.error = msg
       console.error('[agent-host] run failed:', msg)
@@ -947,7 +1059,6 @@ export class AgentSessionManager {
         timestamp: Date.now(),
       })
       this.emit(s, { type: 'notify', sessionId, kind: 'error', message: msg.slice(0, 200) })
-      return { ok: false, error: msg }
     } finally {
       ctx.requestWorkingDir = undefined
       ctx.activeTaskMode = null
@@ -965,13 +1076,13 @@ export class AgentSessionManager {
       }
       // 错误串随本轮收尾一并广播，下一轮 startRun 清空（渲染层错误横幅靠它显示与消失）
       this.emit(s, { type: 'run.status', sessionId, status: s.status, error: s.error })
-      void this.flushQueue(s)
+      if (!s.error) void this.flushQueue(s)
     }
   }
 
   /** FIFO 取队首发送；入口守卫拦下的（缺配置等）放回队首，不丢消息 */
   private async flushQueue(s: HostSession): Promise<void> {
-    if (s.run || s.compacting || s.dropped || s.queue.length === 0) return
+    if (s.run || s.compacting || s.rewinding || s.dropped || s.queue.length === 0) return
     const cmd = this.snapshots.get(s.sessionId)
     if (!cmd) return
     const next = s.queue[0]
@@ -983,31 +1094,28 @@ export class AgentSessionManager {
       taskMode: next.taskMode ?? undefined,
       skills: next.skills,
     })
-    if (!result.ok && result.error !== MISSING_SETTINGS) this.setQueue(s, [next, ...s.queue])
+    if (!result.ok) this.setQueue(s, [next, ...s.queue])
   }
 
   private async manualCompact(s: HostSession, instructions?: string): Promise<void> {
     const sessionId = s.sessionId
-    // 与 run 共用同一把会话锁：压缩结束会拿开头的消息快照整段替换本会话消息，
-    // 压缩期间并发跑一轮（或别处撤回回滚）就等于用旧快照覆盖新消息。
-    if (s.run || s.compacting || s.dropped) return
     const cmd = this.snapshots.get(sessionId)
-    if (!cmd?.settings) return
-    const messages = await this.loadMessages(sessionId)
-    if (messages.length === 0) return
     const ctx = this.contexts.get(sessionId)
     const placeholderId = makeId()
-    s.compacting = true
-    this.emit(s, {
-      type: 'message.added',
-      sessionId,
-      message: { id: placeholderId, role: 'assistant', content: '', timestamp: Date.now(), _isCompacting: true },
-    })
     try {
+      if (!cmd?.settings || s.dropped) return
+      const messages = await this.loadMessages(sessionId)
+      if (messages.length === 0 || s.dropped) return
+      this.emit(s, {
+        type: 'message.added',
+        sessionId,
+        message: { id: placeholderId, role: 'assistant', content: '', timestamp: Date.now(), _isCompacting: true },
+      })
       const result = await compactConversation(messages, cmd.settings, ctx.readFiles, instructions?.trim() || undefined, 'manual')
       // 提交前复核快照：摘要生成期间会话若被改过（撤回、文件回滚、外部写入），
       // 拿旧快照整段替换会把这些改动一起抹掉——宁可放弃这次压缩，也不能丢消息
       const current = await this.loadMessages(sessionId)
+      if (s.dropped) return
       if (!sameMessageSet(messages, current)) {
         console.warn('[agent-host] 压缩期间会话内容已变化，放弃本次压缩')
         this.emit(s, {
@@ -1041,6 +1149,7 @@ export class AgentSessionManager {
       })
     } finally {
       s.compacting = false
+      this.emit(s, { type: 'compaction.status', sessionId, compacting: false })
       // 压缩期间排队的任务在这里放行（压缩独占了这把会话锁）
       void this.flushQueue(s)
     }
@@ -1073,12 +1182,18 @@ export class AgentSessionManager {
         pendingPermissions.push(q.event)
         this.emit(s, q.event)
       }
+      // 只读对账也要发带新序号的权威状态；旧 queue.snapshot 可能已被客户端去重。
+      this.emit(s, { type: 'queue.snapshot', sessionId: s.sessionId, items: s.queue })
+      this.emit(s, { type: 'compaction.status', sessionId: s.sessionId, compacting: !!s.compacting })
+      this.emit(s, { type: 'run.status', sessionId: s.sessionId, status: s.run ? s.status : 'idle', error: s.error })
+      lastSeq = Math.max(lastSeq, s.seq.get())
     }
     return { activeRuns, queue, pendingPermissions, lastSeq }
   }
 
   /** 会话删除时清运行态与上下文，避免宿主留下僵尸 run 与陈旧 token 锚点 */
   dropSession(sessionId: string): void {
+    this.droppedSessions.add(sessionId)
     const s = this.sessions.get(sessionId)
     if (s) {
       // 先立碑：此后所有写入与事件都停手，否则迟到的回调会把用户删掉的会话复活

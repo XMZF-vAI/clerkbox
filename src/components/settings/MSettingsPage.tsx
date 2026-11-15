@@ -45,7 +45,11 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
   const [activeTab, setActiveTab] = useState<Tab>(
     () => useSettingsStore.getState().pendingSettingsTab ?? 'api'
   )
-  const [tabStack, setTabStack] = useState<Tab[]>([]) // history for back button
+  // 从模型/账户入口直达时保留详情意图，不能消费 pendingSettingsTab 后仍停在目录。
+  const [tabStack, setTabStack] = useState<Tab[]>(() => {
+    const pending = useSettingsStore.getState().pendingSettingsTab
+    return pending ? [pending] : []
+  })
   const settings = useSettingsStore()
   // Joule 账号：移动端只做状态展示与仪表盘入口；设备码登录仍走桌面端（WebUI 远程不接触本机凭据）
   const jouleStatus = useJouleStore((s) => s.status)
@@ -155,7 +159,7 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
       className={`fixed ${isVibeMode ? 'inset-0' : 'inset-x-0 bottom-0 top-11 max-md:top-14'} z-50 flex flex-col bg-dark-surfaceDim text-dark-onSurface`}
     >
       {/* 顶部导航栏：详情态显示返回 + 标题；列表态只显示标题 + 关闭 */}
-      <div className="flex items-center gap-2 px-2 h-12 border-b border-dark-onSurfaceVariant/10 bg-dark-surfaceDim sticky top-0 z-10">
+      <div className="flex shrink-0 items-center gap-2 px-2 min-h-14 border-b border-dark-onSurfaceVariant/10 bg-dark-surfaceDim sticky top-0 z-10">
         {inDetail ? (
           <button
             type="button"
@@ -171,7 +175,7 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
             <Smartphone size={20} />
           </div>
         )}
-        <h2 id={titleId} className="flex-1 text-base font-semibold truncate">
+        <h2 id={titleId} className="flex-1 text-ui-base font-semibold truncate">
           {inDetail ? t(`settings.tabs.${activeTab}`) : t('settings.title')}
         </h2>
         <button
@@ -182,7 +186,7 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
           title={t('common.close')}
           className="w-11 h-11 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-dark-onSurfaceVariant"
         >
-          <span className="text-xl leading-none">×</span>
+          <span className="text-ui-xl leading-none">×</span>
         </button>
       </div>
 
@@ -191,20 +195,20 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
         {!inDetail ? (
           <div className="px-3 py-4 space-y-6">
             {groups.map((group) => (
-              <section key={group.key}>
+              <section key={group.key} className="overflow-hidden rounded-md3-lg border border-dark-onSurfaceVariant/10">
                 {group.items.map((item, idx) => (
                   <button
                     key={item.tab}
                     type="button"
                     onClick={() => openTab(item.tab)}
-                    className={`w-full flex items-center gap-3 px-4 py-3.5 bg-dark-surfaceContainer transition-colors active:bg-dark-surfaceContainerHigh text-left ${
+                    className={`md-focus w-full flex items-center gap-3 px-4 py-4 bg-dark-surface transition-colors hover:bg-dark-surfaceContainer active:bg-dark-surfaceContainerHigh text-left ${
                       idx === 0 ? 'rounded-t-md3-md' : ''
                     } ${idx === group.items.length - 1 ? 'rounded-b-md3-md' : 'border-b border-dark-onSurfaceVariant/5'}`}
                   >
-                    <item.icon size={20} className="text-md-primary flex-shrink-0" />
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md3-sm bg-dark-surfaceContainer text-dark-onSurfaceVariant" aria-hidden><item.icon size={18} /></span>
                     <div className="flex-1 min-w-0">
-                      <div className="text-sm font-medium text-dark-onSurface truncate">{item.label}</div>
-                      <div className="text-xs text-dark-onSurfaceVariant/70 truncate mt-0.5">{item.hint}</div>
+                      <div className="text-ui-sm font-medium text-dark-onSurface truncate">{item.label}</div>
+                      <div className="text-ui-xs text-dark-onSurfaceVariant/70 truncate mt-0.5">{item.hint}</div>
                     </div>
                     <ChevronRight size={18} className="text-dark-onSurfaceVariant/40 flex-shrink-0" />
                   </button>
@@ -219,27 +223,28 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
                 className="w-full flex items-center gap-3 px-4 py-3.5 bg-dark-surfaceContainer rounded-md3-md transition-colors active:bg-dark-surfaceContainerHigh text-left"
               >
                 <RotateCcw size={20} className="text-md-error flex-shrink-0" />
-                <span className="text-sm font-medium text-md-error">{t('settings.resetSettings')}</span>
+                <span className="text-ui-sm font-medium text-md-error">{t('settings.resetSettings')}</span>
               </button>
             </section>
           </div>
         ) : (
           <div className="px-4 py-5 max-w-screen-md mx-auto">
+            <p className="mb-5 border-b border-dark-onSurfaceVariant/10 pb-4 text-ui-sm leading-relaxed text-dark-onSurfaceVariant">{t(`settings.sectionDescriptions.${activeTab}`)}</p>
             {/* 详情：与桌面 SettingsPage 完全一致，只是放在滚动容器内 */}
             {activeTab === 'api' && (
               <div className="space-y-5">
-                <div className="flex items-center gap-3 px-4 py-3 rounded-md3-md bg-md-primary/[0.08] border border-md-primary/20">
+                <div className="flex flex-wrap items-center gap-3 px-4 py-4 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10">
                   <Cpu size={16} className="text-md-primary flex-shrink-0" />
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium text-dark-onSurface truncate">{activeLabel}</span>
+                      <span className="text-ui-sm font-medium text-dark-onSurface truncate">{activeLabel}</span>
                       {activeProvider && (
-                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-dark-surfaceContainerHighest text-dark-onSurfaceVariant flex-shrink-0">
+                        <span className="text-ui-xs px-1.5 py-0.5 rounded bg-dark-surfaceContainerHighest text-dark-onSurfaceVariant flex-shrink-0">
                           {settings.apiCompat === 'anthropic' ? 'Anthropic' : 'OpenAI'}
                         </span>
                       )}
                     </div>
-                    <div className="text-xs text-dark-onSurfaceVariant truncate">
+                    <div className="text-ui-xs text-dark-onSurfaceVariant truncate">
                       {activeProvider ? `${activeProvider.name} · ${settings.model || t('settings.api.noActive')}` : t('settings.api.noActive')}
                     </div>
                   </div>
@@ -247,16 +252,16 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
                     type="button"
                     onClick={handleTestConnection}
                     disabled={testStatus === 'testing' || !settings.baseUrl}
-                    className="px-3 py-1.5 bg-md-primary text-md-onPrimary rounded-md3-sm text-xs font-medium hover:bg-md-primary/90 transition-colors disabled:opacity-50 flex-shrink-0"
+                    className="px-3 py-1.5 bg-md-primary text-md-onPrimary rounded-md3-sm text-ui-xs font-medium hover:bg-md-primary/90 transition-colors disabled:opacity-50 flex-shrink-0"
                   >
                     {testStatus === 'testing' ? t('settings.api.testing') : t('settings.api.testConnection')}
                   </button>
                 </div>
                 {testStatus === 'success' && (
-                  <span role="status" className="flex items-center gap-1 text-sm text-md-success"><Check size={14} /> {t('settings.api.testSuccess')}</span>
+                  <span role="status" className="flex items-center gap-1 text-ui-sm text-md-success"><Check size={14} /> {t('settings.api.testSuccess')}</span>
                 )}
                 {testStatus === 'error' && (
-                  <span role="alert" className="flex items-center gap-1 text-sm text-md-error max-w-full truncate"><AlertCircle size={14} /> {testError}</span>
+                  <span role="alert" className="flex items-center gap-1 text-ui-sm text-md-error max-w-full truncate"><AlertCircle size={14} /> {testError}</span>
                 )}
                 <ProvidersSection />
               </div>
@@ -267,7 +272,7 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
             {activeTab === 'general' && (
               <div className="space-y-5">
                 <div>
-                  <label className="flex items-center gap-2 text-sm font-medium mb-2">
+                  <label className="flex items-center gap-2 text-ui-sm font-medium mb-2">
                     <Languages size={14} />
                     {t('settings.general.languageTitle')}
                   </label>
@@ -277,7 +282,7 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
                         key={lang.code}
                         type="button"
                         onClick={() => settings.updateSettings({ language: lang.code })}
-                        className={`flex-1 px-3 py-2 rounded-md3-sm text-sm transition-colors border ${
+                        className={`flex-1 px-3 py-2 rounded-md3-sm text-ui-sm transition-colors border ${
                           settings.language === lang.code
                             ? 'border-md-primary/40 bg-md-primary/10 text-md-primary'
                             : 'border-dark-onSurfaceVariant/10 hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant'
@@ -285,7 +290,7 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
                         aria-pressed={settings.language === lang.code}
                       >
                         <div className="font-medium">{lang.label}</div>
-                        <div className="text-[10px] opacity-60 mt-0.5">{lang.englishLabel}</div>
+                        <div className="text-ui-xs opacity-60 mt-0.5">{lang.englishLabel}</div>
                       </button>
                     ))}
                   </div>
@@ -294,9 +299,9 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
                 <div className="space-y-3 p-4 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10">
                   <div className="flex items-center gap-2">
                     <FileText size={14} className="text-md-primary flex-shrink-0" />
-                    <span className="text-sm font-medium text-dark-onSurface">{t('settings.general.agentsMdTitle')}</span>
+                    <span className="text-ui-sm font-medium text-dark-onSurface">{t('settings.general.agentsMdTitle')}</span>
                   </div>
-                  <p className="text-xs text-dark-onSurfaceVariant/70 leading-relaxed">
+                  <p className="text-ui-xs text-dark-onSurfaceVariant/70 leading-relaxed">
                     {t('settings.general.agentsMdDesc')}
                   </p>
                   <label className="flex items-center gap-2 cursor-pointer">
@@ -306,7 +311,7 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
                       onChange={(e) => settings.updateSettings({ agentsMdEnabled: e.target.checked })}
                       className="accent-md-primary"
                     />
-                    <span className="text-xs text-dark-onSurfaceVariant">{t('settings.general.agentsMdToggle')}</span>
+                    <span className="text-ui-xs text-dark-onSurfaceVariant">{t('settings.general.agentsMdToggle')}</span>
                   </label>
                   {settings.agentsMdEnabled && (
                     <label className="flex items-center gap-2 cursor-pointer">
@@ -316,7 +321,7 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
                         onChange={(e) => settings.updateSettings({ claudeMdCompat: e.target.checked })}
                         className="accent-md-primary"
                       />
-                      <span className="text-xs text-dark-onSurfaceVariant">{t('settings.general.claudeMdCompat')}</span>
+                      <span className="text-ui-xs text-dark-onSurfaceVariant">{t('settings.general.claudeMdCompat')}</span>
                     </label>
                   )}
                 </div>
@@ -326,19 +331,19 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
                   <div className="space-y-3 p-4 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10">
                     <div className="flex items-center gap-2">
                       <Monitor size={14} className="text-md-primary flex-shrink-0" />
-                      <span className="text-sm font-medium text-dark-onSurface">{t('settings.general.trayTitle')}</span>
+                      <span className="text-ui-sm font-medium text-dark-onSurface">{t('settings.general.trayTitle')}</span>
                     </div>
-                    <p className="text-xs text-dark-onSurfaceVariant/70 leading-relaxed">
+                    <p className="text-ui-xs text-dark-onSurfaceVariant/70 leading-relaxed">
                       {t('settings.general.trayDesc')}
                     </p>
                     {isMacPlatform ? (
-                      <p className="text-xs text-dark-onSurfaceVariant/60 leading-relaxed">
+                      <p className="text-ui-xs text-dark-onSurfaceVariant/60 leading-relaxed">
                         {t('settings.general.trayMacNote')}
                       </p>
                     ) : (
                       <>
                         <div>
-                          <label className="text-xs text-dark-onSurfaceVariant mb-2 block">
+                          <label className="text-ui-xs text-dark-onSurfaceVariant mb-2 block">
                             {t('settings.general.trayCloseToTray')} / {t('settings.general.trayCloseToQuit')}
                           </label>
                           <div className="flex gap-2">
@@ -347,7 +352,7 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
                                 key={behavior}
                                 type="button"
                                 onClick={() => settings.updateSettings({ closeBehavior: behavior })}
-                                className={`flex-1 px-3 py-2.5 rounded-md3-sm text-sm transition-colors border ${
+                                className={`flex-1 px-3 py-2.5 rounded-md3-sm text-ui-sm transition-colors border ${
                                   settings.closeBehavior === behavior
                                     ? 'border-md-primary/40 bg-md-primary/10 text-md-primary'
                                     : 'border-dark-onSurfaceVariant/10 hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant'
@@ -360,7 +365,7 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
                           </div>
                         </div>
                         <div>
-                          <label className="text-xs text-dark-onSurfaceVariant mb-2 block">
+                          <label className="text-ui-xs text-dark-onSurfaceVariant mb-2 block">
                             {t('settings.general.traySessionsLimit')}
                           </label>
                           <div className="flex gap-2">
@@ -369,7 +374,7 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
                                 key={limit}
                                 type="button"
                                 onClick={() => settings.updateSettings({ recentSessionsLimit: limit })}
-                                className={`flex-1 px-3 py-2.5 rounded-md3-sm text-sm transition-colors border ${
+                                className={`flex-1 px-3 py-2.5 rounded-md3-sm text-ui-sm transition-colors border ${
                                   settings.recentSessionsLimit === limit
                                     ? 'border-md-primary/40 bg-md-primary/10 text-md-primary'
                                     : 'border-dark-onSurfaceVariant/10 hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant'
@@ -393,14 +398,14 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
             {activeTab === 'appearance' && (
               <div className="space-y-6">
                 <div>
-                  <label className="text-sm font-medium mb-2 block">{t('settings.appearance.themeMode')}</label>
+                  <label className="text-ui-sm font-medium mb-2 block">{t('settings.appearance.themeMode')}</label>
                   <div className="flex gap-2">
                     {(['light', 'dark', 'system'] as const).map((theme) => (
                       <button
                         key={theme}
                         type="button"
                         onClick={() => settings.updateSettings({ theme })}
-                        className={`flex-1 py-2 rounded-md3-sm text-sm border transition-colors ${
+                        className={`flex-1 py-2 rounded-md3-sm text-ui-sm border transition-colors ${
                           settings.theme === theme
                             ? 'border-md-primary/40 bg-md-primary/10 text-md-primary'
                             : 'border-dark-onSurfaceVariant/10 hover:bg-dark-surfaceContainer'
@@ -413,14 +418,14 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
                 </div>
 
                 <div>
-                  <label className="text-sm font-medium mb-2 block">{t('settings.appearance.fontTitle')}</label>
+                  <label className="text-ui-sm font-medium mb-2 block">{t('settings.appearance.fontTitle')}</label>
                   <div className="flex gap-2">
                     {(['default', 'serif'] as const).map((font) => (
                       <button
                         key={font}
                         type="button"
                         onClick={() => settings.updateSettings({ appFont: font })}
-                        className={`flex-1 py-2 rounded-md3-sm text-sm border transition-colors ${
+                        className={`flex-1 py-2 rounded-md3-sm text-ui-sm border transition-colors ${
                           settings.appFont === font
                             ? 'border-md-primary/40 bg-md-primary/10 text-md-primary'
                             : 'border-dark-onSurfaceVariant/10 hover:bg-dark-surfaceContainer'
@@ -434,7 +439,7 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
 
                 <div>
                   <label className="text-ui-sm font-medium mb-2 block">{t('settings.appearance.uiScaleTitle')}</label>
-                  <p className="text-xs text-dark-onSurfaceVariant/60 mt-0.5 mb-2">
+                  <p className="text-ui-xs text-dark-onSurfaceVariant/60 mt-0.5 mb-2">
                     {t('settings.appearance.uiScaleDesc')}
                   </p>
                   <div className="flex gap-2">
@@ -457,8 +462,8 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
                 </div>
 
                 <div>
-                  <label className="text-sm font-medium block">{t('settings.appearance.macaronTitle')}</label>
-                  <p className="text-xs text-dark-onSurfaceVariant/60 mt-0.5 mb-3">
+                  <label className="text-ui-sm font-medium block">{t('settings.appearance.macaronTitle')}</label>
+                  <p className="text-ui-xs text-dark-onSurfaceVariant/60 mt-0.5 mb-3">
                     {t('settings.appearance.macaronDesc')}
                   </p>
                   <div className="grid grid-cols-4 gap-y-4">
@@ -485,7 +490,7 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
                           >
                             {selected && <Check size={16} className="text-white drop-shadow" />}
                           </span>
-                          <span className={`text-xs ${selected ? 'text-md-primary font-medium' : 'text-dark-onSurfaceVariant'}`}>
+                          <span className={`text-ui-xs ${selected ? 'text-md-primary font-medium' : 'text-dark-onSurfaceVariant'}`}>
                             {t(`macaron.${p.id}`)}
                           </span>
                         </button>
@@ -516,7 +521,7 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
                               <Palette size={14} className="text-white drop-shadow" />
                             )}
                           </span>
-                          <span className={`text-xs ${selected ? 'text-md-primary font-medium' : 'text-dark-onSurfaceVariant'}`}>
+                          <span className={`text-ui-xs ${selected ? 'text-md-primary font-medium' : 'text-dark-onSurfaceVariant'}`}>
                             {t('settings.appearance.custom')}
                           </span>
                           <input
@@ -542,8 +547,8 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
                 <div className="space-y-3 p-4 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10">
                   <div className="flex items-center gap-2">
                     <img src={JOULE_MARK} alt="" className="w-[15px] h-[15px] rounded-[4px] flex-shrink-0" />
-                    <span className="text-sm font-medium text-dark-onSurface">{t('joule.accountTitle')}</span>
-                    <span className="px-1.5 py-0.5 rounded-md3-xs bg-dark-surfaceContainerHigh text-dark-onSurfaceVariant text-[10px] font-medium whitespace-nowrap">
+                    <span className="text-ui-sm font-medium text-dark-onSurface">{t('joule.accountTitle')}</span>
+                    <span className="px-1.5 py-0.5 rounded-md3-xs bg-dark-surfaceContainerHigh text-dark-onSurfaceVariant text-ui-xs font-medium whitespace-nowrap">
                       {t(
                         jouleStatus === 'connected' ? 'joule.statusConnected'
                           : jouleStatus === 'expired' ? 'joule.statusExpired'
@@ -553,22 +558,22 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
                       )}
                     </span>
                   </div>
-                  <p className="text-xs text-dark-onSurfaceVariant/70 leading-relaxed">
+                  <p className="text-ui-xs text-dark-onSurfaceVariant/70 leading-relaxed">
                     {jouleUser
                       ? `${jouleUser.username || jouleUser.email || ''}${joulePlan ? ` · ${joulePlan.label}` : ''}`
                       : t('joule.accountDesc')}
                   </p>
                   {jouleLoggingIn && (
-                    <p className="text-[11px] text-md-primary">{t('joule.loggingIn')}</p>
+                    <p className="text-ui-xs text-md-primary">{t('joule.loggingIn')}</p>
                   )}
                   {jouleError && !jouleLoggingIn && (
-                    <p role="alert" className="text-[11px] text-md-error break-all">{jouleError}</p>
+                    <p role="alert" className="text-ui-xs text-md-error break-all">{jouleError}</p>
                   )}
                   <div className="flex items-center gap-2 flex-wrap">
                     <button
                       type="button"
                       onClick={() => void ipc.jouleOpenDashboard()}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-md3-sm bg-md-primary text-md-onPrimary hover:bg-md-primary/90 transition-colors text-xs font-medium"
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-md3-sm bg-md-primary text-md-onPrimary hover:bg-md-primary/90 transition-colors text-ui-xs font-medium"
                     >
                       <ExternalLink size={12} /> {t('joule.openDashboard')}
                     </button>
@@ -576,7 +581,7 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
                       <button
                         type="button"
                         onClick={() => void jouleLogin()}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-md3-sm bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer transition-colors text-xs font-medium text-dark-onSurfaceVariant"
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-md3-sm bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer transition-colors text-ui-xs font-medium text-dark-onSurfaceVariant"
                       >
                         <LogIn size={12} /> {t('joule.login')}
                       </button>
@@ -588,10 +593,10 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
                   <div className="w-14 h-14 rounded-full bg-dark-surfaceContainerHigh flex items-center justify-center mb-4">
                     <User size={26} className="text-md-primary" />
                   </div>
-                  <p className="text-base font-medium text-dark-onSurface mb-1">
+                  <p className="text-ui-base font-medium text-dark-onSurface mb-1">
                     {t('settings.accountMobileOnlyTitle')}
                   </p>
-                  <p className="text-sm text-dark-onSurfaceVariant/70 leading-relaxed max-w-xs">
+                  <p className="text-ui-sm text-dark-onSurfaceVariant/70 leading-relaxed max-w-xs">
                     {t('settings.accountMobileOnlyDesc')}
                   </p>
                 </div>
@@ -601,10 +606,10 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
             {activeTab === 'about' && (
               <div className="flex flex-col items-center justify-center py-8">
                 <img src={APP_ICON} alt="ClerkBox" className="w-16 h-16 rounded-xl mb-4" />
-                <h3 className="text-xl font-semibold mb-1">ClerkBox</h3>
-                <p className="text-sm text-dark-onSurfaceVariant mb-1">{`v${__APP_VERSION__}`}</p>
-                <p className="text-xs text-dark-onSurfaceVariant/50 mb-6">{t('settings.about.tagline')}</p>
-                <div className="w-full max-w-[280px] space-y-3 text-sm">
+                <h3 className="text-ui-xl font-semibold mb-1">ClerkBox</h3>
+                <p className="text-ui-sm text-dark-onSurfaceVariant mb-1">{`v${__APP_VERSION__}`}</p>
+                <p className="text-ui-xs text-dark-onSurfaceVariant/50 mb-6">{t('settings.about.tagline')}</p>
+                <div className="w-full max-w-[280px] space-y-3 text-ui-sm">
                   <div className="flex justify-between py-2 border-b border-dark-onSurfaceVariant/10">
                     <span className="text-dark-onSurfaceVariant/60">{t('settings.about.developer')}</span>
                     <span className="font-medium">XMZF vAI</span>
@@ -618,7 +623,7 @@ export default function MSettingsPage({ onClose }: { onClose: () => void }) {
                     <span>Apache-2.0</span>
                   </div>
                 </div>
-                <p className="mt-8 text-[11px] text-dark-onSurfaceVariant/30 text-center">
+                <p className="mt-8 text-ui-xs text-dark-onSurfaceVariant/30 text-center">
                   {t('settings.about.copyright')}
                 </p>
               </div>

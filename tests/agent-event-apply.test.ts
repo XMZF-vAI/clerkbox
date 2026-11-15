@@ -39,6 +39,10 @@ beforeEach(() => {
     sessions: [{ id: sid, title: '新会话', messages: [], createdAt: 1, updatedAt: 1 }],
     activeSessionId: sid,
     streamingSessionIds: new Set<string>(),
+    compactingSessionIds: new Set<string>(),
+    stoppingSessionIds: new Set<string>(),
+    rewindingSessionIds: new Set<string>(),
+    rewindRevisions: {},
     sessionStatus: {},
     sessionErrors: {},
     queuedMessages: {},
@@ -48,6 +52,14 @@ beforeEach(() => {
 })
 
 describe('运行态与消息回灌', () => {
+  it('压缩态按来源会话隔离，重连后的权威空闲态可以清除旧状态', () => {
+    applyAgentEvent({ type: 'compaction.status', sessionId: sid, compacting: true })
+    expect(useChatStore.getState().compactingSessionIds.has(sid)).toBe(true)
+    expect(useChatStore.getState().compactingSessionIds.has('another')).toBe(false)
+    applyAgentEvent({ type: 'compaction.status', sessionId: sid, compacting: false })
+    expect(useChatStore.getState().compactingSessionIds.has(sid)).toBe(false)
+  })
+
   it('run.started 点亮流式与工作状态，并清掉上一轮错误串', () => {
     useChatStore.getState().setSessionError(sid, '上一轮炸了')
     applyAgentEvent({ type: 'run.started', sessionId: sid, runId: 'r', ts: 1 })
@@ -87,6 +99,22 @@ describe('运行态与消息回灌', () => {
 })
 
 describe('其余通道', () => {
+  it('历史撤回的resync使旧DB读失效，清来源会话旧运行卡片但保留其它会话', () => {
+    const reload = vi.spyOn(useChatStore.getState(), 'reloadSessionFromDb').mockResolvedValue(undefined)
+    useAgentRunsStore.setState({ runsBySession: { [sid]: [run({ status: 'completed' })], other: [run({ id: 'other-run' })] } })
+    useChatStore.getState().setSessionError(sid, '旧分支错误')
+    try {
+      applyAgentEvent({ type: 'resync', sessionId: sid, reason: 'rewind:conversation' })
+      expect(useChatStore.getState().rewindRevisions[sid]).toBe(1)
+      expect(useAgentRunsStore.getState().runsBySession[sid]).toBeUndefined()
+      expect(useAgentRunsStore.getState().runsBySession.other).toHaveLength(1)
+      expect(useChatStore.getState().sessionErrors[sid]).toBeUndefined()
+      expect(reload).toHaveBeenCalledWith(sid)
+      applyAgentEvent({ type: 'resync', sessionId: sid, reason: 'rewind:workspace' })
+      expect(useChatStore.getState().rewindRevisions[sid]).toBe(1)
+    } finally { reload.mockRestore() }
+  })
+
   it('permission.requested 置危险确认态——宿主模式下 C2 卡片就靠它显示', () => {
     applyAgentEvent({
       type: 'permission.requested',

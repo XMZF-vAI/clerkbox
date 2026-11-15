@@ -56,6 +56,31 @@ function writeLegacy(dir: string, data: unknown): string {
 }
 
 describe('createChatStore 迁移（老用户升级路径）', () => {
+  it.each([
+    ['sqlite', 'u2', ['u1', 'a1']],
+    ['sqlite', 'u1', []],
+    ['json', 'u2', ['u1', 'a1']],
+    ['json', 'u1', []],
+  ] as const)('%s 撤回 %s 后重启：只保留锚点前的消息', async (kind, anchorId, keptIds) => {
+    const options = { userDataDir: workDir, ...(kind === 'sqlite' ? { wasmBinary: loadWasm() } : {}) }
+    const store = await createChatStore(options)
+    expect(store.kind).toBe(kind)
+    await store.createSession({ id: 's1', title: '撤回回归', created_at: 1, updated_at: 1 })
+    await store.createSession({ id: 'other', title: '其他会话', created_at: 1, updated_at: 1 })
+    for (const [index, id] of ['u1', 'a1', 'u2', 'a2'].entries()) {
+      // 时间戳相同也必须按插入序截断。
+      await store.addMessage({ id, session_id: 's1', role: index % 2 ? 'assistant' : 'user', content: id, timestamp: 10 })
+    }
+    await store.addMessage({ id: 'other-message', session_id: 'other', role: 'user', content: '不受影响', timestamp: 10 })
+    await store.deleteMessagesFrom('s1', anchorId)
+    expect((await store.getMessages('s1')).map((m) => m.id)).toEqual(keptIds)
+    expect((await store.getMessages('other')).map((m) => m.id)).toEqual(['other-message'])
+    store.flush()
+    const restarted = await createChatStore(options)
+    expect((await restarted.getMessages('s1')).map((m) => m.id)).toEqual(keptIds)
+    expect((await restarted.getMessages('other')).map((m) => m.id)).toEqual(['other-message'])
+  })
+
   it('旧 JSON 数据完整迁移到 SQLite，原文件改名为 .migrated-*.bak 且内容保留', async () => {
     const legacyPath = writeLegacy(workDir, legacyFixture())
     const legacyRaw = fs.readFileSync(legacyPath, 'utf-8')

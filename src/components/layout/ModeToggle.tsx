@@ -1,4 +1,5 @@
 import { Briefcase, SquareTerminal } from 'lucide-react'
+import { useRef, type KeyboardEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useSettingsStore } from '../../stores/settings-store'
 import type { InterfaceMode } from '../../types/agent'
@@ -8,22 +9,35 @@ const MODES: Array<{ value: InterfaceMode; icon: typeof SquareTerminal }> = [
   { value: 'general', icon: Briefcase },
 ]
 
-/**
- * 「编程 / 通用」界面模式切换（参考 Qoder 的胶囊分段控件）：
- * 选中段展开为「图标 + 文字」的高亮胶囊，未选中段收起为仅图标。
- * 模式是纯展示层偏好（问候语、占位符等技术细节的呈现粒度），不改变 Agent 能力。
- */
+/** 展示模式偏好；两个选项始终可见，方向键与 Tab 遵循单选组约定。 */
 export default function ModeToggle() {
   const { t } = useTranslation()
   const interfaceMode = useSettingsStore((s) => s.interfaceMode)
+  const buttonRefs = useRef<Array<HTMLButtonElement | null>>([])
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    const nextIndex = event.key === 'ArrowRight' || event.key === 'ArrowDown'
+      ? (index + 1) % MODES.length
+      : event.key === 'ArrowLeft' || event.key === 'ArrowUp'
+        ? (index - 1 + MODES.length) % MODES.length
+        : event.key === 'Home'
+          ? 0
+          : event.key === 'End'
+            ? MODES.length - 1
+            : -1
+    if (nextIndex < 0) return
+    event.preventDefault()
+    useSettingsStore.getState().updateSettings({ interfaceMode: MODES[nextIndex].value })
+    buttonRefs.current[nextIndex]?.focus()
+  }
 
   return (
     <div
       role="radiogroup"
       aria-label={t('interfaceMode.toggleAria')}
-      className="flex items-center p-0.5 rounded-full bg-dark-surfaceContainerHigh/70 border border-dark-onSurfaceVariant/10"
+      className="grid grid-cols-2 gap-1 rounded-md3-md border border-dark-onSurfaceVariant/10 bg-dark-surfaceContainer/50 p-1"
     >
-      {MODES.map(({ value, icon: Icon }) => {
+      {MODES.map(({ value, icon: Icon }, index) => {
         const active = interfaceMode === value
         return (
           <button
@@ -31,22 +45,23 @@ export default function ModeToggle() {
             type="button"
             role="radio"
             aria-checked={active}
+            tabIndex={active ? 0 : -1}
+            ref={(element) => { buttonRefs.current[index] = element }}
             title={t(`interfaceMode.${value}`)}
+            onKeyDown={(event) => handleKeyDown(event, index)}
             onClick={() => {
               if (!active) useSettingsStore.getState().updateSettings({ interfaceMode: value })
             }}
-            className={`md-focus flex items-center h-7 rounded-full transition-all duration-200 ${
+            className={`md-focus flex min-h-8 items-center justify-center gap-2 rounded-md3-sm border px-2 py-1 max-md:min-h-11 transition-colors duration-200 ${
               active
-                ? 'px-2.5 gap-1.5 border border-md-primary/50 bg-md-primary/10 text-md-primary'
-                : 'w-8 justify-center text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh hover:text-dark-onSurface'
+                ? 'border-dark-onSurfaceVariant/10 bg-dark-surfaceBright text-dark-onSurface shadow-elevation-1'
+                : 'border-transparent text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh hover:text-dark-onSurface'
             }`}
           >
-            <Icon size={13} className="shrink-0" />
-            {active && (
-              <span className="text-xs font-medium whitespace-nowrap leading-none">
-                {t(`interfaceMode.${value}`)}
-              </span>
-            )}
+            <Icon size={14} className="shrink-0" />
+            <span className="text-ui-xs font-medium whitespace-nowrap">
+              {t(`interfaceMode.${value}`)}
+            </span>
           </button>
         )
       })}

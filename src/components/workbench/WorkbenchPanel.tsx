@@ -1,9 +1,10 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useId, useMemo, useRef, useState } from 'react'
 import {
   Bot,
   Folder,
   GitBranch,
   Globe,
+  Loader2,
   MousePointerClick,
   PanelRight,
   Plus,
@@ -64,7 +65,7 @@ const KIND_ICON: Record<WorkbenchTabKind, typeof Folder> = {
  * - 左缘可拖拽调宽；窄屏（max-md）退化为覆盖式抽屉，不做拖拽
  * - 空标签时展示「从这里开始」三入口引导
  */
-export default function WorkbenchPanel({ vibe }: { vibe?: boolean }) {
+export default function WorkbenchPanel({ vibe, suspended = false }: { vibe?: boolean; suspended?: boolean }) {
   const { t } = useTranslation()
   const {
     visible, width, tabs, activeTabId,
@@ -74,6 +75,9 @@ export default function WorkbenchPanel({ vibe }: { vibe?: boolean }) {
   // 当前会话工作目录：作为新建终端的起始路径（用户未选过则用自动生成的默认目录）
   const sessions = useChatStore((s) => s.sessions)
   const activeSessionId = useChatStore((s) => s.activeSessionId)
+  // 标签 id 仅在各自分片内唯一；普通面板的 React/PTY 身份也必须包含分片归属。
+  const boundSessionId = useWorkbenchStore((s) => s.boundSessionId)
+  const contentSessionKey = boundSessionId ?? activeSessionId ?? 'unbound'
   const activeWorkingDir = useMemo(() => {
     const s = sessions.find((s) => s.id === activeSessionId)
     return s?.workingDir || s?.defaultWorkDir || undefined
@@ -83,6 +87,9 @@ export default function WorkbenchPanel({ vibe }: { vibe?: boolean }) {
   const [filter, setFilter] = useState('')
   const [dragging, setDragging] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
+  const menuTriggerRef = useRef<HTMLButtonElement>(null)
+  const tabListRef = useRef<HTMLDivElement>(null)
+  const panelId = useId()
 
   // 持有 Agent 浏览器标签的所有会话。当前会话的面板在下面的 tabs 里渲染，
   // 其余的走保活挂载点 —— 见那里的注释。
@@ -120,7 +127,18 @@ export default function WorkbenchPanel({ vibe }: { vibe?: boolean }) {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false)
     }
     document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return
+      event.preventDefault()
+      event.stopPropagation()
+      setMenuOpen(false)
+      menuTriggerRef.current?.focus()
+    }
+    document.addEventListener('keydown', onEscape)
+    return () => {
+      document.removeEventListener('mousedown', handler)
+      document.removeEventListener('keydown', onEscape)
+    }
   }, [menuOpen])
 
   // 拖拽调宽：监听一次性 move/up；拖拽期间盖全屏 shield，防止 webview/xterm 吞掉指针事件
@@ -151,28 +169,47 @@ export default function WorkbenchPanel({ vibe }: { vibe?: boolean }) {
   if (!visible && !keepAlive) return null
 
   const filteredEntries = availableEntries.filter((e) =>
-    t(e.nameKey).toLowerCase().includes(filter.trim().toLowerCase())
+    `${t(e.nameKey)} ${t(e.descKey)}`.toLowerCase().includes(filter.trim().toLowerCase())
+  )
+
+  const closePanelTab = (id: string) => {
+    const index = tabs.findIndex((tab) => tab.id === id)
+    const next = tabs[index + 1] ?? tabs[index - 1]
+    closeTab(id)
+    requestAnimationFrame(() => {
+      if (next) {
+        tabListRef.current?.querySelector<HTMLButtonElement>(`[data-panel-tab="${next.id}"]`)?.focus()
+      } else menuTriggerRef.current?.focus()
+    })
+  }
+
+  const panelLoading = (
+    <div role="status" className={`flex h-full items-center justify-center gap-2 px-5 text-ui-sm ${vibe ? 'text-white/60' : 'text-dark-onSurfaceVariant'}`}>
+      <Loader2 size={16} className="animate-spin" aria-hidden />
+      {t('common.loading')}
+    </div>
   )
 
   return (
     <>
       {/* 移动端遮罩：点击面板外空白关闭（与左侧会话抽屉行为一致） */}
-      {visible && (
+      {visible && !suspended && (
         <div
-          className="md:hidden fixed inset-0 z-30 bg-black/55 animate-fade-in"
+          className={`workbench-backdrop ${vibe ? 'vibe-workbench-backdrop' : 'md:hidden'} fixed inset-0 z-30 bg-black/55 animate-fade-in`}
           onClick={toggleVisible}
           aria-hidden
         />
       )}
       <aside
-      aria-hidden={!visible}
-      className={`flex flex-col ${
-        !visible
+      aria-hidden={!visible || suspended}
+      inert={!visible || suspended}
+      className={`workbench-panel ${vibe ? 'vibe-workbench-panel' : ''} flex flex-col ${
+        !visible || suspended
           ? 'pointer-events-none fixed left-0 top-0 -z-10 h-px w-px overflow-hidden opacity-[0.001]'
           : `max-md:fixed max-md:inset-y-0 max-md:right-0 max-md:z-40 max-md:w-[min(92vw,430px)] max-md:flex-col max-md:shadow-elevation-3 md:relative md:h-full md:max-h-full md:w-[var(--wb-width)] md:min-w-[300px] md:shrink-0 ${
               vibe
                 ? 'liquid-glass-strong border-white/15 max-md:rounded-l-xl text-white'
-                : 'border-l border-dark-onSurfaceVariant/10 bg-dark-surfaceContainer'
+                : 'border-l border-dark-onSurfaceVariant/10 bg-dark-surfaceDim'
             }`
       }`}
       style={{ ['--wb-width']: `${width}px` } as React.CSSProperties}
@@ -181,8 +218,17 @@ export default function WorkbenchPanel({ vibe }: { vibe?: boolean }) {
     >
       {/* 左缘拖拽把手（桌面端） */}
       <div
-        onMouseDown={() => setDragging(true)}
-        className={`absolute inset-y-0 left-0 z-20 hidden w-1.5 cursor-col-resize items-stretch md:flex ${
+        onMouseDown={(event) => { event.preventDefault(); setDragging(true) }}
+        role="separator"
+        aria-orientation="vertical"
+        aria-valuenow={width}
+        tabIndex={visible && !suspended ? 0 : -1}
+        onKeyDown={(event) => {
+          if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+          event.preventDefault()
+          setWidth(width + (event.key === 'ArrowLeft' ? 32 : -32))
+        }}
+        className={`workbench-resizer absolute inset-y-0 left-0 z-20 hidden w-1.5 cursor-col-resize items-stretch md:flex ${
           dragging ? 'bg-md-primary/40' : 'hover:bg-md-primary/25'
         } transition-colors`}
         title={t('workbench.resizeHandleAria')}
@@ -191,8 +237,8 @@ export default function WorkbenchPanel({ vibe }: { vibe?: boolean }) {
       />
 
       {/* 标签栏 */}
-      <div className={`relative z-10 flex h-10 shrink-0 items-center gap-1 px-2 ${vibe ? '' : ''}`}>
-        <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+      <div className={`relative z-10 flex min-h-12 shrink-0 items-center gap-1 px-2 py-1.5 ${vibe ? '' : 'bg-dark-surfaceContainer/40'}`}>
+        <div ref={tabListRef} role="tablist" aria-label={t('workbench.panelAria')} className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto overscroll-x-contain">
           {tabs.map((tab) => {
             const Icon = KIND_ICON[tab.kind]
             const label =
@@ -201,40 +247,59 @@ export default function WorkbenchPanel({ vibe }: { vibe?: boolean }) {
                 : t(`workbench.tab${tab.kind.charAt(0).toUpperCase()}${tab.kind.slice(1)}` as const)
             const isActive = tab.id === activeTabId
             return (
-              <button
+              <div
                 key={tab.id}
-                type="button"
-                onClick={() => activateTab(tab.id)}
-                className={`group flex h-7 min-w-0 shrink-0 items-center gap-1.5 rounded-md3-md px-2 text-xs transition-colors ${
+                data-active={isActive}
+                className={`workbench-panel-tab flex h-9 min-w-0 shrink-0 items-center rounded-md3-sm border text-ui-xs transition-colors ${
                   isActive
                     ? vibe
-                      ? 'bg-white/15 text-white'
-                      : 'bg-md-primary/15 text-md-primary'
+                      ? 'border-white/15 bg-white/15 text-white'
+                      : 'border-dark-onSurfaceVariant/10 bg-dark-surface text-dark-onSurface'
                     : vibe
-                      ? 'text-white/55 hover:bg-white/8 hover:text-white/85'
-                      : 'text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh hover:text-dark-onSurface'
+                      ? 'border-transparent text-white/60 hover:bg-white/10 hover:text-white/85'
+                      : 'border-transparent text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh hover:text-dark-onSurface'
                 }`}
-                aria-selected={isActive}
-                title={label}
               >
-                <Icon size={12} className="shrink-0" />
-                <span className="max-w-[110px] truncate">{label}</span>
-                {/* 真正的子按钮：可 Tab 聚焦、可 Enter 触发，避免嵌 span 只能鼠标点 */}
+                <button
+                  type="button"
+                  role="tab"
+                  id={`${panelId}-tab-${tab.id}`}
+                  data-panel-tab={tab.id}
+                  aria-controls={`${panelId}-panel-${tab.id}`}
+                  aria-selected={isActive}
+                  tabIndex={isActive ? 0 : -1}
+                  onClick={() => activateTab(tab.id)}
+                  onKeyDown={(event) => {
+                    const index = tabs.findIndex((item) => item.id === tab.id)
+                    const nextIndex = event.key === 'ArrowRight' ? (index + 1) % tabs.length
+                      : event.key === 'ArrowLeft' ? (index - 1 + tabs.length) % tabs.length
+                        : event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : -1
+                    if (event.key === 'Delete') { event.preventDefault(); closePanelTab(tab.id); return }
+                    if (nextIndex < 0) return
+                    event.preventDefault()
+                    activateTab(tabs[nextIndex].id)
+                    tabListRef.current?.querySelector<HTMLButtonElement>(`[data-panel-tab="${tabs[nextIndex].id}"]`)?.focus()
+                  }}
+                  className="md-focus flex h-full min-w-0 items-center gap-2 rounded-md3-sm px-2.5 text-left"
+                  title={label}
+                >
+                  <Icon size={14} className="shrink-0" aria-hidden />
+                  <span className="max-w-32 truncate">{label}</span>
+                </button>
+                {/* 标签与关闭是同级按钮，避免嵌套 button 导致事件与焦点归属不一致。 */}
                 <button
                   type="button"
                   aria-label={t('common.close')}
                   title={t('common.close')}
                   onClick={(e) => {
                     e.stopPropagation()
-                    closeTab(tab.id)
+                    closePanelTab(tab.id)
                   }}
-                  className={`ml-0.5 rounded p-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 hover:bg-black/20 focus-visible:outline focus-visible:outline-md-primary/60 ${
-                    isActive && 'opacity-60'
-                  }`}
+                  className={`workbench-panel-tab-close md-focus mr-1 flex h-6 w-6 items-center justify-center rounded-md3-xs transition-opacity ${vibe ? 'hover:bg-white/15' : 'hover:bg-dark-surfaceContainerHighest'}`}
                 >
                   <X size={11} />
                 </button>
-              </button>
+              </div>
             )
           })}
         </div>
@@ -242,11 +307,12 @@ export default function WorkbenchPanel({ vibe }: { vibe?: boolean }) {
         {/* 「+」菜单 */}
         <div className="relative shrink-0" ref={menuRef}>
           <button
+            ref={menuTriggerRef}
             type="button"
             onClick={() => setMenuOpen(!menuOpen)}
             aria-expanded={menuOpen}
             aria-haspopup="menu"
-            className={`flex h-7 w-7 items-center justify-center rounded-md3-sm transition-colors ${
+            className={`md-focus flex h-9 w-9 max-md:h-11 max-md:w-11 items-center justify-center rounded-md3-sm transition-colors ${
               vibe ? 'text-white/70 hover:bg-white/10' : 'text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh'
             }`}
             aria-label={t('workbench.addMenu')}
@@ -258,7 +324,17 @@ export default function WorkbenchPanel({ vibe }: { vibe?: boolean }) {
           {menuOpen && (
             <div
               role="menu"
-              className={`absolute right-0 top-9 z-30 w-64 overflow-hidden rounded-md3-lg shadow-xl ${
+              onKeyDown={(event) => {
+                if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+                const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'))
+                if (!items.length) return
+                const index = items.indexOf(document.activeElement as HTMLButtonElement)
+                const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
+                  : event.key === 'ArrowDown' ? (index + 1) % items.length : index < 0 ? items.length - 1 : (index - 1 + items.length) % items.length
+                event.preventDefault()
+                items[next].focus()
+              }}
+              className={`absolute right-0 top-11 z-30 w-72 max-w-[calc(100vw-2rem)] overflow-hidden rounded-md3-lg shadow-elevation-3 ${
                 vibe
                   ? 'liquid-glass-strong border border-white/15'
                   : 'border border-dark-onSurfaceVariant/10 bg-dark-surfaceContainerHigh'
@@ -275,18 +351,17 @@ export default function WorkbenchPanel({ vibe }: { vibe?: boolean }) {
                       openByKind(filteredEntries[0].kind)
                       setMenuOpen(false)
                     }
-                    if (e.key === 'Escape') setMenuOpen(false)
                   }}
                   placeholder={t('workbench.menuSearch')}
                   aria-label={t('workbench.menuSearch')}
-                  className={`w-full bg-transparent text-xs outline-none ${
+                  className={`md-focus min-h-8 w-full rounded-md3-xs bg-transparent text-ui-sm outline-none ${
                     vibe ? 'text-white placeholder:text-white/35' : 'text-dark-onSurface placeholder:text-dark-onSurfaceVariant/40'
                   }`}
                 />
               </div>
               <div className="p-1">
                 {filteredEntries.length === 0 ? (
-                  <p className={`px-3 py-3 text-center text-xs ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/50'}`}>
+                  <p className={`px-3 py-3 text-center text-ui-xs ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/50'}`}>
                     {t('workbench.menuNoResults')}
                   </p>
                 ) : (
@@ -301,12 +376,12 @@ export default function WorkbenchPanel({ vibe }: { vibe?: boolean }) {
                           openByKind(entry.kind)
                           setMenuOpen(false)
                         }}
-                        className={`flex w-full items-center gap-2.5 rounded-md3-sm px-3 py-2 text-left text-sm transition-colors ${
+                        className={`md-focus flex w-full items-center gap-2.5 rounded-md3-sm px-3 py-2 text-left text-ui-sm transition-colors ${
                           vibe ? 'text-white/85 hover:bg-white/12' : 'text-dark-onSurface hover:bg-dark-surfaceContainerHighest'
                         }`}
                       >
                         <Icon size={15} className={`shrink-0 ${vibe ? 'text-white/60' : 'text-dark-onSurfaceVariant/70'}`} />
-                        <span>{t(entry.nameKey)}</span>
+                        <span className="min-w-0"><span className="block text-ui-sm">{t(entry.nameKey)}</span><span className={`mt-0.5 block text-ui-xs ${vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant'}`}>{t(entry.descKey)}</span></span>
                       </button>
                     )
                   })
@@ -316,12 +391,12 @@ export default function WorkbenchPanel({ vibe }: { vibe?: boolean }) {
           )}
         </div>
 
-        {/* 收起按钮：仅 VIBE 模式需要（无标题栏开关，否则面板打开后无法关闭）；普通模式由 TitleBar 负责 */}
-        {vibe && (
+        {/* 窄屏抽屉始终提供收起按钮；桌面普通模式沿用标题栏开关。 */}
+        {(
           <button
             type="button"
             onClick={toggleVisible}
-            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md3-sm text-white/70 transition-colors hover:bg-white/10 hover:text-white"
+            className={`md-focus flex h-9 w-9 max-md:h-11 max-md:w-11 shrink-0 items-center justify-center rounded-md3-sm transition-colors ${vibe ? 'text-white/70 hover:bg-white/10 hover:text-white' : 'md:hidden text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh'}`}
             aria-label={t('titlebar.toggleWorkbench')}
             title={t('titlebar.toggleWorkbench')}
             data-testid="workbench-collapse"
@@ -336,8 +411,9 @@ export default function WorkbenchPanel({ vibe }: { vibe?: boolean }) {
       <div className={`min-h-0 flex-1 ${vibe ? 'border-t border-white/10' : 'border-t border-dark-onSurfaceVariant/10'}`}>
         {tabs.length === 0 || !activeTabId ? (
           /* 空态：「从这里开始」引导 */
-          <div className="flex h-full flex-col justify-center gap-1 px-8">
-            <p className={`mb-4 text-lg font-medium ${vibe ? 'text-white/85' : 'text-dark-onSurfaceVariant/80'}`}>
+          <div className="flex h-full flex-col justify-center gap-2 overflow-y-auto px-5 py-6">
+            <span className={`mb-2 flex h-11 w-11 shrink-0 items-center justify-center rounded-md3-md border ${vibe ? 'border-white/15 text-white/70' : 'border-dark-onSurfaceVariant/10 bg-dark-surfaceContainer text-dark-onSurfaceVariant'}`} aria-hidden><PanelRight size={20} /></span>
+            <p className={`mb-3 text-ui-lg font-semibold ${vibe ? 'text-white/85' : 'text-dark-onSurface'}`}>
               {isWebUIMode ? t('workbench.startHereWebUI') : t('workbench.startHere')}
             </p>
             {availableEntries.map((entry) => {
@@ -347,13 +423,10 @@ export default function WorkbenchPanel({ vibe }: { vibe?: boolean }) {
                   key={entry.kind}
                   type="button"
                   onClick={() => openByKind(entry.kind)}
-                  className={`group flex items-center gap-3 py-2.5 text-left ${vibe ? 'text-white/60 hover:text-white/90' : 'text-dark-onSurfaceVariant/60 hover:text-dark-onSurface'}`}
+                  className={`md-focus group flex items-start gap-3 rounded-md3-md border p-3 text-left transition-colors ${vibe ? 'border-white/10 text-white/70 hover:bg-white/10 hover:text-white/90' : 'border-dark-onSurfaceVariant/10 bg-dark-surface/50 text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh hover:text-dark-onSurface'}`}
                 >
                   <Icon size={17} className="shrink-0" />
-                  <span className="font-medium">{t(entry.nameKey)}</span>
-                  <span className={`truncate text-xs ${vibe ? 'text-white/35 group-hover:text-white/55' : 'text-dark-onSurfaceVariant/40 group-hover:text-dark-onSurfaceVariant/70'}`}>
-                    {t(entry.descKey)}
-                  </span>
+                  <span className="min-w-0"><span className="block text-ui-sm font-medium">{t(entry.nameKey)}</span><span className={`mt-1 block text-ui-xs leading-relaxed ${vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant'}`}>{t(entry.descKey)}</span></span>
                 </button>
               )
             })}
@@ -362,19 +435,19 @@ export default function WorkbenchPanel({ vibe }: { vibe?: boolean }) {
           tabs.map((tab) => {
             const isActive = tab.id === activeTabId
             return (
-              <div key={tab.id} className={`h-full ${isActive ? '' : 'hidden'}`}>
-                {tab.kind === 'files' && <Suspense fallback={null}><FilesPanel vibe={vibe} rootDir={activeWorkingDir} /></Suspense>}
-                {tab.kind === 'git' && <Suspense fallback={null}><GitPanel vibe={vibe} workDir={activeWorkingDir} onClose={() => closeTab(tab.id)} /></Suspense>}
-                {tab.kind === 'terminal' && <Suspense fallback={null}><TerminalPanel termId={tab.id} active={isActive} vibe={vibe} cwd={activeWorkingDir} /></Suspense>}
-                {tab.kind === 'browser' && <Suspense fallback={null}><BrowserPanel vibe={vibe} active={isActive} initialUrl={tab.url} onOpenNewTab={openBrowser} /></Suspense>}
-                {tab.kind === 'agent-browser' && <Suspense fallback={null}><AgentBrowserPanel vibe={vibe} /></Suspense>}
+              <div key={tab.kind === 'agent-browser' ? tab.id : `${contentSessionKey}:${tab.id}`} id={`${panelId}-panel-${tab.id}`} role="tabpanel" aria-labelledby={`${panelId}-tab-${tab.id}`} className={`h-full ${isActive ? '' : 'hidden'}`}>
+                {tab.kind === 'files' && <Suspense fallback={panelLoading}><FilesPanel vibe={vibe} rootDir={activeWorkingDir} /></Suspense>}
+                {tab.kind === 'git' && <Suspense fallback={panelLoading}><GitPanel active={isActive && visible && !suspended} vibe={vibe} workDir={activeWorkingDir} onClose={() => closeTab(tab.id)} /></Suspense>}
+                {tab.kind === 'terminal' && <Suspense fallback={panelLoading}><TerminalPanel termId={`${contentSessionKey}:${tab.id}`} active={isActive && visible && !suspended} vibe={vibe} cwd={activeWorkingDir} /></Suspense>}
+                {tab.kind === 'browser' && <Suspense fallback={panelLoading}><BrowserPanel vibe={vibe} active={isActive && visible && !suspended} initialUrl={tab.url} onOpenNewTab={openBrowser} /></Suspense>}
+                {tab.kind === 'agent-browser' && <Suspense fallback={panelLoading}><AgentBrowserPanel vibe={vibe} /></Suspense>}
                 {tab.kind === 'subagent' && (
-                  <Suspense fallback={null}>
+                  <Suspense fallback={panelLoading}>
                     <SubAgentDetailContent
                       sessionId={tab.sessionId!}
                       runId={tab.runId!}
                       titleSnapshot={tab.title}
-                      active={isActive}
+                      active={isActive && visible && !suspended}
                       vibe={vibe}
                       onClose={() => closeTab(tab.id)}
                     />
@@ -397,9 +470,10 @@ export default function WorkbenchPanel({ vibe }: { vibe?: boolean }) {
           <div
             key={`foreign-agent-browser-${sessionId}`}
             aria-hidden
+            inert
             className="pointer-events-none fixed left-0 top-0 -z-10 h-px w-px overflow-hidden opacity-[0.001]"
           >
-            <Suspense fallback={null}>
+            <Suspense fallback={panelLoading}>
               <AgentBrowserPanel vibe={vibe} />
             </Suspense>
           </div>

@@ -30,7 +30,7 @@ const thinkingModeOf = (m: ProviderModel): ThinkingMode =>
   (m.reasoningEfforts?.length ?? 0) > 0 ? 'tier' : 'toggle'
 
 const inputCls =
-  'w-full px-3 py-2 bg-dark-surfaceContainerHighest rounded-md3-sm text-sm border border-dark-onSurfaceVariant/10 outline-none focus:border-md-primary/40 transition-colors'
+  'md-focus w-full min-h-10 px-3 py-2 bg-dark-surface rounded-md3-sm text-ui-sm border border-dark-onSurfaceVariant/15 md-focus outline-none focus:border-md-primary/40 transition-colors'
 
 const GROUP_LABEL_KEY: Record<ProviderGroup, string> = {
   official: 'settings.providers.groupOfficial',
@@ -44,7 +44,7 @@ const GROUP_LABEL_KEY: Record<ProviderGroup, string> = {
 /** 协议徽章 */
 function CompatBadge({ compat }: { compat: ApiCompat }) {
   return (
-    <span className="text-[10px] px-1.5 py-0.5 rounded bg-dark-surfaceContainerHighest text-dark-onSurfaceVariant flex-shrink-0">
+    <span className="text-ui-xs px-1.5 py-0.5 rounded bg-dark-surfaceContainerHighest text-dark-onSurfaceVariant flex-shrink-0">
       {compat === 'anthropic' ? 'Anthropic' : 'OpenAI'}
     </span>
   )
@@ -74,23 +74,23 @@ export default function ProvidersSection() {
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-2">
-        <label className="text-sm font-medium">{t('settings.providers.title')}</label>
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+        <h4 className="text-ui-sm font-semibold">{t('settings.providers.title')}</h4>
         <button
           type="button"
           onClick={() => setShowCatalog(true)}
-          className="flex items-center gap-1 px-2.5 py-1 rounded-md3-sm text-xs text-md-primary hover:bg-md-primary/10 transition-colors"
+          className="md-focus flex min-h-9 items-center gap-1.5 px-3 py-2 rounded-md3-sm text-ui-xs border border-dark-onSurfaceVariant/15 text-dark-onSurface hover:bg-dark-surfaceContainer transition-colors"
         >
           <Plus size={14} /> {t('settings.providers.add')}
         </button>
       </div>
 
       {settings.providers.length === 0 ? (
-        <div className="px-4 py-6 text-center text-sm text-dark-onSurfaceVariant/60 border border-dashed border-dark-onSurfaceVariant/20 rounded-md3-md">
+        <div className="px-4 py-6 text-center text-ui-sm text-dark-onSurfaceVariant/60 border border-dashed border-dark-onSurfaceVariant/20 rounded-md3-md">
           {t('settings.providers.empty')}
         </div>
       ) : (
-        <div className="space-y-2">
+        <div className="space-y-3">
           {settings.providers.map((p) => (
             <ProviderCard
               key={p.id}
@@ -166,17 +166,18 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
     <div
       className={`rounded-md3-md border transition-colors ${
         isActiveProvider
-          ? 'border-md-primary/40 bg-md-primary/[0.08]'
-          : 'border-dark-onSurfaceVariant/10 bg-dark-surfaceContainerHigh'
+          ? 'border-md-primary/30 bg-dark-surfaceContainer/40'
+          : 'border-dark-onSurfaceVariant/10 bg-dark-surface'
       }`}
     >
       {/* 头部 */}
-      <div className="flex items-center gap-2 px-3.5 py-2.5">
+      <div className="flex items-center gap-2 px-4 py-3">
         <button
           type="button"
           onClick={() => patch({ collapsed: !provider.collapsed })}
-          className="w-5 h-5 flex items-center justify-center text-dark-onSurfaceVariant flex-shrink-0"
+          className="md-focus w-7 h-8 max-md:h-11 flex items-center justify-center rounded-md3-xs text-dark-onSurfaceVariant flex-shrink-0"
           aria-label={expanded ? t('settings.providers.collapse') : t('settings.providers.expand')}
+          aria-expanded={expanded}
         >
           <ChevronRight size={14} className={`transition-transform ${expanded ? 'rotate-90' : ''}`} />
         </button>
@@ -191,17 +192,18 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
               if (e.key === 'Enter') { patch({ name: nameDraft.trim() || provider.name }); setRenaming(false) }
               if (e.key === 'Escape') { setNameDraft(provider.name); setRenaming(false) }
             }}
-            className="flex-1 min-w-0 px-2 py-1 bg-dark-surfaceContainerHighest rounded-md3-xs text-sm outline-none border border-md-primary/40"
+            className="flex-1 min-w-0 px-2 py-1 bg-dark-surfaceContainerHighest rounded-md3-xs text-ui-sm md-focus outline-none border border-md-primary/40"
           />
         ) : (
           <button
             type="button"
             onClick={() => patch({ collapsed: !provider.collapsed })}
-            className="flex-1 min-w-0 flex items-center gap-2 text-left"
+            className="md-focus flex-1 min-w-0 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md3-xs py-1 text-left"
+            aria-expanded={expanded}
           >
-            <span className="text-sm font-medium text-dark-onSurface truncate">{provider.name}</span>
+            <span className="text-ui-sm font-medium text-dark-onSurface truncate">{provider.name}</span>
             <CompatBadge compat={provider.apiCompat} />
-            <span className="text-xs text-dark-onSurfaceVariant flex-shrink-0">
+            <span className="text-ui-xs text-dark-onSurfaceVariant flex-shrink-0">
               {t('settings.providers.modelCount', { count: provider.models.length })}
             </span>
           </button>
@@ -226,10 +228,10 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
       </div>
 
       {expanded && (
-        <div className="px-3.5 pb-3.5 space-y-3 border-t border-dark-onSurfaceVariant/10 pt-3">
+        <div className="px-4 pb-4 space-y-4 border-t border-dark-onSurfaceVariant/10 pt-4">
           {/* 协议选择 */}
           <div>
-            <div className="text-xs text-dark-onSurfaceVariant mb-1.5">{t('settings.providers.compat')}</div>
+            <div className="text-ui-xs text-dark-onSurfaceVariant mb-1.5">{t('settings.providers.compat')}</div>
             <div className="flex gap-2">
               {(['openai', 'anthropic'] as ApiCompat[]).map((c) => (
                 <button
@@ -237,9 +239,9 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
                   type="button"
                   onClick={() => switchCompat(c)}
                   aria-pressed={provider.apiCompat === c}
-                  className={`flex-1 px-3 py-1.5 rounded-md3-sm text-xs border transition-colors ${
+                  className={`flex-1 px-3 py-1.5 rounded-md3-sm text-ui-xs border transition-colors ${
                     provider.apiCompat === c
-                      ? 'border-md-primary/50 bg-md-primary/12 text-md-primary font-medium'
+                      ? 'border-md-primary/40 bg-md-primary/10 text-md-primary font-medium'
                       : 'border-dark-onSurfaceVariant/15 text-dark-onSurfaceVariant hover:bg-dark-surfaceContainer'
                   }`}
                 >
@@ -247,7 +249,7 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
                 </button>
               ))}
             </div>
-            <div className="text-[11px] text-dark-onSurfaceVariant/60 mt-1">
+            <div className="text-ui-xs text-dark-onSurfaceVariant/60 mt-1">
               {t('settings.providers.compatHint')}
             </div>
           </div>
@@ -275,7 +277,6 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
                 onClick={() => setShowKey((v) => !v)}
                 className="absolute right-1.5 top-1/2 -translate-y-1/2 w-6 h-6 flex items-center justify-center rounded-md3-xs text-dark-onSurfaceVariant/60 hover:text-dark-onSurface hover:bg-dark-surfaceContainer transition-colors"
                 aria-label={showKey ? t('settings.providers.hideKey') : t('settings.providers.showKey')}
-                tabIndex={-1}
               >
                 {showKey ? <EyeOff size={13} /> : <Eye size={13} />}
               </button>
@@ -284,7 +285,7 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
               <button
                 type="button"
                 onClick={() => ipc.openExternal(preset.apiKeyUrl!)}
-                className="px-2.5 flex items-center gap-1 rounded-md3-sm text-xs text-md-primary hover:bg-md-primary/10 transition-colors flex-shrink-0 whitespace-nowrap"
+                className="px-2.5 flex items-center gap-1 rounded-md3-sm text-ui-xs text-md-primary hover:bg-md-primary/10 transition-colors flex-shrink-0 whitespace-nowrap"
               >
                 <ExternalLink size={12} /> {t('settings.providers.getKey')}
               </button>
@@ -299,7 +300,7 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
               onChange={(e) => patch({ directFetch: e.target.checked })}
               className="accent-md-primary"
             />
-            <span className="text-xs text-dark-onSurfaceVariant">{t('settings.providers.directFetch')}</span>
+            <span className="text-ui-xs text-dark-onSurfaceVariant">{t('settings.providers.directFetch')}</span>
           </label>
 
           {/* 操作条 */}
@@ -308,7 +309,7 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
               type="button"
               onClick={onPickModels}
               disabled={!provider.baseUrl.trim()}
-              className="flex items-center gap-1 px-2.5 py-1.5 rounded-md3-sm text-xs bg-md-primary text-md-onPrimary font-medium hover:bg-md-primary/90 transition-colors disabled:opacity-40"
+              className="flex items-center gap-1 px-2.5 py-1.5 rounded-md3-sm text-ui-xs bg-md-primary text-md-onPrimary font-medium hover:bg-md-primary/90 transition-colors disabled:opacity-40"
             >
               <RefreshCw size={12} /> {t('settings.providers.fetchModels')}
             </button>
@@ -316,15 +317,15 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
               type="button"
               onClick={testConnection}
               disabled={testStatus === 'testing' || !provider.baseUrl.trim()}
-              className="px-2.5 py-1.5 rounded-md3-sm text-xs border border-dark-onSurfaceVariant/15 text-dark-onSurfaceVariant hover:bg-dark-surfaceContainer transition-colors disabled:opacity-40"
+              className="px-2.5 py-1.5 rounded-md3-sm text-ui-xs border border-dark-onSurfaceVariant/15 text-dark-onSurfaceVariant hover:bg-dark-surfaceContainer transition-colors disabled:opacity-40"
             >
               {testStatus === 'testing' ? t('settings.api.testing') : t('settings.api.testConnection')}
             </button>
             {testStatus === 'ok' && (
-              <span role="status" className="flex items-center gap-1 text-xs text-md-success"><Check size={12} /> {testMsg}</span>
+              <span role="status" className="flex items-center gap-1 text-ui-xs text-md-success"><Check size={12} /> {testMsg}</span>
             )}
             {testStatus === 'error' && (
-              <span role="alert" className="flex items-center gap-1 text-xs text-md-error min-w-0 truncate" title={testMsg}>
+              <span role="alert" className="flex items-center gap-1 text-ui-xs text-md-error min-w-0 truncate" title={testMsg}>
                 <AlertCircle size={12} className="flex-shrink-0" /> <span className="truncate">{testMsg}</span>
               </span>
             )}
@@ -357,16 +358,16 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
                         className="flex-1 min-w-0 text-left"
                       >
                         <div className="flex items-center gap-2">
-                          <span className={`text-xs truncate ${active ? 'text-md-primary font-medium' : 'text-dark-onSurface'}`}>
+                          <span className={`text-ui-xs truncate ${active ? 'text-md-primary font-medium' : 'text-dark-onSurface'}`}>
                             {m.label || m.id}
                           </span>
                           {active && (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-md-primary text-md-onPrimary flex-shrink-0">
+                            <span className="text-ui-xs px-1.5 py-0.5 rounded-full bg-md-primary text-md-onPrimary flex-shrink-0">
                               {t('settings.api.currentBadge')}
                             </span>
                           )}
                         </div>
-                        {m.label && <div className="text-[10px] text-dark-onSurfaceVariant/70 truncate">{m.id}</div>}
+                        {m.label && <div className="text-ui-xs text-dark-onSurfaceVariant/70 truncate">{m.id}</div>}
                       </button>
                       <button
                         type="button"
@@ -392,8 +393,8 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
                       </button>
                     </div>
                     {advancedOpen && (
-                      <div className="px-2.5 pb-2.5 pt-1 border-t border-dark-onSurfaceVariant/8 space-y-2">
-                        <label className="flex items-center justify-between text-[10px] text-dark-onSurfaceVariant">
+                      <div className="px-2.5 pb-2.5 pt-1 border-t border-dark-onSurfaceVariant/10 space-y-2">
+                        <label className="flex items-center justify-between text-ui-xs text-dark-onSurfaceVariant">
                           <span className="flex items-center gap-1"><Brain size={10} /> {t('settings.api.thinkingSupport')}</span>
                           <input
                             type="checkbox"
@@ -406,7 +407,7 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
                             className="accent-md-primary"
                           />
                         </label>
-                        <label className="flex items-center justify-between text-[10px] text-dark-onSurfaceVariant">
+                        <label className="flex items-center justify-between text-ui-xs text-dark-onSurfaceVariant">
                           <span className="flex items-center gap-1"><ImageIcon size={10} /> {t('settings.api.imageSupport')}</span>
                           <input
                             type="checkbox"
@@ -418,7 +419,7 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
                         {(m.supportsThinking ?? false) && (
                           <>
                             <div>
-                              <div className="text-[10px] text-dark-onSurfaceVariant mb-1">{t('settings.api.thinkingMode')}</div>
+                              <div className="text-ui-xs text-dark-onSurfaceVariant mb-1">{t('settings.api.thinkingMode')}</div>
                               <div className="flex gap-1">
                                 {(['toggle', 'tier'] as const).map((mode) => (
                                   <button
@@ -437,7 +438,7 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
                                         patchModel({ reasoningEfforts: [], reasoningEffort: undefined })
                                       }
                                     }}
-                                    className={`px-2 py-1 rounded-md3-xs text-[10px] transition-colors ${
+                                    className={`px-2 py-1 rounded-md3-xs text-ui-xs transition-colors ${
                                       thinkingModeOf(m) === mode
                                         ? 'bg-md-primary/20 text-md-primary'
                                         : 'bg-dark-surfaceContainer text-dark-onSurfaceVariant/60'
@@ -448,7 +449,7 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
                             </div>
                             {(m.reasoningEfforts?.length ?? 0) > 0 && (
                               <div>
-                                <div className="text-[10px] text-dark-onSurfaceVariant mb-1">{t('settings.api.reasoningLevels')}</div>
+                                <div className="text-ui-xs text-dark-onSurfaceVariant mb-1">{t('settings.api.reasoningLevels')}</div>
                                 <div className="flex flex-wrap gap-1">
                                   {REASONING_EFFORTS.map((effort) => {
                                     const selected = (m.reasoningEfforts ?? []).includes(effort)
@@ -470,7 +471,7 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
                                               : next[0],
                                           })
                                         }}
-                                        className={`px-2 py-1 rounded-md3-xs text-[10px] capitalize transition-colors ${
+                                        className={`px-2 py-1 rounded-md3-xs text-ui-xs capitalize transition-colors ${
                                           selected
                                             ? 'bg-md-primary/20 text-md-primary'
                                             : 'bg-dark-surfaceContainer text-dark-onSurfaceVariant/60'
@@ -479,13 +480,13 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
                                     )
                                   })}
                                 </div>
-                                <div className="text-[9px] text-dark-onSurfaceVariant/60 mt-1">{t('settings.api.reasoningLevelsHint')}</div>
+                                <div className="text-ui-xs text-dark-onSurfaceVariant/60 mt-1">{t('settings.api.reasoningLevelsHint')}</div>
                               </div>
                             )}
                           </>
                         )}
                         <div>
-                          <label className="flex items-center gap-1 text-[10px] text-dark-onSurfaceVariant mb-1">
+                          <label className="flex items-center gap-1 text-ui-xs text-dark-onSurfaceVariant mb-1">
                             <Thermometer size={10} />
                             {t('settings.api.temperature')}
                           </label>
@@ -500,12 +501,12 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
                               const val = parseFloat(e.target.value)
                               patchModel({ temperature: isNaN(val) ? 0.7 : Math.min(2, Math.max(0, val)) })
                             }}
-                            className="w-full px-2 py-1.5 bg-dark-surfaceContainer rounded-md3-xs text-xs border border-dark-onSurfaceVariant/10 outline-none focus:border-md-primary/40 transition-colors"
+                            className="w-full px-2 py-1.5 bg-dark-surfaceContainer rounded-md3-xs text-ui-xs border border-dark-onSurfaceVariant/10 md-focus outline-none focus:border-md-primary/40 transition-colors"
                           />
                         </div>
                         <div className="grid grid-cols-2 gap-2">
                           <div>
-                            <label className="flex items-center gap-1 text-[10px] text-dark-onSurfaceVariant mb-1">
+                            <label className="flex items-center gap-1 text-ui-xs text-dark-onSurfaceVariant mb-1">
                               <Hash size={10} />
                               {t('settings.api.maxInputTokens')}
                             </label>
@@ -520,11 +521,11 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
                                 const val = parseInt(e.target.value, 10)
                                 patchModel({ maxInputTokens: isNaN(val) ? 184000 : Math.min(1000000, Math.max(4096, val)) })
                               }}
-                              className="w-full px-2 py-1.5 bg-dark-surfaceContainer rounded-md3-xs text-xs border border-dark-onSurfaceVariant/10 outline-none focus:border-md-primary/40 transition-colors"
+                              className="w-full px-2 py-1.5 bg-dark-surfaceContainer rounded-md3-xs text-ui-xs border border-dark-onSurfaceVariant/10 md-focus outline-none focus:border-md-primary/40 transition-colors"
                             />
                           </div>
                           <div>
-                            <label className="flex items-center gap-1 text-[10px] text-dark-onSurfaceVariant mb-1">
+                            <label className="flex items-center gap-1 text-ui-xs text-dark-onSurfaceVariant mb-1">
                               <Hash size={10} />
                               {t('settings.api.maxOutputTokens')}
                             </label>
@@ -539,7 +540,7 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
                                 const val = parseInt(e.target.value, 10)
                                 patchModel({ maxTokens: isNaN(val) ? 16000 : Math.min(128000, Math.max(256, val)) })
                               }}
-                              className="w-full px-2 py-1.5 bg-dark-surfaceContainer rounded-md3-xs text-xs border border-dark-onSurfaceVariant/10 outline-none focus:border-md-primary/40 transition-colors"
+                              className="w-full px-2 py-1.5 bg-dark-surfaceContainer rounded-md3-xs text-ui-xs border border-dark-onSurfaceVariant/10 md-focus outline-none focus:border-md-primary/40 transition-colors"
                             />
                           </div>
                         </div>
@@ -567,7 +568,7 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
               onClick={addManualModel}
               disabled={!manualId.trim()}
               aria-label={t('settings.providers.add')}
-              className="px-2.5 rounded-md3-sm text-xs border border-dark-onSurfaceVariant/15 text-dark-onSurfaceVariant hover:bg-dark-surfaceContainer transition-colors disabled:opacity-40 flex-shrink-0"
+              className="px-2.5 rounded-md3-sm text-ui-xs border border-dark-onSurfaceVariant/15 text-dark-onSurfaceVariant hover:bg-dark-surfaceContainer transition-colors disabled:opacity-40 flex-shrink-0"
             >
               <Plus size={13} />
             </button>
@@ -615,7 +616,7 @@ function CatalogModal({ onClose, onPick }: { onClose: () => void; onPick: (p: Pr
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-4 py-3 border-b border-dark-onSurfaceVariant/10">
-          <h2 id={titleId} className="text-sm font-medium">{t('settings.providers.catalogTitle')}</h2>
+          <h2 id={titleId} className="text-ui-sm font-medium">{t('settings.providers.catalogTitle')}</h2>
           <button
             type="button"
             onClick={onClose}
@@ -645,7 +646,7 @@ function CatalogModal({ onClose, onPick }: { onClose: () => void; onPick: (p: Pr
             if (items.length === 0) return null
             return (
               <div key={g} className="mb-2">
-                <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-dark-onSurfaceVariant/60">
+                <div className="px-2 py-1 text-ui-xs font-semibold uppercase tracking-wide text-dark-onSurfaceVariant/60">
                   {t(GROUP_LABEL_KEY[g])}
                 </div>
                 {items.map((p) => (
@@ -656,12 +657,12 @@ function CatalogModal({ onClose, onPick }: { onClose: () => void; onPick: (p: Pr
                     className="w-full flex items-center gap-2 px-2.5 py-2 rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-left"
                   >
                     <div className="flex-1 min-w-0">
-                      <div className="text-sm text-dark-onSurface truncate">{p.name}</div>
-                      <div className="text-[10px] text-dark-onSurfaceVariant/70 truncate">{p.baseUrl || t('settings.providers.customHint')}</div>
+                      <div className="text-ui-sm text-dark-onSurface truncate">{p.name}</div>
+                      <div className="text-ui-xs text-dark-onSurfaceVariant/70 truncate">{p.baseUrl || t('settings.providers.customHint')}</div>
                     </div>
                     <CompatBadge compat={p.apiCompat} />
                     {p.altCompat && (
-                      <span className="text-[9px] px-1 py-px rounded bg-md-primary/15 text-md-primary flex-shrink-0">
+                      <span className="text-ui-xs px-1 py-px rounded bg-md-primary/15 text-md-primary flex-shrink-0">
                         +{p.altCompat.apiCompat === 'anthropic' ? 'Anthropic' : 'OpenAI'}
                       </span>
                     )}
@@ -773,8 +774,8 @@ function ModelPickerModal({ provider, onClose }: { provider: ModelProvider; onCl
       >
         <div className="flex items-center justify-between px-4 py-3 border-b border-dark-onSurfaceVariant/10">
           <div className="min-w-0">
-            <h2 id={titleId} className="text-sm font-medium truncate">{t('settings.providers.pickTitle')}</h2>
-            <div className="text-[11px] text-dark-onSurfaceVariant truncate">{provider.name}</div>
+            <h2 id={titleId} className="text-ui-sm font-medium truncate">{t('settings.providers.pickTitle')}</h2>
+            <div className="text-ui-xs text-dark-onSurfaceVariant truncate">{provider.name}</div>
           </div>
           <button
             type="button"
@@ -803,7 +804,7 @@ function ModelPickerModal({ provider, onClose }: { provider: ModelProvider; onCl
             type="button"
             onClick={load}
             disabled={loading}
-            className="px-2.5 rounded-md3-sm text-xs border border-dark-onSurfaceVariant/15 text-dark-onSurfaceVariant hover:bg-dark-surfaceContainer transition-colors disabled:opacity-40 flex-shrink-0"
+            className="px-2.5 rounded-md3-sm text-ui-xs border border-dark-onSurfaceVariant/15 text-dark-onSurfaceVariant hover:bg-dark-surfaceContainer transition-colors disabled:opacity-40 flex-shrink-0"
             aria-label={t('settings.providers.retry')}
           >
             <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
@@ -812,21 +813,21 @@ function ModelPickerModal({ provider, onClose }: { provider: ModelProvider; onCl
 
         <div className="flex-1 overflow-y-auto p-2 min-h-[120px]">
           {loading ? (
-            <div className="px-3 py-6 text-center text-xs text-dark-onSurfaceVariant/60">
+            <div className="px-3 py-6 text-center text-ui-xs text-dark-onSurfaceVariant/60">
               {t('settings.providers.loading')}
             </div>
           ) : error ? (
             <div className="px-3 py-4 space-y-2">
-              <div className="flex items-start gap-1.5 text-xs text-md-error">
+              <div className="flex items-start gap-1.5 text-ui-xs text-md-error">
                 <AlertCircle size={13} className="flex-shrink-0 mt-px" />
                 <span className="break-all">{error}</span>
               </div>
-              <div className="text-[11px] text-dark-onSurfaceVariant/60">
+              <div className="text-ui-xs text-dark-onSurfaceVariant/60">
                 {t('settings.providers.fetchFailHint')}
               </div>
             </div>
           ) : visible.length === 0 ? (
-            <div className="px-3 py-6 text-center text-xs text-dark-onSurfaceVariant/60">
+            <div className="px-3 py-6 text-center text-ui-xs text-dark-onSurfaceVariant/60">
               {t('settings.providers.noMatch')}
             </div>
           ) : (
@@ -850,10 +851,10 @@ function ModelPickerModal({ provider, onClose }: { provider: ModelProvider; onCl
                     {on && <Check size={11} className="text-md-onPrimary" />}
                   </span>
                   <div className="flex-1 min-w-0">
-                    <div className={`text-xs truncate ${on ? 'text-md-primary' : 'text-dark-onSurface'}`}>
+                    <div className={`text-ui-xs truncate ${on ? 'text-md-primary' : 'text-dark-onSurface'}`}>
                       {m.label || m.id}
                     </div>
-                    {m.label && <div className="text-[10px] text-dark-onSurfaceVariant/70 truncate">{m.id}</div>}
+                    {m.label && <div className="text-ui-xs text-dark-onSurfaceVariant/70 truncate">{m.id}</div>}
                   </div>
                 </button>
               )
@@ -862,17 +863,17 @@ function ModelPickerModal({ provider, onClose }: { provider: ModelProvider; onCl
         </div>
 
         <div className="flex items-center justify-between px-4 py-3 border-t border-dark-onSurfaceVariant/10">
-          <span className="text-[11px] text-dark-onSurfaceVariant">
+          <span className="text-ui-xs text-dark-onSurfaceVariant">
             {t('settings.providers.selectedCount', { count: selected.size })}
           </span>
           <div className="flex gap-2">
-            <button type="button" onClick={onClose} className="px-3 py-1.5 rounded-md3-sm text-xs text-dark-onSurfaceVariant hover:bg-dark-surfaceContainer transition-colors">
+            <button type="button" onClick={onClose} className="px-3 py-1.5 rounded-md3-sm text-ui-xs text-dark-onSurfaceVariant hover:bg-dark-surfaceContainer transition-colors">
               {t('common.cancel')}
             </button>
             <button
               type="button"
               onClick={save}
-              className="px-3 py-1.5 bg-md-primary text-md-onPrimary rounded-md3-sm text-xs font-medium hover:bg-md-primary/90 transition-colors"
+              className="px-3 py-1.5 bg-md-primary text-md-onPrimary rounded-md3-sm text-ui-xs font-medium hover:bg-md-primary/90 transition-colors"
             >
               {t('common.save')}
             </button>

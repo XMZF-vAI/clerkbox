@@ -37,6 +37,7 @@ import {
 } from '../../lib/scheduled-task'
 import HostFolderPicker from '../ui/HostFolderPicker'
 import ConfirmDialog from '../ui/ConfirmDialog'
+import Modal from '../ui/Modal'
 import type {
   ScheduledTask,
   ScheduledTaskDraft,
@@ -89,10 +90,10 @@ function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: 
       aria-checked={checked}
       aria-label={label}
       onClick={() => onChange(!checked)}
-      className={`w-9 h-5 rounded-full relative transition-colors flex-shrink-0 ${checked ? 'bg-md-primary' : 'bg-dark-onSurfaceVariant/25'}`}
+      className={`md-focus relative flex h-9 w-11 shrink-0 items-center rounded-md3-sm before:absolute before:inset-x-1 before:h-5 before:rounded-full before:transition-colors ${checked ? 'before:bg-md-primary' : 'before:bg-dark-onSurfaceVariant/30'}`}
     >
       <span
-        className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${checked ? 'translate-x-4' : ''}`}
+        className={`relative ml-1.5 h-4 w-4 rounded-full transition-transform ${checked ? 'translate-x-4 bg-md-onPrimary' : 'bg-dark-surface'}`}
       />
     </button>
   )
@@ -117,7 +118,7 @@ function Select({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         aria-label={ariaLabel}
-        className="w-full appearance-none pl-3 pr-8 py-2 rounded-md3-md border border-dark-onSurfaceVariant/15 bg-dark-surfaceContainer text-sm text-dark-onSurface outline-none focus:border-md-primary/50 cursor-pointer"
+        className="md-focus min-h-10 max-md:min-h-11 w-full appearance-none pl-3 pr-8 py-2 rounded-md3-sm border border-dark-onSurfaceVariant/15 bg-dark-surface text-ui-sm text-dark-onSurface md-focus outline-none focus:border-md-primary/50 cursor-pointer"
       >
         {options.map((opt) => (
           <option key={opt.value} value={opt.value}>
@@ -135,12 +136,12 @@ function Select({
 
 function EmptyState({ icon: Icon, title, hint }: { icon: typeof Clock; title: string; hint: string }) {
   return (
-    <div className="flex flex-col items-center justify-center py-20">
-      <div className="w-16 h-16 rounded-md3-lg bg-dark-surfaceContainerHigh flex items-center justify-center">
-        <Icon size={26} className="text-dark-onSurfaceVariant/50" />
+    <div className="flex flex-col items-center justify-center px-6 py-16 text-center">
+      <div className="w-12 h-12 rounded-md3-md border border-dark-onSurfaceVariant/10 bg-dark-surfaceContainer flex items-center justify-center">
+        <Icon size={22} className="text-dark-onSurfaceVariant" />
       </div>
-      <p className="mt-4 text-base text-dark-onSurfaceVariant">{title}</p>
-      <p className="mt-1 text-sm text-dark-onSurfaceVariant/50">{hint}</p>
+      <p className="mt-4 text-ui-base font-medium text-dark-onSurface">{title}</p>
+      <p className="mt-2 max-w-sm text-ui-sm leading-relaxed text-dark-onSurfaceVariant">{hint}</p>
     </div>
   )
 }
@@ -181,7 +182,9 @@ function TaskEditorModal({ target, onClose }: { target: EditorTarget; onClose: (
     return opts
   }, [providers, t])
 
-  const canSave = name.trim().length > 0 && prompt.trim().length > 0
+  const [hour, minute] = timeValue.split(':').map(Number)
+  const validTime = /^\d{2}:\d{2}$/.test(timeValue) && hour >= 0 && hour < 24 && minute >= 0 && minute < 60
+  const canSave = name.trim().length > 0 && prompt.trim().length > 0 && validTime
 
   // 原生目录选择：WebUI 无原生对话框（返回 null）→ 降级为宿主目录浏览器
   const handlePickFolder = async () => {
@@ -221,42 +224,30 @@ function TaskEditorModal({ target, onClose }: { target: EditorTarget; onClose: (
   }
 
   const inputClass =
-    'w-full px-3 py-2 rounded-md3-md border border-dark-onSurfaceVariant/15 bg-dark-surfaceContainer text-sm text-dark-onSurface placeholder:text-dark-onSurfaceVariant/40 outline-none focus:border-md-primary/50'
+    'md-focus w-full min-h-10 max-md:min-h-11 px-3 py-2 rounded-md3-sm border border-dark-onSurfaceVariant/15 bg-dark-surface text-ui-sm text-dark-onSurface placeholder:text-dark-onSurfaceVariant/50 md-focus outline-none focus:border-md-primary/50'
 
   return (
-    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/55 p-4 animate-fade-in" onClick={onClose}>
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label={task ? t('scheduledTasks.editor.titleEdit') : t('scheduledTasks.editor.titleNew')}
-        onClick={(e) => e.stopPropagation()}
-        className="w-[560px] max-w-full max-h-[88vh] overflow-y-auto rounded-md3-xl bg-dark-surfaceDim border border-dark-onSurfaceVariant/10 p-6 shadow-elevation-3"
+    <>
+      <Modal
+        title={task ? t('scheduledTasks.editor.titleEdit') : t('scheduledTasks.editor.titleNew')}
+        description={t('scheduledTasks.editor.desc')}
+        titleIcon={<CalendarClock size={18} />}
+        onClose={onClose}
+        widthClass="w-[620px]"
+        footer={<>
+          <button type="button" onClick={onClose} className="md-focus min-h-10 max-md:min-h-11 px-4 py-2 rounded-md3-sm text-ui-sm text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh transition-colors">{t('common.cancel')}</button>
+          <button type="button" onClick={handleSave} className="md-focus min-h-10 max-md:min-h-11 px-5 py-2 rounded-md3-sm bg-md-primary text-md-onPrimary text-ui-sm font-medium hover:bg-md-primary/90 transition-colors">{t('common.save')}</button>
+        </>}
       >
-        <div className="flex items-start justify-between">
+        <div className="space-y-5">
           <div>
-            <h2 className="text-lg font-semibold text-dark-onSurface">
-              {task ? t('scheduledTasks.editor.titleEdit') : t('scheduledTasks.editor.titleNew')}
-            </h2>
-            <p className="mt-1 text-sm text-dark-onSurfaceVariant/70">{t('scheduledTasks.editor.desc')}</p>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="w-8 h-8 flex items-center justify-center rounded-md3-sm text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh"
-            aria-label={t('common.close')}
-          >
-            <X size={17} />
-          </button>
-        </div>
-
-        <div className="mt-5 space-y-4">
-          <div>
-            <label className="block text-sm text-dark-onSurfaceVariant mb-1.5" htmlFor="task-name">
+            <label className="block text-ui-sm text-dark-onSurfaceVariant mb-1.5" htmlFor="task-name">
               {t('scheduledTasks.editor.nameLabel')}
             </label>
             <input
               id="task-name"
               value={name}
+              aria-invalid={submitted && !name.trim()}
               onChange={(e) => setName(e.target.value)}
               placeholder={t('scheduledTasks.editor.namePlaceholder')}
               className={inputClass}
@@ -265,7 +256,7 @@ function TaskEditorModal({ target, onClose }: { target: EditorTarget; onClose: (
 
 
           <div>
-            <span className="block text-sm text-dark-onSurfaceVariant mb-1.5">
+            <span className="block text-ui-sm text-dark-onSurfaceVariant mb-1.5">
               {t('scheduledTasks.editor.scheduleLabel')}
             </span>
             <div className="flex flex-wrap gap-2">
@@ -308,6 +299,7 @@ function TaskEditorModal({ target, onClose }: { target: EditorTarget; onClose: (
               <input
                 type="time"
                 value={timeValue}
+                aria-invalid={submitted && !validTime}
                 onChange={(e) => setTimeValue(e.target.value)}
                 aria-label={t('scheduledTasks.editor.timeLabel')}
                 className={`${inputClass} w-32 flex-shrink-0`}
@@ -316,12 +308,13 @@ function TaskEditorModal({ target, onClose }: { target: EditorTarget; onClose: (
           </div>
 
           <div>
-            <label className="block text-sm text-dark-onSurfaceVariant mb-1.5" htmlFor="task-prompt">
+            <label className="block text-ui-sm text-dark-onSurfaceVariant mb-1.5" htmlFor="task-prompt">
               {t('scheduledTasks.editor.promptLabel')}
             </label>
             <textarea
               id="task-prompt"
               value={prompt}
+              aria-invalid={submitted && !prompt.trim()}
               onChange={(e) => setPrompt(e.target.value)}
               placeholder={t('scheduledTasks.editor.promptPlaceholder')}
               rows={6}
@@ -331,33 +324,33 @@ function TaskEditorModal({ target, onClose }: { target: EditorTarget; onClose: (
 
 
           <div>
-            <span className="block text-sm text-dark-onSurfaceVariant mb-1.5">
+            <span className="block text-ui-sm text-dark-onSurfaceVariant mb-1.5">
               {t('scheduledTasks.editor.workDirLabel')}
             </span>
             <div className="flex items-center gap-2">
               <button
                 type="button"
                 onClick={() => void handlePickFolder()}
-                className="flex items-center gap-1.5 px-3 py-2 rounded-md3-md bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer text-sm text-dark-onSurface transition-colors flex-shrink-0"
+                className="flex items-center gap-1.5 px-3 py-2 rounded-md3-md bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer text-ui-sm text-dark-onSurface transition-colors flex-shrink-0"
               >
                 <FolderOpen size={15} />
                 <span>{t('scheduledTasks.editor.workDirPick')}</span>
               </button>
               {workingDir ? (
                 <>
-                  <code className="flex-1 min-w-0 truncate text-xs text-dark-onSurfaceVariant/70" title={workingDir}>
+                  <code className="flex-1 min-w-0 truncate text-ui-xs text-dark-onSurfaceVariant/70" title={workingDir}>
                     {workingDir}
                   </code>
                   <button
                     type="button"
                     onClick={() => setWorkingDir(undefined)}
-                    className="px-2 py-1.5 rounded-md3-sm text-xs text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh transition-colors flex-shrink-0"
+                    className="px-2 py-1.5 rounded-md3-sm text-ui-xs text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh transition-colors flex-shrink-0"
                   >
                     {t('scheduledTasks.editor.workDirClear')}
                   </button>
                 </>
               ) : (
-                <span className="text-xs text-dark-onSurfaceVariant/50">
+                <span className="text-ui-xs text-dark-onSurfaceVariant/50">
                   {t('scheduledTasks.editor.workDirNone')}
                 </span>
               )}
@@ -365,7 +358,7 @@ function TaskEditorModal({ target, onClose }: { target: EditorTarget; onClose: (
           </div>
 
           <div>
-            <span className="block text-sm text-dark-onSurfaceVariant mb-1.5">
+            <span className="block text-ui-sm text-dark-onSurfaceVariant mb-1.5">
               {t('scheduledTasks.editor.modelLabel')}
             </span>
             <Select
@@ -379,28 +372,12 @@ function TaskEditorModal({ target, onClose }: { target: EditorTarget; onClose: (
         </div>
 
         {submitted && !canSave && (
-          <p role="alert" className="mt-3 text-xs text-md-error">
-            {t('scheduledTasks.editor.validation')}
+          <p role="alert" className="mt-3 rounded-md3-sm border border-md-error/20 bg-md-error/10 px-3 py-2 text-ui-xs text-md-error">
+            {t(!validTime ? 'scheduledTasks.editor.timeValidation' : 'scheduledTasks.editor.validation')}
           </p>
         )}
 
-        <div className="mt-6 flex justify-end gap-2">
-          <button
-            type="button"
-            onClick={onClose}
-            className="px-4 py-2 rounded-md3-md text-sm text-dark-onSurface hover:bg-dark-surfaceContainerHigh transition-colors"
-          >
-            {t('common.cancel')}
-          </button>
-          <button
-            type="button"
-            onClick={handleSave}
-            className="px-5 py-2 rounded-md3-md bg-md-primary text-md-onPrimary text-sm font-medium hover:opacity-90 transition-opacity"
-          >
-            {t('common.save')}
-          </button>
-        </div>
-      </div>
+      </Modal>
 
       <HostFolderPicker
         open={pickingFolder}
@@ -408,7 +385,7 @@ function TaskEditorModal({ target, onClose }: { target: EditorTarget; onClose: (
         onSelect={(dir) => setWorkingDir(dir)}
         initialPath={workingDir}
       />
-    </div>
+    </>
   )
 }
 
@@ -439,6 +416,20 @@ function TaskCard({
 }) {
   const { t } = useTranslation()
   const [menuOpen, setMenuOpen] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const menuTriggerRef = useRef<HTMLButtonElement>(null)
+  useEffect(() => {
+    if (!menuOpen) return
+    const frame = requestAnimationFrame(() => menuRef.current?.querySelector<HTMLButtonElement>('button')?.focus())
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return
+      event.preventDefault()
+      setMenuOpen(false)
+      menuTriggerRef.current?.focus()
+    }
+    document.addEventListener('keydown', onEscape)
+    return () => { cancelAnimationFrame(frame); document.removeEventListener('keydown', onEscape) }
+  }, [menuOpen])
   const nextRun = nextTriggerAt(task.schedule, Date.now())
 
   const menuItems: Array<{ key: string; label: string; icon: typeof Play; danger?: boolean; action: () => void }> = [
@@ -451,22 +442,24 @@ function TaskCard({
   ]
 
   return (
-    <div className="relative rounded-md3-lg border border-dark-onSurfaceVariant/10 bg-dark-surfaceContainer p-4 flex flex-col min-h-[170px]">
+    <div className="relative rounded-md3-lg border border-dark-onSurfaceVariant/10 bg-dark-surfaceDim p-5 flex flex-col min-h-[210px] transition-colors hover:border-dark-onSurfaceVariant/20">
       <div className="flex items-start justify-between">
         <Toggle checked={task.enabled} onChange={onToggle} label={t('scheduledTasks.enabledAria')} />
         <button
+          ref={menuTriggerRef}
           type="button"
           onClick={() => setMenuOpen((v) => !v)}
-          className="w-7 h-7 -mr-1 flex items-center justify-center rounded-md3-sm text-dark-onSurfaceVariant/70 hover:bg-dark-surfaceContainerHigh hover:text-dark-onSurface transition-colors"
+          className="md-focus w-9 h-9 max-md:w-11 max-md:h-11 -mr-1 flex items-center justify-center rounded-md3-sm text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh hover:text-dark-onSurface transition-colors"
           aria-label={t('scheduledTasks.moreActions')}
           aria-expanded={menuOpen}
+          aria-haspopup="menu"
         >
           <MoreHorizontal size={17} />
         </button>
       </div>
 
-      <h3 className="mt-2 text-[15px] font-medium text-dark-onSurface truncate">{task.name}</h3>
-      <p className="mt-1 text-xs leading-relaxed text-dark-onSurfaceVariant/70 line-clamp-2 whitespace-pre-line">
+      <h3 className="mt-3 text-ui-base font-semibold text-dark-onSurface truncate" title={task.name}>{task.name}</h3>
+      <p className="mt-1 text-ui-xs leading-relaxed text-dark-onSurfaceVariant/70 line-clamp-2 whitespace-pre-line">
         {task.prompt}
       </p>
 
@@ -475,7 +468,7 @@ function TaskCard({
         <button
           type="button"
           onClick={() => onViewSession(running.sessionId as string)}
-          className="mt-2 inline-flex items-center gap-1.5 self-start px-2 py-1 rounded-md3-sm bg-md-primary/10 text-xs text-md-primary hover:bg-md-primary/20 transition-colors"
+          className="mt-2 inline-flex items-center gap-1.5 self-start px-2 py-1 rounded-md3-sm bg-md-primary/10 text-ui-xs text-md-primary hover:bg-md-primary/20 transition-colors"
         >
           <Loader2 size={12} className="animate-spin" />
           <span>{t('scheduledTasks.status.running')}</span>
@@ -483,13 +476,13 @@ function TaskCard({
       )}
 
       <div className="mt-auto pt-3">
-        <div className="border-t border-dashed border-dark-onSurfaceVariant/15 pt-2.5 flex items-center justify-between gap-2">
-          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md3-sm bg-dark-surfaceContainerHigh text-xs text-dark-onSurfaceVariant">
+        <div className="border-t border-dark-onSurfaceVariant/10 pt-3 flex flex-wrap items-center justify-between gap-2">
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md3-sm bg-dark-surfaceContainerHigh text-ui-xs text-dark-onSurfaceVariant">
             <Clock size={12} />
             {scheduleLabelText(task.schedule, t)}
           </span>
           {!running && task.enabled && nextRun && (
-            <span className="text-[11px] text-dark-onSurfaceVariant/50 truncate">
+            <span className="text-ui-xs text-dark-onSurfaceVariant/50 truncate">
               {t('scheduledTasks.nextRun', {
                 time: t(`scheduledTasks.moment.${formatMoment(nextRun).kind}`, {
                   time: formatMoment(nextRun).time,
@@ -505,7 +498,17 @@ function TaskCard({
         <>
           <div className="fixed inset-0 z-20" onClick={() => setMenuOpen(false)} aria-hidden />
           <div
+            ref={menuRef}
             role="menu"
+            aria-label={t('scheduledTasks.moreActions')}
+            onKeyDown={(event) => {
+              const items = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>('button') ?? [])
+              const index = items.indexOf(document.activeElement as HTMLButtonElement)
+              const next = event.key === 'ArrowDown' ? (index + 1) % items.length
+                : event.key === 'ArrowUp' ? (index - 1 + items.length) % items.length
+                  : event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : -1
+              if (next >= 0) { event.preventDefault(); items[next]?.focus() }
+            }}
             className="absolute right-2 top-9 z-30 w-40 rounded-md3-md bg-dark-surfaceContainerHigh border border-dark-onSurfaceVariant/10 shadow-elevation-3 py-1 animate-fade-in"
           >
             {menuItems.map((item) => {
@@ -519,7 +522,7 @@ function TaskCard({
                     setMenuOpen(false)
                     item.action()
                   }}
-                  className={`w-full flex items-center gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-dark-surface ${
+                  className={`w-full flex items-center gap-2 px-3 py-2 text-left text-ui-sm transition-colors hover:bg-dark-surface ${
                     item.danger ? 'text-md-error' : 'text-dark-onSurface'
                   }`}
                 >
@@ -565,20 +568,20 @@ function RunRow({
         </span>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-sm font-medium text-dark-onSurface truncate">{taskName}</span>
-            <span className={`px-1.5 py-0.5 rounded-md3-xs text-[11px] ${style.className}`}>{statusText}</span>
-            <span className="px-1.5 py-0.5 rounded-md3-xs text-[11px] bg-dark-surfaceContainerHigh text-dark-onSurfaceVariant/70">
+            <span className="text-ui-sm font-medium text-dark-onSurface truncate">{taskName}</span>
+            <span className={`px-1.5 py-0.5 rounded-md3-xs text-ui-xs ${style.className}`}>{statusText}</span>
+            <span className="px-1.5 py-0.5 rounded-md3-xs text-ui-xs bg-dark-surfaceContainerHigh text-dark-onSurfaceVariant/70">
               {t(`scheduledTasks.trigger.${run.trigger}`)}
             </span>
           </div>
           {(run.error || run.note || run.summary) && (
-            <p className="mt-1 text-xs text-dark-onSurfaceVariant/60 line-clamp-2">
+            <p className="mt-1 text-ui-xs text-dark-onSurfaceVariant/60 line-clamp-2">
               {run.error ? run.error : run.note ? t(`scheduledTasks.note.${run.note}`) : run.summary}
             </p>
           )}
         </div>
         <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
-          <span className="text-xs text-dark-onSurfaceVariant/60">
+          <span className="text-ui-xs text-dark-onSurfaceVariant/60">
             {t(`scheduledTasks.moment.${moment.kind}`, { time: moment.time, date: moment.date ?? '' })}
             {duration ? ` · ${duration}` : ''}
           </span>
@@ -587,7 +590,7 @@ function RunRow({
               <button
                 type="button"
                 onClick={() => onStop(run.sessionId as string)}
-                className="inline-flex items-center gap-1 px-2 py-1 rounded-md3-sm text-xs text-md-warning hover:bg-dark-surfaceContainerHigh transition-colors"
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-md3-sm text-ui-xs text-md-warning hover:bg-dark-surfaceContainerHigh transition-colors"
               >
                 <Square size={11} />
                 {t('scheduledTasks.runs.stop')}
@@ -597,7 +600,7 @@ function RunRow({
               <button
                 type="button"
                 onClick={() => onViewSession(run.sessionId as string)}
-                className="inline-flex items-center gap-1 px-2 py-1 rounded-md3-sm text-xs text-md-primary hover:bg-dark-surfaceContainerHigh transition-colors"
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-md3-sm text-ui-xs text-md-primary hover:bg-dark-surfaceContainerHigh transition-colors"
               >
                 {t('scheduledTasks.runs.viewSession')}
               </button>
@@ -656,22 +659,22 @@ function ProposalCard({
     <div className="rounded-md3-lg border border-dark-onSurfaceVariant/10 bg-dark-surfaceContainer p-4">
       <div className="flex items-center gap-2 flex-wrap">
         <span
-          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md3-sm text-[11px] font-medium ${PROPOSAL_ACTION_STYLE[proposal.action]}`}
+          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md3-sm text-ui-xs font-medium ${PROPOSAL_ACTION_STYLE[proposal.action]}`}
         >
           <Bot size={12} />
           {t(PROPOSAL_ACTION_LABEL_KEY[proposal.action])}
         </span>
-        <h3 className="min-w-0 flex-1 truncate text-[15px] font-medium text-dark-onSurface">
+        <h3 className="min-w-0 flex-1 truncate text-ui-sm font-medium text-dark-onSurface">
           {proposal.draft?.name ?? proposal.taskName ?? proposal.id}
         </h3>
-        <span className="text-[11px] text-dark-onSurfaceVariant/50 flex-shrink-0">
+        <span className="text-ui-xs text-dark-onSurfaceVariant/50 flex-shrink-0">
           {t('scheduledTasks.proposal.expiresIn', { time: formatDuration(remaining) })}
         </span>
       </div>
 
       {/* 改/删既有任务时说明动的是哪一个：任务名快照，任务被删后仍读得懂 */}
       {proposal.taskId && (
-        <p className="mt-1.5 text-xs text-dark-onSurfaceVariant/70">
+        <p className="mt-1.5 text-ui-xs text-dark-onSurfaceVariant/70">
           {t('scheduledTasks.proposal.targetTask', { name: proposal.taskName ?? proposal.taskId })}
           {proposal.action === 'set_enabled' &&
             ` ${t('scheduledTasks.proposal.enabledTo', {
@@ -681,7 +684,7 @@ function ProposalCard({
       )}
 
       {proposal.draft && (
-        <div className="mt-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md3-sm bg-dark-surfaceContainerHigh text-xs text-dark-onSurfaceVariant">
+        <div className="mt-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md3-sm bg-dark-surfaceContainerHigh text-ui-xs text-dark-onSurfaceVariant">
           <Clock size={12} />
           {scheduleLabelText(proposal.draft.schedule, t)}
         </div>
@@ -690,7 +693,7 @@ function ProposalCard({
       {proposal.draft?.prompt && (
         <>
           <p
-            className={`mt-2 text-xs leading-relaxed text-dark-onSurfaceVariant/70 whitespace-pre-line ${
+            className={`mt-2 text-ui-xs leading-relaxed text-dark-onSurfaceVariant/70 whitespace-pre-line ${
               promptExpanded ? '' : 'line-clamp-2'
             }`}
           >
@@ -703,7 +706,7 @@ function ProposalCard({
               type="button"
               onClick={() => setPromptExpanded((v) => !v)}
               aria-expanded={promptExpanded}
-              className="mt-1 inline-flex items-center gap-1 text-[11px] text-dark-onSurfaceVariant/70 hover:text-dark-onSurface"
+              className="mt-1 inline-flex items-center gap-1 text-ui-xs text-dark-onSurfaceVariant/70 hover:text-dark-onSurface"
             >
               <ChevronDown
                 size={12}
@@ -719,7 +722,7 @@ function ProposalCard({
 
       {/* create 提案的工作目录是新任务将来执行的位置：必须显式展示，用户无从从别处看到 */}
       {proposal.action === 'create' && proposal.draft?.workingDir && (
-        <p className="mt-2 flex items-start gap-1.5 text-[11px] text-dark-onSurfaceVariant/70">
+        <p className="mt-2 flex items-start gap-1.5 text-ui-xs text-dark-onSurfaceVariant/70">
           <FolderOpen size={12} className="mt-0.5 shrink-0" />
           <span className="min-w-0 break-all">
             {t('scheduledTasks.proposal.workDir', { dir: proposal.draft.workingDir })}
@@ -727,13 +730,13 @@ function ProposalCard({
         </p>
       )}
       {proposal.action === 'update' && (
-        <p className="mt-2 text-[11px] text-dark-onSurfaceVariant/60">
+        <p className="mt-2 text-ui-xs text-dark-onSurfaceVariant/60">
           {t('scheduledTasks.proposal.workDirKept')}
         </p>
       )}
 
       {proposal.rationale && (
-        <p className="mt-2 text-xs leading-relaxed text-dark-onSurface/80">
+        <p className="mt-2 text-ui-xs leading-relaxed text-dark-onSurface/80">
           {t('scheduledTasks.proposal.reason', { text: proposal.rationale })}
         </p>
       )}
@@ -743,7 +746,7 @@ function ProposalCard({
           <button
             type="button"
             onClick={() => onViewSession(proposal.sessionId as string)}
-            className="text-xs text-dark-onSurfaceVariant/70 hover:text-dark-onSurface hover:underline truncate"
+            className="text-ui-xs text-dark-onSurfaceVariant/70 hover:text-dark-onSurface hover:underline truncate"
             title={sessionTitle ?? proposal.sessionId}
           >
             {t('scheduledTasks.proposal.viewSession')}
@@ -751,12 +754,12 @@ function ProposalCard({
         )}
         <div className="flex-1" />
         {targetMissing ? (
-          <span className="text-[11px] text-md-warning">{t('scheduledTasks.proposal.taskMissing')}</span>
+          <span className="text-ui-xs text-md-warning">{t('scheduledTasks.proposal.taskMissing')}</span>
         ) : (
           <button
             type="button"
             onClick={onAccept}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md3-md bg-md-primary text-md-onPrimary text-xs font-medium hover:opacity-90 transition-opacity"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md3-md bg-md-primary text-md-onPrimary text-ui-xs font-medium hover:opacity-90 transition-opacity"
           >
             <CheckCircle2 size={13} />
             {t('scheduledTasks.proposal.accept')}
@@ -765,7 +768,7 @@ function ProposalCard({
         <button
           type="button"
           onClick={onReject}
-          className="flex items-center gap-1 px-3 py-1.5 rounded-md3-md text-xs text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh hover:text-dark-onSurface transition-colors"
+          className="flex items-center gap-1 px-3 py-1.5 rounded-md3-md text-ui-xs text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh hover:text-dark-onSurface transition-colors"
         >
           <X size={13} />
           {t('scheduledTasks.proposal.reject')}
@@ -896,11 +899,11 @@ export default function ScheduledTasksPage() {
   return (
     <div className="relative flex h-full flex-col bg-dark-surface overflow-hidden">
       {/* 顶栏：返回 / 刷新 / 新建 */}
-      <header className="flex items-center gap-3 px-5 py-3 border-b border-dark-onSurfaceVariant/10 flex-shrink-0">
+      <header className="flex items-center gap-3 px-6 max-md:px-4 py-3 border-b border-dark-onSurfaceVariant/10 flex-shrink-0">
         <button
           type="button"
           onClick={() => setShowScheduledTasks(false)}
-          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md3-md text-sm text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh hover:text-dark-onSurface transition-colors"
+          className="md-focus flex min-h-10 max-md:min-h-11 items-center gap-1.5 px-3 py-2 rounded-md3-sm text-ui-sm text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh hover:text-dark-onSurface transition-colors"
         >
           <ChevronDown size={15} className="rotate-90" />
           <span>{t('common.back')}</span>
@@ -909,7 +912,9 @@ export default function ScheduledTasksPage() {
         <button
           type="button"
           onClick={handleRefresh}
-          className="w-9 h-9 flex items-center justify-center rounded-md3-md text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh hover:text-dark-onSurface transition-colors"
+          disabled={refreshing}
+          aria-busy={refreshing}
+          className="md-focus w-10 h-10 max-md:w-11 max-md:h-11 flex items-center justify-center rounded-md3-sm text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh hover:text-dark-onSurface transition-colors disabled:opacity-50"
           aria-label={t('scheduledTasks.refresh')}
           title={t('scheduledTasks.refresh')}
         >
@@ -918,28 +923,29 @@ export default function ScheduledTasksPage() {
         <button
           type="button"
           onClick={() => setEditorTarget({ mode: 'create' })}
-          className="flex items-center gap-1.5 px-4 py-2 rounded-md3-md bg-dark-onSurface text-dark-surface text-sm font-medium hover:opacity-90 transition-opacity"
+          className="md-focus flex min-h-10 max-md:min-h-11 items-center gap-1.5 px-4 py-2 rounded-md3-sm bg-md-primary text-md-onPrimary text-ui-sm font-medium hover:bg-md-primary/90 transition-colors"
         >
           <Plus size={16} />
           <span>{t('scheduledTasks.newTask')}</span>
         </button>
       </header>
 
-      <div className="flex-1 overflow-y-auto px-5 pb-10">
+      <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-6 max-md:px-4 pb-10">
         <div className="max-w-5xl mx-auto">
-          <h1 className="mt-5 text-2xl font-semibold text-dark-onSurface">{t('scheduledTasks.title')}</h1>
-          <p className="mt-1.5 text-sm text-dark-onSurfaceVariant/80">{t('scheduledTasks.subtitle')}</p>
+          <h1 className="mt-7 text-ui-2xl font-semibold text-dark-onSurface">{t('scheduledTasks.title')}</h1>
+          <p className="mt-2 text-ui-sm leading-relaxed text-dark-onSurfaceVariant">{t('scheduledTasks.subtitle')}</p>
 
           {/* 唤醒提示条 */}
-          <div className="mt-4 flex items-center gap-2.5 rounded-md3-md bg-md-info/10 px-4 py-3">
-            <Info size={15} className="text-md-info flex-shrink-0" />
-            <span className="flex-1 min-w-0 text-sm text-dark-onSurface/90 truncate">
+          <div className="mt-5 flex flex-wrap items-center gap-3 rounded-md3-md border border-dark-onSurfaceVariant/10 bg-dark-surfaceContainer/40 px-4 py-3">
+            <Info size={16} className="text-dark-onSurfaceVariant flex-shrink-0" aria-hidden />
+            <span className="flex-1 min-w-40 text-ui-xs leading-relaxed text-dark-onSurfaceVariant">
               {t('scheduledTasks.wakeHint')}
             </span>
             <button
               type="button"
               onClick={() => setKeepAwake(!keepAwake)}
-              className="text-sm text-md-info hover:underline flex-shrink-0"
+              aria-pressed={keepAwake}
+              className="md-focus rounded-md3-xs text-ui-xs text-dark-onSurface hover:underline flex-shrink-0"
             >
               {t('scheduledTasks.keepAwake')}
             </button>
@@ -947,20 +953,33 @@ export default function ScheduledTasksPage() {
           </div>
 
           {/* Tab 行：左侧主 Tab，右侧排序 / 记录筛选 */}
-          <div className="mt-6 flex items-end justify-between gap-3 flex-wrap">
-            <div className="flex items-center gap-6">
+          <div className="mt-7 flex items-center justify-between gap-3 flex-wrap">
+            <div role="tablist" aria-label={t('scheduledTasks.title')} className="flex items-center gap-1 rounded-md3-md border border-dark-onSurfaceVariant/10 bg-dark-surfaceContainer/40 p-1">
               {(['tasks', 'runs'] as const).map((key) => (
                 <button
                   key={key}
                   type="button"
+                  role="tab"
+                  id={`scheduled-tab-${key}`}
+                  aria-selected={tab === key}
+                  aria-controls="scheduled-content"
+                  tabIndex={tab === key ? 0 : -1}
                   onClick={() => setTab(key)}
-                  className={`text-lg transition-colors ${
+                  onKeyDown={(event) => {
+                    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+                    event.preventDefault()
+                    const next = event.key === 'Home' ? 'tasks' : event.key === 'End' ? 'runs' : key === 'tasks' ? 'runs' : 'tasks'
+                    setTab(next)
+                    document.getElementById(`scheduled-tab-${next}`)?.focus()
+                  }}
+                  className={`md-focus flex min-h-9 max-md:min-h-11 items-center gap-2 rounded-md3-sm px-4 py-2 text-ui-sm transition-colors ${
                     tab === key
-                      ? 'font-semibold text-dark-onSurface'
-                      : 'text-dark-onSurfaceVariant/50 hover:text-dark-onSurfaceVariant'
+                      ? 'bg-dark-surface font-medium text-dark-onSurface'
+                      : 'text-dark-onSurfaceVariant hover:bg-dark-surfaceContainer'
                   }`}
                 >
                   {t(key === 'tasks' ? 'scheduledTasks.tabTasks' : 'scheduledTasks.tabRuns')}
+                  <span className="rounded-md3-xs bg-dark-surfaceContainerHigh px-1.5 text-ui-xs tabular-nums text-dark-onSurfaceVariant">{key === 'tasks' ? tasks.length : runs.length}</span>
                 </button>
               ))}
             </div>
@@ -987,9 +1006,10 @@ export default function ScheduledTasksPage() {
                       key={range}
                       type="button"
                       onClick={() => setRunRange(range)}
-                      className={`px-3 py-1.5 rounded-md3-sm text-xs transition-colors ${
+                      aria-pressed={runRange === range}
+                      className={`px-3 py-1.5 rounded-md3-sm text-ui-xs transition-colors ${
                         runRange === range
-                          ? 'bg-dark-surface text-dark-onSurface shadow-sm'
+                          ? 'bg-dark-surface text-dark-onSurface'
                           : 'text-dark-onSurfaceVariant/70 hover:text-dark-onSurface'
                       }`}
                     >
@@ -1025,18 +1045,19 @@ export default function ScheduledTasksPage() {
           </div>
 
 
+          <div id="scheduled-content" role="tabpanel" aria-labelledby={`scheduled-tab-${tab}`}>
           {/* 智能体提交的待确认提案：确认后才进任务表 */}
           {tab === 'tasks' && proposals.length > 0 && (
             <section className="mt-4">
               <div className="flex items-center gap-2">
-                <h2 className="text-sm font-medium text-dark-onSurface">
+                <h2 className="text-ui-sm font-medium text-dark-onSurface">
                   {t('scheduledTasks.proposal.sectionTitle')}
                 </h2>
-                <span className="px-1.5 py-0.5 rounded-md3-sm bg-md-primary/15 text-[11px] font-medium text-md-primary">
+                <span className="px-1.5 py-0.5 rounded-md3-sm bg-md-primary/15 text-ui-xs font-medium text-md-primary">
                   {proposals.length}
                 </span>
               </div>
-              <p className="mt-1 text-xs text-dark-onSurfaceVariant/60">{t('scheduledTasks.proposal.sectionHint')}</p>
+              <p className="mt-1 text-ui-xs text-dark-onSurfaceVariant/60">{t('scheduledTasks.proposal.sectionHint')}</p>
               <div className="mt-3 space-y-3">
                 {proposals.map((proposal) => (
                   <ProposalCard
@@ -1064,7 +1085,7 @@ export default function ScheduledTasksPage() {
                 />
               </div>
             ) : (
-              <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="mt-5 grid grid-cols-[repeat(auto-fit,minmax(min(100%,22rem),1fr))] gap-4">
                 {sortedTasks.map((task) => (
                   <TaskCard
                     key={task.id}
@@ -1098,7 +1119,7 @@ export default function ScheduledTasksPage() {
                 <button
                   type="button"
                   onClick={() => setClearingRuns(true)}
-                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md3-sm text-xs text-dark-onSurfaceVariant/70 hover:bg-dark-surfaceContainerHigh hover:text-dark-onSurface transition-colors"
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md3-sm text-ui-xs text-dark-onSurfaceVariant/70 hover:bg-dark-surfaceContainerHigh hover:text-dark-onSurface transition-colors"
                 >
                   <Trash2 size={13} />
                   {t('scheduledTasks.runs.clear')}
@@ -1115,6 +1136,7 @@ export default function ScheduledTasksPage() {
               ))}
             </div>
           )}
+          </div>
         </div>
       </div>
 

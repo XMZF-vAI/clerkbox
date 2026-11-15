@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 
-const MOBILE_QUERY = '(max-width: 768px)'
+// Tailwind's md breakpoint starts at 768px; use the same exclusive boundary.
+export const MOBILE_QUERY = '(max-width: 767.98px)'
 
 /**
  * 窄屏检测：WebUI 在手机/平板浏览器中的移动端布局开关。

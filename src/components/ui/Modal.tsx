@@ -44,7 +44,7 @@ export default function Modal({
   titleIcon,
   footer,
   widthClass = 'w-[560px]',
-  bodyClassName = 'px-5 py-4 space-y-3',
+  bodyClassName = 'px-6 py-5 max-md:px-4 space-y-4',
   bodyScroll = true,
 }: ModalProps) {
   const { t } = useTranslation()
@@ -56,7 +56,7 @@ export default function Modal({
   const panel = (
     <div
       className={`fixed ${
-        isVibeMode ? 'inset-0' : 'inset-x-0 bottom-0 top-11'
+        isVibeMode ? 'inset-0' : 'inset-x-0 bottom-0 top-11 max-md:top-14'
       } z-50 flex items-center justify-center ${
         isVibeMode ? 'bg-black/50 backdrop-blur-sm' : 'bg-black/60'
       } animate-fade-in`}
@@ -73,42 +73,39 @@ export default function Modal({
         aria-describedby={description ? descId : undefined}
         tabIndex={-1}
         // 高度上限用 rem 之外的算式：弹窗要贴着视口走，字号放大时靠内部滚动兜住
-        className={`${widthClass} max-w-[calc(100vw-2rem)] max-md:w-[calc(100vw-1rem)] max-h-[calc(100vh-6rem)] max-md:max-h-[calc(100vh-3rem)] bg-dark-surfaceDim rounded-md3-xl border border-dark-onSurfaceVariant/10 flex flex-col shadow-elevation-3 animate-pop-in outline-none`}
+        className={`${widthClass} max-w-[calc(100vw-2rem)] max-md:w-[calc(100vw-1rem)] max-h-[calc(100dvh-6rem)] max-md:max-h-[calc(100dvh-5rem)] bg-dark-surfaceDim text-dark-onSurface rounded-md3-xl border border-dark-onSurfaceVariant/10 flex flex-col shadow-elevation-3 animate-pop-in outline-none overflow-hidden`}
         onMouseDown={(e) => e.stopPropagation()}
       >
-        <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-dark-onSurfaceVariant/10">
-          <div className="flex items-center gap-2 min-w-0">
+        <div className="flex shrink-0 items-start justify-between gap-4 px-6 py-5 max-md:px-4 border-b border-dark-onSurfaceVariant/10">
+          <div className="flex items-start gap-3 min-w-0">
             {titleIcon && (
-              <span className="flex-shrink-0 text-md-primary" aria-hidden>
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md3-md border border-dark-onSurfaceVariant/10 bg-dark-surfaceContainer text-md-primary" aria-hidden>
                 {titleIcon}
               </span>
             )}
-            <h2 id={titleId} className="text-ui-base font-semibold truncate">
-              {title}
-            </h2>
+            <div className="min-w-0">
+              <h2 id={titleId} className="text-ui-lg font-semibold break-words">{title}</h2>
+              {description && (
+                <p id={descId} className="mt-1 text-ui-xs text-dark-onSurfaceVariant leading-relaxed">{description}</p>
+              )}
+            </div>
           </div>
           <button
             type="button"
             onClick={onClose}
             aria-label={t('common.close')}
-            className="md-focus flex-shrink-0 w-7 h-7 max-md:w-9 max-md:h-9 -mr-1 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-dark-onSurfaceVariant"
+            className="md-focus flex-shrink-0 w-9 h-9 max-md:w-11 max-md:h-11 -mr-1 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-dark-onSurfaceVariant"
           >
             <X size={14} />
           </button>
         </div>
 
-        {description && (
-          <p id={descId} className="px-5 pt-3 pb-2 text-ui-sm text-dark-onSurfaceVariant leading-relaxed">
-            {description}
-          </p>
-        )}
-
-        <div className={`flex-1 min-h-0 ${bodyScroll ? 'overflow-y-auto' : 'overflow-hidden'} ${bodyClassName}`}>
+        <div className={`flex-1 min-h-0 ${bodyScroll ? 'overflow-y-auto overscroll-contain' : 'overflow-hidden'} ${bodyClassName}`}>
           {children}
         </div>
 
         {footer && (
-          <div className="flex items-center justify-end gap-2 px-5 py-4 border-t border-dark-onSurfaceVariant/10">
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 px-6 py-4 max-md:px-4 border-t border-dark-onSurfaceVariant/10 bg-dark-surfaceContainer/40">
             {footer}
           </div>
         )}

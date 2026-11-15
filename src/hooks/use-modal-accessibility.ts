@@ -30,6 +30,8 @@ function focusModal(entry: ModalEntry) {
 
 // One capture listener chooses its owner before any close handler can change the stack.
 function handleKeyDown(event: KeyboardEvent) {
+  // Escape cancels an IME candidate first; it must not also dismiss its dialog.
+  if (event.isComposing || event.keyCode === 229) return
   const entry = topModal()
   if (!entry || event.defaultPrevented || (entry.respectOverlayLock && overlayLocks > 0)) return
   if (event.key === 'Escape') {

@@ -1,5 +1,6 @@
 import { useState, useRef, useId } from 'react'
 import { useModalAccessibility } from '../../hooks/use-modal-accessibility'
+import ConfirmDialog from '../ui/ConfirmDialog'
 import {
   Plus, Trash2, Pencil, X, Check, AlertCircle, Loader2, Plug, FileJson, RefreshCw,
 } from 'lucide-react'
@@ -10,7 +11,7 @@ import { ipc } from '../../lib/ipc-client'
 import type { McpServerConfig, McpTransportType } from '../../types/ipc'
 
 const inputCls =
-  'w-full px-3 py-2 bg-dark-surfaceContainerHighest rounded-md3-sm text-sm border border-dark-onSurfaceVariant/10 outline-none focus:border-md-primary/40 transition-colors'
+  'md-focus w-full min-h-10 px-3 py-2 bg-dark-surface rounded-md3-sm text-ui-sm border border-dark-onSurfaceVariant/15 outline-none focus:border-md-primary/40 transition-colors'
 
 /** 解析标准 MCP 配置 JSON（兼容 Claude Desktop / Cursor 的 mcpServers 格式）；error 返回 i18n key，由调用方翻译 */
 function parseMcpJson(text: string): { servers: Omit<McpServerConfig, 'id' | 'enabled'>[]; error?: string } {
@@ -132,6 +133,14 @@ function ServerDialog({
   const [error, setError] = useState('')
   const [testState, setTestState] = useState<'idle' | 'testing' | 'ok' | 'fail'>('idle')
   const [testResult, setTestResult] = useState('')
+  const testRunRef = useRef(0)
+
+  const invalidateTest = () => {
+    testRunRef.current += 1
+    setTestState('idle')
+    setTestResult('')
+    setError('')
+  }
 
   const buildConfig = (): McpServerConfig | null => {
     if (!name.trim()) {
@@ -168,17 +177,28 @@ function ServerDialog({
   }
 
   const handleTest = async () => {
+    if (testState === 'testing') return
+    setError('')
     const config = buildConfig()
     if (!config) return
+    const run = ++testRunRef.current
     setTestState('testing')
     setTestResult('')
-    const res = await ipc.mcpTest(config)
-    if ('error' in res) {
+    // IPC 断开会直接 reject；必须收尾测试态，按钮才能再次使用。
+    try {
+      const res = await ipc.mcpTest(config)
+      if (run !== testRunRef.current) return
+      if ('error' in res) {
+        setTestState('fail')
+        setTestResult(res.error)
+      } else {
+        setTestState('ok')
+        setTestResult(t('settings.mcp.testOk', { count: res.toolCount }))
+      }
+    } catch (error) {
+      if (run !== testRunRef.current) return
       setTestState('fail')
-      setTestResult(res.error)
-    } else {
-      setTestState('ok')
-      setTestResult(t('settings.mcp.testOk', { count: res.toolCount }))
+      setTestResult(error instanceof Error ? error.message : String(error))
     }
   }
 
@@ -196,10 +216,11 @@ function ServerDialog({
         aria-modal="true"
         aria-labelledby={titleId}
         tabIndex={-1}
+        onChangeCapture={invalidateTest}
         className="w-full max-w-md max-h-full overflow-y-auto bg-dark-surfaceDim rounded-md3-lg border border-dark-onSurfaceVariant/10 p-5 space-y-4"
       >
         <div className="flex items-center justify-between">
-          <h3 id={titleId} className="text-sm font-semibold">{initial ? t('settings.mcp.editServer') : t('settings.mcp.addServer')}</h3>
+          <h3 id={titleId} className="text-ui-sm font-semibold">{initial ? t('settings.mcp.editServer') : t('settings.mcp.addServer')}</h3>
           <button
             type="button"
             onClick={onClose}
@@ -211,17 +232,18 @@ function ServerDialog({
         </div>
 
         <div>
-          <label className="block text-xs text-dark-onSurfaceVariant mb-1">{t('settings.mcp.serverName')}</label>
-          <input ref={nameRef} className={inputCls} value={name} onChange={(e) => setName(e.target.value)} placeholder={t('settings.mcp.namePlaceholder')} />
+          <label htmlFor={`${titleId}-name`} className="block text-ui-xs text-dark-onSurfaceVariant mb-1">{t('settings.mcp.serverName')}</label>
+          <input id={`${titleId}-name`} ref={nameRef} className={inputCls} value={name} onChange={(e) => setName(e.target.value)} placeholder={t('settings.mcp.namePlaceholder')} />
         </div>
 
         <div>
-          <label className="block text-xs text-dark-onSurfaceVariant mb-1">{t('settings.mcp.transport')}</label>
+          <label className="block text-ui-xs text-dark-onSurfaceVariant mb-1">{t('settings.mcp.transport')}</label>
           <div className="flex gap-2">
             <button
               type="button"
-              onClick={() => setTransport('stdio')}
-              className={`flex-1 px-3 py-1.5 rounded-md3-sm text-xs border transition-colors ${
+              onClick={() => { setTransport('stdio'); invalidateTest() }}
+              aria-pressed={transport === 'stdio'}
+              className={`flex-1 px-3 py-1.5 rounded-md3-sm text-ui-xs border transition-colors ${
                 transport === 'stdio'
                   ? 'bg-md-primary/10 border-md-primary/40 text-md-primary'
                   : 'border-dark-onSurfaceVariant/15 text-dark-onSurfaceVariant hover:bg-dark-surfaceContainer'
@@ -231,8 +253,9 @@ function ServerDialog({
             </button>
             <button
               type="button"
-              onClick={() => setTransport('http')}
-              className={`flex-1 px-3 py-1.5 rounded-md3-sm text-xs border transition-colors ${
+              onClick={() => { setTransport('http'); invalidateTest() }}
+              aria-pressed={transport === 'http'}
+              className={`flex-1 px-3 py-1.5 rounded-md3-sm text-ui-xs border transition-colors ${
                 transport === 'http'
                   ? 'bg-md-primary/10 border-md-primary/40 text-md-primary'
                   : 'border-dark-onSurfaceVariant/15 text-dark-onSurfaceVariant hover:bg-dark-surfaceContainer'
@@ -246,43 +269,43 @@ function ServerDialog({
         {transport === 'stdio' ? (
           <>
             <div>
-              <label className="block text-xs text-dark-onSurfaceVariant mb-1">{t('settings.mcp.command')}</label>
-              <input className={inputCls} value={command} onChange={(e) => setCommand(e.target.value)} placeholder="npx / uvx / node" />
+              <label htmlFor={`${titleId}-command`} className="block text-ui-xs text-dark-onSurfaceVariant mb-1">{t('settings.mcp.command')}</label>
+              <input id={`${titleId}-command`} className={inputCls} value={command} onChange={(e) => setCommand(e.target.value)} placeholder="npx / uvx / node" />
             </div>
             <div>
-              <label className="block text-xs text-dark-onSurfaceVariant mb-1">{t('settings.mcp.args')}</label>
-              <textarea className={`${inputCls} font-mono text-xs`} rows={3} value={argsText} onChange={(e) => setArgsText(e.target.value)} placeholder={'-y\n@modelcontextprotocol/server-filesystem'} />
+              <label htmlFor={`${titleId}-args`} className="block text-ui-xs text-dark-onSurfaceVariant mb-1">{t('settings.mcp.args')}</label>
+              <textarea id={`${titleId}-args`} className={`${inputCls} font-mono text-ui-xs`} rows={3} value={argsText} onChange={(e) => setArgsText(e.target.value)} placeholder={'-y\n@modelcontextprotocol/server-filesystem'} />
             </div>
             <div>
-              <label className="block text-xs text-dark-onSurfaceVariant mb-1">{t('settings.mcp.env')}</label>
-              <textarea className={`${inputCls} font-mono text-xs`} rows={2} value={envText} onChange={(e) => setEnvText(e.target.value)} placeholder={'API_KEY=xxx'} />
+              <label htmlFor={`${titleId}-env`} className="block text-ui-xs text-dark-onSurfaceVariant mb-1">{t('settings.mcp.env')}</label>
+              <textarea id={`${titleId}-env`} className={`${inputCls} font-mono text-ui-xs`} rows={2} value={envText} onChange={(e) => setEnvText(e.target.value)} placeholder={'API_KEY=xxx'} />
             </div>
           </>
         ) : (
           <>
             <div>
-              <label className="block text-xs text-dark-onSurfaceVariant mb-1">URL</label>
-              <input className={inputCls} value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://example.com/mcp" />
+              <label htmlFor={`${titleId}-url`} className="block text-ui-xs text-dark-onSurfaceVariant mb-1">URL</label>
+              <input id={`${titleId}-url`} className={inputCls} value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://example.com/mcp" />
             </div>
             <div>
-              <label className="block text-xs text-dark-onSurfaceVariant mb-1">{t('settings.mcp.headers')}</label>
-              <textarea className={`${inputCls} font-mono text-xs`} rows={2} value={headersText} onChange={(e) => setHeadersText(e.target.value)} placeholder={'Authorization=Bearer xxx'} />
+              <label htmlFor={`${titleId}-headers`} className="block text-ui-xs text-dark-onSurfaceVariant mb-1">{t('settings.mcp.headers')}</label>
+              <textarea id={`${titleId}-headers`} className={`${inputCls} font-mono text-ui-xs`} rows={2} value={headersText} onChange={(e) => setHeadersText(e.target.value)} placeholder={'Authorization=Bearer xxx'} />
             </div>
           </>
         )}
 
         {error && (
-          <div role="alert" className="flex items-center gap-1.5 text-xs text-md-error">
+          <div role="alert" className="flex items-center gap-1.5 text-ui-xs text-md-error">
             <AlertCircle size={13} /> {error}
           </div>
         )}
         {testState === 'ok' && (
-          <div role="status" className="flex items-center gap-1.5 text-xs text-md-success">
+          <div role="status" className="flex items-center gap-1.5 text-ui-xs text-md-success">
             <Check size={13} /> {testResult}
           </div>
         )}
         {testState === 'fail' && (
-          <div role="alert" className="flex items-start gap-1.5 text-xs text-md-error">
+          <div role="alert" className="flex items-start gap-1.5 text-ui-xs text-md-error">
             <AlertCircle size={13} className="flex-shrink-0 mt-0.5" /> <span className="break-all">{testResult}</span>
           </div>
         )}
@@ -291,17 +314,18 @@ function ServerDialog({
           <button
             type="button"
             onClick={handleTest}
+            aria-busy={testState === 'testing'}
             disabled={testState === 'testing' || !name.trim() || (transport === 'stdio' ? !command.trim() : !url.trim())}
-            className="flex items-center gap-1 px-3 py-1.5 rounded-md3-sm text-xs text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh transition-colors disabled:opacity-50"
+            className="flex items-center gap-1 px-3 py-1.5 rounded-md3-sm text-ui-xs text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh transition-colors disabled:opacity-50"
           >
             {testState === 'testing' ? <Loader2 size={13} className="animate-spin" /> : <Plug size={13} />}
             {testState === 'testing' ? t('settings.mcp.testing') : t('settings.mcp.test')}
           </button>
           <div className="flex gap-2">
-            <button type="button" onClick={onClose} className="px-3 py-1.5 rounded-md3-sm text-xs text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh transition-colors">
+            <button type="button" onClick={onClose} className="px-3 py-1.5 rounded-md3-sm text-ui-xs text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh transition-colors">
               {t('common.cancel')}
             </button>
-            <button type="button" onClick={handleSave} className="px-3 py-1.5 bg-md-primary text-md-onPrimary rounded-md3-sm text-xs font-medium hover:bg-md-primary/90 transition-colors">
+            <button type="button" onClick={handleSave} className="px-3 py-1.5 bg-md-primary text-md-onPrimary rounded-md3-sm text-ui-xs font-medium hover:bg-md-primary/90 transition-colors">
               {t('common.save')}
             </button>
           </div>
@@ -346,7 +370,7 @@ function ImportDialog({
         className="w-full max-w-md max-h-full overflow-y-auto bg-dark-surfaceDim rounded-md3-lg border border-dark-onSurfaceVariant/10 p-5 space-y-4"
       >
         <div className="flex items-center justify-between">
-          <h3 id={titleId} className="text-sm font-semibold">{t('settings.mcp.importTitle')}</h3>
+          <h3 id={titleId} className="text-ui-sm font-semibold">{t('settings.mcp.importTitle')}</h3>
           <button
             type="button"
             onClick={onClose}
@@ -356,9 +380,10 @@ function ImportDialog({
             <X size={14} />
           </button>
         </div>
-        <p className="text-xs text-dark-onSurfaceVariant leading-relaxed">{t('settings.mcp.importHint')}</p>
+        <p className="text-ui-xs text-dark-onSurfaceVariant leading-relaxed">{t('settings.mcp.importHint')}</p>
         <textarea
-          className={`${inputCls} font-mono text-xs`}
+          aria-label={t('settings.mcp.importTitle')}
+          className={`${inputCls} font-mono text-ui-xs`}
           rows={8}
           value={text}
           onChange={(e) => { setText(e.target.value); setError('') }}
@@ -366,19 +391,19 @@ function ImportDialog({
           ref={textRef}
         />
         {error && (
-          <div role="alert" className="flex items-center gap-1.5 text-xs text-md-error">
+          <div role="alert" className="flex items-center gap-1.5 text-ui-xs text-md-error">
             <AlertCircle size={13} /> {error}
           </div>
         )}
         <div className="flex justify-end gap-2 pt-1">
-          <button type="button" onClick={onClose} className="px-3 py-1.5 rounded-md3-sm text-xs text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh transition-colors">
+          <button type="button" onClick={onClose} className="px-3 py-1.5 rounded-md3-sm text-ui-xs text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh transition-colors">
             {t('common.cancel')}
           </button>
           <button
             type="button"
             onClick={handleImport}
             disabled={!text.trim()}
-            className="px-3 py-1.5 bg-md-primary text-md-onPrimary rounded-md3-sm text-xs font-medium hover:bg-md-primary/90 transition-colors disabled:opacity-50"
+            className="px-3 py-1.5 bg-md-primary text-md-onPrimary rounded-md3-sm text-ui-xs font-medium hover:bg-md-primary/90 transition-colors disabled:opacity-50"
           >
             {t('settings.mcp.importButton')}
           </button>
@@ -392,7 +417,7 @@ function ImportDialog({
 function StateDot({ state }: { state: string }) {
   const cls =
     state === 'connected' ? 'bg-md-success'
-    : state === 'connecting' ? 'bg-yellow-500 animate-pulse'
+    : state === 'connecting' ? 'bg-md-warning animate-pulse'
     : state === 'error' ? 'bg-md-error'
     : 'bg-dark-onSurfaceVariant/40'
   return <span className={`w-2 h-2 rounded-full flex-shrink-0 ${cls}`} aria-hidden />
@@ -413,9 +438,6 @@ export default function McpSection() {
   const [editing, setEditing] = useState<McpServerConfig | 'new' | null>(null)
   const [showImport, setShowImport] = useState(false)
   const [removing, setRemoving] = useState<string | null>(null)
-  const removeCancelRef = useRef<HTMLButtonElement>(null)
-  const removeDialogRef = useModalAccessibility(() => setRemoving(null), removeCancelRef, { active: removing !== null })
-  const removeMessageId = useId()
 
   const saveServer = (server: McpServerConfig) => {
     const exists = settings.mcpServers.some((s) => s.id === server.id)
@@ -450,22 +472,24 @@ export default function McpSection() {
     <div className="space-y-5">
       {/* 说明 + 操作按钮 */}
       <div>
-        <div className="flex items-center justify-between mb-1">
-          <label className="text-sm font-medium">{t('settings.mcp.title')}</label>
-          <div className="flex items-center gap-1">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-2">
+          <h3 className="text-ui-base font-semibold">{t('settings.mcp.title')}</h3>
+          <div className="flex flex-wrap items-center gap-1.5">
             <button
               type="button"
               onClick={() => void syncMcpServers(settings.mcpServers)}
               disabled={syncing}
+              aria-label={t('settings.mcp.refresh')}
+              aria-busy={syncing}
               title={t('settings.mcp.refresh')}
-              className="w-7 h-7 flex items-center justify-center rounded-md3-sm text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh transition-colors disabled:opacity-50"
+              className="md-focus w-9 h-9 flex items-center justify-center rounded-md3-sm text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh transition-colors disabled:opacity-50"
             >
               <RefreshCw size={14} className={syncing ? 'animate-spin' : ''} />
             </button>
             <button
               type="button"
               onClick={() => setShowImport(true)}
-              className="flex items-center gap-1 px-2.5 py-1.5 rounded-md3-sm text-xs text-md-primary hover:bg-md-primary/10 transition-colors"
+              className="md-focus flex min-h-9 items-center gap-1.5 px-3 py-2 rounded-md3-sm text-ui-xs text-dark-onSurfaceVariant border border-dark-onSurfaceVariant/15 hover:bg-dark-surfaceContainerHigh transition-colors"
             >
               <FileJson size={13} />
               {t('settings.mcp.importButton')}
@@ -473,19 +497,20 @@ export default function McpSection() {
             <button
               type="button"
               onClick={() => setEditing('new')}
-              className="flex items-center gap-1 px-2.5 py-1.5 rounded-md3-sm text-xs text-md-primary hover:bg-md-primary/10 transition-colors"
+              className="md-focus flex min-h-9 items-center gap-1.5 px-3 py-2 rounded-md3-sm text-ui-xs font-medium bg-md-primary text-md-onPrimary hover:bg-md-primary/90 transition-colors"
             >
               <Plus size={13} />
               {t('settings.mcp.addServer')}
             </button>
           </div>
         </div>
-        <p className="text-xs text-dark-onSurfaceVariant leading-relaxed">{t('settings.mcp.desc')}</p>
+        <p className="text-ui-xs text-dark-onSurfaceVariant leading-relaxed">{t('settings.mcp.desc')}</p>
       </div>
 
       {/* 服务器列表 */}
       {settings.mcpServers.length === 0 ? (
-        <div className="text-xs text-dark-onSurfaceVariant px-4 py-8 rounded-md3-md border border-dashed border-dark-onSurfaceVariant/15 text-center">
+        <div className="text-ui-sm text-dark-onSurfaceVariant px-5 py-12 rounded-md3-lg border border-dashed border-dark-onSurfaceVariant/20 bg-dark-surfaceContainer/30 text-center leading-relaxed">
+          <Plug size={28} className="mx-auto mb-3 text-dark-onSurfaceVariant/60" aria-hidden />
           {t('settings.mcp.empty')}
         </div>
       ) : (
@@ -494,33 +519,35 @@ export default function McpSection() {
             const status = statuses.find((s) => s.id === server.id)
             const state = server.enabled ? (status?.state ?? 'connecting') : 'disabled'
             return (
-              <div key={server.id} className="flex items-center gap-3 px-4 py-3 rounded-md3-md bg-dark-surfaceContainer border border-dark-onSurfaceVariant/5">
+              <div key={server.id} className="flex flex-wrap items-center gap-3 p-4 rounded-md3-md bg-dark-surfaceContainer/40 border border-dark-onSurfaceVariant/10">
                 <StateDot state={state} />
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-dark-onSurface truncate">{server.name}</span>
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-dark-surfaceContainerHighest text-dark-onSurfaceVariant flex-shrink-0">
+                <div className="flex-1 min-w-0 basis-40">
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                    <span className="text-ui-sm font-medium text-dark-onSurface truncate">{server.name}</span>
+                    <span className="text-ui-xs px-1.5 py-0.5 rounded bg-dark-surfaceContainerHighest text-dark-onSurfaceVariant flex-shrink-0">
                       {server.transport === 'stdio' ? t('settings.mcp.transportStdio') : 'HTTP'}
                     </span>
                   </div>
-                  <div className="text-xs text-dark-onSurfaceVariant truncate">
+                  <div className="mt-1 text-ui-xs text-dark-onSurfaceVariant truncate" title={server.transport === 'stdio' ? server.command : server.url}>
                     {server.transport === 'stdio' ? server.command : server.url}
-                    {state === 'connected' && status ? ` · ${t('settings.mcp.toolCount', { count: status.toolCount })}` : ''}
-                    {state === 'connecting' ? ` · ${t('settings.mcp.stateConnecting')}` : ''}
-                    {state === 'error' && status?.error ? ` · ${status.error}` : ''}
-                    {state === 'disabled' ? ` · ${t('settings.mcp.stateDisabled')}` : ''}
                   </div>
+                  <p className={`mt-1 text-ui-xs leading-relaxed break-words ${state === 'error' ? 'text-md-error' : 'text-dark-onSurfaceVariant'}`} role={state === 'error' ? 'alert' : 'status'}>
+                    {t(STATE_LABEL_KEY[state] ?? STATE_LABEL_KEY.disabled)}
+                    {state === 'connected' && status ? ` · ${t('settings.mcp.toolCount', { count: status.toolCount })}` : ''}
+                    {state === 'error' && status?.error ? ` · ${status.error}` : ''}
+                  </p>
                 </div>
+                <div className="ml-auto flex shrink-0 items-center gap-1">
                 <button
                   type="button"
                   role="switch"
                   aria-checked={server.enabled}
                   aria-label={t('settings.mcp.toggleEnabled')}
                   onClick={() => toggleServer(server)}
-                  className={`relative w-8 h-[18px] rounded-full transition-colors flex-shrink-0 ${server.enabled ? 'bg-md-primary' : 'bg-dark-surfaceContainerHighest'}`}
+                  className={`md-focus relative w-11 h-11 rounded-md3-sm flex-shrink-0 before:absolute before:inset-x-1 before:top-3 before:h-5 before:rounded-full before:transition-colors ${server.enabled ? 'before:bg-md-primary' : 'before:bg-dark-surfaceContainerHighest'}`}
                 >
                   <span
-                    className={`absolute top-[2px] w-[14px] h-[14px] rounded-full bg-white transition-all ${server.enabled ? 'left-[16px]' : 'left-[2px]'}`}
+                    className={`absolute top-3.5 w-4 h-4 rounded-full transition-all ${server.enabled ? 'left-6 bg-md-onPrimary' : 'left-1.5 bg-dark-onSurfaceVariant'}`}
                   />
                 </button>
                 <button
@@ -528,7 +555,7 @@ export default function McpSection() {
                   onClick={() => setEditing(server)}
                   aria-label={t('settings.mcp.editServer')}
                   title={t('settings.mcp.editServer')}
-                  className="w-7 h-7 flex items-center justify-center rounded-md3-sm text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh transition-colors flex-shrink-0"
+                  className="md-focus w-9 h-9 flex items-center justify-center rounded-md3-sm text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh transition-colors flex-shrink-0"
                 >
                   <Pencil size={13} />
                 </button>
@@ -537,10 +564,11 @@ export default function McpSection() {
                   onClick={() => setRemoving(server.id)}
                   aria-label={t('settings.mcp.removeServer')}
                   title={t('settings.mcp.removeServer')}
-                  className="w-7 h-7 flex items-center justify-center rounded-md3-sm text-dark-onSurfaceVariant hover:bg-md-error/10 hover:text-md-error transition-colors flex-shrink-0"
+                  className="md-focus w-9 h-9 flex items-center justify-center rounded-md3-sm text-dark-onSurfaceVariant hover:bg-md-error/10 hover:text-md-error transition-colors flex-shrink-0"
                 >
                   <Trash2 size={13} />
                 </button>
+                </div>
               </div>
             )
           })}
@@ -549,19 +577,14 @@ export default function McpSection() {
 
       {/* 删除确认 */}
       {removing && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div ref={removeDialogRef} role="alertdialog" aria-modal="true" aria-label={t('settings.mcp.removeServer')} aria-describedby={removeMessageId} tabIndex={-1} className="w-full max-w-xs bg-dark-surfaceDim rounded-md3-lg border border-dark-onSurfaceVariant/10 p-5 space-y-4">
-            <p id={removeMessageId} className="text-sm">{t('settings.mcp.removeConfirm')}</p>
-            <div className="flex justify-end gap-2">
-              <button ref={removeCancelRef} type="button" onClick={() => setRemoving(null)} className="px-3 py-1.5 rounded-md3-sm text-xs text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh transition-colors">
-                {t('common.cancel')}
-              </button>
-              <button type="button" onClick={() => removeServer(removing)} className="px-3 py-1.5 bg-md-error text-md-onError rounded-md3-sm text-xs font-medium hover:bg-md-error/90 transition-colors">
-                {t('settings.mcp.removeServer')}
-              </button>
-            </div>
-          </div>
-        </div>
+        <ConfirmDialog
+          title={t('settings.mcp.removeServer')}
+          message={t('settings.mcp.removeConfirm')}
+          confirmText={t('settings.mcp.removeServer')}
+          variant="danger"
+          onCancel={() => setRemoving(null)}
+          onConfirm={() => removeServer(removing)}
+        />
       )}
 
       {/* 添加/编辑弹窗 */}

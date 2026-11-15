@@ -1,8 +1,10 @@
 import { useState, useRef, type KeyboardEvent as ReactKeyboardEvent, type ClipboardEvent as ReactClipboardEvent, type DragEvent as ReactDragEvent, type ChangeEvent as ReactChangeEvent, useEffect, useLayoutEffect } from 'react'
+import { createPortal } from 'react-dom'
 import { Send, Brain, FolderOpen, ChevronDown, ChevronRight, ArrowLeft, Square, Check, X, Store, Plus, FolderPlus, Paperclip, FileText, ShieldCheck, Hand, TriangleAlert, Slash, BookOpen, GitBranch, Target, Plug, Settings2, FoldVertical, Loader2, Layers, Lock, Clock3, Pencil, SendHorizontal, type LucideIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useSettingsStore } from '../../stores/settings-store'
 import { useJouleStore } from '../../stores/joule-store'
+import { canSelectJouleModel } from '../../lib/joule-models'
 import { useChatStore, EMPTY_CHAT_DRAFT, hasChatDraft, type QueuedMessageItem } from '../../stores/chat-store'
 import { useSkillsStore } from '../../stores/skills-store'
 import { useMcpStore } from '../../stores/mcp-store'
@@ -18,7 +20,9 @@ import BranchSwitcher from '../git/BranchSwitcher'
 import WorkSkillSwitcher from './WorkSkillSwitcher'
 import { useIsMobile } from '../../hooks/use-mobile'
 import { useShallow } from 'zustand/react/shallow'
-import { hostQueue } from '../../lib/host-queue'
+import { useComposerQueueStore, EMPTY_QUEUE_OPERATIONS, mutateComposerQueue, refreshComposerQueue, recoverComposerQueue } from '../../lib/composer-queue'
+import { useComposerToolbarFit } from '../../hooks/use-composer-toolbar-fit'
+import { useModalAccessibility } from '../../hooks/use-modal-accessibility'
 
 // ── "/" 命令菜单里的命令（任务工作流 + 上下文压缩；工作流对齐 TRAE：Spec / Plan / Goal；Browser 模式不做） ──
 // 上下文压缩命令：选中后出现芯片，回车即手动压缩（输入文本作为可选的压缩重点指令）
@@ -162,8 +166,9 @@ function QueuedAttachmentBadges({ item, vibe }: { item: QueuedMessageItem; vibe:
 interface ChatInputProps {
   sessionId: string
   onSend: (content: string, attachments?: MessageAttachment[], taskMode?: TaskMode, skills?: MessageSkillSnapshot[]) => Promise<boolean>
-  onManualCompact?: (instructions?: string) => void | Promise<void>
+  onManualCompact?: (instructions?: string) => Promise<boolean>
   isCompacting?: boolean
+  isStopping?: boolean
   onStop?: () => void
   isStreaming?: boolean
   /** 立即发送排队消息：中断当前运行 → 等收尾 → 移出队列 → 立即发出（use-agent.sendQueuedNow） */
@@ -174,11 +179,20 @@ interface ChatInputProps {
   vibe?: boolean
 }
 
-export default function ChatInput({ sessionId, onSend, onManualCompact, isCompacting, onStop, isStreaming, onSendNow, onEnqueueQueued, variant = 'default', vibe = false }: ChatInputProps) {
+export default function ChatInput({ sessionId, onSend, onManualCompact, isCompacting, isStopping, onStop, isStreaming, onSendNow, onEnqueueQueued, variant = 'default', vibe = false }: ChatInputProps) {
   const { t } = useTranslation()
   const activeSessionId = sessionId
   const draft = useChatStore((state) => state.drafts[sessionId] ?? EMPTY_CHAT_DRAFT)
   const submitting = useChatStore((state) => state.draftSubmitting[sessionId] ?? false)
+  const rewinding = useChatStore((state) => state.rewindingSessionIds.has(sessionId))
+  const rewindRevision = useChatStore((state) => state.rewindRevisions[sessionId] ?? 0)
+  const queueOperations = useComposerQueueStore((state) => state.operations[sessionId] ?? EMPTY_QUEUE_OPERATIONS)
+  const queueDraftBlocked = Object.values(queueOperations).some((operation) =>
+    operation.kind !== 'remove' && (operation.status === 'unknown' || operation.status === 'recovered'))
+  const [feedback, setFeedback] = useState<string | null>(null)
+  const [refreshingQueue, setRefreshingQueue] = useState(false)
+  const [queueRecoveryId, setQueueRecoveryId] = useState<string | null>(null)
+  const toolbarRef = useComposerToolbarFit()
   const { content, taskMode, compactMode, attachments } = draft
   const setContent = (value: string | ((current: string) => string)) => {
     const current = useChatStore.getState().drafts[sessionId] ?? EMPTY_CHAT_DRAFT
@@ -197,8 +211,11 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
   const [remoteFolderPath, setRemoteFolderPath] = useState('')
   const [remoteFolderEntries, setRemoteFolderEntries] = useState<FileEntry[]>([])
   const [remoteFolderLoading, setRemoteFolderLoading] = useState(false)
+  const folderPickerPanelRef = useModalAccessibility(() => setRemoteFolderPickerOpen(false), undefined, { active: remoteFolderPickerOpen })
 
   const commitAttachments = (next: MessageAttachment[]) => {
+    // 图片压缩/上传可能跨过一次撤回；旧异步任务不能污染已恢复的消息草稿。
+    if ((useChatStore.getState().rewindRevisions[sessionId] ?? 0) !== rewindRevision) return
     useChatStore.getState().updateDraft(sessionId, { attachments: next })
   }
 
@@ -207,7 +224,7 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
     const images = prev.filter((a) => a.kind === 'image')
     const totalBytes = images.reduce((sum, a) => sum + (a.dataUrl?.length ?? 0), 0) + dataUrl.length
     if (images.length >= MAX_IMAGES || totalBytes > MAX_TOTAL_IMAGE_BYTES) {
-      alert(t('chat.attachLimit'))
+      setFeedback(t('chat.attachLimit'))
       return
     }
     commitAttachments([...prev, {
@@ -255,7 +272,7 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
   const jouleSubscription = useJouleStore((s) => s.subscription)
   const jouleNotice = useJouleStore((s) => s.notice)
   const dismissJouleNotice = useJouleStore((s) => s.dismissNotice)
-  const jouleUnlocked = !!joulePlan && (jouleSubscription?.expiresAt ?? 0) > Date.now() && jouleStatus !== 'needs_reauth'
+  const jouleUnlocked = canSelectJouleModel({ plan: joulePlan, subscription: jouleSubscription, status: jouleStatus })
   const { sessions, createSession, updateSessionWorkingDir, setSessionHarnessMode, recentsFolders, pushRecentFolder } = useChatStore(
     useShallow((s) => ({
       sessions: s.sessions,
@@ -334,6 +351,7 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
   // 勾选「我已了解风险」才能放行；每次切换都重新勾，不记忆。
   const [fullAccessConfirm, setFullAccessConfirm] = useState(false)
   const [fullAccessAck, setFullAccessAck] = useState(false)
+  const fullAccessPanelRef = useModalAccessibility(() => setFullAccessConfirm(false), undefined, { active: fullAccessConfirm })
   const approvalMenuRef = useRef<HTMLDivElement>(null)
   const approvalTriggerRef = useRef<HTMLButtonElement>(null)
 
@@ -418,18 +436,11 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
   }
 
   /** 排队消息三个操作：编辑（回填输入框并移出队列）/ 立即发送（中断并立即发出）/ 删除 */
-  const applyQueuedEdit = (item: QueuedMessageItem) => {
+  const applyQueuedEdit = async (item: QueuedMessageItem) => {
     const state = useChatStore.getState()
-    if (!activeSessionId || state.draftSubmitting[sessionId]) return
+    if (!activeSessionId || state.draftSubmitting[sessionId] || state.rewindingSessionIds.has(sessionId)) return
     if (!state.queuedMessages[sessionId]?.some((queued) => queued.id === item.id)) return
-    state.removeQueuedMessage(activeSessionId, item.id)
-    void hostQueue.remove(activeSessionId, item.id)
-    state.updateDraft(sessionId, {
-      content: item.content,
-      taskMode: item.taskMode ?? null,
-      compactMode: false,
-      attachments: item.attachments ?? [],
-    })
+    if (!(await mutateComposerQueue(sessionId, item, 'edit'))) return
     requestAnimationFrame(() => {
       if (textareaRef.current) {
         textareaRef.current.style.height = 'auto'
@@ -441,12 +452,12 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
 
   const handleQueuedEdit = (item: QueuedMessageItem) => {
     if (hasChatDraft(useChatStore.getState().drafts[sessionId])) setPendingQueuedEdit(item)
-    else applyQueuedEdit(item)
+    else void applyQueuedEdit(item)
   }
 
   const submitDraft = async (text: string, files?: MessageAttachment[], mode?: TaskMode, skills?: MessageSkillSnapshot[]) => {
     const state = useChatStore.getState()
-    if (state.draftSubmitting[sessionId]) return
+    if (state.draftSubmitting[sessionId] || state.rewindingSessionIds.has(sessionId)) return
     const sentDraft = state.drafts[sessionId] ?? EMPTY_CHAT_DRAFT
     state.setDraftSubmitting(sessionId, true)
     try {
@@ -473,15 +484,13 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
     onSendNow?.(item)
   }
 
-  const handleQueuedRemove = (item: QueuedMessageItem) => {
+  const handleQueuedRemove = async (item: QueuedMessageItem) => {
     if (!activeSessionId) return
-    useChatStore.getState().removeQueuedMessage(activeSessionId, item.id)
-    // 本地队列只是视图：宿主模式下必须同时撤回，否则被删的那条仍会被发出去
-    void hostQueue.remove(activeSessionId, item.id)
+    await mutateComposerQueue(sessionId, item, 'remove')
   }
 
   const handleSend = () => {
-    if (useChatStore.getState().draftSubmitting[sessionId]) return
+    if (useChatStore.getState().draftSubmitting[sessionId] || useChatStore.getState().rewindingSessionIds.has(sessionId) || queueDraftBlocked || isStopping) return
     const trimmed = content.trim()
     // AI 运行/压缩中：消息进入排队组件（可编辑/立即发送/删除，运行结束后 FIFO 自动发出）。
     // 排队条目按普通消息的完整语义入队（附件/任务芯片/技能快照原样保留，发出时透传）。
@@ -490,12 +499,12 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
       if (!activeSessionId) return
       if (!trimmed && attachments.length === 0) return
       if (trimmed.length > 50000) {
-        alert(t('chat.messageTooLong'))
+        setFeedback(t('chat.messageTooLong'))
         return
       }
       // 非视觉模型：无磁盘路径的图片无法降级为路径引用，排队时同样拦截
       if (!imageSupported && attachments.some((a) => a.kind === 'image' && !a.path)) {
-        alert(t('chat.imageBlocked'))
+        setFeedback(t('chat.imageBlocked'))
         return
       }
       const queuedItem: QueuedMessageItem = {
@@ -508,15 +517,9 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
           : {}),
         queuedAt: Date.now(),
       }
-      useChatStore.getState().enqueueQueuedMessage(activeSessionId, queuedItem)
-      // 宿主模式下队列真源在主进程：只入本地的话，宿主一次 queue.snapshot 就把这条冲掉
-      void hostQueue.enqueue(activeSessionId, queuedItem)
-      // 兜住"入队瞬间 run 恰好结束"的竞态：flush 自带空闲守卫，忙碌时跳过
-      onEnqueueQueued?.()
-      useChatStore.getState().clearDraft(sessionId, draft)
-      if (textareaRef.current) {
-        textareaRef.current.style.height = 'auto'
-      }
+      void mutateComposerQueue(sessionId, queuedItem, 'enqueue').then((accepted) => {
+        if (accepted) onEnqueueQueued?.()
+      })
       return
     }
     // /goal 子命令（对齐 Claude Code）：
@@ -535,13 +538,14 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
     }
     // 压缩模式：回车执行手动压缩（输入文本作为可选自定义指令），不走普通消息发送
     if (compactMode) {
-      void onManualCompact?.(trimmed || undefined)
-      setContent('')
-      setCompactMode(false)
-      commitAttachments([])
-      if (textareaRef.current) {
-        textareaRef.current.style.height = 'auto'
-      }
+      if (!onManualCompact) return
+      const sentDraft = useChatStore.getState().drafts[sessionId] ?? EMPTY_CHAT_DRAFT
+      useChatStore.getState().setDraftSubmitting(sessionId, true)
+      void onManualCompact(trimmed || undefined).then((accepted) => {
+        if (accepted) useChatStore.getState().clearDraft(sessionId, sentDraft)
+      }).catch((error: unknown) => {
+        useChatStore.getState().setSessionError(sessionId, error instanceof Error ? error.message : String(error))
+      }).finally(() => useChatStore.getState().setDraftSubmitting(sessionId, false))
       return
     }
     // 显式 /<skill-slug> 激活：消息以已安装技能的 slug 开头 → 自动激活该技能并剥离前缀，
@@ -577,12 +581,12 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
     }
     if (!trimmed && attachments.length === 0) return
     if (trimmed.length > 50000) {
-      alert(t('chat.messageTooLong'))
+      setFeedback(t('chat.messageTooLong'))
       return
     }
     // 非视觉模型：无磁盘路径的图片（如粘贴的截图）无法降级为路径引用，直接拦截
     if (!imageSupported && attachments.some((a) => a.kind === 'image' && !a.path)) {
-      alert(t('chat.imageBlocked'))
+      setFeedback(t('chat.imageBlocked'))
       return
     }
     const skillSnapshots: MessageSkillSnapshot[] = activeSkills.map(({ id, name, icon, slug }) => ({
@@ -601,7 +605,7 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
 
   const attachRemoteFile = async (file: File) => {
     if (file.size > remoteUploadLimit) {
-      alert(t('chat.attachSizeLimit', { name: file.name, limit: Math.round(remoteUploadLimit / (1024 * 1024)) }))
+      setFeedback(t('chat.attachSizeLimit', { name: file.name, limit: Math.round(remoteUploadLimit / (1024 * 1024)) }))
       return
     }
     try {
@@ -615,7 +619,7 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
       }
     } catch (error) {
       console.error('Failed to upload WebUI file:', error)
-      alert(t('chat.attachUploadFailed', { name: file.name || 'file' }))
+      setFeedback(t('chat.attachUploadFailed', { name: file.name || 'file' }))
     }
   }
 
@@ -653,7 +657,7 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
               const compressed = await compressImage(dataUrl)
               addImageAttachment(compressed, basename(p), p)
             } catch {
-              alert(t('chat.attachReadFailed'))
+              setFeedback(t('chat.attachReadFailed'))
             }
           } else {
             addFileAttachment(basename(p), p)
@@ -696,7 +700,7 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
       for (const file of imageFiles) {
         try {
           if (webuiUploadEnabled && file.size > remoteUploadLimit) {
-            alert(t('chat.attachSizeLimit', { name: file.name, limit: Math.round(remoteUploadLimit / (1024 * 1024)) }))
+            setFeedback(t('chat.attachSizeLimit', { name: file.name, limit: Math.round(remoteUploadLimit / (1024 * 1024)) }))
             continue
           }
           const dataUrl = await readFileAsDataURL(file)
@@ -708,7 +712,7 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
             addImageAttachment(compressed, file.name || 'image.png')
           }
         } catch {
-          alert(t('chat.attachReadFailed'))
+          setFeedback(t('chat.attachReadFailed'))
         }
       }
       for (const { name, path } of pathFiles) {
@@ -748,7 +752,7 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
             const compressed = await compressImage(dataUrl)
             addImageAttachment(compressed, file.name, p || undefined)
           } catch {
-            alert(t('chat.attachReadFailed'))
+            setFeedback(t('chat.attachReadFailed'))
           }
         } else if (p) {
           addFileAttachment(file.name, p)
@@ -907,7 +911,7 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
         }
       }
       setRemoteFolderLoading(false)
-      alert(t('chat.folderSelectionFailed'))
+      setFeedback(t('chat.folderSelectionFailed'))
       return
     }
     if (folderSelecting) return
@@ -917,7 +921,7 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
       if (folder) requestSetFolder(folder)
     } catch (error) {
       console.error('Failed to select a working directory:', error)
-      alert(t('chat.folderSelectionFailed'))
+      setFeedback(t('chat.folderSelectionFailed'))
     } finally {
       setFolderSelecting(false)
     }
@@ -973,7 +977,7 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
 
   const handleSelectModel = (providerId: string, modelId: string) => {
     // 未订阅/过期时 Joule 模型保持可见但锁定：点击引导订阅，不切换
-    if (providerId === 'joule' && !jouleUnlocked) {
+    if (providerId === 'joule' && !canSelectJouleModel(useJouleStore.getState())) {
       void ipc.openExternal('https://joule.xmzf.space/console#subscribe')
       return
     }
@@ -1111,10 +1115,10 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
 
   // Outer container: different styling for welcome vs default
   const outerClass = isWelcome
-    ? 'px-4 py-2'
+    ? 'shrink-0 px-0 py-2'
     : vibe
-      ? 'px-4 py-3 bg-transparent'
-      : 'px-4 py-3 max-md:pb-[calc(0.75rem+env(safe-area-inset-bottom))] bg-dark-surfaceDim border-t border-dark-onSurfaceVariant/10'
+      ? 'vibe-composer shrink-0 px-4 pb-4 pt-2 max-md:px-3 max-md:pb-[calc(0.75rem+env(safe-area-inset-bottom))] bg-transparent'
+      : 'shrink-0 px-5 pb-4 pt-2 max-md:px-3 max-md:pb-[calc(0.75rem+env(safe-area-inset-bottom))] bg-dark-surface'
   // 虚拟键盘弹出时抬高输入区（压缩消息列表），避免输入框被遮挡
   const outerStyle = !isWelcome && isMobile && kbOffset > 0 ? { paddingBottom: kbOffset } : undefined
 
@@ -1123,11 +1127,40 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
 
   // Box class: vibe uses liquid glass（relative 供 "/" 命令菜单 absolute 锚定）
   const boxClass = vibe
-    ? `chat-input-box relative flex flex-col ${boxMaxWidth} mx-auto liquid-glass rounded-[28px] px-5 py-3.5 gap-2 focus-within:border-white/40 transition-colors`
-    : `chat-input-box relative flex flex-col ${boxMaxWidth} mx-auto bg-dark-surfaceContainerHigh rounded-[28px] px-5 py-3.5 gap-2 border border-dark-onSurfaceVariant/8 focus-within:border-md-primary/30 focus-within:shadow-elevation-1 transition-[border-color,box-shadow]`
+    ? `chat-input-box relative flex flex-col ${boxMaxWidth} mx-auto liquid-glass rounded-md3-md px-4 py-3 gap-3 focus-within:border-white/40 transition-colors`
+    : `chat-input-box relative flex flex-col ${boxMaxWidth} mx-auto bg-dark-surfaceBright rounded-md3-md px-4 py-3 gap-3 border border-dark-onSurfaceVariant/15 shadow-elevation-1 focus-within:border-md-primary/40 transition-[border-color,box-shadow]`
 
   return (
     <div className={outerClass} style={outerStyle}>
+      {feedback && (
+        <div role="alert" className={`mx-auto mb-3 flex max-w-5xl items-start gap-2 rounded-md3-sm border px-3 py-2.5 text-ui-sm ${vibe ? 'border-white/20 bg-black/40 text-white' : 'border-md-error/20 bg-md-error/5 text-md-error'}`}>
+          <TriangleAlert size={16} className="mt-0.5 shrink-0" />
+          <span className="min-w-0 flex-1 break-words">{feedback}</span>
+          <button type="button" aria-label={t('common.close')} onClick={() => setFeedback(null)} className={`md-focus flex h-8 w-8 shrink-0 items-center justify-center rounded-md3-xs max-md:h-11 max-md:w-11 ${vibe ? 'hover:bg-white/10' : 'hover:bg-md-error/10'}`}><X size={15} /></button>
+        </div>
+      )}
+      {Object.values(queueOperations).some((operation) => operation.status === 'pending') && (
+        <div role="status" className={`mx-auto mb-2 flex max-w-5xl items-center gap-2 px-1 text-ui-xs ${vibe ? 'text-white/75' : 'text-dark-onSurfaceVariant'}`}>
+          <Loader2 size={14} className="shrink-0 animate-spin" aria-hidden />
+          {t('chat.queueUpdating')}
+        </div>
+      )}
+      {Object.values(queueOperations).filter((operation) => operation.status !== 'pending').map((operation) => (
+        <div key={operation.item.id} role="status" className={`mx-auto mb-3 max-w-5xl rounded-md3-sm border px-3 py-3 text-ui-sm ${vibe ? 'border-white/20 bg-black/40 text-white' : operation.status === 'rejected' ? 'border-md-error/20 bg-md-error/5 text-md-error' : 'border-md-askSurface bg-md-askSurface/10 text-md-askForeground'}`}>
+          <div className="flex items-start gap-2"><TriangleAlert size={16} className="mt-0.5 shrink-0" /><span>{t(operation.status === 'rejected' ? 'chat.queueOperationFailed' : operation.status === 'recovered' ? 'chat.queueDraftChanged' : 'chat.queueOutcomeUnknown')}</span></div>
+          <p className="mt-2 line-clamp-2 break-words opacity-80">{operation.item.content || t('chat.queuedAttachmentOnly')}</p>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            {operation.status === 'unknown' && <button type="button" disabled={refreshingQueue} className="md-focus inline-flex min-h-9 items-center gap-1.5 rounded-md3-xs border border-current px-2.5 text-ui-xs disabled:opacity-50 max-md:min-h-11" onClick={() => {
+              setRefreshingQueue(true)
+              void refreshComposerQueue(sessionId).then((ok) => { if (!ok) setFeedback(t('chat.queueRefreshFailed')) }).finally(() => setRefreshingQueue(false))
+            }}>{refreshingQueue && <Loader2 size={13} className="animate-spin" />}{t('chat.queueRefresh')}</button>}
+            <button type="button" className="md-focus min-h-9 rounded-md3-xs border border-current px-2.5 text-ui-xs max-md:min-h-11" onClick={() => {
+              if (operation.status === 'rejected') recoverComposerQueue(sessionId, operation.item.id)
+              else setQueueRecoveryId(operation.item.id)
+            }}>{t(operation.status === 'rejected' ? 'common.close' : 'chat.queueRecover')}</button>
+          </div>
+        </div>
+      ))}
       {/* Harness 模式行（对话框上方）：新对话可选一次并展示小字解析；开始后锁定为「模式名 + 小字」提醒。
           选项为内联展开（参与文档流、把输入框下推），非浮层——不与顶栏/消息内容产生遮挡关系 */}
       <div className={`mb-2 px-1 max-w-5xl mx-auto min-w-0 ${vibe ? 'text-white/70' : 'text-dark-onSurfaceVariant'}`} ref={harnessMenuRef}>
@@ -1135,10 +1168,10 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
           {harnessLocked ? (
             <>
               <Layers size={12} className="flex-shrink-0 opacity-70" />
-              <span className="text-[11px] font-medium flex-shrink-0">{t(harnessMeta.nameKey)}</span>
+              <span className="text-ui-xs font-medium flex-shrink-0">{t(harnessMeta.nameKey)}</span>
               <Lock size={10} className="flex-shrink-0 opacity-50" />
               <span
-                className={`text-[11px] truncate min-w-0 ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/60'}`}
+                className={`text-ui-xs truncate min-w-0 ${vibe ? 'text-white/65' : 'text-dark-onSurfaceVariant/80'}`}
                 title={t(harnessMeta.descKey)}
               >
                 · {t(harnessMeta.descKey)}
@@ -1150,7 +1183,7 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
                 ref={harnessTriggerRef}
                 type="button"
                 onClick={() => setShowHarnessMenu((v) => !v)}
-                className={`flex items-center gap-1 h-6 px-1.5 -mx-1 flex-shrink-0 rounded-md3-sm transition-colors ${
+                className={`md-focus flex items-center gap-1 min-h-8 max-md:min-h-11 px-1.5 -mx-1 flex-shrink-0 rounded-md3-sm transition-colors ${
                   harnessMode !== 'default'
                     ? vibe
                       ? 'bg-md-tertiary/25 text-md-tertiary hover:bg-md-tertiary/35'
@@ -1164,11 +1197,11 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
                 aria-expanded={showHarnessMenu}
               >
                 <Layers size={12} />
-                <span className="text-[11px] font-medium">{t(harnessMeta.nameKey)}</span>
+                <span className="text-ui-xs font-medium">{t(harnessMeta.nameKey)}</span>
                 <ChevronDown size={10} className={`transition-transform ${showHarnessMenu ? 'rotate-180' : ''}`} />
               </button>
               <span
-                className={`text-[11px] truncate min-w-0 ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/60'}`}
+                className={`text-ui-xs truncate min-w-0 ${vibe ? 'text-white/65' : 'text-dark-onSurfaceVariant/80'}`}
                 title={t(harnessMeta.descKey)}
               >
                 · {t(harnessMeta.descKey)}
@@ -1179,6 +1212,7 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
         {!harnessLocked && (
           <div
             aria-hidden={!showHarnessMenu}
+            inert={!showHarnessMenu}
             className="overflow-hidden transition-[max-height,opacity,visibility] duration-200 ease-out motion-reduce:transition-none"
             style={{
               maxHeight: showHarnessMenu ? Math.max(harnessPanelHeight, 1) : 0,
@@ -1301,7 +1335,8 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
                 onClick={() => handleQueuedEdit(item)}
                 aria-label={t('chat.queuedEdit')}
                 title={t('chat.queuedEdit')}
-                className="opacity-60 hover:opacity-100 flex-shrink-0"
+                disabled={!!queueOperations[item.id] && queueOperations[item.id].status !== 'rejected'}
+                className="md-focus flex h-8 w-8 shrink-0 items-center justify-center rounded-md3-xs opacity-70 hover:bg-dark-onSurfaceVariant/10 hover:opacity-100 disabled:opacity-30 max-md:h-11 max-md:w-11"
               >
                 <Pencil size={13} />
               </button>
@@ -1310,7 +1345,8 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
                 onClick={() => handleQueuedSendNow(item)}
                 aria-label={t('chat.queuedSendNow')}
                 title={t('chat.queuedSendNow')}
-                className="opacity-60 hover:opacity-100 flex-shrink-0"
+                disabled={isStopping || (!!queueOperations[item.id] && queueOperations[item.id].status !== 'rejected')}
+                className="md-focus flex h-8 w-8 shrink-0 items-center justify-center rounded-md3-xs opacity-70 hover:bg-dark-onSurfaceVariant/10 hover:opacity-100 disabled:opacity-30 max-md:h-11 max-md:w-11"
               >
                 <SendHorizontal size={13} />
               </button>
@@ -1319,7 +1355,8 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
                 onClick={() => handleQueuedRemove(item)}
                 aria-label={t('chat.queuedRemove')}
                 title={t('chat.queuedRemove')}
-                className="opacity-60 hover:opacity-100 flex-shrink-0"
+                disabled={!!queueOperations[item.id] && queueOperations[item.id].status !== 'rejected'}
+                className="md-focus flex h-8 w-8 shrink-0 items-center justify-center rounded-md3-xs opacity-70 hover:bg-dark-onSurfaceVariant/10 hover:opacity-100 disabled:opacity-30 max-md:h-11 max-md:w-11"
               >
                 <X size={13} />
               </button>
@@ -1466,6 +1503,8 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
           ))}
           <textarea
             ref={textareaRef}
+            readOnly={submitting || rewinding || queueDraftBlocked}
+            aria-busy={submitting || rewinding}
             value={content}
             onChange={handleTextareaChange}
             onKeyDown={handleKeyDown}
@@ -1484,11 +1523,11 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
                       ? t('chat.placeholderGeneral')
                       : (effectiveWorkDir ? t('chat.placeholderWorkDir', { name: effectiveWorkDir.split(/[/\\]/).pop() }) : t('chat.placeholderDefault'))}
             rows={1}
-            className={`min-w-[96px] flex-1 bg-transparent text-sm max-md:text-base resize-none outline-none min-h-[20px] max-md:min-h-6 max-h-[200px] py-1 ${
+            className={`min-w-[96px] flex-1 bg-transparent text-ui-sm max-md:text-ui-base leading-relaxed resize-none outline-none min-h-12 max-h-[200px] py-1 ${
               vibe
                 ? 'text-white/90 placeholder-white/50'
-                : 'text-dark-onSurface placeholder-dark-onSurfaceVariant/40'
-            } ${(isStreaming || isCompacting) ? 'opacity-60 cursor-default' : ''}`}
+                : 'text-dark-onSurface placeholder-dark-onSurfaceVariant/60'
+            } ${submitting || rewinding || queueDraftBlocked ? 'cursor-wait opacity-60' : ''}`}
           />
         </div>
 
@@ -1646,7 +1685,7 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
         )}
 
         {/* Bottom button row - inside the box */}
-        <div className="chat-input-toolbar flex min-w-0 items-center gap-1 flex-nowrap overflow-visible">
+        <div ref={toolbarRef} className={`chat-input-toolbar flex min-w-0 items-center gap-1 flex-nowrap overflow-visible border-t pt-2 ${vibe ? 'border-white/10' : 'border-dark-onSurfaceVariant/10'}`}>
           {/* Attach (images / files) button */}
           <button
             type="button"
@@ -1819,7 +1858,7 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
               aria-expanded={showApprovalMenu}
             >
               <ApprovalIcon size={14} />
-              <span className="chat-toolbar-label text-xs font-medium">{approvalMeta.label}</span>
+              <span className="chat-toolbar-label text-ui-xs font-medium">{approvalMeta.label}</span>
               <ChevronDown size={12} className={`chat-toolbar-chevron transition-transform ${showApprovalMenu ? 'rotate-180' : ''}`} />
             </button>
             {showApprovalMenu && (
@@ -1941,7 +1980,7 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
                 aria-expanded={showThinkingMenu}
                 aria-controls="chat-reasoning-menu"
               >
-                <span className="chat-toolbar-label text-[10px] capitalize">{reasoningEfforts[currentEffortIndex]}</span>
+                <span className="chat-toolbar-label text-ui-xs capitalize">{reasoningEfforts[currentEffortIndex]}</span>
                 <ChevronDown size={11} className={`chat-toolbar-chevron transition-transform ${showThinkingMenu ? 'rotate-180' : ''}`} />
               </button>
             )}
@@ -2014,7 +2053,7 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
               aria-expanded={showModelMenu}
             >
               <Settings2 size={14} className="chat-toolbar-model-icon hidden" />
-              <span className="chat-toolbar-model-label max-w-[100px] truncate text-xs">{currentModelLabel}</span>
+              <span className="chat-toolbar-model-label max-w-40 truncate text-ui-xs">{currentModelLabel}</span>
               <ChevronDown size={12} className={`chat-toolbar-chevron transition-transform ${showModelMenu ? 'rotate-180' : ''}`} />
             </button>
             {showModelMenu && (
@@ -2265,13 +2304,24 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
           {/* Spacer to push send button to the right */}
           <div className="flex-1" />
 
+          {isStreaming && (content.trim() || attachments.length > 0) && (
+            <button type="button" onClick={handleSend}
+              disabled={submitting || rewinding || queueDraftBlocked || isStopping}
+              aria-label={t('chat.queueMessageAria')} title={t('chat.queueMessageAria')}
+              className={`md-focus inline-flex min-h-9 shrink-0 items-center justify-center gap-1.5 rounded-md3-sm border px-2.5 text-ui-xs font-medium transition-colors disabled:opacity-40 max-md:min-h-11 max-md:min-w-11 ${vibe ? 'border-white/20 text-white hover:bg-white/10' : 'border-dark-onSurfaceVariant/20 text-dark-onSurface hover:bg-dark-surfaceContainerHigh'}`}>
+              {submitting ? <Loader2 size={15} className="animate-spin" aria-hidden /> : <Send size={15} aria-hidden />}
+              <span className="chat-toolbar-label">{t('chat.queueMessageAria')}</span>
+            </button>
+          )}
+
           {/* Send / Stop button */}
           <button
             type="button"
             onClick={isStreaming ? onStop : handleSend}
-            disabled={isCompacting || (!isStreaming && (submitting || (!compactMode && !content.trim() && attachments.length === 0)))}
-            aria-label={isStreaming ? t('chat.stopResponseAria') : t('chat.sendMessageAria')}
-            className={`chat-toolbar-send h-9 w-9 max-md:h-12 max-md:w-12 flex-shrink-0 flex items-center justify-center rounded-full transition-colors disabled:opacity-30 disabled:cursor-not-allowed ${
+            disabled={rewinding || isStopping || (!isStreaming && (submitting || queueDraftBlocked || (!compactMode && !content.trim() && attachments.length === 0)))}
+            aria-label={isStopping ? t('chat.stopping') : isStreaming ? t('chat.stopResponseAria') : isCompacting ? t('chat.queueMessageAria') : t('chat.sendMessageAria')}
+            title={isStopping ? t('chat.stopping') : isStreaming ? t('chat.stopResponseAria') : t('chat.sendMessageAria')}
+            className={`chat-toolbar-send md-focus h-9 w-9 max-md:h-11 max-md:w-11 flex-shrink-0 flex items-center justify-center rounded-md3-sm transition-colors disabled:opacity-30 disabled:cursor-not-allowed ${
               isStreaming
                 ? 'bg-md-error text-md-onError hover:bg-md-error/90'
                 : vibe
@@ -2279,7 +2329,7 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
                   : 'bg-md-primary text-md-onPrimary hover:bg-md-primary/90'
             }`}
           >
-            {isCompacting || (submitting && !isStreaming)
+            {isStopping || (submitting && !isStreaming)
               ? <Loader2 size={isMobile ? 18 : 14} className="animate-spin" />
               : isStreaming
                 ? <Square size={isMobile ? 18 : 14} />
@@ -2288,10 +2338,10 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
         </div>
       </div>
 
-      {remoteFolderPickerOpen && (
+      {remoteFolderPickerOpen && createPortal((
         <>
           <div className="fixed inset-0 z-[70] bg-black/55 animate-fade-in" onClick={() => setRemoteFolderPickerOpen(false)} aria-hidden />
-          <div className={`fixed z-[71] inset-x-4 top-1/2 -translate-y-1/2 max-w-lg mx-auto rounded-md3-md border shadow-elevation-3 overflow-hidden animate-fade-in ${
+          <div ref={folderPickerPanelRef} tabIndex={-1} className={`fixed z-[71] inset-x-4 top-1/2 -translate-y-1/2 max-w-lg mx-auto max-h-[80dvh] rounded-md3-md border shadow-elevation-3 overflow-y-auto outline-none animate-fade-in ${
             vibe ? 'bg-white/10 border-white/15 backdrop-blur-2xl text-white' : 'bg-dark-surfaceContainer border-dark-onSurfaceVariant/15 text-dark-onSurface'
           }`} role="dialog" aria-modal="true" aria-label={t('chat.folderBrowseHost')}>
             <div className="flex items-center gap-2 px-3 py-2 border-b border-dark-onSurfaceVariant/10">
@@ -2321,17 +2371,17 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
               )}
             </div>
             <div className="flex items-center justify-end gap-2 px-3 py-2 border-t border-dark-onSurfaceVariant/10">
-              <button type="button" onClick={() => setRemoteFolderPickerOpen(false)} className="px-3 py-1.5 text-xs rounded-md3-sm hover:bg-dark-surfaceContainerHigh">{t('common.cancel')}</button>
-              <button type="button" onClick={selectRemoteFolder} disabled={!remoteFolderPath || remoteFolderLoading} className="px-3 py-1.5 text-xs rounded-md3-sm bg-md-primary text-md-onPrimary hover:bg-md-primary/90 disabled:opacity-40">{t('chat.folderUseThis')}</button>
+              <button type="button" onClick={() => setRemoteFolderPickerOpen(false)} className="md-focus min-h-9 max-md:min-h-11 px-3 py-1.5 text-ui-xs rounded-md3-sm hover:bg-dark-surfaceContainerHigh">{t('common.cancel')}</button>
+              <button type="button" onClick={selectRemoteFolder} disabled={!remoteFolderPath || remoteFolderLoading} className="md-focus min-h-9 max-md:min-h-11 px-3 py-1.5 text-ui-xs rounded-md3-sm bg-md-primary text-md-onPrimary hover:bg-md-primary/90 disabled:opacity-40">{t('chat.folderUseThis')}</button>
             </div>
           </div>
         </>
-      )}
+      ), document.body)}
 
       {/* Disclaimer - only in default mode */}
       {!isWelcome && (
         <div className="text-center mt-1.5 max-w-5xl mx-auto">
-          <span className={`text-[10px] ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/30'}`}>{t('chat.disclaimer')}</span>
+          <span className={`text-ui-xs ${vibe ? 'text-white/60' : 'text-dark-onSurfaceVariant/60'}`}>{t('chat.disclaimer')}</span>
         </div>
       )}
 
@@ -2341,9 +2391,15 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
           title={t('chat.queuedEditReplaceTitle')}
           message={t('chat.queuedEditReplaceBody')}
           variant="danger"
-          onConfirm={() => { applyQueuedEdit(pendingQueuedEdit); setPendingQueuedEdit(null) }}
+          onConfirm={() => { void applyQueuedEdit(pendingQueuedEdit); setPendingQueuedEdit(null) }}
           onCancel={() => setPendingQueuedEdit(null)}
         />
+      )}
+      {queueRecoveryId && (
+        <ConfirmDialog title={t('chat.queueRecoverTitle')} message={t('chat.queueRecoverBody')}
+          confirmText={t('chat.queueRecover')} variant="danger"
+          onConfirm={() => { recoverComposerQueue(sessionId, queueRecoveryId); setQueueRecoveryId(null) }}
+          onCancel={() => setQueueRecoveryId(null)} />
       )}
       {pendingFolder && (
         <ConfirmDialog
@@ -2358,7 +2414,7 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
 
       {/* 完全访问切换确认（对齐 ZCode 的 YOLO 门）：风险说明 + 「我已了解风险」复选框，
           确认按钮在勾选前置灰；每次切换都重新勾——这是唯一的升档摩擦，不记忆、不跳过。 */}
-      {fullAccessConfirm && (
+      {fullAccessConfirm && createPortal((
         <div
           className={`fixed z-[70] flex items-center justify-center animate-fade-in ${
             vibe ? 'inset-0 bg-black/50 backdrop-blur-sm' : 'inset-x-0 bottom-0 top-11 bg-black/60'
@@ -2366,10 +2422,12 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
           onClick={() => setFullAccessConfirm(false)}
         >
           <div
+            ref={fullAccessPanelRef}
+            tabIndex={-1}
             role="dialog"
             aria-modal="true"
             aria-labelledby="approval-full-confirm-title"
-            className="w-[400px] max-w-[calc(100vw-2rem)] bg-dark-surfaceDim rounded-md3-xl border border-dark-onSurfaceVariant/10 flex flex-col shadow-elevation-3 animate-pop-in"
+            className="w-[400px] max-w-[calc(100vw-2rem)] max-h-[80dvh] overflow-y-auto bg-dark-surfaceDim text-dark-onSurface rounded-md3-xl border border-dark-onSurfaceVariant/10 flex flex-col shadow-elevation-3 outline-none animate-pop-in"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between px-5 py-4 border-b border-dark-onSurfaceVariant/10">
@@ -2402,7 +2460,7 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
               <button
                 type="button"
                 onClick={() => setFullAccessConfirm(false)}
-                className="md-focus px-4 py-2 rounded-md3-sm text-sm text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh transition-colors"
+                className="md-focus min-h-10 max-md:min-h-11 px-4 py-2 rounded-md3-sm text-ui-sm text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh transition-colors"
               >
                 {t('common.cancel')}
               </button>
@@ -2410,14 +2468,14 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
                 type="button"
                 disabled={!fullAccessAck}
                 onClick={() => { settings.updateSettings({ approvalMode: 'full' }); setFullAccessConfirm(false) }}
-                className="md-focus px-4 py-2 rounded-md3-sm text-sm font-medium transition-colors bg-md-warning text-dark-surfaceDim hover:bg-md-warning/90 disabled:opacity-40 disabled:cursor-not-allowed"
+                className="md-focus min-h-10 max-md:min-h-11 px-4 py-2 rounded-md3-sm border border-md-confirmationForeground/20 text-ui-sm font-medium transition-colors bg-md-confirmationSurface text-md-confirmationForeground hover:bg-md-confirmationSurface/90 disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 {t('chat.approvalFullConfirmConfirm')}
               </button>
             </div>
           </div>
         </div>
-      )}
+      ), document.body)}
     </div>
   )
 }

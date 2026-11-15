@@ -138,6 +138,9 @@ afterEach(() => {
 
 const requested = () => sent.filter((e) => e.type === 'permission.requested')
 const settled = () => sent.filter((e) => e.type === 'permission.settled')
+const waitForIdle = (manager: AgentSessionManager) => vi.waitFor(() => {
+  expect(manager.inspect().every((session) => !session.hasRun)).toBe(true)
+})
 const audits = (rows: Array<Record<string, unknown>>) =>
   rows
     .filter((r) => typeof r.content === 'string' && (r.content as string).startsWith(PERMISSION_AUDIT_PREFIX))
@@ -156,6 +159,7 @@ it('有窗口：请求带 tool/args 广播出去，批准后落 settled + 留痕
 
   await m.handleCommand({ type: 'permission.resolve', sessionId: 's1', requestId: req.requestId, approved: true, scope: 'session' })
   await running
+  await waitForIdle(m)
 
   expect(requested()).toHaveLength(1) // 会话级放行命中：第二个同样的危险命令没再打扰
   expect(settled()).toHaveLength(1)
@@ -176,6 +180,7 @@ it('拒绝路径：落 denied 留痕并广播 settled，不执行工具', async 
   const resultsBefore = (store.addMessage as unknown as { mock: { calls: unknown[] } }).mock.calls.length
   await m.handleCommand({ type: 'permission.resolve', sessionId: 's1', requestId: req.requestId, approved: false })
   await running
+  await waitForIdle(m)
   expect(settled()[0]).toMatchObject({ approved: false, timedOut: false })
   const rows = (store.addMessage as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.map((c) => c[0])
   expect(audits(rows).at(-1)).toMatchObject({ decision: 'deny' })
@@ -189,6 +194,7 @@ it('无窗口即 fail-closed：不广播待批事件，直接拒绝并留痕（U
   const store = fakeStore(workDir)
   const m = new AgentSessionManager(store)
   await m.handleCommand({ type: 'run', sessionId: 's1', content: '跑一下', settings })
+  await waitForIdle(m)
   expect(requested()).toHaveLength(0)
   const rows = (store.addMessage as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.map((c) => c[0])
   expect(audits(rows)[0]).toMatchObject({ decision: 'deny', tool: 'execute_command' })
@@ -222,6 +228,7 @@ describe('extendPermissionWait（IM 审批续时）', () => {
     expect(settled()).toHaveLength(0)
     await m.handleCommand({ type: 'permission.resolve', sessionId: 's1', requestId, approved: true })
     await running
+    await waitForIdle(m)
     expect(settled()[0]).toMatchObject({ approved: true, timedOut: false })
     expect(toolRegistry.execute).toHaveBeenCalledTimes(1)
   })
@@ -234,6 +241,7 @@ describe('extendPermissionWait（IM 审批续时）', () => {
     await wait(200)
     expect(m.extendPermissionWait('s1', requestId, 5_000, 120)).toBe(false)
     await running
+    await waitForIdle(m)
     expect(settled()[0]).toMatchObject({ approved: false, timedOut: true })
     expect(toolRegistry.execute).not.toHaveBeenCalled()
     const rows = (store.addMessage as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.map((c) => c[0])
@@ -253,6 +261,7 @@ describe('extendPermissionWait（IM 审批续时）', () => {
     expect(settled()).toHaveLength(0)
     await m.handleCommand({ type: 'permission.resolve', sessionId: 's1', requestId, approved: false })
     await running
+    await waitForIdle(m)
     expect(settled()[0]).toMatchObject({ timedOut: false, approved: false })
     expect(m).toBeDefined()
   })

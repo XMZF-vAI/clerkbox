@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { Check, ChevronRight, Copy, ExternalLink, Globe, Loader2, MessageSquare, Play, Smartphone, Square, SlidersHorizontal } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { AlertCircle, Check, ChevronRight, Copy, ExternalLink, Globe, Loader2, MessageSquare, Play, Smartphone, Square, SlidersHorizontal } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import Modal from '../ui/Modal'
 import QrCode from '../ui/QrCode'
@@ -52,6 +52,11 @@ export default function RemoteAccessDialog({ onClose }: RemoteAccessDialogProps)
 
   // ── WebUI 控制（自 Sidebar 原样搬运）──
   const [webuiStarting, setWebuiStarting] = useState(false)
+  const [webuiChecking, setWebuiChecking] = useState(true)
+  const [webuiStopping, setWebuiStopping] = useState(false)
+  const [webuiError, setWebuiError] = useState<string | null>(null)
+  const operationRef = useRef(false)
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [webuiInfo, setWebuiInfo] = useState<WebUIRuntime | null>(null)
   const [webuiCopied, setWebuiCopied] = useState(false)
   const [webuiRestarting, setWebuiRestarting] = useState<'lan' | 'file' | null>(null)
@@ -65,6 +70,9 @@ export default function RemoteAccessDialog({ onClose }: RemoteAccessDialogProps)
 
   const [botsOpen, setBotsOpen] = useState(false)
   const [botsEntryProvider, setBotsEntryProvider] = useState<BotProvider | null>(null)
+  const webuiBusy = webuiChecking || webuiStarting || webuiStopping || webuiRestarting !== null
+
+  useEffect(() => () => { if (copyTimerRef.current) clearTimeout(copyTimerRef.current) }, [])
 
   /** 解析二维码 URL：lanAllowed 时取第一个非内部 IPv4 拼 URL，否则不生成二维码 */
   const resolveQrUrl = async (result: WebUIRuntime, lanAllowed: boolean) => {
@@ -102,7 +110,8 @@ export default function RemoteAccessDialog({ onClose }: RemoteAccessDialogProps)
         setWebuiInfo(runtime)
         await resolveQrUrl(runtime, webuiLanAccess)
       })
-      .catch(() => undefined)
+      .catch(() => { if (!cancelled) setWebuiError(t('remoteAccess.webuiOperationError')) })
+      .finally(() => { if (!cancelled) setWebuiChecking(false) })
     return () => {
       cancelled = true
     }
@@ -111,59 +120,85 @@ export default function RemoteAccessDialog({ onClose }: RemoteAccessDialogProps)
   }, [])
 
   const handleStartWebUI = async () => {
-    if (webuiStarting) return
+    if (operationRef.current || webuiChecking) return
+    operationRef.current = true
+    setWebuiError(null)
     setWebuiStarting(true)
     try {
       const runtime = await startWebUIService(webuiLanAccess, webuiFileAccess)
-      if (!runtime) alert(t('remoteAccess.webuiError'))
+      if (!runtime) setWebuiError(t('remoteAccess.webuiError'))
     } catch {
-      alert(t('remoteAccess.webuiError'))
+      setWebuiError(t('remoteAccess.webuiError'))
     } finally {
+      operationRef.current = false
       setWebuiStarting(false)
     }
   }
 
-  // 两个开关都改变主进程的服务态（绑定范围 / 文件读取授权），写设置后重启 WebUI 才生效
+  // 两个开关都改变主进程服务态；先成功重启，再保存与实际服务一致的设置。
   const restartWebUI = async (kind: 'lan' | 'file', lanAccess: boolean, fileAccess: boolean) => {
-    if (webuiRestarting) return
+    if (operationRef.current || webuiChecking) return
+    operationRef.current = true
+    setWebuiError(null)
     setWebuiRestarting(kind)
     try {
-      await ipc.stopWebUI()
-      await startWebUIService(lanAccess, fileAccess)
+      const stopped = await ipc.stopWebUI()
+      if (!stopped.ok) throw new Error('WebUI stop was rejected')
+      // 服务停止后旧链接已失效，重启失败时不能继续展示为可用地址。
+      setWebuiInfo(null)
+      setWebuiQrUrl(null)
+      setWebuiLanMissing(false)
+      const runtime = await startWebUIService(lanAccess, fileAccess)
+      if (!runtime) throw new Error('WebUI restart failed')
+      updateSettings({ webuiLanAccess: lanAccess, webuiFileAccess: fileAccess })
     } catch {
-      /* 重启失败时保留原状态，用户可手动重试（与搬运前一致） */
+      setWebuiError(t('remoteAccess.webuiOperationError'))
     } finally {
+      operationRef.current = false
       setWebuiRestarting(null)
     }
   }
 
   const handleToggleLanAccess = () => {
     const next = !webuiLanAccess
-    updateSettings({ webuiLanAccess: next })
     void restartWebUI('lan', next, webuiFileAccess)
   }
 
   const handleToggleFileAccess = () => {
     const next = !webuiFileAccess
-    updateSettings({ webuiFileAccess: next })
     void restartWebUI('file', webuiLanAccess, next)
   }
 
   const handleStopWebUI = async () => {
-    await ipc.stopWebUI()
-    setWebuiInfo(null)
-    setWebuiQrUrl(null)
-    setWebuiLanMissing(false)
+    if (operationRef.current || webuiChecking) return
+    operationRef.current = true
+    setWebuiStopping(true)
+    setWebuiError(null)
+    try {
+      const stopped = await ipc.stopWebUI()
+      if (!stopped.ok) throw new Error('WebUI stop was rejected')
+      setWebuiInfo(null)
+      setWebuiQrUrl(null)
+      setWebuiLanMissing(false)
+      setWebuiCopied(false)
+    } catch {
+      setWebuiError(t('remoteAccess.webuiOperationError'))
+    } finally {
+      operationRef.current = false
+      setWebuiStopping(false)
+    }
   }
 
   const handleCopyWebUIUrl = async () => {
     if (!webuiInfo) return
     try {
       await navigator.clipboard.writeText(webuiInfo.url)
+      setWebuiError(null)
       setWebuiCopied(true)
-      setTimeout(() => setWebuiCopied(false), 2000)
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
+      copyTimerRef.current = setTimeout(() => setWebuiCopied(false), 2000)
     } catch {
-      /* 剪贴板不可用时忽略 */
+      setWebuiError(t('remoteAccess.webuiCopyError'))
     }
   }
 
@@ -178,22 +213,29 @@ export default function RemoteAccessDialog({ onClose }: RemoteAccessDialogProps)
         title={t('remoteAccess.title')}
         description={t('remoteAccess.desc')}
         onClose={onClose}
-        widthClass="w-[680px]"
+        widthClass="w-[800px]"
         bodyClassName="p-0"
         titleIcon={<Globe size={18} />}
       >
         <div className="grid md:grid-cols-2">
           {/* ── 左栏：手机访问（WebUI）── */}
-          <section className="p-5 max-md:p-4 md:border-r border-dark-onSurfaceVariant/10 max-md:border-b max-md:border-r-0">
-            <div className="flex items-center gap-2 mb-1">
+          <section className="min-w-0 p-6 max-md:p-4 md:border-r border-dark-onSurfaceVariant/10 max-md:border-b max-md:border-r-0">
+            <div className="flex items-center gap-2.5 mb-2">
               <Smartphone size={16} className="text-md-primary" />
-              <h3 className="text-ui-sm font-medium text-dark-onSurface">{t('remoteAccess.webuiTitle')}</h3>
+              <h3 className="text-ui-base font-semibold text-dark-onSurface">{t('remoteAccess.webuiTitle')}</h3>
             </div>
             <p className="text-ui-xs text-dark-onSurfaceVariant leading-relaxed mb-3">
               {t('remoteAccess.webuiDesc')}
             </p>
 
-            {!webuiInfo && (
+            {webuiBusy && (
+              <p role="status" className="mb-3 flex items-center gap-2 text-ui-xs text-dark-onSurfaceVariant"><Loader2 size={14} className="animate-spin" aria-hidden />{webuiRestarting ? t('remoteAccess.webuiRestarting') : webuiStarting ? t('remoteAccess.webuiStarting') : t('common.loading')}</p>
+            )}
+            {webuiError && (
+              <p role="alert" className="mb-3 flex items-start gap-2 rounded-md3-sm border border-md-error/20 bg-md-error/10 px-3 py-2 text-ui-xs leading-relaxed text-md-error"><AlertCircle size={14} className="mt-0.5 shrink-0" aria-hidden />{webuiError}</p>
+            )}
+
+            {!webuiInfo && !webuiChecking && (
               <div className="p-3 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10">
                 <p className="text-ui-xs text-dark-onSurfaceVariant leading-relaxed mb-3">
                   {t('remoteAccess.webuiIdleHint')}
@@ -201,7 +243,7 @@ export default function RemoteAccessDialog({ onClose }: RemoteAccessDialogProps)
                 <button
                   type="button"
                   onClick={handleStartWebUI}
-                  disabled={webuiStarting}
+                  disabled={webuiBusy}
                   className="md-focus w-full flex items-center justify-center gap-1.5 px-4 py-2 rounded-md3-sm text-ui-sm font-medium bg-md-primary text-md-onPrimary hover:bg-md-primary/90 transition-colors disabled:opacity-50"
                 >
                   {webuiStarting ? <Loader2 size={15} className="animate-spin" /> : <Play size={15} />}
@@ -226,7 +268,7 @@ export default function RemoteAccessDialog({ onClose }: RemoteAccessDialogProps)
                     {webuiCopied ? <Check size={14} className="text-md-primary" /> : <Copy size={14} />}
                   </button>
                 </div>
-                {webuiCopied && <p className="text-ui-xs text-md-primary mb-1">{t('remoteAccess.webuiCopied')}</p>}
+                {webuiCopied && <p role="status" className="text-ui-xs text-md-primary mb-1">{t('remoteAccess.webuiCopied')}</p>}
 
                 {/* 扫码直达：仅在允许局域网访问且探测到网卡地址时展示 */}
                 {webuiLanAccess && webuiQrUrl && (
@@ -253,7 +295,7 @@ export default function RemoteAccessDialog({ onClose }: RemoteAccessDialogProps)
                       type="checkbox"
                       checked={webuiLanAccess}
                       onChange={handleToggleLanAccess}
-                      disabled={webuiRestarting !== null}
+                      disabled={webuiBusy}
                       className="accent-md-primary"
                     />
                     <span className="text-ui-xs text-dark-onSurface">{t('remoteAccess.webuiLanAccess')}</span>
@@ -271,7 +313,7 @@ export default function RemoteAccessDialog({ onClose }: RemoteAccessDialogProps)
                       type="checkbox"
                       checked={webuiFileAccess}
                       onChange={handleToggleFileAccess}
-                      disabled={webuiRestarting !== null}
+                      disabled={webuiBusy}
                       className="accent-md-primary"
                     />
                     <span className="text-ui-xs text-dark-onSurface">{t('remoteAccess.webuiFileAccess')}</span>
@@ -286,7 +328,8 @@ export default function RemoteAccessDialog({ onClose }: RemoteAccessDialogProps)
                   <button
                     type="button"
                     onClick={() => ipc.openExternal(webuiInfo.url)}
-                    className="md-focus flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-md3-md bg-md-primary text-md-onPrimary hover:opacity-90 transition-opacity text-ui-sm"
+                    disabled={webuiBusy}
+                    className="md-focus min-h-10 max-md:min-h-11 flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-md3-sm bg-md-primary text-md-onPrimary hover:bg-md-primary/90 transition-colors text-ui-sm disabled:opacity-50"
                   >
                     <ExternalLink size={15} />
                     <span>{t('remoteAccess.webuiOpen')}</span>
@@ -294,7 +337,8 @@ export default function RemoteAccessDialog({ onClose }: RemoteAccessDialogProps)
                   <button
                     type="button"
                     onClick={handleStopWebUI}
-                    className="md-focus inline-flex items-center gap-1.5 px-3 py-2 rounded-md3-md bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer transition-colors text-ui-sm"
+                    disabled={webuiBusy}
+                    className="md-focus min-h-10 max-md:min-h-11 inline-flex items-center gap-1.5 px-3 py-2 rounded-md3-sm border border-dark-onSurfaceVariant/15 hover:bg-dark-surfaceContainer transition-colors text-ui-sm disabled:opacity-50"
                   >
                     <Square size={13} />
                     <span>{t('remoteAccess.webuiStop')}</span>
@@ -305,10 +349,10 @@ export default function RemoteAccessDialog({ onClose }: RemoteAccessDialogProps)
           </section>
 
           {/* ── 右栏：IM 机器人 ── */}
-          <section className="p-5 max-md:p-4">
-            <div className="flex items-center gap-2 mb-1">
+          <section className="min-w-0 p-6 max-md:p-4">
+            <div className="flex items-center gap-2.5 mb-2">
               <MessageSquare size={16} className="text-md-primary" />
-              <h3 className="text-ui-sm font-medium text-dark-onSurface">{t('remoteAccess.botsTitle')}</h3>
+              <h3 className="text-ui-base font-semibold text-dark-onSurface">{t('remoteAccess.botsTitle')}</h3>
             </div>
             <p className="text-ui-xs text-dark-onSurfaceVariant leading-relaxed mb-3">
               {t('remoteAccess.botsDesc')}
@@ -327,12 +371,12 @@ export default function RemoteAccessDialog({ onClose }: RemoteAccessDialogProps)
                   key={provider}
                   type="button"
                   onClick={() => openBots(provider)}
-                  className="md-focus w-full flex items-center gap-3 p-3 rounded-md3-md border border-dark-onSurfaceVariant/10 hover:bg-dark-surfaceContainer transition-colors text-left"
+                  className="md-focus w-full flex items-center gap-3 p-3.5 rounded-md3-md border border-dark-onSurfaceVariant/10 bg-dark-surface/50 hover:bg-dark-surfaceContainer transition-colors text-left"
                 >
                   <ChannelBadge provider={provider} />
                   <span className="flex-1 min-w-0">
                     <span className="block text-ui-sm text-dark-onSurface">{t(labelKey)}</span>
-                    <span className="block text-ui-xs text-dark-onSurfaceVariant/70 truncate">{t(descKey)}</span>
+                    <span className="mt-1 block text-ui-xs text-dark-onSurfaceVariant leading-relaxed">{t(descKey)}</span>
                   </span>
                   <span className="flex-shrink-0 flex items-center gap-0.5 text-ui-xs text-md-primary">
                     <span>{t('remoteAccess.botsOpen')}</span>

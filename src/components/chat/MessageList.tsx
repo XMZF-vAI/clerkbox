@@ -1,11 +1,12 @@
 ﻿import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, memo } from 'react'
-import { ChevronDown, Wrench } from 'lucide-react'
+import { ChevronDown } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import type { Message } from '../../types/agent'
-import { lastRewindableTurnIndex } from '../../lib/rewind'
+import { isRewindableUserMessage, lastRewindableTurnIndex } from '../../lib/rewind'
 import MessageItem from './MessageItem'
-import AgentStatusIndicator from './AgentStatusIndicator'
+import { AssistantTurnStream } from './AssistantTurnStream'
+import AgentStatusIndicator, { useAgentActivity } from './AgentStatusIndicator'
 import RewindActions from './RewindActions'
 import {
   VIRTUALIZE_MIN_TURNS,
@@ -108,42 +109,6 @@ export function groupIntoTurns(messages: Message[]): Turn[] {
   return turns
 }
 
-/** Check if a message should be collapsible as a step (has tool calls and is not a sub-agent card) */
-function isCollapsibleStep(msg: Message): boolean {
-  return (
-    msg.role === 'assistant' &&
-    !msg.isSubAgentCard &&
-    !!msg.toolCalls &&
-    msg.toolCalls.length > 0
-  )
-}
-
-/** Count tool calls in a single message (excluding spawn_agent shown as cards) */
-function countMsgToolCalls(msg: Message): number {
-  return msg.toolCalls?.filter((tc) => tc.name !== 'spawn_agent').length || 0
-}
-
-/** 折叠头统计「改了几处文件」用的工具名集合 —— 与 diff chips 的口径一致（能产出 __EDIT_DIFF__ 的那几个） */
-const EDIT_TOOL_NAMES = new Set(['search_replace', 'edit_file', 'write_file'])
-
-/** 折叠头的耗时口径：5 秒以内不显示（一轮本来就该几秒，写出来只是噪声） */
-function formatTurnDuration(ms: number): string {
-  if (!Number.isFinite(ms) || ms < 5000) return ''
-  const s = Math.round(ms / 1000)
-  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s`
-}
-
-/** 一轮的耗时 = 该轮内所有消息时间戳的跨度；缺时间戳的历史数据按 0 处理，不显示 */
-function turnDurationMs(turn: Turn): number {
-  let min = turn.userMsg.timestamp
-  let max = turn.userMsg.timestamp
-  for (const m of turn.aiMessages) {
-    if (m.timestamp > max) max = m.timestamp
-    if (m.timestamp < min) min = m.timestamp
-  }
-  return Number.isFinite(min) && Number.isFinite(max) ? max - min : 0
-}
-
 /**
  * 吸顶条的步数：只回扫当前这一轮（遇到上一条用户消息就停）。
  * 不做 useMemo —— 它每 token 随 messages 求值，但一轮的消息数量是个位数到几十，
@@ -162,7 +127,7 @@ function tailTurnStepCount(messages: Message[]): number {
   return count
 }
 
-/** Turn panel - 只保留一个回合级折叠按钮：折叠时只显示最终回复，展开时按自然顺序显示所有中间步骤 */
+/** Turn panel - 用户气泡 + 助手会话流（ZCode 层级：全行平铺，无回合级折叠头） */
 type TurnPanelProps = {
   turn: Turn
   isLastTurn: boolean
@@ -193,72 +158,14 @@ function areTurnPanelPropsEqual(previous: TurnPanelProps, next: TurnPanelProps):
   return previous.turn.aiMessages.every((message, index) => message === next.turn.aiMessages[index])
 }
 
-const TurnPanel = memo(function TurnPanel({ turn, isLastTurn, isStreaming, vibe, sessionId, canRewindAnchor, onResend }: TurnPanelProps) {
-  const { t } = useTranslation()
-  const [stepsExpanded, setStepsExpanded] = useState(false)
-
-  const isActiveTurn = isLastTurn && isStreaming
-
-  // 最后一条 AI 消息 = 最终回复（含 thinking + content）
-  const finalMsg = turn.aiMessages.length > 0
-    ? turn.aiMessages[turn.aiMessages.length - 1]
-    : null
-
-  // 中间消息 = 除最后一条外的所有 AI 消息
-  const intermediateMsgs = turn.aiMessages.length > 1
-    ? turn.aiMessages.slice(0, -1)
-    : []
-
-  // 中间是否有需要折叠的步骤（含 toolCalls 的消息或子 agent 卡片）
-  const hasFoldableSteps = intermediateMsgs.some(
-    (m) => isCollapsibleStep(m) || m.isSubAgentCard
-  )
-
-  // 统计折叠的步骤数（toolCalls + 子 agent 卡片）
-  const stepCount = intermediateMsgs.reduce((sum, m) => {
-    if (m.isSubAgentCard) return sum + 1
-    return sum + countMsgToolCalls(m)
-  }, 0)
-
-  /**
-   * 折叠头上的另外两项：改了几处文件、这一轮跑了多久。
-   * 不挂 useMemo —— shouldFold 在活动轮恒为 false，而带 shouldFold 的轮被
-   * areTurnPanelPropsEqual 挡在不重渲染那一侧，这两行只在消息数真变了时求值。
-   */
-  const editCount = intermediateMsgs.reduce(
-    (sum, m) => sum + (m.toolCalls?.filter((tc) => EDIT_TOOL_NAMES.has(tc.name)).length ?? 0),
-    0,
-  )
-  const duration = formatTurnDuration(turnDurationMs(turn))
-
-  // 最后一条自己若也含 toolCalls（还没出总结），不折叠
-  const finalHasTools = !!finalMsg?.toolCalls && finalMsg.toolCalls.length > 0
-
-  // 折叠条件：非流式 + 中间有可折叠步骤 + 最终消息已是总结（无工具调用）
-  const shouldFold = hasFoldableSteps && !isActiveTurn && !finalHasTools && stepCount > 0
-
-  /**
-   * 「复制」的复制范围（对标 ZCode：轮尾复制的是整轮，不是最后一段）。
-   *
-   * 一轮里模型可能分几段说话（边干活边汇报），只复制最后一段会丢掉它前面的说明。
-   * 只有一轮确实说了多段时才改语义，单段情形保持「复制这条」的直觉。
-   */
-  const turnText = useMemo(
-    () => turn.aiMessages
-      .filter((m) => m.role === 'assistant' && !m.isSubAgentCard && !!m.content.trim())
-      .map((m) => m.content.trim())
-      .join('\n\n'),
-    [turn.aiMessages]
-  )
-  const mergedIsMoreThanFinal = !!finalMsg && turnText.trim() !== finalMsg.content.trim()
-
+const TurnPanel = memo(function TurnPanel({ turn, vibe, sessionId, canRewindAnchor, onResend, isStreaming }: TurnPanelProps) {
   return (
-    <div className="space-y-1.5">
-      {/* User message（动作条里的 编辑 / 撤回 / 撤销文件 由 RewindActions 提供，仅最后一轮出现） */}
+    <div className="flex flex-col gap-4">
+      {/* 每条真实用户消息都可撤回；编辑和单独撤销文件仍限定最后一轮。 */}
       <MessageItem
         message={turn.userMsg}
         vibe={vibe}
-        extraActions={canRewindAnchor ? (
+        extraActions={isRewindableUserMessage(turn.userMsg) ? (
           <RewindActions
             sessionId={sessionId}
             anchor={turn.userMsg}
@@ -269,50 +176,8 @@ const TurnPanel = memo(function TurnPanel({ turn, isLastTurn, isStreaming, vibe,
           />
         ) : undefined}
       />
-      {/* 折叠头 —— 一个回合只显示一个。整行可点（不是左边一小块），
-          统计口径直接写在行上：步数 / 改了几处 / 耗时，展开后同一行只翻转箭头。 */}
-      {shouldFold && (
-        <button
-          type="button"
-          onClick={() => setStepsExpanded(!stepsExpanded)}
-          aria-expanded={stepsExpanded}
-          className={`flex h-7 w-full items-center gap-2 rounded-md3-xs px-1.5 text-left text-[12px] transition-colors duration-100 ${
-            vibe
-              ? 'text-white/60 hover:bg-white/10'
-              : 'text-dark-onSurfaceVariant/70 hover:bg-dark-surfaceContainerHigh/40'
-          }`}
-        >
-          <ChevronDown size={12} className={`shrink-0 transition-transform duration-200 ${stepsExpanded ? '' : '-rotate-90'}`} />
-          <Wrench size={12} className="shrink-0 opacity-70" />
-          <span className="shrink-0 tabular-nums">{t('chat.stepCount', { count: stepCount })}</span>
-          {editCount > 0 && (
-            <span className="shrink-0 tabular-nums opacity-70">· {t('chat.stepEdits', { count: editCount })}</span>
-          )}
-          {duration && <span className="shrink-0 font-mono text-[11px] tabular-nums opacity-60">· {duration}</span>}
-        </button>
-      )}
-      {shouldFold && stepsExpanded && (
-        <div className="space-y-1">
-          {intermediateMsgs.map((msg) => (
-            <MessageItem key={msg.id} message={msg} vibe={vibe} isIntermediate />
-          ))}
-        </div>
-      )}
-
-      {/* 流式中或无需折叠时，按自然顺序渲染中间消息 */}
-      {(!shouldFold || isActiveTurn) && intermediateMsgs.map((msg) => (
-        <MessageItem key={msg.id} message={msg} vibe={vibe} isIntermediate />
-      ))}
-
-      {/* 最终回复（含 thinking + content）；复制按钮在整轮多段时复制整轮 */}
-      {finalMsg && (
-        <MessageItem
-          message={finalMsg}
-          vibe={vibe}
-          copyText={mergedIsMoreThanFinal ? turnText : undefined}
-          copyTitle={mergedIsMoreThanFinal ? t('chat.copyTurn') : undefined}
-        />
-      )}
+      {/* 助手侧会话流（照抄 ZCode）：思考行 / 正文段 / 工具行按自然顺序平铺，无回合级折叠头 */}
+      <AssistantTurnStream messages={turn.aiMessages} vibe={vibe} sessionId={sessionId} />
     </div>
   )
 }, areTurnPanelPropsEqual)
@@ -397,6 +262,7 @@ function estimateOffsetFor(decision: ScrollRestoreDecision, sizes: number[]): nu
 
 export default function MessageList({ messages, isStreaming, sessionId, vibe, onResend }: MessageListProps) {
   const { t } = useTranslation()
+  const agentActivity = useAgentActivity(sessionId, isStreaming)
   const scrollRef = useRef<HTMLDivElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const scrollRafRef = useRef<number | null>(null)
@@ -764,10 +630,10 @@ if (messages.length === 0) {
           </div>
         )}
         {/* 行间距口径与上方一致：指示器前 24、其后再留 24 + 容器 pb-6，等价改造前 space-y-6 + py-6 */}
-        {isStreaming && (
+        {agentActivity.active && (
           <div className="pt-6">
             {/* Agent 工作状态指示器：像素网格 + 阶段文案 + 耗时，固定在对话最底部 */}
-            <AgentStatusIndicator messages={messages} vibe={vibe} />
+            <AgentStatusIndicator messages={messages} sessionId={sessionId} activity={agentActivity} vibe={vibe} />
           </div>
         )}
         <div ref={bottomRef} className="pt-6" />
@@ -775,24 +641,24 @@ if (messages.length === 0) {
       {/*
         流式期间用户上翻时，顶部吸一条工作状态 —— 底部那条指示器已经被滚出视口，
         没有它就没有任何进度可读。用 absolute 浮层而不是 sticky：sticky 会进滚动流，
-        虚拟列表的行高口径就多算一份。整条只在 isStreaming 期间挂载，
-        于是它的耗时计时器和底部那条同起点（各自 mount 时刻起计），不会报两个数。
+        虚拟列表的行高口径就多算一份。整条只在会话活动期间挂载，
+        两处耗时都取同一条活动消息的时间戳，重新挂载也保持同一起点。
       */}
-      {isStreaming && (
+      {agentActivity.active && (
         <div
           aria-hidden={!awayFromBottom}
           className={`pointer-events-none absolute inset-x-0 top-0 z-10 flex items-center gap-2.5 px-4 pb-3 pt-1.5 transition-opacity duration-200 ${
             awayFromBottom ? 'opacity-100' : 'opacity-0'
           } ${vibe ? 'bg-gradient-to-b from-black/60 to-transparent' : 'bg-gradient-to-b from-dark-surface/95 to-transparent'}`}
         >
-          <AgentStatusIndicator messages={messages} vibe={vibe} variant="dots" />
+          <AgentStatusIndicator messages={messages} sessionId={sessionId} activity={agentActivity} vibe={vibe} variant="dots" />
           <span className={`font-mono text-[11px] tabular-nums ${vibe ? 'text-white/45' : 'text-dark-onSurfaceVariant/55'}`}>
             {t('chat.stepCount', { count: tailTurnStepCount(messages) })}
           </span>
         </div>
       )}
       {/* 流式期间用户上翻：底部中央悬浮「回到底部」按钮 */}
-      {awayFromBottom && isStreaming && (
+      {awayFromBottom && agentActivity.active && (
         <button
           type="button"
           onClick={scrollToBottom}

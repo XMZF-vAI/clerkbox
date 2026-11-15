@@ -21,6 +21,8 @@ import { I18nProvider } from './components/I18nProvider'
 import { isWebUIMode } from './lib/ipc-client'
 import { useIsMobile } from './hooks/use-mobile'
 import { useGlobalShortcuts } from './hooks/use-global-shortcuts'
+import { VibeResourceBoundary } from './components/vibe/VibeErrorBoundary'
+import VibeSessionDrawer from './components/vibe/VibeSessionDrawer'
 
 // 非首屏模块按需加载，避免普通聊天启动时加载设置、技能商店和 VIBE 资源。
 const SkillStore = lazy(() => import('./components/chat/SkillStore'))
@@ -96,6 +98,9 @@ export default function App() {
   // 定时任务执行队列：队首任务由不可见的 TaskRunHost 承载
   const headTaskRun = useScheduledTasksStore((s) => s.queue[0])
   const isVibeMode = useVibeStore((s) => s.isVibeMode)
+  const readingOpacity = useVibeStore((s) => s.readingOpacity)
+  const vibeSidebarOpen = useUIStore((s) => s.vibeSidebarOpen)
+  const commandPaletteOpen = useUIStore((s) => s.commandPaletteOpen)
   const hasCompletedOnboarding = useSettingsStore((s) => s.hasCompletedOnboarding)
   // 等待 zustand persist 水合，避免老配置闪烁成欢迎页
   const [hydrated, setHydrated] = useState(() => useSettingsStore.persist.hasHydrated())
@@ -104,6 +109,10 @@ export default function App() {
   // 移动端（WebUI 窄屏）：侧边栏变为覆盖式抽屉
   const isMobile = useIsMobile()
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
+
+  useEffect(() => {
+    if (showSettings || commandPaletteOpen || !isVibeMode) useUIStore.getState().setVibeSidebarOpen(false)
+  }, [showSettings, commandPaletteOpen, isVibeMode])
 
   useEffect(() => window.clerkbox?.onWindowStateChange(setIsMaximized), [])
   useEffect(() => useSettingsStore.persist.onFinishHydration(() => setHydrated(true)), [])
@@ -173,83 +182,55 @@ export default function App() {
         <OnboardingFlow />
       </div>
     )
-  } else if (isVibeMode) {
-    content = (
-      <div className={`app-window relative h-screen max-md:h-dvh w-screen max-md:w-full overflow-hidden text-white ${windowShape} ${isWebUIMode || isMaximized ? '' : 'border border-white/15'}`}>
-        {/* 就近 Suspense：VIBE 背景首次挂起时只缺背景层，聊天界面立即呈现不闪白 */}
-        <Suspense fallback={null}><VibeBackground /></Suspense>
-        <main className="relative z-10 flex h-full w-full">
-          <div className="min-w-0 flex-1">
-            <ChatPage vibe />
-          </div>
-          {/* VIBE 模式下工作台走玻璃拟态皮肤；面板自身控制显隐 */}
-          <WorkbenchPanel vibe />
-        </main>
-        <AgentActionBridge />
-        {/* 就近 Suspense：控件浮层首次挂起不拖垮整屏 */}
-        <Suspense fallback={null}><VibeControls /></Suspense>
-        {/* 就近 Suspense：设置页懒加载挂起时只缺浮层，主界面不闪白 */}
-        <Suspense fallback={null}>
-          {showSettings && (
-            isMobile ? (
-              <MSettingsPage onClose={() => useSettingsStore.getState().updateSettings({ showSettings: false })} />
-            ) : (
-              <SettingsPage onClose={() => useSettingsStore.getState().updateSettings({ showSettings: false })} />
-            )
-          )}
-        </Suspense>
-      </div>
-    )
   } else {
+    const auxiliaryPageOpen = showSkillStore || showScheduledTasks
     content = (
-      <div className={`app-window flex h-screen max-md:h-dvh w-screen max-md:w-full bg-dark-surface text-dark-onSurface overflow-hidden ${windowShape} ${isWebUIMode || isMaximized ? '' : 'border border-dark-onSurfaceVariant/20'}`}>
-        {isMobile ? (
-          <>
-            {/* 移动端：覆盖式抽屉 + 遮罩 */}
-            {mobileSidebarOpen && (
-              <div className="fixed inset-0 z-40 md:hidden">
-                <div
-                  className="absolute inset-0 bg-black/55 animate-fade-in"
-                  onClick={() => setMobileSidebarOpen(false)}
-                  aria-hidden
-                />
-                <div className="absolute inset-y-0 left-0 w-[85vw] max-w-xs shadow-elevation-3 animate-slide-in-left">
-                  <Sidebar
-                    collapsed={false}
-                    onToggle={() => setMobileSidebarOpen(false)}
-                    onNavigate={() => setMobileSidebarOpen(false)}
-                  />
-                </div>
+      <div
+        className={`app-window relative flex h-screen max-md:h-dvh w-screen max-md:w-full overflow-hidden ${isVibeMode ? 'vibe-shell text-white' : 'bg-dark-surface text-dark-onSurface'} ${windowShape} ${isWebUIMode || isMaximized ? '' : 'border border-dark-onSurfaceVariant/20'}`}
+        style={{ '--vibe-reading-opacity': readingOpacity / 100 } as React.CSSProperties}
+      >
+        {/* Optional atmosphere never owns the work component lifecycle. */}
+        {isVibeMode && (
+          <VibeResourceBoundary key="background" fallback="background">
+            <Suspense fallback={null}><VibeBackground /></Suspense>
+          </VibeResourceBoundary>
+        )}
+        <div key="navigation" className={isVibeMode ? 'hidden' : 'contents'}>
+          {!isMobile && <Sidebar collapsed={sidebarCollapsed} onToggle={toggleSidebar} />}
+          {isMobile && mobileSidebarOpen && (
+            <div className="fixed inset-0 z-40">
+              <div className="absolute inset-0 bg-black/55" onClick={() => setMobileSidebarOpen(false)} aria-hidden />
+              <div className="absolute inset-y-0 left-0 w-[85vw] max-w-xs shadow-elevation-3 animate-slide-in-left">
+                <Sidebar collapsed={false} onToggle={() => setMobileSidebarOpen(false)} onNavigate={() => setMobileSidebarOpen(false)} />
+              </div>
+            </div>
+          )}
+        </div>
+        <div key="workspace" className="workspace-shell relative z-10 flex flex-1 flex-col min-h-0 min-w-0">
+          {isVibeMode ? (
+            <VibeResourceBoundary fallback="controls">
+              <Suspense fallback={<div className="h-16 shrink-0" />}><VibeControls /></Suspense>
+            </VibeResourceBoundary>
+          ) : (
+            <TitleBar sidebarVisible={isMobile ? mobileSidebarOpen : !sidebarCollapsed} onToggleSidebar={isMobile ? () => setMobileSidebarOpen(true) : toggleSidebar} />
+          )}
+          <main className={`workspace-main relative flex flex-1 min-h-0 min-w-0 overflow-hidden ${isVibeMode ? 'vibe-workspace' : ''}`}>
+            <div className={`workspace-chat min-h-0 min-w-0 flex-1 overflow-hidden ${isVibeMode ? 'vibe-reading-surface' : ''}`} aria-hidden={auxiliaryPageOpen} inert={auxiliaryPageOpen}>
+              <ChatPage vibe={isVibeMode} />
+            </div>
+            {/* Keep terminal and browser instances mounted when changing mode or pages. */}
+            <div className={auxiliaryPageOpen ? 'pointer-events-none fixed -left-[10000px] top-0 h-px w-px overflow-hidden' : 'contents'} aria-hidden={auxiliaryPageOpen} inert={auxiliaryPageOpen}>
+              <WorkbenchPanel vibe={isVibeMode} suspended={auxiliaryPageOpen} />
+            </div>
+            {auxiliaryPageOpen && (
+              <div className="absolute inset-0 z-20 overflow-hidden bg-dark-surface text-dark-onSurface">
+                <Suspense fallback={null}>{showScheduledTasks ? <ScheduledTasksPage /> : <SkillStore />}</Suspense>
               </div>
             )}
-          </>
-        ) : (
-          <Sidebar
-            collapsed={sidebarCollapsed}
-            onToggle={toggleSidebar}
-          />
-        )}
-        <div className="flex flex-col flex-1 min-w-0">
-          <TitleBar sidebarVisible={isMobile ? mobileSidebarOpen : !sidebarCollapsed} onToggleSidebar={isMobile ? () => setMobileSidebarOpen(true) : toggleSidebar} />
-          <main className="flex-1 min-h-0 overflow-hidden">
-            <div className="flex h-full">
-              <div className="min-w-0 flex-1 overflow-hidden">
-                {showScheduledTasks ? (
-                  <Suspense fallback={null}><ScheduledTasksPage /></Suspense>
-                ) : showSkillStore ? (
-                  <Suspense fallback={null}><SkillStore /></Suspense>
-                ) : (
-                  <ChatPage />
-                )}
-              </div>
-              {/* 技能商店/定时任务页为独立全屏页，工作台仅在聊天视图挂载 */}
-              {!showSkillStore && !showScheduledTasks && <WorkbenchPanel />}
-            </div>
           </main>
         </div>
-        {/* Agent 动作桥接（浏览器 / 桌面）：只做主进程与渲染层之间的接线，无 UI */}
-        <AgentActionBridge />
-        {/* 就近 Suspense：设置页懒加载挂起时只缺浮层，主界面不闪白 */}
+        <AgentActionBridge key="agent-bridge" />
+        {isVibeMode && vibeSidebarOpen && <VibeSessionDrawer />}
         <Suspense fallback={null}>
           {showSettings && (
             isMobile ? (

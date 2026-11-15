@@ -1,635 +1,36 @@
-import { useState, useEffect, useRef, useMemo, memo, Suspense, type ReactNode } from 'react'
-import { createPortal } from 'react-dom'
-import { Check, Terminal, FileText, FolderOpen, AlertTriangle, ChevronDown, ChevronUp, Wrench, FilePen, Globe, Pencil, Archive, Loader2, BookOpen, GitBranch, Target, CircleHelp, ListTodo, Sparkles, LayoutGrid, MonitorSmartphone, MousePointerClick, Brain, BellRing, Workflow } from 'lucide-react'
+import { useState, memo, type ReactNode } from 'react'
+import { Check, FileText, AlertTriangle, ChevronDown, ChevronUp, Wrench, Archive, Loader2, BookOpen, GitBranch, Target, BellRing, Workflow } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import type { Message, StreamingToolCall } from '../../types/agent'
+import type { Message } from '../../types/agent'
 import { useChatStore } from '../../stores/chat-store'
 import { parsePermissionAudit } from '../../lib/permission-preview'
-// 正文 Markdown 渲染已抽到独立组件（子代理面板 / 工作流结果共用同一实现）
 import { MarkdownContent } from './MarkdownContent'
-import {
-  getToolCardOpen,
-  hasAutoActed,
-  hasUserTouched,
-  markAutoActed,
-  resolveToolCardAutoAction,
-  setToolCardOpen,
-  toolGroupStateKey,
-} from '../../lib/tool-card-state'
 import { PermissionAuditRow } from './PermissionCard'
 import { CopyButton, MessageActions } from './MessageActions'
-import { isRenderedByUnifiedEntry, resolveRenderer } from './tool-renderers/resolveRenderer'
-import { ToolDetailLines, ToolDetailPanel, ToolShell, ToolSkeleton, noteToolRunning } from './tool-renderers/ToolShell'
-import { parseEditDiff, stripEditDiff, type EditDiffMetaView } from './tool-renderers/shared'
+import { isRenderedByUnifiedEntry } from './tool-renderers/resolveRenderer'
+import { ToolCallRow } from './ToolCallRow'
 import { SubAgentCard } from './SubAgentCard'
 
 interface MessageItemProps {
   message: Message
   vibe?: boolean
   sessionId?: string
-  /** 中间过程消息（非最终回复），隐藏时间戳和缓存统计 */
-  isIntermediate?: boolean
   /** 追加在这一行动作条里的按钮（撤回/编辑等），由父级按 turn 语义下发 */
   extraActions?: ReactNode
-  /** 复制按钮要复制的正文；父级可下发「整轮合并文本」而不是这一条的内容 */
-  copyText?: string
-  /** 复制按钮的 tooltip；整轮复制要写清楚复制范围 */
-  copyTitle?: string
 }
 
-/** Extract path and content from partial JSON args for write_file preview */
-function extractWriteFileData(argsSoFar: string): { path: string; content: string } {
-  // Try full parse first
-  try {
-    const parsed = JSON.parse(argsSoFar)
-    return { path: parsed.path || '', content: parsed.content || '' }
-  } catch { /* Partial JSON falls through to tolerant field extraction. */ }
-
-  let path = ''
-  let content = ''
-
-  // Extract path with regex
-  const pathMatch = argsSoFar.match(/"path"\s*:\s*"((?:[^"\\]|\\.)*)"/)
-  if (pathMatch) {
-    try { path = JSON.parse('"' + pathMatch[1] + '"') } catch { path = pathMatch[1] }
-  }
-
-  // Extract content - find "content": " and take everything after
-  const contentKey = argsSoFar.indexOf('"content"')
-  if (contentKey !== -1) {
-    const colonIdx = argsSoFar.indexOf(':', contentKey)
-    const quoteIdx = argsSoFar.indexOf('"', colonIdx + 1)
-    if (quoteIdx > colonIdx) {
-      let raw = argsSoFar.slice(quoteIdx + 1)
-      // Remove trailing incomplete escape sequences
-      raw = raw.replace(/\\$/, '')
-      // Unescape common JSON sequences
-      content = raw
-        .replace(/\\n/g, '\n')
-        .replace(/\\t/g, '\t')
-        .replace(/\\\\/g, '\\')
-        .replace(/\\"/g, '"')
-    }
-  }
-
-  return { path, content }
-}
-
-// ── 工具行渲染（紧凑行样式，参考 Tool Chips 设计）──
-// 差异元数据解析（__EDIT_DIFF__）与折叠壳统一取自 tool-renderers，避免两处实现漂移
-
-const fileBase = (p: string) => p.split(/[\\/]/).pop() || p
-
-/** 从流式部分 JSON 中抽第一个出现的字符串字段值 */
-function extractFirstStringField(argsSoFar: string, keys: string[]): string {
-  for (const k of keys) {
-    const m = argsSoFar.match(new RegExp(`"${k}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`))
-    if (m) {
-      try { return JSON.parse('"' + m[1] + '"') } catch { return m[1] }
-    }
-  }
-  return ''
-}
-
-function toolRowIcon(name: string) {
-  // app_* 自我管控工具要在关键词规则之前拦：app_list_sessions 会被 includes('list') 抓去
-  // FolderOpen、app_read_session 被 includes('read') 抓去 FileText，语义都不对
-  if (name.startsWith('app_')) return <LayoutGrid size={13} />
-  // Agent 动作同理：browser_click 含 'click' 不会被下面的规则抓走，但
-  // computer_wait / browser_snapshot 这类会掉进 read/list 的关键词规则，图标完全不对
-  if (name.startsWith('computer_')) return <MonitorSmartphone size={13} />
-  if (name.startsWith('browser_')) return <MousePointerClick size={13} />
-  if (name === 'question') return <CircleHelp size={13} />
-  if (name === 'todowrite') return <ListTodo size={13} />
-  if (name === 'create_workflow') return <Workflow size={13} />
-  if (name === 'search_replace' || name === 'edit_file') return <Pencil size={13} />
-  if (name === 'write_file') return <FilePen size={13} />
-  if (name.includes('read') || name.includes('file')) return <FileText size={13} />
-  if (name.includes('dir') || name.includes('list')) return <FolderOpen size={13} />
-  if (name.includes('web') || (name.includes('search') && !name.includes('content'))) return <Globe size={13} />
-  return <Terminal size={13} />
-}
-
-/** 行 chip 文本：读写类显示文件名，命令/搜索显示参数片段 */
-function chipTextFor(name: string, args: Record<string, unknown>, t: ReturnType<typeof useTranslation>['t']): string {
-  // 自我管控工具没有单一目标参数，用工具自身的短标签做 chip 比截断 JSON 可读；
-  // i18n 的 tools.app_* 补齐前会回落到英文工具名（defaultValue 兜底，与既有写法一致）
-  if (name.startsWith('app_')) return t(`tools.${name}`, { defaultValue: name })
-  // 工作流：显示工作流名（脚本本体太长，名字才是用户认得的标识）
-  if (name === 'create_workflow') return String(args.name || '')
-  // Agent 动作：展示目标而不是 JSON 片段。坐标/URL/元素 ref 是用户唯一关心的信息，
-  // 摊开 args 只会把它们淹没在默认值里
-  if (name.startsWith('browser_') || name.startsWith('computer_')) {
-    if (name === 'browser_navigate') return String(args.url || args.action || '')
-    if (name === 'computer_drag') return `${args.from_x},${args.from_y} → ${args.to_x},${args.to_y}`
-    if (args.x !== undefined && args.y !== undefined) return `${args.x}, ${args.y}`
-    if (args.ref) return String(args.ref)
-    if (args.key) return String(args.key)
-    if (args.name) return String(args.name)
-    if (args.text) return String(args.text).slice(0, 40)
-    if (args.selector) return String(args.selector)
-    return ''
-  }
-  if (name === 'write_file' || name === 'search_replace' || name === 'edit_file' ||
-      name === 'read_file' || name === 'read_image' || name === 'list_dir') {
-    return fileBase(String(args.path || ''))
-  }
-  if (name === 'execute_command') return String(args.command || '').slice(0, 80)
-  if (name === 'search_files' || name === 'search_content') return String(args.pattern || '')
-  if (name === 'web_search') return String(args.query || '')
-  if (name === 'web_fetch') return String(args.url || '')
-  if (name === 'question') return t('chat.chipQuestions', { count: Array.isArray(args.questions) ? args.questions.length : 0 })
-  if (name === 'todowrite') return t('chat.chipTodos', { count: Array.isArray(args.items) ? args.items.length : 0 })
-  const json = JSON.stringify(args)
-  return json === '{}' ? '' : json.slice(0, 80)
-}
-
-/** 单个工具调用行：图标 + 动作标签 + 参数 chip；悬停露出 chevron，点击展开明细 */
-function ToolRow({ toolCall, result, vibe, sessionId }: {
-  toolCall: NonNullable<Message['toolCalls']>[0]
-  result?: Message['toolResults']
-  vibe?: boolean
-  /** 所属会话：工作流停止按钮要向宿主发停止命令 */
-  sessionId?: string
-}) {
+/**
+ * 用户气泡与特殊卡片渲染。
+ * 正常助手消息（思考 / 正文 / 工具）已改由 AssistantTurnStream 按 ZCode 行流渲染，
+ * 这里只保留：用户消息、压缩摘要 / 边界、权限留痕、目标判定、通知条、子代理卡、
+ * 压缩 / 重试占位、历史 collapsed 消息。
+ */
+function MessageItem({ message, vibe = false, sessionId, extraActions }: MessageItemProps) {
   const { t } = useTranslation()
-  // 展开态经 tool-card-state 仓库持久（键=toolCall.id）：虚拟行重挂 / 会话切回不丢
-  const [open, setOpen] = useState(() => getToolCardOpen(toolCall.id) ?? false)
-  // 收起动画期间保持展开体挂载（300ms 延迟卸载）：grid-rows 收起动画需要内容在位，
-  // 立即卸载会让动画塌成空壳；也避免误关后立刻重开时重新拉取 lazy 渲染器分片
-  const [mountDetail, setMountDetail] = useState(() => getToolCardOpen(toolCall.id) ?? false)
-  const toolResult = result?.find((r) => r.toolCallId === toolCall.id)
-  const isError = toolResult?.isError ?? false
-  const running = !toolResult
-  const Renderer = resolveRenderer(toolCall.name)
-  // 解析结果一次算完：`meta` 若在外层每次渲染新建，下面的 useMemo 依赖必然变化，
-  // 等于每来一个 token 就把每条工具行的 diff 重切一遍（工具行可多达几十条）。
-  const parsed = useMemo<{
-    meta: EditDiffMetaView | null
-    detailLines: Array<{ text: string; tone: 'add' | 'del' | 'ctx' }>
-  }>(() => {
-    if (!toolResult) return { meta: null, detailLines: [] }
-    const diff = isError ? null : parseEditDiff(toolResult.content)
-    if (diff) return { meta: diff, detailLines: diff.lines }
-    return {
-      meta: null,
-      detailLines: stripEditDiff(toolResult.content)
-        .split('\n')
-        .filter((l) => l.trim())
-        .slice(0, 5)
-        .map((text) => ({ text, tone: 'ctx' as const })),
-    }
-  }, [toolResult, isError])
-  const { meta, detailLines } = parsed
-
-  // 耗时在常驻的工具行侧记录，展开后的专属渲染器按 callId 读取
-  useEffect(() => {
-    noteToolRunning(toolCall.id, running)
-  }, [toolCall.id, running])
-
-  // 展开体挂载跟随 open：打开立即挂；收起走 300ms 延迟卸载（动画期间内容在位不塌陷）
-  useEffect(() => {
-    if (open) {
-      setMountDetail(true)
-      return
-    }
-    const timer = setTimeout(() => setMountDetail(false), 300)
-    return () => clearTimeout(timer)
-  }, [open])
-
-  // 工作流起跑即展开：运行看板是这次调用唯一的进度面，折叠着等于没有。
-  // 只对 create_workflow 生效；展开后记 autoActed，完成边沿就不会又把它收起来
-  // （那会在跑完的瞬间把用户正看着的终态图关掉）。用户手动收起过则完全不抢方向盘。
-  const workflowStartedRef = useRef(false)
-  useEffect(() => {
-    if (!running || workflowStartedRef.current) return
-    if (toolCall.name !== 'create_workflow' || hasUserTouched(toolCall.id)) return
-    workflowStartedRef.current = true
-    markAutoActed(toolCall.id)
-    setToolCardOpen(toolCall.id, true)
-    setOpen(true)
-  }, [running, toolCall.id, toolCall.name])
-
-  // 完成边沿的自动展开/收起（每行一次，用户手动操作过的不抢方向盘）：
-  // 写类完成后自动展开看 diff；长输出完成后收起流式期间摊开的明细。
-  const wasRunningRef = useRef(running)
-  useEffect(() => {
-    const wasRunning = wasRunningRef.current
-    wasRunningRef.current = running
-    if (wasRunning === running || !wasRunning || running) return
-    const action = resolveToolCardAutoAction({
-      wasRunning,
-      isRunning: running,
-      isOpen: open,
-      userTouched: hasUserTouched(toolCall.id),
-      toolName: toolCall.name,
-      hasAutoActed: hasAutoActed(toolCall.id),
-    })
-    if (action === 'open' && !open) {
-      markAutoActed(toolCall.id)
-      setToolCardOpen(toolCall.id, true)
-      setOpen(true)
-    } else if (action === 'collapse' && open) {
-      markAutoActed(toolCall.id)
-      setToolCardOpen(toolCall.id, false)
-      setOpen(false)
-    }
-  }, [running, open, toolCall.id, toolCall.name])
-
-  const toggleOpen = () => {
-    const next = !open
-    setOpen(next)
-    // 用户手动操作：此后该行不再被自动动作（autoOpen/autoCollapse 让位）
-    setToolCardOpen(toolCall.id, next, { userAction: true })
-  }
-
-  const label = toolCall.name === 'write_file'
-    ? t('chat.toolRowWrite', { count: String(toolCall.arguments.content || '').split('\n').length })
-    : t(`tools.${toolCall.name}`, { defaultValue: toolCall.name })
-  const chip = chipTextFor(toolCall.name, toolCall.arguments, t)
-
-  return (
-    <div className="animate-fade-up">
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={toggleOpen}
-        className={`flex h-7 w-full items-center gap-2 rounded-md3-xs px-1.5 text-left transition-colors duration-100 ${
-          vibe ? 'hover:bg-white/10' : 'hover:bg-dark-surfaceContainerHigh/40'
-        }`}
-      >
-        <span className={`flex size-4 shrink-0 items-center justify-center ${
-          isError ? 'text-md-error' : running ? 'text-md-info' : vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/50'
-        }`}>
-          {isError ? <AlertTriangle size={13} /> : running ? <Loader2 size={13} className="animate-spin" /> : toolRowIcon(toolCall.name)}
-        </span>
-        <span className={`shrink-0 text-[12px] font-medium ${vibe ? 'text-white/85' : 'text-dark-onSurface/85'}`}>{label}</span>
-        {/* 目标 chip 去底色：底色把一行切成三段，反而比纯文字更挤；参考图里文件名就是普通文字 */}
-        <span className={`min-w-0 flex-1 truncate font-mono text-[11px] ${
-          vibe ? 'text-white/45' : 'text-dark-onSurfaceVariant/55'
-        }`}>
-          {chip || '…'}
-        </span>
-        {meta && meta.added > 0 && (
-          <span className="shrink-0 font-mono text-[10px] tabular-nums text-md-success">+{meta.added}</span>
-        )}
-        {meta && meta.removed > 0 && (
-          <span className="shrink-0 font-mono text-[10px] tabular-nums text-md-error">−{meta.removed}</span>
-        )}
-        {/* 失败原因挂原生 tooltip：行不强制展开（ZCode 同款语义），悬停即可读失败输出 */}
-        {isError && (
-          <span
-            className="shrink-0 text-[10px] text-md-error"
-            title={toolResult ? toolResult.content.slice(0, 500) : undefined}
-          >
-            {t('toolPreview.executionFailed')}
-          </span>
-        )}
-        {/* chevron 常显（原来只在悬停时与图标交叉淡入）：展开与否是这一行的状态，不该靠悬停才看得见 */}
-        <ChevronDown
-          size={12}
-          className={`shrink-0 transition-transform duration-200 ${open ? '' : '-rotate-90'} ${
-            vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/40'
-          }`}
-        />
-      </button>
-      {/* 展开明细：专属渲染器优先，未注册工具走通用回退（与现状同一份折叠动效与样式） */}
-      <ToolShell open={open}>
-        {Renderer ? (
-          /* 展开时挂载；收起后 300ms 内仍挂载（动画不塌、lazy 分片不重拉），从未展开过不挂载 */
-          mountDetail ? (
-            <Suspense fallback={<ToolSkeleton vibe={vibe} />}>
-              <Renderer
-                call={toolCall}
-                result={toolResult}
-                isError={isError}
-                args={toolCall.arguments}
-                vibe={vibe}
-                sessionId={sessionId}
-              />
-            </Suspense>
-          ) : null
-        ) : detailLines.length > 0 ? (
-          <ToolDetailLines lines={detailLines} vibe={vibe} />
-        ) : null}
-      </ToolShell>
-    </div>
-  )
-}
-
-/** 流式生成中的工具调用行：与完成态同款行样式，参数从部分 JSON 容错抽取 */
-function StreamingToolRow({ call, vibe }: { call: StreamingToolCall; vibe?: boolean }) {
-  const { t } = useTranslation()
-  const raw = useMemo(() => {
-    if (call.name === 'write_file') return extractWriteFileData(call.argsSoFar).path
-    const v = extractFirstStringField(call.argsSoFar, ['path', 'command', 'query', 'url', 'pattern'])
-    return v.length > 80 ? v.slice(0, 80) : v
-  }, [call.name, call.argsSoFar])
-  const isPathTool = call.name === 'write_file' || call.name === 'search_replace' ||
-    call.name === 'read_file' || call.name === 'read_image' || call.name === 'list_dir'
-  const chip = isPathTool ? fileBase(raw) : raw
-
-  return (
-    <div className="flex h-7 w-full items-center gap-2 rounded-md3-xs px-1.5 animate-fade-up">
-      <span className={`flex size-4 shrink-0 items-center justify-center ${vibe ? 'text-white/60' : 'text-dark-onSurfaceVariant/60'}`}>
-        <Loader2 size={13} className="animate-spin" />
-      </span>
-      <span className={`shrink-0 text-[12px] font-medium ${vibe ? 'text-white/85' : 'text-dark-onSurface/85'}`}>
-        {t(`tools.${call.name}`, { defaultValue: call.name })}
-      </span>
-      <span className={`min-w-0 flex-1 truncate font-mono text-[11px] ${
-        vibe ? 'text-white/45' : 'text-dark-onSurfaceVariant/55'
-      }`}>
-        {chip || t('toolPreview.parsing')}
-      </span>
-      {/* 行尾的「执行中」去掉了：行首的 spinner 已经说明这一行在跑，两处报同一件事是纯占位 */}
-      <span className="size-3 shrink-0" aria-hidden />
-    </div>
-  )
-}
-
-function StreamingToolRows({ calls, vibe }: { calls: StreamingToolCall[]; vibe?: boolean }) {
-  if (!calls.length) return null
-  return (
-    <div className="flex w-full flex-col gap-0.5">
-      {calls.map((tc) => <StreamingToolRow key={tc.id} call={tc} vibe={vibe} />)}
-    </div>
-  )
-}
-
-/** 文件差异 chips：run 完成后聚合各文件增删行数，悬停弹出 diff 预览浮层。
- *  浮层经 portal 渲染到 body —— 消息列表容器带 transform，会重定义 fixed 坐标系。 */
-function DiffChips({ metas, vibe }: { metas: EditDiffMetaView[]; vibe?: boolean }) {
-  const { t } = useTranslation()
-  const [preview, setPreview] = useState<{ meta: EditDiffMetaView; x: number; top?: number; bottom?: number } | null>(null)
-
-  const openPreview = (meta: EditDiffMetaView) => (e: React.SyntheticEvent) => {
-    const rect = (e.currentTarget as Element).getBoundingClientRect()
-    const height = 30 + Math.min(meta.lines.length, 16) * 20
-    const fitsBelow = rect.bottom + 6 + height <= window.innerHeight - 12
-    setPreview({
-      meta,
-      x: Math.max(12, Math.min(rect.left, window.innerWidth - 320)),
-      ...(fitsBelow ? { top: rect.bottom + 6 } : { bottom: window.innerHeight - rect.top + 6 }),
-    })
-  }
-  const closePreview = (path: string) => () =>
-    setPreview((cur) => (cur?.meta.path === path ? null : cur))
-
-  return (
-    <div className={`mt-2 flex max-w-full flex-wrap gap-1.5 border-t pt-2 ${vibe ? 'border-white/10' : 'border-dark-onSurfaceVariant/[0.06]'}`}>
-      {metas.map((m, i) => (
-        <span key={m.path} className="relative" onMouseEnter={openPreview(m)} onMouseLeave={closePreview(m.path)}>
-          <button
-            type="button"
-            aria-label={t('chat.diffPreviewLabel', { file: fileBase(m.path) })}
-            className={`inline-flex h-7 max-w-full items-center gap-1.5 rounded-md3-xs px-2 font-mono text-[11px] transition-colors duration-100 animate-pop-in ${
-              vibe
-                ? 'bg-white/[0.08] text-white/85 hover:bg-white/15'
-                : 'border border-dark-onSurfaceVariant/[0.06] bg-dark-surfaceContainer/60 text-dark-onSurface/85 hover:bg-dark-surfaceContainerHigh/60'
-            }`}
-            style={{ animationDelay: `${i * 60}ms` }}
-          >
-            <span className="min-w-0 truncate">{fileBase(m.path)}</span>
-            {m.added > 0 && <span className="shrink-0 tabular-nums text-md-success">+{m.added}</span>}
-            {m.removed > 0 && <span className="shrink-0 tabular-nums text-md-error">−{m.removed}</span>}
-          </button>
-        </span>
-      ))}
-      {preview && typeof document !== 'undefined' && createPortal(
-        <div
-          className={`fixed z-50 w-80 overflow-hidden rounded-md3-md border shadow-elevation-3 ${
-            vibe ? 'border-white/10 bg-white/10 backdrop-blur-xl' : 'border-dark-onSurfaceVariant/10 bg-dark-surfaceContainerHighest'
-          }`}
-          style={{
-            left: preview.x,
-            top: preview.top,
-            bottom: preview.bottom,
-            animation: 'popIn 160ms cubic-bezier(0.23,1,0.32,1) both',
-            transformOrigin: preview.top === undefined ? 'bottom left' : 'top left',
-          }}
-        >
-          <div className={`flex items-center justify-between border-b px-2.5 py-1.5 font-mono text-[11px] ${vibe ? 'border-white/10' : 'border-dark-onSurfaceVariant/[0.06]'}`}>
-            <span className={`min-w-0 truncate ${vibe ? 'text-white/60' : 'text-dark-onSurfaceVariant/70'}`} title={preview.meta.path}>
-              {fileBase(preview.meta.path)}
-            </span>
-            <span className="shrink-0 tabular-nums">
-              {preview.meta.added > 0 && <span className="text-md-success"> +{preview.meta.added}</span>}
-              {preview.meta.removed > 0 && <span className="text-md-error"> −{preview.meta.removed}</span>}
-            </span>
-          </div>
-          <div className="py-1 font-mono text-[11px] leading-[1.8]">
-            {preview.meta.lines.map((line, i) => (
-              <div
-                key={i}
-                className={`flex gap-2 px-2.5 whitespace-pre ${
-                  line.tone === 'add' ? 'bg-md-success/8 text-md-success'
-                  : line.tone === 'del' ? 'bg-md-error/8 text-md-error'
-                  : vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/60'
-                }`}
-              >
-                <span className="w-3 shrink-0 select-none">{line.tone === 'add' ? '+' : line.tone === 'del' ? '−' : ' '}</span>
-                <span className="min-w-0 truncate" title={line.text}>{line.text}</span>
-              </div>
-            ))}
-          </div>
-        </div>,
-        document.body,
-      )}
-    </div>
-  )
-}
-
-/** 工具运行组：折叠头部「N 个工具调用」+ 紧凑行列表 + 差异 chips */
-function ToolRunGroup({ toolCalls, toolResults, vibe, defaultOpen = false, finishReason, sessionId }: {
-  toolCalls: NonNullable<Message['toolCalls']>
-  toolResults?: Message['toolResults']
-  vibe?: boolean
-  defaultOpen?: boolean
-  /** 消息完成原因；流式过程中工具组默认展开，完成后自动收起 */
-  finishReason?: string
-  /** 所属会话：透传给 ToolRow（工作流停止按钮） */
-  sessionId?: string
-}) {
-  const { t } = useTranslation()
-  const visible = toolCalls.filter((tc) => !isRenderedByUnifiedEntry(tc.name))
-  // 组展开态持久：键锚定组内首行（流式追加不改组身份），虚拟重挂 / 会话切回不丢
-  const groupKey = visible.length > 0 ? toolGroupStateKey(visible[0].id) : ''
-  const [open, setOpen] = useState(() => (groupKey ? getToolCardOpen(groupKey) ?? defaultOpen : defaultOpen))
-
-  // 流式过程中保持工具组展开，消息完成后自动收起（收起也写仓库，重挂后不回弹）
-  useEffect(() => {
-    if (defaultOpen && finishReason && open) {
-      setOpen(false)
-      if (groupKey) setToolCardOpen(groupKey, false)
-    }
-  }, [finishReason, defaultOpen, open, groupKey])
-
-  const toggleGroup = () => {
-    const next = !open
-    setOpen(next)
-    if (groupKey) setToolCardOpen(groupKey, next, { userAction: true })
-  }
-  const running = visible.some((tc) => !toolResults?.some((r) => r.toolCallId === tc.id))
-  const diffMetas = useMemo(() => {
-    const byPath = new Map<string, EditDiffMetaView>()
-    for (const r of toolResults || []) {
-      const meta = parseEditDiff(r.content)
-      if (!meta || r.isError) continue
-      const cur = byPath.get(meta.path)
-      if (cur) {
-        cur.added += meta.added
-        cur.removed += meta.removed
-        cur.lines = meta.lines
-      } else {
-        byPath.set(meta.path, { ...meta })
-      }
-    }
-    return Array.from(byPath.values())
-  }, [toolResults])
-
-  if (visible.length === 0) return null
-
-  return (
-    <div className="w-full">
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={toggleGroup}
-        className={`flex w-fit items-center gap-1.5 rounded-md3-xs px-1.5 py-1 text-[12px] transition-colors duration-100 ${
-          vibe ? 'text-white/60 hover:bg-white/10' : 'text-dark-onSurfaceVariant/60 hover:bg-dark-surfaceContainerHigh/40'
-        }`}
-      >
-        <ChevronDown size={12} className={`transition-transform duration-200 ${open ? '' : '-rotate-90'}`} />
-        <span className="tabular-nums">{t('chat.toolRunSummary', { count: visible.length })}</span>
-        {running && <span className="size-1.5 animate-pulse-soft rounded-full bg-md-info" />}
-      </button>
-      <div
-        className="grid transition-[grid-template-rows,opacity] duration-300"
-        style={{ gridTemplateRows: open ? '1fr' : '0fr', opacity: open ? 1 : 0, transitionTimingFunction: 'cubic-bezier(0.23, 1, 0.32, 1)' }}
-      >
-        <div className="min-h-0 overflow-hidden">
-          <div className="mt-1 flex flex-col gap-0.5">
-            {visible.map((tc) => (
-              <ToolRow key={tc.id} toolCall={tc} result={toolResults} vibe={vibe} sessionId={sessionId} />
-            ))}
-          </div>
-          {!running && diffMetas.length > 0 && <DiffChips metas={diffMetas} vibe={vibe} />}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-interface ThinkingRowProps {
-  thinkingContent: string
-  isStreaming: boolean
-  hasContent: boolean
-  finishReason?: string
-  expanded: boolean
-  onToggle: () => void
-  vibe?: boolean
-}
-
-/** 思考行：与工具行同款的 h-7 时间线行（图标 +「深度思考」+ 状态 + 常显 chevron）。
- *  原来是独立一套「思考中... ⌄」+ 圆角展开框，和下面的动作行不是同一种语言，
- *  读起来像两条并行的时间线；参考图里思考就是时间线上普通的一行。 */
-function ThinkingRow({ thinkingContent, isStreaming, hasContent, finishReason, expanded, onToggle, vibe }: ThinkingRowProps) {
-  const { t } = useTranslation()
-  const startRef = useRef<number | null>(null)
-  const [done, setDone] = useState(false)
-
-  // Mark thinking phase boundaries; the wall-clock duration is no longer displayed.
-  useEffect(() => {
-    if (!thinkingContent) {
-      startRef.current = null
-      setDone(false)
-      return
-    }
-
-    // Mark start when thinking content first appears
-    if (startRef.current == null) {
-      startRef.current = Date.now()
-      setDone(false)
-    }
-
-    // Thinking is done when:
-    // 1. Message has final content (reply started) → thinking phase ended
-    // 2. finishReason present → entire message finished
-    // 3. !isStreaming → stream ended
-    if ((hasContent || finishReason || !isStreaming) && startRef.current != null) {
-      setDone(true)
-    }
-  }, [thinkingContent, isStreaming, hasContent, finishReason])
-
-  const statusText = !done ? t('chat.thinkingInProgress') : ''
-
-  return (
-    <div className="w-full">
-      <button
-        type="button"
-        onClick={onToggle}
-        aria-expanded={expanded}
-        className={`flex h-7 w-full items-center gap-2 rounded-md3-xs px-1.5 text-left transition-colors duration-100 ${
-          vibe ? 'hover:bg-white/10' : 'hover:bg-dark-surfaceContainerHigh/40'
-        }`}
-      >
-        <span className={`flex size-4 shrink-0 items-center justify-center ${
-          !done ? 'text-md-info' : vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/50'
-        }`}>
-          <Brain size={13} />
-        </span>
-        <span className={`shrink-0 text-[12px] font-medium ${vibe ? 'text-white/85' : 'text-dark-onSurface/85'}`}>
-          {t('chat.thinkingRow')}
-        </span>
-        <span className={`inline-flex h-5 min-w-0 flex-1 items-center truncate px-1.5 text-[11px] ${
-          !done
-            ? 'thinking-shimmer font-medium'
-            : vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/60'
-        }`}>
-          {statusText}
-        </span>
-        <ChevronDown
-          size={12}
-          className={`shrink-0 transition-transform duration-200 ${expanded ? '' : '-rotate-90'} ${
-            vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/40'
-          }`}
-        />
-      </button>
-      <ToolShell open={expanded}>
-        <ToolDetailPanel vibe={vibe}>
-          <div
-            className={`whitespace-pre-wrap break-words py-1 text-[12px] leading-relaxed max-h-[300px] overflow-y-auto ${
-              vibe ? 'text-white/70' : 'text-dark-onSurfaceVariant/70'
-            }`}
-          >
-            {thinkingContent}
-          </div>
-        </ToolDetailPanel>
-      </ToolShell>
-    </div>
-  )
-}
-
-function MessageItem({ message, vibe = false, sessionId, isIntermediate = false, extraActions, copyText, copyTitle }: MessageItemProps) {
-  const { t } = useTranslation()
-  const [thinkingExpanded, setThinkingExpanded] = useState(false)
   const [collapsedExpanded, setCollapsedExpanded] = useState(false)
   const [summaryExpanded, setSummaryExpanded] = useState(false)
   const isUser = message.role === 'user'
   const isToolResult = message.role === 'tool'
-  const isTruncated = message.finishReason === 'length'
-  const hasThinking = !!message.thinkingContent && message.thinkingContent.length > 0
-  const hasVisibleToolCalls = message.toolCalls?.some((tc) => !isRenderedByUnifiedEntry(tc.name)) ?? false
-  const cacheReadTokens = message.usage?.cache_read_input_tokens ?? 0
-  const cacheCreatedTokens = message.usage?.cache_creation_input_tokens ?? 0
-  const cacheEligibleTokens = cacheReadTokens + cacheCreatedTokens
-  // OpenAI 兼容端点只报命中不报写入（creation=0），此时按 read/prompt 算真实命中率
-  const cacheHitRate = cacheCreatedTokens > 0
-    ? Math.round(cacheReadTokens / cacheEligibleTokens * 100)
-    : message.usage?.prompt_tokens
-      ? Math.round(cacheReadTokens / message.usage.prompt_tokens * 100)
-      : 0
 
   // Compact boundary message — render as a divider card
   if (message.role === 'system' && message.isCompactSummary) {
@@ -827,7 +228,7 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false,
     )
   }
 
-  // Tool result messages are hidden (displayed inside ToolCallBar)
+  // Tool result messages are hidden (结果挂在助手消息的 toolResults 上)
   if (isToolResult) return null
 
   // 正在压缩上下文占位 —— 居中显示过程提示（压缩完成后被摘要卡片替换）
@@ -873,11 +274,10 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false,
     )
   }
 
-  // Collapsed intermediate messages — show as expandable summary
+  // Collapsed intermediate messages（历史压缩遗留）— show as expandable summary
   if (message.collapsed && !isUser) {
-    const toolCallsCount = message.toolCalls?.length || 0
-    // 既无正文也无工具调用的空折叠消息直接不渲染（历史数据兜底，避免出现空气泡）
-    if (toolCallsCount === 0 && !message.content.trim()) return null
+    const visibleCalls = (message.toolCalls ?? []).filter((tc) => !isRenderedByUnifiedEntry(tc.name))
+    if (visibleCalls.length === 0 && !message.content.trim()) return null
     return (
       <div className="flex justify-start animate-slide-up">
         <div className="w-full">
@@ -891,10 +291,10 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false,
           >
             {collapsedExpanded ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
             <Wrench size={11} />
-            <span>{t('chat.collapsedSteps', { count: toolCallsCount })}</span>
+            <span>{t('chat.collapsedSteps', { count: visibleCalls.length })}</span>
           </button>
           {collapsedExpanded && (
-            <div className="mt-2 w-full">
+            <div className="mt-2 flex w-full flex-col gap-2">
               {message.content && (
                 <div className={`min-w-0 break-words text-sm leading-relaxed ${
                   vibe ? 'text-white/80' : 'text-dark-onSurface/85'
@@ -902,9 +302,14 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false,
                   <MarkdownContent content={message.content} vibe={vibe} />
                 </div>
               )}
-              {message.toolCalls && (
-                <ToolRunGroup toolCalls={message.toolCalls} toolResults={message.toolResults} vibe={vibe} sessionId={sessionId} />
-              )}
+              {visibleCalls.map((call) => (
+                <ToolCallRow
+                  key={call.id}
+                  item={{ call, result: message.toolResults?.find((r) => r.toolCallId === call.id), message }}
+                  vibe={vibe}
+                  sessionId={sessionId}
+                />
+              ))}
             </div>
           )}
         </div>
@@ -912,23 +317,15 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false,
     )
   }
 
-  if (
-    message.role === 'assistant' &&
-    !message.isSubAgentCard &&
-    !message.content.trim() &&
-    !hasThinking &&
-    !message.streamingToolCalls?.length &&
-    !hasVisibleToolCalls
-  ) {
-    return null
-  }
+  // 正常助手消息由 AssistantTurnStream 渲染；走到这里的非用户消息直接不渲染
+  if (!isUser) return null
 
   // 用户消息附件：图片缩略图 + 文件 chip（与正文气泡分开渲染，正文为空时也要显示）
-  const userImages = isUser ? (message.attachments || []).filter((a) => a.kind === 'image' && a.dataUrl) : []
-  const userFiles = isUser ? (message.attachments || []).filter((a) => a.kind === 'file') : []
+  const userImages = (message.attachments || []).filter((a) => a.kind === 'image' && a.dataUrl)
+  const userFiles = (message.attachments || []).filter((a) => a.kind === 'file')
 
   // 发送时选中的任务工作流与 Skill 快照都嵌入对应的用户消息气泡。
-  const taskModeMeta = isUser && message.taskMode
+  const taskModeMeta = message.taskMode
     ? ({
         spec: { icon: BookOpen, name: 'Spec', cls: 'bg-md-info/15 text-md-info' },
         plan: { icon: GitBranch, name: 'Plan', cls: 'bg-md-primary/15 text-md-primary' },
@@ -936,20 +333,13 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false,
       } as const)[message.taskMode]
     : null
   const TaskModeIcon = taskModeMeta?.icon
-  const messageSkills = isUser ? (message.skills || []) : []
+  const messageSkills = message.skills || []
   const hasUserMetadata = !!taskModeMeta || messageSkills.length > 0
-  // AI 自主加载的技能芯片（read_file 命中技能 SKILL.md 时由 agent 循环记录）
-  const loadedSkills = !isUser ? (message.loadedSkills || []) : []
-  // 最终回复的正文有 2px 左边框 + 14px 内衬，收尾的元信息（时间戳/缓存/截断）要对齐正文首字，
-  // 否则会贴着列边、和正文错开一条缝。
-  const metaAlign = !isUser && !isIntermediate ? 'pl-3.5' : 'px-1'
 
   return (
-    <div className={`animate-slide-up group/msg ${isUser ? 'flex justify-end' : 'flex justify-start'}`}>
-      {/* AI 侧占满整列：叙述文字曾是 `items-start max-w-[90%]` + 按内容收缩的气泡，
-          模型每行写得短一点，整段就贴着左边缩成窄栏、右边空一大片（老板点名的「挤在左边」）。
-          现在改成全宽单列时间线，用户侧仍保留右对齐气泡 —— 它是短输入，靠右是定位手段。 */}
-      <div className={`flex flex-col gap-1 ${isUser ? 'items-end max-w-[85%] max-md:max-w-[92%]' : 'w-full items-stretch'}`}>
+    <div className="message-action-scope animate-slide-up flex justify-end">
+      {/* 用户侧保留右对齐气泡的限宽 —— 短输入靠右是定位手段 */}
+      <div className="flex flex-col gap-1 items-end max-w-[85%] max-md:max-w-[92%]">
 
         {/* User message attachments - above the content bubble */}
         {(userImages.length > 0 || userFiles.length > 0) && (
@@ -988,136 +378,44 @@ function MessageItem({ message, vibe = false, sessionId, isIntermediate = false,
           </div>
         )}
 
-        {/* 思考行（时间线第一行，可展开正文） */}
-        {hasThinking && !isUser && (
-          <ThinkingRow
-            thinkingContent={message.thinkingContent || ''}
-            isStreaming={!!message._isStreaming}
-            hasContent={!!message.content}
-            finishReason={message.finishReason}
-            expanded={thinkingExpanded}
-            onToggle={() => setThinkingExpanded(!thinkingExpanded)}
-            vibe={vibe}
-          />
-        )}
-
-        {/* AI 自主加载的技能芯片（助手消息，read_file 命中技能 SKILL.md 时展示） */}
-        {loadedSkills.length > 0 && (
-          <div className="flex flex-wrap gap-1.5">
-            {loadedSkills.map((skill) => (
-              <span
-                key={`${skill.id}-${skill.slug || skill.name}`}
-                title={t('chat.aiLoadedSkill')}
-                className={`inline-flex max-w-full flex-shrink-0 items-center gap-1 rounded-md3-sm px-2 py-0.5 text-[11px] font-medium ${
-                  vibe ? 'bg-white/15 text-white/90' : 'bg-md-tertiaryContainer text-md-onTertiaryContainer'
-                }`}
-              >
-                <Sparkles size={11} className="flex-shrink-0" aria-hidden="true" />
-                {skill.icon && <span aria-hidden="true">{skill.icon}</span>}
-                <span className="truncate max-w-[200px]">{skill.name}</span>
-              </span>
-            ))}
-          </div>
-        )}
-
-        {/* Message content —— 用户侧保持右对齐气泡；AI 侧去底色改全宽纯文本。
-            最终回复用左侧细线与过程叙述区分（对标参考图：正文铺满整行，不靠底色分层）。 */}
-        {(message.content.trim() || (isUser && hasUserMetadata)) && (
+        {/* Message content —— 用户侧右对齐气泡 */}
+        {(message.content.trim() || hasUserMetadata) && (
           <div
-            className={`relative group min-w-0 break-words text-sm leading-relaxed ${
-              isUser
-                ? `px-4 py-2.5 rounded-md3-md ${
-                    vibe ? 'liquid-glass text-white' : 'bg-md-primaryContainer text-md-onPrimaryContainer'
-                  }`
-                : isIntermediate
-                  ? `px-0.5 ${vibe ? 'text-white/80' : 'text-dark-onSurface/85'}`
-                  : `border-l-2 py-0.5 pl-3 ${
-                      vibe ? 'border-white/25 text-white/90' : 'border-md-primary/35 text-dark-onSurface'
-                    }`
+            className={`relative group min-w-0 break-words text-sm leading-relaxed px-4 py-2.5 rounded-md3-md ${
+              vibe ? 'liquid-glass text-white' : 'bg-md-primaryContainer text-md-onPrimaryContainer'
             }`}
           >
-            {isUser ? (
-              <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-                {taskModeMeta && TaskModeIcon && (
-                  <span className={`inline-flex flex-shrink-0 items-center gap-1 rounded-md3-sm px-2 py-0.5 text-[11px] font-medium ${
-                    vibe ? 'bg-white/15 text-white/90' : taskModeMeta.cls
-                  }`}>
-                    <TaskModeIcon size={11} className="flex-shrink-0" />
-                    <span>{taskModeMeta.name}</span>
-                  </span>
-                )}
-                {messageSkills.map((skill) => (
-                  <span
-                    key={`${skill.id}-${skill.slug || skill.name}`}
-                    className={`inline-flex max-w-full flex-shrink-0 items-center gap-1 rounded-md3-sm px-2 py-0.5 text-[11px] font-medium ${
-                      vibe ? 'bg-white/15 text-white/90' : 'bg-dark-surface/10 text-md-onPrimaryContainer'
-                    }`}
-                  >
-                    {skill.icon && <span aria-hidden="true">{skill.icon}</span>}
-                    <span className="max-w-[180px] truncate">{skill.name}</span>
-                  </span>
-                ))}
-                {message.content.trim() && (
-                  <span className="min-w-0 whitespace-pre-wrap break-words">{message.content}</span>
-                )}
-              </div>
-            ) : (
-              <MarkdownContent content={message.content} vibe={vibe} />
-            )}
-          </div>
-        )}
-
-        {/* 流式生成中的工具调用行 — 与完成态同款紧凑行样式 */}
-        {!isUser && message.streamingToolCalls?.length ? (
-          <StreamingToolRows calls={message.streamingToolCalls} vibe={vibe} />
-        ) : null}
-
-        {/* 工具行：过程消息与流式中的回复直接平铺 —— 时间线本体不该被二次折叠头切成两段。
-            已完成的轮尾仍保留「N 个工具调用」折叠头：中止的一轮会以带工具的消息收尾，
-            整轮折叠对那种消息不生效，这道头部是唯一能把几十行收起来的地方。 */}
-        {!isUser && message.toolCalls && (
-          (isIntermediate || !message.finishReason) ? (
-            <div className="w-full flex flex-col gap-0.5">
-              {message.toolCalls
-                .filter((tc) => !isRenderedByUnifiedEntry(tc.name))
-                .map((tc) => (
-                  <ToolRow key={tc.id} toolCall={tc} result={message.toolResults} vibe={vibe} sessionId={sessionId} />
-                ))}
+            <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+              {taskModeMeta && TaskModeIcon && (
+                <span className={`inline-flex flex-shrink-0 items-center gap-1 rounded-md3-sm px-2 py-0.5 text-[11px] font-medium ${
+                  vibe ? 'bg-white/15 text-white/90' : taskModeMeta.cls
+                }`}>
+                  <TaskModeIcon size={11} className="flex-shrink-0" />
+                  <span>{taskModeMeta.name}</span>
+                </span>
+              )}
+              {messageSkills.map((skill) => (
+                <span
+                  key={`${skill.id}-${skill.slug || skill.name}`}
+                  className={`inline-flex max-w-full flex-shrink-0 items-center gap-1 rounded-md3-sm px-2 py-0.5 text-[11px] font-medium ${
+                    vibe ? 'bg-white/15 text-white/90' : 'bg-dark-surface/10 text-md-onPrimaryContainer'
+                  }`}
+                >
+                  {skill.icon && <span aria-hidden="true">{skill.icon}</span>}
+                  <span className="max-w-[180px] truncate">{skill.name}</span>
+                </span>
+              ))}
+              {message.content.trim() && (
+                <span className="min-w-0 whitespace-pre-wrap break-words">{message.content}</span>
+              )}
             </div>
-          ) : (
-            <ToolRunGroup
-              toolCalls={message.toolCalls}
-              toolResults={message.toolResults}
-              vibe={vibe}
-              defaultOpen={!!message.streamingToolCalls?.length || !message.finishReason}
-              finishReason={message.finishReason}
-              sessionId={sessionId}
-            />
-          )
-        )}
-
-        {/* Truncation warning */}
-        {isTruncated && (
-          <div className={`flex items-center gap-1 text-[11px] text-md-warning ${metaAlign}`}>
-            <AlertTriangle size={10} />
-            {t('chat.truncated')}
           </div>
-        )}
-
-        {cacheEligibleTokens > 0 && !isUser && !isIntermediate && (
-          <span className={`text-[10px] ${metaAlign} ${vibe ? 'text-white/45' : 'text-dark-onSurfaceVariant/40'}`}>
-            {t('chat.cacheStats', {
-              rate: cacheHitRate,
-              read: cacheReadTokens.toLocaleString(),
-              created: cacheCreatedTokens.toLocaleString(),
-            })}
-          </span>
         )}
 
         {/* 动作条：复制 + 父级按 turn 语义下发的按钮（编辑/撤回/撤销文件） */}
-        {(!!copyText?.trim() || !!message.content.trim() || !!extraActions) && (
-          <MessageActions vibe={vibe} className={metaAlign}>
-            <CopyButton text={copyText ?? message.content} title={copyTitle} vibe={vibe} />
+        {(!!message.content.trim() || !!extraActions) && (
+          <MessageActions vibe={vibe} className="px-1">
+            <CopyButton text={message.content} vibe={vibe} />
             {extraActions}
           </MessageActions>
         )}

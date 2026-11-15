@@ -13,6 +13,7 @@ import McpSection from './McpSection'
 import TokenUsageStats from './TokenUsageStats'
 import ConfirmDialog from '../ui/ConfirmDialog'
 import { useModalAccessibility } from '../../hooks/use-modal-accessibility'
+import { useIsMobile } from '../../hooks/use-mobile'
 
 import APP_ICON from '../../assets/icon.png'
 
@@ -54,6 +55,10 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
   const titleId = useId()
   const closeButtonRef = useRef<HTMLButtonElement>(null)
   const dialogRef = useModalAccessibility(onClose, closeButtonRef)
+  const contentRef = useRef<HTMLDivElement>(null)
+  const isMobile = useIsMobile()
+
+  useEffect(() => { contentRef.current?.scrollTo({ top: 0 }) }, [activeTab])
 
   // 消费后立即清空标记，下次打开设置页回到默认 tab
   useEffect(() => {
@@ -101,9 +106,9 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
 
   const handleTabKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>, currentTab: Tab) => {
     const currentIndex = tabs.findIndex((tab) => tab.key === currentTab)
-    const nextIndex = event.key === 'ArrowDown'
+    const nextIndex = event.key === (isMobile ? 'ArrowRight' : 'ArrowDown')
       ? (currentIndex + 1) % tabs.length
-      : event.key === 'ArrowUp'
+      : event.key === (isMobile ? 'ArrowLeft' : 'ArrowUp')
         ? (currentIndex - 1 + tabs.length) % tabs.length
         : event.key === 'Home'
           ? 0
@@ -126,25 +131,28 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
         aria-modal="true"
         aria-labelledby={titleId}
         tabIndex={-1}
-        className="w-[720px] max-w-[92vw] h-[560px] max-h-[82vh] bg-dark-surfaceDim rounded-md3-xl border border-dark-onSurfaceVariant/10 flex flex-col shadow-elevation-3
+        className="w-[940px] max-w-[calc(100vw-3rem)] h-[740px] max-h-[calc(100dvh-6rem)] bg-dark-surfaceDim text-dark-onSurface rounded-md3-xl border border-dark-onSurfaceVariant/10 flex flex-col shadow-elevation-3 md-focus outline-none overflow-hidden
           max-md:w-screen max-md:h-full max-md:max-w-none max-md:max-h-none max-md:rounded-none max-md:border-0"
       >
-        <div className="flex items-center justify-between px-6 py-4 border-b border-dark-onSurfaceVariant/10">
-          <h2 id={titleId} className="text-lg font-semibold">{t('settings.title')}</h2>
+        <div className="flex shrink-0 items-center justify-between gap-4 px-6 py-4 border-b border-dark-onSurfaceVariant/10">
+          <div className="flex min-w-0 items-center gap-3">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md3-md border border-dark-onSurfaceVariant/10 bg-dark-surfaceContainer" aria-hidden><Settings size={18} /></span>
+            <h2 id={titleId} className="text-ui-lg font-semibold">{t('settings.title')}</h2>
+          </div>
           <button
             ref={closeButtonRef}
             type="button"
             onClick={onClose}
             aria-label={t('common.close')}
             title={t('common.close')}
-            className="w-8 h-8 max-md:w-11 max-md:h-11 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-dark-onSurfaceVariant"
+            className="md-focus w-9 h-9 max-md:w-11 max-md:h-11 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-dark-onSurfaceVariant"
           >
             <X size={16} />
           </button>
         </div>
 
         <div className="flex flex-1 min-h-0 max-md:flex-col">
-          <div role="tablist" aria-orientation="vertical" className="w-44 flex flex-col gap-1 p-3 border-r border-dark-onSurfaceVariant/10
+          <div role="tablist" aria-label={t('settings.title')} aria-orientation={isMobile ? 'horizontal' : 'vertical'} className="w-48 shrink-0 flex flex-col gap-1 p-3 border-r border-dark-onSurfaceVariant/10 bg-dark-surfaceContainer/40
             max-md:w-full max-md:flex-row max-md:items-center max-md:overflow-x-auto max-md:overscroll-contain max-md:gap-1 max-md:p-2 max-md:border-r-0 max-md:border-b">
             {tabs.map((tab) => (
               <button
@@ -153,44 +161,50 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                 id={`settings-tab-${tab.key}`}
                 role="tab"
                 aria-selected={activeTab === tab.key}
+                tabIndex={activeTab === tab.key ? 0 : -1}
                 aria-controls="settings-tabpanel"
                 onClick={() => setActiveTab(tab.key)}
                 onKeyDown={(event) => handleTabKeyDown(event, tab.key)}
-                className={`flex items-center gap-2.5 px-3 py-2.5 max-md:py-3 max-md:px-4 max-md:flex-shrink-0 rounded-md3-sm text-sm transition-colors text-left ${
+                className={`md-focus flex items-center gap-3 px-3 py-3 max-md:px-4 max-md:flex-shrink-0 rounded-md3-sm text-ui-sm transition-colors text-left border ${
                   activeTab === tab.key
-                    ? 'bg-dark-surfaceContainerHigh text-dark-onSurface'
-                    : 'text-dark-onSurfaceVariant hover:bg-dark-surfaceContainer'
+                    ? 'bg-dark-surface border-dark-onSurfaceVariant/10 text-dark-onSurface font-medium'
+                    : 'border-transparent text-dark-onSurfaceVariant hover:bg-dark-surfaceContainer'
                 }`}
               >
-                <tab.icon size={16} />
+                <tab.icon size={16} className="shrink-0" aria-hidden />
                 <span>{tab.label}</span>
               </button>
             ))}
           </div>
 
           <div
+            ref={contentRef}
             id="settings-tabpanel"
             role="tabpanel"
             aria-labelledby={`settings-tab-${activeTab}`}
-            className="flex-1 overflow-y-auto overscroll-contain p-6 max-md:p-4"
+            className="min-w-0 flex-1 overflow-y-auto overscroll-contain p-7 max-md:p-4 bg-dark-surface/60"
           >
+            <div className="mb-6 border-b border-dark-onSurfaceVariant/10 pb-5">
+              <h3 className="text-ui-xl font-semibold text-dark-onSurface">{t(`settings.tabs.${activeTab}`)}</h3>
+              <p className="mt-1.5 text-ui-sm leading-relaxed text-dark-onSurfaceVariant">{t(`settings.sectionDescriptions.${activeTab}`)}</p>
+            </div>
             {activeTab === 'api' && (
               <div className="space-y-5">
                 {/* 当前生效 */}
-                <div className="flex items-center gap-3 px-4 py-3 rounded-md3-md bg-md-primary/[0.08] border border-md-primary/20">
+                <div className="flex flex-wrap items-center gap-3 px-4 py-4 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10">
                   <Cpu size={16} className="text-md-primary flex-shrink-0" />
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium text-dark-onSurface truncate">
+                      <span className="text-ui-sm font-medium text-dark-onSurface truncate">
                         {activeLabel}
                       </span>
                       {activeProvider && (
-                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-dark-surfaceContainerHighest text-dark-onSurfaceVariant flex-shrink-0">
+                        <span className="text-ui-xs px-1.5 py-0.5 rounded bg-dark-surfaceContainerHighest text-dark-onSurfaceVariant flex-shrink-0">
                           {settings.apiCompat === 'anthropic' ? 'Anthropic' : 'OpenAI'}
                         </span>
                       )}
                     </div>
-                    <div className="text-xs text-dark-onSurfaceVariant truncate">
+                    <div className="text-ui-xs text-dark-onSurfaceVariant truncate">
                       {activeProvider ? `${activeProvider.name} · ${settings.model || t('settings.api.noActive')}` : t('settings.api.noActive')}
                     </div>
                   </div>
@@ -198,16 +212,16 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                     type="button"
                     onClick={handleTestConnection}
                     disabled={testStatus === 'testing' || !settings.baseUrl}
-                    className="px-3 py-1.5 bg-md-primary text-md-onPrimary rounded-md3-sm text-xs font-medium hover:bg-md-primary/90 transition-colors disabled:opacity-50 flex-shrink-0"
+                    className="px-3 py-1.5 bg-md-primary text-md-onPrimary rounded-md3-sm text-ui-xs font-medium hover:bg-md-primary/90 transition-colors disabled:opacity-50 flex-shrink-0"
                   >
                     {testStatus === 'testing' ? t('settings.api.testing') : t('settings.api.testConnection')}
                   </button>
                 </div>
                 {testStatus === 'success' && (
-                  <span role="status" className="flex items-center gap-1 text-sm text-md-success"><Check size={14} /> {t('settings.api.testSuccess')}</span>
+                  <span role="status" className="flex items-center gap-1 text-ui-sm text-md-success"><Check size={14} /> {t('settings.api.testSuccess')}</span>
                 )}
                 {testStatus === 'error' && (
-                  <span role="alert" className="flex items-center gap-1 text-sm text-md-error max-w-full truncate"><AlertCircle size={14} /> {testError}</span>
+                  <span role="alert" className="flex items-start gap-2 rounded-md3-sm border border-md-error/20 bg-md-error/10 px-3 py-2 text-ui-sm text-md-error break-words"><AlertCircle size={14} className="mt-0.5 shrink-0" /> {testError}</span>
                 )}
 
                 <ProvidersSection />
@@ -222,7 +236,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
               <div className="space-y-5">
                 {/* 语言 */}
                 <div>
-                  <label className="flex items-center gap-2 text-sm font-medium mb-2">
+                  <label className="flex items-center gap-2 text-ui-sm font-medium mb-2">
                     <Languages size={14} />
                     {t('settings.general.languageTitle')}
                   </label>
@@ -232,7 +246,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                         key={lang.code}
                         type="button"
                         onClick={() => settings.updateSettings({ language: lang.code })}
-                        className={`flex-1 px-3 py-2 rounded-md3-sm text-sm transition-colors border ${
+                        className={`flex-1 px-3 py-2 rounded-md3-sm text-ui-sm transition-colors border ${
                           settings.language === lang.code
                             ? 'border-md-primary/40 bg-md-primary/10 text-md-primary'
                             : 'border-dark-onSurfaceVariant/10 hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant'
@@ -240,7 +254,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                         aria-pressed={settings.language === lang.code}
                       >
                         <div className="font-medium">{lang.label}</div>
-                        <div className="text-[10px] opacity-60 mt-0.5">{lang.englishLabel}</div>
+                        <div className="text-ui-xs opacity-60 mt-0.5">{lang.englishLabel}</div>
                       </button>
                     ))}
                   </div>
@@ -250,9 +264,9 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                 <div className="space-y-3 p-4 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10">
                   <div className="flex items-center gap-2">
                     <FileText size={14} className="text-md-primary flex-shrink-0" />
-                    <span className="text-sm font-medium text-dark-onSurface">{t('settings.general.agentsMdTitle')}</span>
+                    <span className="text-ui-sm font-medium text-dark-onSurface">{t('settings.general.agentsMdTitle')}</span>
                   </div>
-                  <p className="text-xs text-dark-onSurfaceVariant/70 leading-relaxed">
+                  <p className="text-ui-xs text-dark-onSurfaceVariant/70 leading-relaxed">
                     {t('settings.general.agentsMdDesc')}
                   </p>
                   <label className="flex items-center gap-2 cursor-pointer">
@@ -262,7 +276,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                       onChange={(e) => settings.updateSettings({ agentsMdEnabled: e.target.checked })}
                       className="accent-md-primary"
                     />
-                    <span className="text-xs text-dark-onSurfaceVariant">{t('settings.general.agentsMdToggle')}</span>
+                    <span className="text-ui-xs text-dark-onSurfaceVariant">{t('settings.general.agentsMdToggle')}</span>
                   </label>
                   {settings.agentsMdEnabled && (
                     <label className="flex items-center gap-2 cursor-pointer">
@@ -272,7 +286,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                         onChange={(e) => settings.updateSettings({ claudeMdCompat: e.target.checked })}
                         className="accent-md-primary"
                       />
-                      <span className="text-xs text-dark-onSurfaceVariant">{t('settings.general.claudeMdCompat')}</span>
+                      <span className="text-ui-xs text-dark-onSurfaceVariant">{t('settings.general.claudeMdCompat')}</span>
                     </label>
                   )}
                 </div>
@@ -285,9 +299,9 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                     <div className="space-y-3 p-4 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10">
                       <div className="flex items-center gap-2">
                         <Globe size={14} className="text-md-primary flex-shrink-0" />
-                        <span className="text-sm font-medium text-dark-onSurface">{t('settings.general.browserUseTitle')}</span>
+                        <span className="text-ui-sm font-medium text-dark-onSurface">{t('settings.general.browserUseTitle')}</span>
                       </div>
-                      <p className="text-xs text-dark-onSurfaceVariant/70 leading-relaxed">
+                      <p className="text-ui-xs text-dark-onSurfaceVariant/70 leading-relaxed">
                         {t('settings.general.browserUseDesc')}
                       </p>
                       <label className="flex items-center gap-2 cursor-pointer">
@@ -297,16 +311,16 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                           onChange={(e) => settings.updateSettings({ browserUseEnabled: e.target.checked })}
                           className="accent-md-primary"
                         />
-                        <span className="text-xs text-dark-onSurfaceVariant">{t('settings.general.browserUseToggle')}</span>
+                        <span className="text-ui-xs text-dark-onSurfaceVariant">{t('settings.general.browserUseToggle')}</span>
                       </label>
                     </div>
 
                     <div className="space-y-3 p-4 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10">
                       <div className="flex items-center gap-2">
                         <MonitorSmartphone size={14} className="text-md-primary flex-shrink-0" />
-                        <span className="text-sm font-medium text-dark-onSurface">{t('settings.general.computerUseTitle')}</span>
+                        <span className="text-ui-sm font-medium text-dark-onSurface">{t('settings.general.computerUseTitle')}</span>
                       </div>
-                      <p className="text-xs text-dark-onSurfaceVariant/70 leading-relaxed">
+                      <p className="text-ui-xs text-dark-onSurfaceVariant/70 leading-relaxed">
                         {t('settings.general.computerUseDesc')}
                       </p>
                       <label className="flex items-center gap-2 cursor-pointer">
@@ -316,7 +330,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                           onChange={(e) => settings.updateSettings({ computerUseEnabled: e.target.checked })}
                           className="accent-md-primary"
                         />
-                        <span className="text-xs text-dark-onSurfaceVariant">{t('settings.general.computerUseToggle')}</span>
+                        <span className="text-ui-xs text-dark-onSurfaceVariant">{t('settings.general.computerUseToggle')}</span>
                       </label>
                       {settings.computerUseEnabled && (
                         <p className="text-ui-xs text-dark-onSurfaceVariant/60 leading-relaxed">
@@ -332,19 +346,19 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                   <div className="space-y-3 p-4 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10">
                     <div className="flex items-center gap-2">
                       <Monitor size={14} className="text-md-primary flex-shrink-0" />
-                      <span className="text-sm font-medium text-dark-onSurface">{t('settings.general.trayTitle')}</span>
+                      <span className="text-ui-sm font-medium text-dark-onSurface">{t('settings.general.trayTitle')}</span>
                     </div>
-                    <p className="text-xs text-dark-onSurfaceVariant/70 leading-relaxed">
+                    <p className="text-ui-xs text-dark-onSurfaceVariant/70 leading-relaxed">
                       {t('settings.general.trayDesc')}
                     </p>
                     {isMacPlatform ? (
-                      <p className="text-xs text-dark-onSurfaceVariant/60 leading-relaxed">
+                      <p className="text-ui-xs text-dark-onSurfaceVariant/60 leading-relaxed">
                         {t('settings.general.trayMacNote')}
                       </p>
                     ) : (
                       <>
                         <div>
-                          <label className="text-xs text-dark-onSurfaceVariant mb-2 block">
+                          <label className="text-ui-xs text-dark-onSurfaceVariant mb-2 block">
                             {t('settings.general.trayCloseToTray')} / {t('settings.general.trayCloseToQuit')}
                           </label>
                           <div className="flex gap-2">
@@ -353,7 +367,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                                 key={behavior}
                                 type="button"
                                 onClick={() => settings.updateSettings({ closeBehavior: behavior })}
-                                className={`flex-1 px-3 py-2 rounded-md3-sm text-sm transition-colors border ${
+                                className={`flex-1 px-3 py-2 rounded-md3-sm text-ui-sm transition-colors border ${
                                   settings.closeBehavior === behavior
                                     ? 'border-md-primary/40 bg-md-primary/10 text-md-primary'
                                     : 'border-dark-onSurfaceVariant/10 hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant'
@@ -366,7 +380,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                           </div>
                         </div>
                         <div>
-                          <label className="text-xs text-dark-onSurfaceVariant mb-2 block">
+                          <label className="text-ui-xs text-dark-onSurfaceVariant mb-2 block">
                             {t('settings.general.traySessionsLimit')}
                           </label>
                           <div className="flex gap-2">
@@ -375,7 +389,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                                 key={limit}
                                 type="button"
                                 onClick={() => settings.updateSettings({ recentSessionsLimit: limit })}
-                                className={`flex-1 px-3 py-2 rounded-md3-sm text-sm transition-colors border ${
+                                className={`flex-1 px-3 py-2 rounded-md3-sm text-ui-sm transition-colors border ${
                                   settings.recentSessionsLimit === limit
                                     ? 'border-md-primary/40 bg-md-primary/10 text-md-primary'
                                     : 'border-dark-onSurfaceVariant/10 hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant'
@@ -400,14 +414,14 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
             {activeTab === 'appearance' && (
               <div className="space-y-6">
                 <div>
-                  <label className="text-sm font-medium mb-2 block">{t('settings.appearance.themeMode')}</label>
+                  <label className="text-ui-sm font-medium mb-2 block">{t('settings.appearance.themeMode')}</label>
                   <div className="flex gap-2">
                     {(['light', 'dark', 'system'] as const).map((theme) => (
                       <button
                         key={theme}
                         type="button"
                         onClick={() => settings.updateSettings({ theme })}
-                        className={`flex-1 py-2 rounded-md3-sm text-sm border transition-colors ${
+                        className={`flex-1 py-2 rounded-md3-sm text-ui-sm border transition-colors ${
                           settings.theme === theme
                             ? 'border-md-primary/40 bg-md-primary/10 text-md-primary'
                             : 'border-dark-onSurfaceVariant/10 hover:bg-dark-surfaceContainer'
@@ -420,14 +434,14 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                 </div>
 
                 <div>
-                  <label className="text-sm font-medium mb-2 block">{t('settings.appearance.fontTitle')}</label>
+                  <label className="text-ui-sm font-medium mb-2 block">{t('settings.appearance.fontTitle')}</label>
                   <div className="flex gap-2">
                     {(['default', 'serif'] as const).map((font) => (
                       <button
                         key={font}
                         type="button"
                         onClick={() => settings.updateSettings({ appFont: font })}
-                        className={`flex-1 py-2 rounded-md3-sm text-sm border transition-colors ${
+                        className={`flex-1 py-2 rounded-md3-sm text-ui-sm border transition-colors ${
                           settings.appFont === font
                             ? 'border-md-primary/40 bg-md-primary/10 text-md-primary'
                             : 'border-dark-onSurfaceVariant/10 hover:bg-dark-surfaceContainer'
@@ -441,7 +455,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
 
                 <div>
                   <label className="text-ui-sm font-medium mb-2 block">{t('settings.appearance.uiScaleTitle')}</label>
-                  <p className="text-xs text-dark-onSurfaceVariant/60 mt-0.5 mb-2">
+                  <p className="text-ui-xs text-dark-onSurfaceVariant/60 mt-0.5 mb-2">
                     {t('settings.appearance.uiScaleDesc')}
                   </p>
                   <div className="flex gap-2">
@@ -464,8 +478,8 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                 </div>
 
                 <div>
-                  <label className="text-sm font-medium block">{t('settings.appearance.macaronTitle')}</label>
-                  <p className="text-xs text-dark-onSurfaceVariant/60 mt-0.5 mb-3">
+                  <label className="text-ui-sm font-medium block">{t('settings.appearance.macaronTitle')}</label>
+                  <p className="text-ui-xs text-dark-onSurfaceVariant/60 mt-0.5 mb-3">
                     {t('settings.appearance.macaronDesc')}
                   </p>
                   <div className="grid grid-cols-4 gap-y-4">
@@ -492,7 +506,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                           >
                             {selected && <Check size={16} className="text-white drop-shadow" />}
                           </span>
-                          <span className={`text-xs ${selected ? 'text-md-primary font-medium' : 'text-dark-onSurfaceVariant'}`}>
+                          <span className={`text-ui-xs ${selected ? 'text-md-primary font-medium' : 'text-dark-onSurfaceVariant'}`}>
                             {t(`macaron.${p.id}`)}
                           </span>
                         </button>
@@ -524,7 +538,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                               <Palette size={14} className="text-white drop-shadow" />
                             )}
                           </span>
-                          <span className={`text-xs ${selected ? 'text-md-primary font-medium' : 'text-dark-onSurfaceVariant'}`}>
+                          <span className={`text-ui-xs ${selected ? 'text-md-primary font-medium' : 'text-dark-onSurfaceVariant'}`}>
                             {t('settings.appearance.custom')}
                           </span>
                           <input
@@ -551,7 +565,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                     {/* 未登录：说明 + 登录入口 */}
                     <div className="flex items-start gap-3 p-4 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10">
                       <User size={16} className="text-md-primary flex-shrink-0 mt-0.5" />
-                      <p className="text-xs text-dark-onSurfaceVariant/70 leading-relaxed">
+                      <p className="text-ui-xs text-dark-onSurfaceVariant/70 leading-relaxed">
                         {t('account.desc')}
                       </p>
                     </div>
@@ -559,7 +573,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                       type="button"
                       onClick={() => void account.login()}
                       disabled={account.loggingIn}
-                      className="flex items-center justify-center gap-1.5 px-4 py-2 rounded-md3-md bg-md-primary text-md-onPrimary hover:bg-md-primary/90 transition-colors text-sm font-medium disabled:opacity-60"
+                      className="flex items-center justify-center gap-1.5 px-4 py-2 rounded-md3-md bg-md-primary text-md-onPrimary hover:bg-md-primary/90 transition-colors text-ui-sm font-medium disabled:opacity-60"
                     >
                       {account.loggingIn
                         ? <Loader2 size={15} className="animate-spin" />
@@ -567,7 +581,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                       <span>{account.loggingIn ? t('account.loginPending') : t('account.login')}</span>
                     </button>
                     {account.lastError && (
-                      <p role="alert" className="flex items-center gap-1 text-sm text-md-error">
+                      <p role="alert" className="flex items-center gap-1 text-ui-sm text-md-error">
                         <AlertCircle size={14} className="flex-shrink-0" />
                         <span className="break-all">{account.lastError}</span>
                       </p>
@@ -581,7 +595,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                     {/* 用户信息卡 */}
                     <div className="flex items-center gap-3 p-4 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10">
                       <span
-                        className="w-10 h-10 rounded-full flex items-center justify-center text-white text-base font-semibold flex-shrink-0"
+                        className="w-10 h-10 rounded-full flex items-center justify-center text-white text-ui-base font-semibold flex-shrink-0"
                         style={{ backgroundColor: avatarColorFor(account.user.username) }}
                         aria-hidden
                       >
@@ -589,17 +603,17 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                       </span>
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
-                          <span className="text-sm font-medium text-dark-onSurface truncate">
+                          <span className="text-ui-sm font-medium text-dark-onSurface truncate">
                             {account.user.username}
                           </span>
                           {account.user.isBetaUser && (
-                            <span className="px-1.5 py-0.5 rounded-md3-xs bg-md-tertiary/15 text-md-tertiary text-[10px] font-medium whitespace-nowrap flex-shrink-0">
+                            <span className="px-1.5 py-0.5 rounded-md3-xs bg-md-tertiary/15 text-md-tertiary text-ui-xs font-medium whitespace-nowrap flex-shrink-0">
                               {t('account.beta')}
                             </span>
                           )}
                         </div>
                         {account.user.email && (
-                          <div className="text-xs text-dark-onSurfaceVariant truncate mt-0.5">
+                          <div className="text-ui-xs text-dark-onSurfaceVariant truncate mt-0.5">
                             {account.user.email}
                           </div>
                         )}
@@ -607,7 +621,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                       <button
                         type="button"
                         onClick={() => void account.logout()}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-md3-sm text-xs text-dark-onSurfaceVariant hover:bg-md-error/15 hover:text-md-error transition-colors flex-shrink-0"
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-md3-sm text-ui-xs text-dark-onSurfaceVariant hover:bg-md-error/15 hover:text-md-error transition-colors flex-shrink-0"
                       >
                         <LogOut size={13} />
                         <span>{t('account.logout')}</span>
@@ -621,7 +635,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                     <div className="space-y-3 p-4 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10">
                       <div className="flex items-center gap-2">
                         <RefreshCw size={14} className="text-md-primary flex-shrink-0" />
-                        <span className="text-sm font-medium text-dark-onSurface">
+                        <span className="text-ui-sm font-medium text-dark-onSurface">
                           {t('account.sync.title')}
                         </span>
                       </div>
@@ -632,7 +646,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                           onChange={(e) => account.setSyncMemory(e.target.checked)}
                           className="accent-md-primary"
                         />
-                        <span className="text-xs text-dark-onSurfaceVariant">{t('account.sync.memory')}</span>
+                        <span className="text-ui-xs text-dark-onSurfaceVariant">{t('account.sync.memory')}</span>
                       </label>
                       <label className="flex items-center gap-2 cursor-pointer">
                         <input
@@ -641,7 +655,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                           onChange={(e) => account.setSyncModels(e.target.checked)}
                           className="accent-md-primary"
                         />
-                        <span className="text-xs text-dark-onSurfaceVariant">{t('account.sync.models')}</span>
+                        <span className="text-ui-xs text-dark-onSurfaceVariant">{t('account.sync.models')}</span>
                       </label>
                       <label className="flex items-center gap-2 cursor-pointer">
                         <input
@@ -650,7 +664,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                           onChange={(e) => account.setSyncMcp(e.target.checked)}
                           className="accent-md-primary"
                         />
-                        <span className="text-xs text-dark-onSurfaceVariant">{t('account.sync.mcp')}</span>
+                        <span className="text-ui-xs text-dark-onSurfaceVariant">{t('account.sync.mcp')}</span>
                       </label>
                       <label className="flex items-center gap-2 cursor-pointer">
                         <input
@@ -659,9 +673,9 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                           onChange={(e) => account.setAutoSync(e.target.checked)}
                           className="accent-md-primary"
                         />
-                        <span className="text-xs text-dark-onSurfaceVariant">{t('account.sync.auto')}</span>
+                        <span className="text-ui-xs text-dark-onSurfaceVariant">{t('account.sync.auto')}</span>
                       </label>
-                      <p className="text-xs text-dark-onSurfaceVariant/60 leading-relaxed">
+                      <p className="text-ui-xs text-dark-onSurfaceVariant/60 leading-relaxed">
                         {t('account.sync.autoDesc')}
                       </p>
                     </div>
@@ -670,20 +684,20 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                     <div className="space-y-3 p-4 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10">
                       <div className="flex items-center gap-2">
                         <KeyRound size={14} className="text-md-primary flex-shrink-0" />
-                        <span className="text-sm font-medium text-dark-onSurface">
+                        <span className="text-ui-sm font-medium text-dark-onSurface">
                           {t('account.enc.title')}
                         </span>
                         {account.passphraseSet && (
-                          <span className="px-1.5 py-0.5 rounded-md3-xs bg-md-tertiary/15 text-md-tertiary text-[10px] font-medium whitespace-nowrap">
+                          <span className="px-1.5 py-0.5 rounded-md3-xs bg-md-tertiary/15 text-md-tertiary text-ui-xs font-medium whitespace-nowrap">
                             {t('account.enc.enabled')}
                           </span>
                         )}
                       </div>
-                      <p className="text-xs text-dark-onSurfaceVariant/60 leading-relaxed">
+                      <p className="text-ui-xs text-dark-onSurfaceVariant/60 leading-relaxed">
                         {t('account.enc.desc')}
                       </p>
                       {!account.passphraseSet && (
-                        <p className="text-xs text-md-error/80 leading-relaxed">
+                        <p className="text-ui-xs text-md-error/80 leading-relaxed">
                           {t('account.enc.notSetWarn')}
                         </p>
                       )}
@@ -695,7 +709,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                             onChange={(e) => { setEncPass(e.target.value); setEncError('') }}
                             placeholder={t('account.enc.passPlaceholder')}
                             autoComplete="new-password"
-                            className="w-full px-3 py-1.5 rounded-md3-sm bg-dark-surfaceContainerHigh text-xs text-dark-onSurface border border-dark-onSurfaceVariant/15 focus:outline-none focus:border-md-primary/60"
+                            className="w-full px-3 py-1.5 rounded-md3-sm bg-dark-surfaceContainerHigh text-ui-xs text-dark-onSurface border border-dark-onSurfaceVariant/15 focus:outline-none focus:border-md-primary/60"
                           />
                           <input
                             type="password"
@@ -703,10 +717,10 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                             onChange={(e) => { setEncPass2(e.target.value); setEncError('') }}
                             placeholder={t('account.enc.passConfirmPlaceholder')}
                             autoComplete="new-password"
-                            className="w-full px-3 py-1.5 rounded-md3-sm bg-dark-surfaceContainerHigh text-xs text-dark-onSurface border border-dark-onSurfaceVariant/15 focus:outline-none focus:border-md-primary/60"
+                            className="w-full px-3 py-1.5 rounded-md3-sm bg-dark-surfaceContainerHigh text-ui-xs text-dark-onSurface border border-dark-onSurfaceVariant/15 focus:outline-none focus:border-md-primary/60"
                           />
                           {encError && (
-                            <p role="alert" className="text-xs text-md-error">{encError}</p>
+                            <p role="alert" className="text-ui-xs text-md-error">{encError}</p>
                           )}
                           <div className="flex items-center gap-2">
                             <button
@@ -724,7 +738,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                                   }
                                 })
                               }}
-                              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md3-sm bg-md-primary text-md-onPrimary hover:bg-md-primary/90 transition-colors text-xs font-medium disabled:opacity-50"
+                              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md3-sm bg-md-primary text-md-onPrimary hover:bg-md-primary/90 transition-colors text-ui-xs font-medium disabled:opacity-50"
                             >
                               {account.passphraseSaving && <Loader2 size={12} className="animate-spin" />}
                               <span>{t('account.enc.save')}</span>
@@ -737,13 +751,13 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                                 setEncPass2('')
                                 setEncError('')
                               }}
-                              className="px-3 py-1.5 rounded-md3-sm bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer transition-colors text-xs font-medium text-dark-onSurfaceVariant"
+                              className="px-3 py-1.5 rounded-md3-sm bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer transition-colors text-ui-xs font-medium text-dark-onSurfaceVariant"
                             >
                               {t('account.enc.cancel')}
                             </button>
                           </div>
                           {account.passphraseSet && (
-                            <p className="text-xs text-dark-onSurfaceVariant/50 leading-relaxed">
+                            <p className="text-ui-xs text-dark-onSurfaceVariant/50 leading-relaxed">
                               {t('account.enc.changeNote')}
                             </p>
                           )}
@@ -752,13 +766,13 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                         <button
                           type="button"
                           onClick={() => setEncEditing(true)}
-                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-md3-sm bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer transition-colors text-xs font-medium text-dark-onSurfaceVariant"
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-md3-sm bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer transition-colors text-ui-xs font-medium text-dark-onSurfaceVariant"
                         >
                           <KeyRound size={12} />
                           <span>{account.passphraseSet ? t('account.enc.change') : t('account.enc.set')}</span>
                         </button>
                       )}
-                      <p className="text-xs text-dark-onSurfaceVariant/50 leading-relaxed">
+                      <p className="text-ui-xs text-dark-onSurfaceVariant/50 leading-relaxed">
                         {t('account.enc.warn')}
                       </p>
                     </div>
@@ -769,7 +783,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                         type="button"
                         onClick={() => void account.upload()}
                         disabled={account.syncing !== 'idle'}
-                        className="flex items-center gap-1.5 px-3 py-2 rounded-md3-sm bg-md-primary text-md-onPrimary hover:bg-md-primary/90 transition-colors text-xs font-medium disabled:opacity-50"
+                        className="flex items-center gap-1.5 px-3 py-2 rounded-md3-sm bg-md-primary text-md-onPrimary hover:bg-md-primary/90 transition-colors text-ui-xs font-medium disabled:opacity-50"
                       >
                         {account.syncing === 'uploading'
                           ? <Loader2 size={14} className="animate-spin" />
@@ -782,7 +796,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                         type="button"
                         onClick={() => setConfirmDownload(true)}
                         disabled={account.syncing !== 'idle'}
-                        className="flex items-center gap-1.5 px-3 py-2 rounded-md3-sm bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer transition-colors text-xs font-medium text-dark-onSurfaceVariant disabled:opacity-50"
+                        className="flex items-center gap-1.5 px-3 py-2 rounded-md3-sm bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer transition-colors text-ui-xs font-medium text-dark-onSurfaceVariant disabled:opacity-50"
                       >
                         {account.syncing === 'downloading'
                           ? <Loader2 size={14} className="animate-spin" />
@@ -794,7 +808,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                     </div>
 
                     {/* 上次同步时间 */}
-                    <div className="space-y-1.5 p-4 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10 text-xs">
+                    <div className="space-y-1.5 p-4 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10 text-ui-xs">
                       <div className="text-dark-onSurfaceVariant/60 mb-1">{t('account.sync.lastSyncAt')}</div>
                       <div className="flex items-center justify-between">
                         <span className="text-dark-onSurfaceVariant">{t('account.sync.memory')}</span>
@@ -823,7 +837,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                     </div>
 
                     {account.lastError && (
-                      <p role="alert" className="flex items-center gap-1 text-sm text-md-error">
+                      <p role="alert" className="flex items-center gap-1 text-ui-sm text-md-error">
                         <AlertCircle size={14} className="flex-shrink-0" />
                         <span className="break-all">{account.lastError}</span>
                       </p>
@@ -836,10 +850,10 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
             {activeTab === 'about' && (
               <div className="flex flex-col items-center justify-center py-8">
                 <img src={APP_ICON} alt="ClerkBox" className="w-16 h-16 rounded-xl mb-4" />
-                <h3 className="text-xl font-semibold mb-1">ClerkBox</h3>
-                <p className="text-sm text-dark-onSurfaceVariant mb-1">{`v${__APP_VERSION__}`}</p>
-                <p className="text-xs text-dark-onSurfaceVariant/50 mb-6">{t('settings.about.tagline')}</p>
-                <div className="w-full max-w-[240px] space-y-3 text-sm">
+                <h3 className="text-ui-xl font-semibold mb-1">ClerkBox</h3>
+                <p className="text-ui-sm text-dark-onSurfaceVariant mb-1">{`v${__APP_VERSION__}`}</p>
+                <p className="text-ui-xs text-dark-onSurfaceVariant/50 mb-6">{t('settings.about.tagline')}</p>
+                <div className="w-full max-w-[240px] space-y-3 text-ui-sm">
                   <div className="flex justify-between py-2 border-b border-dark-onSurfaceVariant/10">
                     <span className="text-dark-onSurfaceVariant/60">{t('settings.about.developer')}</span>
                     <span className="font-medium">XMZF vAI</span>
@@ -853,13 +867,13 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                     <span>Apache-2.0</span>
                   </div>
                 </div>
-                <p className="mt-8 text-[11px] text-dark-onSurfaceVariant/30 text-center">
+                <p className="mt-8 text-ui-xs text-dark-onSurfaceVariant/30 text-center">
                   {t('settings.about.copyright')}
                 </p>
                 <button
                   type="button"
                   onClick={() => settings.updateSettings({ hasCompletedOnboarding: false, showSettings: false })}
-                  className="mt-4 flex items-center gap-1.5 text-xs text-md-primary/80 hover:text-md-primary transition-colors"
+                  className="mt-4 flex items-center gap-1.5 text-ui-xs text-md-primary/80 hover:text-md-primary transition-colors"
                 >
                   <Sparkles size={13} />
                   {t('settings.about.reshowOnboarding')}
@@ -877,7 +891,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
                         })
                         .catch(() => setDiagExportState('error'))
                     }}
-                    className="mt-2 flex items-center gap-1.5 text-xs text-md-primary/80 hover:text-md-primary transition-colors disabled:opacity-50"
+                    className="mt-2 flex items-center gap-1.5 text-ui-xs text-md-primary/80 hover:text-md-primary transition-colors disabled:opacity-50"
                   >
                     {diagExportState === 'busy' ? <Loader2 size={13} className="animate-spin" /> : <FileText size={13} />}
                     {diagExportState === 'done'
@@ -894,7 +908,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
               <button
                 type="button"
                   onClick={() => setShowResetConfirmation(true)}
-                className="flex items-center gap-2 text-sm text-dark-onSurfaceVariant hover:text-md-error transition-colors"
+                className="flex items-center gap-2 text-ui-sm text-dark-onSurfaceVariant hover:text-md-error transition-colors"
               >
                 <RotateCcw size={14} />
                 {t('settings.resetSettings')}

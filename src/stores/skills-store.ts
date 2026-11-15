@@ -16,6 +16,8 @@ const STANDARD_SKILL_SOURCES = new Set([
   'project-claude',
 ])
 let standardSkillDiscoverySequence = 0
+let skillSearchSequence = 0
+let skillRecommendationSequence = 0
 function withSkillLock<T>(slug: string, task: () => Promise<T>): Promise<T> {
   const prev = skillMutex.get(slug) ?? Promise.resolve()
   const next = prev.then(task, task) as unknown as Promise<void>
@@ -98,6 +100,7 @@ interface SkillsState {
   searchResults: SkillsMPSkill[]
   /** Search loading state */
   searchLoading: boolean
+  searchError: string | null
   /** Search query */
   searchQuery: string
   /** Search pagination */
@@ -107,6 +110,7 @@ interface SkillsState {
   /** Recommended skills (fetched on store open) */
   recommendedSkills: SkillsMPSkill[]
   recommendedLoading: boolean
+  recommendedError: string | null
 
   /** Toggle a skill on/off for the current session, sync to disk */
   toggleSessionSkill: (id: string, workingDir?: string) => Promise<void>
@@ -212,12 +216,14 @@ export const useSkillsStore = create<SkillsState>()(
       sessionSkillIds: [],
       searchResults: [],
       searchLoading: false,
+      searchError: null,
       searchQuery: '',
       searchPage: 1,
       searchTotal: 0,
       searchHasNext: false,
       recommendedSkills: [],
       recommendedLoading: false,
+      recommendedError: null,
 
       toggleSessionSkill: async (id: string, workingDir?: string) => {
         const { sessionSkillIds, skills } = get()
@@ -327,15 +333,24 @@ export const useSkillsStore = create<SkillsState>()(
       },
 
       searchOnlineSkills: async (query: string, page: number = 1) => {
-        set({ searchLoading: true, searchQuery: query })
+        const sequence = ++skillSearchSequence
+        const previous = get()
+        const append = page > 1 && previous.searchQuery === query
+        set({
+          searchLoading: true,
+          searchQuery: query,
+          searchError: null,
+          ...(!append ? { searchResults: [], searchPage: 1, searchTotal: 0, searchHasNext: false } : {}),
+        })
         try {
           const raw = await ipc.skillsSearch(query, page, 20)
           const result: SkillsMPSearchResult = JSON.parse(raw)
+          if (sequence !== skillSearchSequence) return
           if (result.success && result.data && Array.isArray(result.data.skills)) {
             // 防御：强制 id 为 string
             const skills = result.data.skills.map((s) => ({ ...s, id: String(s.id) }))
             // page > 1 时追加而非覆盖（支持"加载更多"语义）
-            const merged = page > 1 ? [...get().searchResults, ...skills] : skills
+            const merged = append ? [...get().searchResults, ...skills] : skills
             set({
               searchResults: merged,
               searchPage: result.data.pagination.page,
@@ -345,11 +360,13 @@ export const useSkillsStore = create<SkillsState>()(
             })
           } else {
             console.error('[skills-store] searchOnlineSkills failed:', result)
-            set({ searchResults: [], searchPage: 1, searchTotal: 0, searchHasNext: false, searchLoading: false })
+            const message = result.error?.message
+            set({ searchError: typeof message === 'string' && message ? message : 'MARKET_REQUEST_FAILED', searchLoading: false })
           }
         } catch (err) {
+          if (sequence !== skillSearchSequence) return
           console.error('[skills-store] searchOnlineSkills error:', err)
-          set({ searchResults: [], searchPage: 1, searchTotal: 0, searchHasNext: false, searchLoading: false })
+          set({ searchError: (err instanceof Error && err.message) || 'MARKET_REQUEST_FAILED', searchLoading: false })
         }
       },
 
@@ -439,7 +456,8 @@ export const useSkillsStore = create<SkillsState>()(
       },
 
       clearSearch: () => {
-        set({ searchResults: [], searchQuery: '', searchPage: 1, searchTotal: 0, searchHasNext: false })
+        ++skillSearchSequence
+        set({ searchResults: [], searchQuery: '', searchPage: 1, searchTotal: 0, searchHasNext: false, searchLoading: false, searchError: null })
       },
 
       installCustomSkill: async (filePath: string) => {
@@ -476,11 +494,13 @@ export const useSkillsStore = create<SkillsState>()(
       },
 
       loadRecommended: async () => {
-        set({ recommendedLoading: true })
+        const sequence = ++skillRecommendationSequence
+        set({ recommendedLoading: true, recommendedError: null })
         try {
           // CocoLoop Hub /search 路由返回 SSR HTML 含 initialItems（热门技能列表）
           const raw = await ipc.skillsSearch('', 1, 12)
           const result: SkillsMPSearchResult = JSON.parse(raw)
+          if (sequence !== skillRecommendationSequence) return
           if (result.success && result.data && Array.isArray(result.data.skills)) {
             // 防御：CocoLoop 后端 id 可能为 number，强制转 string 避免 UI 层 .replace 报错
             const skills = result.data.skills.map((s) => ({ ...s, id: String(s.id) }))
@@ -489,11 +509,13 @@ export const useSkillsStore = create<SkillsState>()(
             set({ recommendedSkills: sorted, recommendedLoading: false })
           } else {
             console.error('[skills-store] loadRecommended: API returned non-success or empty', result)
-            set({ recommendedSkills: [], recommendedLoading: false })
+            const message = result.error?.message
+            set({ recommendedError: typeof message === 'string' && message ? message : 'MARKET_REQUEST_FAILED', recommendedLoading: false })
           }
         } catch (err) {
+          if (sequence !== skillRecommendationSequence) return
           console.error('[skills-store] loadRecommended failed:', err)
-          set({ recommendedSkills: [], recommendedLoading: false })
+          set({ recommendedError: (err instanceof Error && err.message) || 'MARKET_REQUEST_FAILED', recommendedLoading: false })
         }
       },
 

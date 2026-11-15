@@ -36,10 +36,10 @@ function StatCard({ icon: Icon, label, value, hint, accent }: StatCardProps) {
     <div className={`p-3 rounded-md3-md border ${bgMap[accent]}`}>
       <div className="flex items-center gap-1.5 mb-1">
         <Icon size={12} className={accentMap[accent]} />
-        <span className="text-[11px] text-dark-onSurfaceVariant/70">{label}</span>
+        <span className="text-ui-xs text-dark-onSurfaceVariant/70">{label}</span>
       </div>
-      <div className={`text-base font-semibold ${accentMap[accent]}`}>{value}</div>
-      {hint && <div className="text-[10px] text-dark-onSurfaceVariant/50 mt-0.5">{hint}</div>}
+      <div className={`text-ui-base font-semibold ${accentMap[accent]}`}>{value}</div>
+      {hint && <div className="text-ui-xs text-dark-onSurfaceVariant/50 mt-0.5">{hint}</div>}
     </div>
   )
 }
@@ -64,13 +64,13 @@ export default function TokenUsageStats() {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Activity size={14} className="text-md-primary flex-shrink-0" />
-          <span className="text-sm font-medium text-dark-onSurface">{t('settings.general.tokenTitle')}</span>
+          <span className="text-ui-sm font-medium text-dark-onSurface">{t('settings.general.tokenTitle')}</span>
         </div>
         {hasData && (
           <button
             type="button"
             onClick={() => setShowClearConfirm(true)}
-            className="flex items-center gap-1 text-[11px] text-dark-onSurfaceVariant/60 hover:text-md-error transition-colors"
+            className="flex items-center gap-1 text-ui-xs text-dark-onSurfaceVariant/60 hover:text-md-error transition-colors"
           >
             <RotateCcw size={11} />
             {t('settings.general.clearStats')}
@@ -78,12 +78,12 @@ export default function TokenUsageStats() {
         )}
       </div>
 
-      <p className="text-xs text-dark-onSurfaceVariant/70 leading-relaxed">
+      <p className="text-ui-xs text-dark-onSurfaceVariant/70 leading-relaxed">
         {t('settings.general.tokenDesc')}
       </p>
 
       {!hasData ? (
-        <div className="py-6 text-center text-xs text-dark-onSurfaceVariant/40">
+        <div className="py-6 text-center text-ui-xs text-dark-onSurfaceVariant/40">
           {t('settings.general.noData')}
         </div>
       ) : (
@@ -149,7 +149,7 @@ export default function TokenUsageStats() {
               accent="success"
             />
           </div>
-          <div className="flex items-center justify-between pt-2 border-t border-dark-onSurfaceVariant/10 text-xs">
+          <div className="flex items-center justify-between pt-2 border-t border-dark-onSurfaceVariant/10 text-ui-xs">
             <span className="text-dark-onSurfaceVariant/70">{t('settings.general.totalTokens')}</span>
             <span className="font-semibold text-dark-onSurface">{formatTokens(stats.totalTokens)}</span>
           </div>

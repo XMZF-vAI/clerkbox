@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
-import { Loader2, RotateCw, ShieldOff } from 'lucide-react'
+import { CircleAlert, Loader2, RotateCw } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { ipc } from '../../lib/ipc-client'
 import '@xterm/xterm/css/xterm.css'
@@ -15,11 +15,16 @@ interface TerminalPanelProps {
   cwd?: string
 }
 
-const XTERM_THEME = {
-  background: 'rgba(0,0,0,0)',
-  foreground: '#e6e6e6',
-  cursor: '#4d8ef7',
-  selectionBackground: 'rgba(77,142,247,0.35)',
+/** xterm 不能直接读取 CSS 变量；从当前主题的计算样式解析，避免浅色主题仍用白字。 */
+function terminalTheme(container: HTMLElement) {
+  const styles = getComputedStyle(container)
+  const accent = styles.getPropertyValue('--md-primary-rgb').trim()
+  return {
+    background: 'transparent',
+    foreground: styles.color,
+    cursor: styles.color,
+    selectionBackground: `rgb(${accent} / 0.24)`,
+  }
 }
 
 /**
@@ -44,7 +49,9 @@ export default function TerminalPanel({ termId, active, vibe, cwd }: TerminalPan
   const startSessionRef = useRef<() => void>(() => {})
   const [booting, setBooting] = useState(true)
   const [exited, setExited] = useState<number | null>(null)
-  const [unavailable, setUnavailable] = useState(false)
+  const [bootError, setBootError] = useState(false)
+  const activeRef = useRef(active)
+  activeRef.current = active
 
   useEffect(() => {
     if (termRef.current) return
@@ -53,11 +60,12 @@ export default function TerminalPanel({ termId, active, vibe, cwd }: TerminalPan
 
     const term = new Terminal({
       fontFamily: 'Consolas, Menlo, "Courier New", monospace',
-      fontSize: 12,
+      fontSize: parseFloat(getComputedStyle(container).fontSize),
       lineHeight: 1.25,
       cursorBlink: true,
       scrollback: 4000,
-      theme: XTERM_THEME,
+      allowTransparency: true,
+      theme: terminalTheme(container),
     })
     const fit = new FitAddon()
     term.loadAddon(fit)
@@ -79,6 +87,16 @@ export default function TerminalPanel({ termId, active, vibe, cwd }: TerminalPan
       }
     }
 
+    const syncTheme = () => {
+      if (disposed) return
+      term.options.theme = terminalTheme(container)
+      term.options.fontSize = parseFloat(getComputedStyle(container).fontSize)
+      doFit()
+    }
+    const themeObserver = new MutationObserver(syncTheme)
+    themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'style'] })
+    themeObserver.observe(container, { attributes: true, attributeFilter: ['class'] })
+
     /** 启动（或重启）一个全新代次的 PTY 会话，先回收旧 key */
     const startSession = () => {
       const prevKey = ptyKeyRef.current
@@ -86,6 +104,7 @@ export default function TerminalPanel({ termId, active, vibe, cwd }: TerminalPan
       ptyKeyRef.current = key
       if (prevKey) void ipc.ptyKill(prevKey).catch(() => {})
       setBooting(true)
+      setBootError(false)
       setExited(null)
       ipc
         .ptyCreate({ id: key, cwd, cols: term.cols || 80, rows: term.rows || 24 })
@@ -97,7 +116,7 @@ export default function TerminalPanel({ termId, active, vibe, cwd }: TerminalPan
           }
           setBooting(false)
           doFit()
-          term.focus()
+          if (activeRef.current) term.focus()
           if (!resizeObserver) {
             resizeObserver = new ResizeObserver(doFit)
             resizeObserver.observe(container)
@@ -106,8 +125,8 @@ export default function TerminalPanel({ termId, active, vibe, cwd }: TerminalPan
         .catch(() => {
           if (disposed || ptyKeyRef.current !== key) return
           setBooting(false)
-          // WebUI 等非桌面环境主进程通道不存在：标记不可用而不是留黑屏
-          setUnavailable(true)
+          // 启动失败也保留终端容器，允许修复目录或短暂连接故障后重试。
+          setBootError(true)
         })
     }
     startSessionRef.current = startSession
@@ -134,6 +153,7 @@ export default function TerminalPanel({ termId, active, vibe, cwd }: TerminalPan
       offData()
       offExit()
       resizeObserver?.disconnect()
+      themeObserver.disconnect()
       if (ptyKeyRef.current) void ipc.ptyKill(ptyKeyRef.current).catch(() => {})
       term.dispose()
       termRef.current = null
@@ -166,24 +186,23 @@ export default function TerminalPanel({ termId, active, vibe, cwd }: TerminalPan
     return () => cancelAnimationFrame(raf)
   }, [active, termId])
 
-  if (unavailable) {
-    return (
-      <div className={`flex h-full flex-col items-center justify-center gap-3 text-xs ${vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/60'}`}>
-        <ShieldOff size={28} aria-hidden />
-        <span>{t('workbench.terminalDesktopOnly')}</span>
-      </div>
-    )
-  }
-
   return (
     <div
-      className="relative h-full min-h-0 p-1"
+      className="relative h-full min-h-0 p-2"
       // 点击终端区域任意位置都把焦点交给 xterm（兜底：即使焦点此前落在其他控件）
       onMouseDown={() => termRef.current?.focus()}
     >
       {booting && (
-        <div className="absolute inset-0 z-10 flex items-center justify-center">
-          <Loader2 size={16} className="animate-spin opacity-60" />
+        <div role="status" className="absolute inset-0 z-10 flex items-center justify-center gap-2 text-ui-sm text-dark-onSurfaceVariant">
+          <Loader2 size={16} className="animate-spin opacity-60" aria-hidden />
+          {t('common.loading')}
+        </div>
+      )}
+      {bootError && (
+        <div role="alert" className={`absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 px-6 py-5 text-center text-ui-sm ${vibe ? 'bg-dark-surfaceDim/95 text-white/75' : 'bg-dark-surfaceDim text-dark-onSurfaceVariant'}`}>
+          <CircleAlert size={26} className="text-md-error" aria-hidden />
+          <p className="max-w-sm leading-relaxed">{t('workbench.terminalStartFailed')}</p>
+          <button type="button" onClick={handleRestart} className="md-focus flex min-h-9 items-center gap-2 rounded-md3-sm border border-dark-onSurfaceVariant/20 px-4 py-2 text-ui-sm hover:bg-dark-surfaceContainerHigh transition-colors"><RotateCw size={14} aria-hidden />{t('common.retry')}</button>
         </div>
       )}
       {!booting && exited !== null && (
@@ -191,7 +210,7 @@ export default function TerminalPanel({ termId, active, vibe, cwd }: TerminalPan
           <button
             type="button"
             onClick={handleRestart}
-            className={`flex items-center gap-1.5 rounded-md3-md px-2.5 py-1.5 text-xs shadow-elevation-2 transition-colors ${
+            className={`md-focus flex min-h-9 items-center gap-1.5 rounded-md3-md px-3 py-2 text-ui-xs shadow-elevation-2 transition-colors ${
               vibe
                 ? 'liquid-glass-subtle text-white/90 hover:bg-white/15'
                 : 'bg-dark-surfaceContainerHigh text-dark-onSurfaceVariant hover:bg-dark-surfaceContainer'
@@ -202,7 +221,7 @@ export default function TerminalPanel({ termId, active, vibe, cwd }: TerminalPan
           </button>
         </div>
       )}
-      <div ref={containerRef} className="h-full w-full" />
+      <div ref={containerRef} className={`h-full w-full text-ui-sm ${vibe ? 'text-white' : 'text-dark-onSurface'}`} />
     </div>
   )
 }

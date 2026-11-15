@@ -12,9 +12,12 @@
 import { agentClient } from './agent-client'
 import { ipc } from './ipc-client'
 import { messageToRow } from './chat-row'
-import { buildRewindPlan } from './rewind'
+import { buildRewindPlan, isRewindableUserMessage } from './rewind'
 import { buildRewindIo, executeRewind } from './rewind-service'
-import { getSessionAbortController, useChatStore } from '../stores/chat-store'
+import { flushSessionMessageWrites, getSessionAbortController, hasChatDraft, useChatStore } from '../stores/chat-store'
+import { hasRunningSubagents } from '../agent-core/session-context'
+import { listRunningWorkflowRuns } from './workflow-runtime'
+import { useComposerQueueStore } from './composer-queue'
 import type { RewindOutcome, RewindPlan, RewindScope, Message } from '../types/agent'
 
 function localMessages(sessionId: string): Message[] {
@@ -30,25 +33,19 @@ function localIo(sessionId: string) {
   })
 }
 
-/**
- * 等本地那圈 run 真正停下来。
- *
- * abort 只是发信号，循环要把手上的模型流与工具批次收完才清 controller；
- * 不等就截断，等于在一个还在被写历史的锚点下面抽掉消息。
- * 上限 10s，超时就报忙而不是无限等下去。
- */
-async function waitLocalRunEnded(sessionId: string): Promise<boolean> {
-  for (let i = 0; i < 200; i++) {
-    if (!getSessionAbortController(sessionId)) return true
-    await new Promise((resolve) => setTimeout(resolve, 50))
-  }
-  return !getSessionAbortController(sessionId)
+function sessionBusy(sessionId: string): boolean {
+  const state = useChatStore.getState()
+  return !!getSessionAbortController(sessionId) || state.streamingSessionIds.has(sessionId) ||
+    state.compactingSessionIds.has(sessionId) || state.stoppingSessionIds.has(sessionId) ||
+    !!state.draftSubmitting[sessionId] || !!state.queuedMessages[sessionId]?.length ||
+    hasRunningSubagents(sessionId) || listRunningWorkflowRuns(sessionId).length > 0 ||
+    Object.values(useComposerQueueStore.getState().operations[sessionId] ?? {}).some((op) => op.status !== 'rejected')
 }
 
 function failedOutcome(error: string | undefined): RewindOutcome {
   // 只透传界面有文案的码：宿主还会返回 'rewind-local-only' 这类内部码，
   // 直接拼进 t() 会让用户看到一条键名而不是话
-  const known: RewindOutcome['error'][] = ['cancelled', 'plan-blocked', 'write-failed', 'truncate-failed', 'no-checkpoint', 'session-busy']
+  const known: RewindOutcome['error'][] = ['cancelled', 'plan-blocked', 'write-failed', 'truncate-failed', 'no-checkpoint', 'session-busy', 'history-changed', 'draft-conflict']
   const mapped = known.includes(error as RewindOutcome['error']) ? (error as RewindOutcome['error']) : 'session-busy'
   return { ok: false, error: mapped, restored: [], compensated: false, removedMessages: 0 }
 }
@@ -65,7 +62,7 @@ export async function previewRewind(
   }
   const messages = localMessages(sessionId)
   const fromIndex = messages.findIndex((m) => m.id === anchorMessageId)
-  if (fromIndex < 0) return null
+  if (fromIndex < 0 || !isRewindableUserMessage(messages[fromIndex]!)) return null
   const io = localIo(sessionId)
   return buildRewindPlan({
     messages,
@@ -86,29 +83,63 @@ export async function previewRewind(
 export async function applyRewind(
   sessionId: string,
   anchorMessageId: string,
-  scope: RewindScope
+  scope: RewindScope,
+  options: { expectedHistoryVersion?: string; restoreDraft?: boolean } = {},
 ): Promise<RewindOutcome> {
-  if ((await agentClient.ensureMode()) === 'main') {
-    const res = await agentClient.send({ type: 'rewind.apply', sessionId, anchorMessageId, scope })
-    const outcome = res.outcome as RewindOutcome | undefined
-    // 宿主没给结果就是没受理：把错误码原样带上，界面按码出文案
-    if (!outcome) return failedOutcome(res.error)
-    // 成功时宿主已广播 resync，reducer 会把整会话重拉，这里不必再拉一次
-    return outcome
+  const state = useChatStore.getState()
+  if (state.rewindingSessionIds.has(sessionId) || sessionBusy(sessionId)) return failedOutcome('session-busy')
+  const anchor = localMessages(sessionId).find((m) => m.id === anchorMessageId)
+  if (!anchor || !isRewindableUserMessage(anchor)) return failedOutcome('no-checkpoint')
+  const restoreDraft = options.restoreDraft === true && scope !== 'workspace'
+  if (restoreDraft && hasChatDraft(state.drafts[sessionId])) return failedOutcome('draft-conflict')
+  const draft = {
+    content: anchor.content,
+    attachments: anchor.attachments?.map((attachment) => ({ ...attachment })) ?? [],
+    taskMode: anchor.taskMode ?? null,
+    compactMode: false,
   }
 
-  const io = localIo(sessionId)
-  const outcome = await executeRewind(io, {
-    getMessages: async () => localMessages(sessionId),
-    anchorMessageId,
-    scope,
-    abortActiveRun: async () => {
-      const controller = getSessionAbortController(sessionId)
-      if (!controller) return true
-      controller.abort()
-      return waitLocalRunEnded(sessionId)
-    },
-  })
-  if (outcome.ok) await useChatStore.getState().reloadSessionFromDb(sessionId)
-  return outcome
+  // 同步占锁，再做模式查询/IPC。双击、发送、压缩和迟到附件都不能改写这份草稿。
+  state.setRewinding(sessionId, true)
+  try {
+    const mode = await agentClient.ensureMode()
+    if (sessionBusy(sessionId)) return failedOutcome('session-busy')
+    let outcome: RewindOutcome
+    if (mode === 'main') {
+      const res = await agentClient.send({
+        type: 'rewind.apply', sessionId, anchorMessageId, scope,
+        expectedHistoryVersion: options.expectedHistoryVersion,
+      })
+      outcome = (res.outcome as RewindOutcome | undefined) ?? failedOutcome(res.error)
+    } else {
+      await flushSessionMessageWrites(sessionId)
+      if (sessionBusy(sessionId)) return failedOutcome('session-busy')
+      outcome = await executeRewind(localIo(sessionId), {
+        getMessages: async () => localMessages(sessionId),
+        anchorMessageId,
+        scope,
+        expectedHistoryVersion: options.expectedHistoryVersion,
+        abortActiveRun: async () => !sessionBusy(sessionId),
+      })
+    }
+    if (!outcome.ok) return outcome
+
+    if (scope !== 'workspace') {
+      useChatStore.setState((current) => ({
+        rewindRevisions: { ...current.rewindRevisions, [sessionId]: (current.rewindRevisions[sessionId] ?? 0) + 1 },
+        sessions: current.sessions.map((session) => {
+          if (session.id !== sessionId) return session
+          const index = session.messages.findIndex((m) => m.id === anchorMessageId)
+          return index < 0 ? session : { ...session, messages: session.messages.slice(0, index) }
+        }),
+        ...(restoreDraft && current.sessions.some((s) => s.id === sessionId)
+          ? { drafts: { ...current.drafts, [sessionId]: draft } } : {}),
+      }))
+    }
+    // 等权威历史读回再解锁；原会话的草稿恢复不改变当前选中的会话。
+    await useChatStore.getState().reloadSessionFromDb(sessionId)
+    return outcome
+  } finally {
+    useChatStore.getState().setRewinding(sessionId, false)
+  }
 }

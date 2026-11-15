@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Bot, FolderCog, Loader2, Plus, RotateCcw, Trash2, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import Modal, { useOverlayKeyboardLock } from '../ui/Modal'
@@ -103,10 +103,12 @@ export default function BotsDialog({ onClose, entryProvider }: BotsDialogProps) 
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
   const [draft, setDraft] = useState<DetailDraft>({ name: '', defaultWorkDir: '' })
-  const [saving, setSaving] = useState(false)
+  const [updating, setUpdating] = useState<{ id: string; kind: 'save' | 'toggle' } | null>(null)
   const [detailError, setDetailError] = useState<string | null>(null)
   const [pendingDelete, setPendingDelete] = useState<BotListItem | null>(null)
   const [pendingReset, setPendingReset] = useState<BotListItem | null>(null)
+  const selectedIdRef = useRef(selectedId)
+  selectedIdRef.current = selectedId
 
   // 删除确认框叠在本弹窗之上：期间让出 Modal 的 Esc / Tab，否则一次按键关掉两层
   // Esc 要一次只关一层：确认框叠在 Modal 上时，锁必须把两个都算进去
@@ -131,6 +133,8 @@ export default function BotsDialog({ onClose, entryProvider }: BotsDialogProps) 
 
   const dirty =
     !!selected && (draft.name !== selected.name || draft.defaultWorkDir !== (selected.defaultWorkDir ?? ''))
+  const saving = updating?.id === selectedId && updating.kind === 'save'
+  const toggling = updating?.id === selectedId && updating.kind === 'toggle'
 
   const submitCreate = useCallback(async () => {
     const provider = create?.provider
@@ -165,8 +169,9 @@ export default function BotsDialog({ onClose, entryProvider }: BotsDialogProps) 
   }, [create?.name, create?.provider, creating, refresh, t])
 
   const submitDraft = useCallback(async () => {
-    if (!selected || saving) return
-    setSaving(true)
+    if (!selected || updating) return
+    const id = selected.id
+    setUpdating({ id, kind: 'save' })
     setDetailError(null)
     try {
       const name = draft.name.trim() || selected.name
@@ -179,35 +184,41 @@ export default function BotsDialog({ onClose, entryProvider }: BotsDialogProps) 
         ...(draft.defaultWorkDir.trim() ? { defaultWorkDir: draft.defaultWorkDir.trim() } : {}),
       })
       if (!result.ok) {
-        setDetailError(t('bots.error.saveFailed', { error: result.error }))
+        if (selectedIdRef.current === id) setDetailError(t('bots.error.saveFailed', { error: result.error }))
         return
       }
       await refresh()
     } catch (error) {
-      setDetailError(error instanceof Error ? error.message : String(error))
+      if (selectedIdRef.current === id) setDetailError(error instanceof Error ? error.message : String(error))
     } finally {
-      setSaving(false)
+      setUpdating(null)
     }
-  }, [draft.defaultWorkDir, draft.name, refresh, saving, selected, t])
+  }, [draft.defaultWorkDir, draft.name, refresh, selected, t, updating])
 
   const toggleEnabled = useCallback(
     async (next: boolean) => {
-      if (!selected) return
+      if (!selected || updating) return
+      const id = selected.id
+      setUpdating({ id, kind: 'toggle' })
       setDetailError(null)
       try {
         const result = await ipc.bots.setEnabled(selected.id, next)
-        if (!result.ok) setDetailError(t('bots.error.toggleFailed', { error: result.error }))
+        if (!result.ok && selectedIdRef.current === id) setDetailError(t('bots.error.toggleFailed', { error: result.error }))
         await refresh()
       } catch (error) {
-        setDetailError(error instanceof Error ? error.message : String(error))
+        if (selectedIdRef.current === id) setDetailError(error instanceof Error ? error.message : String(error))
+      } finally {
+        setUpdating(null)
       }
     },
-    [refresh, selected, t]
+    [refresh, selected, t, updating]
   )
 
   const chooseWorkDir = useCallback(async () => {
+    const targetId = selectedIdRef.current
     const dir = await ipc.selectFolder().catch(() => null)
-    if (dir) setDraft((prev) => ({ ...prev, defaultWorkDir: dir }))
+    // 原生选择器返回前可切换机器人；旧目录不能写入新选中的机器人草稿。
+    if (dir && selectedIdRef.current === targetId) setDraft((prev) => ({ ...prev, defaultWorkDir: dir }))
   }, [])
 
   const confirmDelete = useCallback(async () => {
@@ -217,13 +228,16 @@ export default function BotsDialog({ onClose, entryProvider }: BotsDialogProps) 
     setDetailError(null)
     try {
       const result = await ipc.bots.remove(id)
-      if (!result.ok) setDetailError(t('bots.error.removeFailed', { error: result.error }))
-      if (selectedId === id) setSelectedId(null)
+      if (!result.ok) {
+        if (selectedIdRef.current === id) setDetailError(t('bots.error.removeFailed', { error: result.error }))
+        return
+      }
+      if (selectedIdRef.current === id) setSelectedId(null)
       await refresh()
     } catch (error) {
-      setDetailError(error instanceof Error ? error.message : String(error))
+      if (selectedIdRef.current === id) setDetailError(error instanceof Error ? error.message : String(error))
     }
-  }, [pendingDelete, refresh, selectedId, t])
+  }, [pendingDelete, refresh, t])
 
   /**
    * 重置这个 bot 的 IM 侧状态：绑定关系、聊天上下文与长轮询游标一次清干净，
@@ -237,10 +251,10 @@ export default function BotsDialog({ onClose, entryProvider }: BotsDialogProps) 
     setDetailError(null)
     try {
       const result = await ipc.bots.resetBot(id)
-      if (!result.ok) setDetailError(t('bots.error.resetFailed', { error: result.error }))
+      if (!result.ok && selectedIdRef.current === id) setDetailError(t('bots.error.resetFailed', { error: result.error }))
       await refresh()
     } catch (error) {
-      setDetailError(error instanceof Error ? error.message : String(error))
+      if (selectedIdRef.current === id) setDetailError(error instanceof Error ? error.message : String(error))
     }
   }, [pendingReset, refresh, t])
 
@@ -257,18 +271,18 @@ export default function BotsDialog({ onClose, entryProvider }: BotsDialogProps) 
       title={t('bots.title')}
       description={t('bots.desc')}
       onClose={onClose}
-      widthClass="w-[720px]"
-      bodyClassName="p-0"
+      widthClass="w-[880px]"
+      bodyClassName="p-0 flex flex-col"
       bodyScroll={false}
       titleIcon={<Bot size={18} />}
     >
-      <div className="h-full flex max-md:flex-col min-h-0">
+      <div className="h-[min(620px,65dvh)] flex max-md:flex-col min-h-0">
         {/* ── 左：机器人列表 ── */}
-        <div className="w-[220px] max-md:w-full max-md:border-b border-dark-onSurfaceVariant/10 flex flex-col min-h-0 max-md:max-h-[168px]">
-          <div className="px-3 pt-1 pb-1.5 text-ui-xs font-medium text-dark-onSurfaceVariant/50 uppercase tracking-wider">
+        <div className="w-56 shrink-0 max-md:w-full md:border-r max-md:border-b border-dark-onSurfaceVariant/10 bg-dark-surfaceContainer/30 flex flex-col min-h-0 max-md:max-h-44">
+          <div className="px-4 pt-4 pb-2 text-ui-xs font-semibold text-dark-onSurfaceVariant">
             {t('bots.listTitle')}
           </div>
-          <div className="flex-1 min-h-0 overflow-y-auto px-2">
+          <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain px-2 pb-2">
             {loading && (
               <p className="px-2 py-3 text-ui-xs text-dark-onSurfaceVariant/60 flex items-center gap-1.5">
                 <Loader2 size={12} className="animate-spin" />
@@ -290,10 +304,11 @@ export default function BotsDialog({ onClose, entryProvider }: BotsDialogProps) 
                         setSelectedId(item.id)
                       }}
                       aria-current={active}
-                      className={`md-focus w-full flex items-center gap-2 px-2 py-2 rounded-md3-xs text-ui-xs transition-colors text-left ${
+                      title={item.name}
+                      className={`md-focus min-h-11 w-full flex items-center gap-2.5 px-3 py-2.5 rounded-md3-sm border text-ui-sm transition-colors text-left ${
                         active
-                          ? 'bg-md-secondaryContainer text-md-onSecondaryContainer'
-                          : 'text-dark-onSurfaceVariant/85 hover:bg-dark-surfaceContainer'
+                          ? 'border-dark-onSurfaceVariant/10 bg-dark-surface text-dark-onSurface font-medium'
+                          : 'border-transparent text-dark-onSurfaceVariant hover:bg-dark-surfaceContainer'
                       }`}
                     >
                       <ChannelBadge provider={item.provider} size="sm" />
@@ -318,7 +333,7 @@ export default function BotsDialog({ onClose, entryProvider }: BotsDialogProps) 
         </div>
 
         {/* ── 右：详情 / 新建 ── */}
-        <div className="flex-1 min-w-0 min-h-0 overflow-y-auto px-4 py-3 space-y-3">
+        <div className="flex-1 min-w-0 min-h-0 overflow-y-auto overscroll-contain px-6 py-5 max-md:px-4 space-y-5">
           {loadError && (
             <p role="alert" className="text-ui-xs text-md-error bg-md-error/10 border border-md-error/20 rounded-md3-sm px-3 py-2">
               {t('bots.error.loadFailed')}
@@ -327,9 +342,9 @@ export default function BotsDialog({ onClose, entryProvider }: BotsDialogProps) 
 
           {create && (
             <div className="space-y-3">
-              <p className="text-ui-sm font-medium text-dark-onSurface">{t('bots.newBotTitle')}</p>
+              <h3 className="text-ui-lg font-semibold text-dark-onSurface">{t('bots.newBotTitle')}</h3>
               <p className="text-ui-xs text-dark-onSurfaceVariant leading-relaxed">{t('bots.chooseChannelHint')}</p>
-              <div className="grid gap-2 max-md:grid-cols-1">
+              <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,13rem),1fr))] gap-2">
                 {PROVIDERS.map((provider) => {
                   const picked = create.provider === provider
                   return (
@@ -347,7 +362,7 @@ export default function BotsDialog({ onClose, entryProvider }: BotsDialogProps) 
                       <ChannelBadge provider={provider} />
                       <span className="min-w-0">
                         <span className="block text-ui-sm text-dark-onSurface">{t(providerLabelKey(provider))}</span>
-                        <span className="block text-ui-xs text-dark-onSurfaceVariant/70 truncate">
+                        <span className="mt-1 block text-ui-xs leading-relaxed text-dark-onSurfaceVariant">
                           {t(providerDescKey(provider))}
                         </span>
                       </span>
@@ -409,16 +424,16 @@ export default function BotsDialog({ onClose, entryProvider }: BotsDialogProps) 
 
           {!create && selected && (
             <>
-              <div className="flex items-start gap-3">
+              <div className="flex flex-wrap items-start gap-3 border-b border-dark-onSurfaceVariant/10 pb-5">
                 <ChannelBadge provider={selected.provider} />
                 <div className="flex-1 min-w-0">
                   <input
                     aria-label={t('bots.name')}
                     value={draft.name}
                     onChange={(e) => setDraft((prev) => ({ ...prev, name: e.target.value }))}
-                    className="w-full bg-transparent text-ui-sm font-medium text-dark-onSurface outline-none border-b border-transparent focus:border-md-primary/40 transition-colors"
+                    className="md-focus w-full min-h-9 rounded-md3-xs bg-transparent text-ui-base font-semibold text-dark-onSurface outline-none border-b border-transparent focus:border-md-primary/40 transition-colors"
                   />
-                  <p className="mt-1 flex items-center gap-1.5 text-ui-xs text-dark-onSurfaceVariant/70">
+                  <p className="mt-1 flex flex-wrap items-center gap-1.5 text-ui-xs text-dark-onSurfaceVariant">
                     <StatusDot state={status?.state ?? selected.status} pulse />
                     <span>{t(STATUS_LABEL_KEY[status?.state ?? selected.status])}</span>
                     <span className="text-dark-onSurfaceVariant/40">·</span>
@@ -429,10 +444,12 @@ export default function BotsDialog({ onClose, entryProvider }: BotsDialogProps) 
                   <input
                     type="checkbox"
                     checked={selected.enabled}
+                    disabled={updating !== null}
                     onChange={(e) => void toggleEnabled(e.target.checked)}
                     className="accent-md-primary"
                   />
                   <span className="text-ui-xs text-dark-onSurface">{t('bots.enabled')}</span>
+                  {toggling && <Loader2 size={13} className="animate-spin text-dark-onSurfaceVariant" aria-hidden />}
                 </label>
               </div>
 
@@ -446,9 +463,9 @@ export default function BotsDialog({ onClose, entryProvider }: BotsDialogProps) 
                 </p>
               )}
 
-              <SetupCard bot={selected} onChanged={refresh} />
+              <SetupCard key={selected.id} bot={selected} onChanged={refresh} />
 
-              <BindPanel bot={selected} onChanged={refresh} />
+              <BindPanel key={selected.id} bot={selected} onChanged={refresh} />
 
               {/* 默认工作目录 */}
               <div className="p-3 rounded-md3-md bg-dark-surfaceContainer/50 border border-dark-onSurfaceVariant/10">
@@ -457,7 +474,7 @@ export default function BotsDialog({ onClose, entryProvider }: BotsDialogProps) 
                   <span className="text-ui-sm font-medium text-dark-onSurface">{t('bots.workDir.title')}</span>
                 </div>
                 <p className="text-ui-xs text-dark-onSurfaceVariant leading-relaxed mb-2">{t('bots.workDir.desc')}</p>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <code className="flex-1 min-w-0 text-ui-xs break-all text-dark-onSurfaceVariant select-all">
                     {draft.defaultWorkDir || t('bots.workDir.none')}
                   </code>
@@ -482,11 +499,11 @@ export default function BotsDialog({ onClose, entryProvider }: BotsDialogProps) 
 
               {/* 未保存提示 + 保存：元数据改动（名称 / 目录）统一一次提交，避免改一个字写一次盘 */}
               {dirty && (
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <button
                     type="button"
                     onClick={() => void submitDraft()}
-                    disabled={saving}
+                    disabled={updating !== null}
                     className="md-focus inline-flex items-center gap-1.5 px-4 py-2 rounded-md3-sm text-ui-sm font-medium bg-md-primary text-md-onPrimary hover:bg-md-primary/90 transition-colors disabled:opacity-50"
                   >
                     {saving && <Loader2 size={14} className="animate-spin" />}
@@ -494,6 +511,7 @@ export default function BotsDialog({ onClose, entryProvider }: BotsDialogProps) 
                   </button>
                   <button
                     type="button"
+                    disabled={updating !== null}
                     onClick={() =>
                       setDraft({ name: selected.name, defaultWorkDir: selected.defaultWorkDir ?? '' })
                     }
@@ -516,7 +534,8 @@ export default function BotsDialog({ onClose, entryProvider }: BotsDialogProps) 
                 <button
                   type="button"
                   onClick={() => setPendingReset(selected)}
-                  className="md-focus inline-flex items-center gap-1.5 px-3 py-2 rounded-md3-sm text-ui-xs text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh transition-colors"
+                  disabled={updating !== null}
+                  className="md-focus inline-flex items-center gap-1.5 px-3 py-2 rounded-md3-sm text-ui-xs text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh transition-colors disabled:opacity-50"
                 >
                   <RotateCcw size={13} />
                   <span>{t('bots.resetAll')}</span>
@@ -524,7 +543,8 @@ export default function BotsDialog({ onClose, entryProvider }: BotsDialogProps) 
                 <button
                   type="button"
                   onClick={() => setPendingDelete(selected)}
-                  className="md-focus inline-flex items-center gap-1.5 px-3 py-2 rounded-md3-sm text-ui-xs text-md-error hover:bg-md-error/10 transition-colors"
+                  disabled={updating !== null}
+                  className="md-focus inline-flex items-center gap-1.5 px-3 py-2 rounded-md3-sm text-ui-xs text-md-error hover:bg-md-error/10 transition-colors disabled:opacity-50"
                 >
                   <Trash2 size={13} />
                   <span>{t('bots.delete')}</span>

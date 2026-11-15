@@ -90,9 +90,42 @@ describe('排队语义（运行中收到新消息不并发，按队列 FIFO）',
     for (const id of ['q1', 'q2', 'q3']) {
       await m.handleCommand({ type: 'queue.enqueue', sessionId: 's1', item: { id, content: id, queuedAt: 1 } })
     }
-    await m.handleCommand({ type: 'queue.flush', sessionId: 's1', id: 'q3' })
+    expect(await m.handleCommand({ type: 'queue.flush', sessionId: 's1', id: 'q3' }))
+      .toEqual({ ok: false, error: 'run-command-missing-settings' })
     const snaps = m.peekRing('s1').filter((e) => e.type === 'queue.snapshot')
-    expect(snaps.at(-1)).toMatchObject({ items: [{ id: 'q3' }, { id: 'q1' }, { id: 'q2' }] })
+    expect(snaps.at(-1)).toMatchObject({ items: [{ id: 'q1' }, { id: 'q2' }, { id: 'q3' }] })
+  })
+
+  it('已被取走的排队条目不能再回执成编辑删除成功或发送成功', async () => {
+    const m = new AgentSessionManager(fakeStore())
+    await expect(m.handleCommand({ type: 'queue.remove', sessionId: 's1', id: 'missing' }))
+      .resolves.toEqual({ ok: false, error: 'queue-item-missing' })
+    await expect(m.handleCommand({ type: 'queue.flush', sessionId: 's1', id: 'missing' }))
+      .resolves.toEqual({ ok: false, error: 'queue-item-missing' })
+  })
+
+  it('相同入队身份重复到达只保留一条，移除后重放也不重新排入', async () => {
+    const m = new AgentSessionManager(fakeStore())
+    const command: AgentCommand = { type: 'queue.enqueue', sessionId: 's1', item: { id: 'q1', content: 'x', queuedAt: 1 } }
+    await m.handleCommand(command)
+    await m.handleCommand(command)
+    expect(m.inspect()[0].queued).toBe(1)
+    await m.handleCommand({ type: 'queue.remove', sessionId: 's1', id: 'q1' })
+    await m.handleCommand(command)
+    expect(m.inspect()[0].queued).toBe(0)
+  })
+
+  it('只读对账以新序号广播队列与压缩状态，不要求重发写命令', async () => {
+    const m = new AgentSessionManager(fakeStore())
+    await m.handleCommand({ type: 'queue.enqueue', sessionId: 's1', item: { id: 'q1', content: 'x', queuedAt: 1 } })
+    const before = m.snapshot('s1', 0).lastSeq
+    const snapshot = m.snapshot('s1', before)
+    expect(snapshot.lastSeq).toBeGreaterThan(before)
+    expect(m.peekRing('s1').slice(-3)).toEqual([
+      { type: 'queue.snapshot', sessionId: 's1', items: [{ id: 'q1', content: 'x', queuedAt: 1 }] },
+      { type: 'compaction.status', sessionId: 's1', compacting: false },
+      { type: 'run.status', sessionId: 's1', status: 'idle', error: undefined },
+    ])
   })
 })
 

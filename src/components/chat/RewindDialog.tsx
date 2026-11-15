@@ -5,10 +5,14 @@
  * 这样消息流上的 RewindActions 与错误横幅上的「重试」能共用同一份判断与同一套文案，
  * 不会长成两种「看起来一样、点下去不一样」的撤回入口。
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { AlertTriangle, Loader2 } from 'lucide-react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import { AlertTriangle, Loader2, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { applyRewind, previewRewind } from '../../lib/rewind-action'
+import { useModalAccessibility } from '../../hooks/use-modal-accessibility'
+import { hasChatDraft, useChatStore } from '../../stores/chat-store'
+import { useVibeStore } from '../../stores/vibe-store'
 import type { Message, RewindPlan, RewindScope } from '../../types/agent'
 
 export type RewindMode = 'recall' | 'edit' | 'files' | 'retry'
@@ -53,67 +57,115 @@ export interface RewindDialogProps {
 
 export default function RewindDialog({ sessionId, anchor, mode, onClose, onResend }: RewindDialogProps) {
   const { t } = useTranslation()
-  const files = fileRewindState(anchor)
+  const vibe = useVibeStore((s) => s.isVibeMode)
+  const streaming = useChatStore((s) => s.streamingSessionIds.has(sessionId))
+  const compacting = useChatStore((s) => s.compactingSessionIds.has(sessionId))
+  const stopping = useChatStore((s) => s.stoppingSessionIds.has(sessionId))
+  const submitting = useChatStore((s) => !!s.draftSubmitting[sessionId])
+  const rewinding = useChatStore((s) => s.rewindingSessionIds.has(sessionId))
+  const queued = useChatStore((s) => !!s.queuedMessages[sessionId]?.length)
+  const currentDraft = useChatStore((s) => s.drafts[sessionId])
   const [plan, setPlan] = useState<RewindPlan | null>(null)
   const [previewing, setPreviewing] = useState(true)
-  const [withFiles, setWithFiles] = useState(files.enabled)
+  const [withFiles, setWithFiles] = useState(mode === 'files')
   const [draft, setDraft] = useState(anchor.content)
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState<string | null>(null)
+  const [filePreviewUnavailable, setFilePreviewUnavailable] = useState(false)
+  const [previewRevision, setPreviewRevision] = useState(0)
+  const busyRef = useRef(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const cancelRef = useRef<HTMLButtonElement>(null)
+  const titleId = useId()
+  const descriptionId = useId()
+  const close = useCallback(() => {
+    if (!busyRef.current && !busy && !rewinding) onClose()
+  }, [busy, rewinding, onClose])
+  const dialogRef = useModalAccessibility(close, mode === 'edit' ? textareaRef : cancelRef)
 
-  useEffect(() => {
-    if (mode !== 'edit') return
-    textareaRef.current?.focus()
-  }, [mode])
-
-  // 打开或切换文件档时重新 dry-run：计划是「此刻磁盘状态」的快照，缓存一次就会骗人
+  // 始终预览整个尾段的文件范围，默认确认仍只删除对话。版本由 apply 再校验。
   useEffect(() => {
     let cancelled = false
     setPreviewing(true)
-    void previewRewind(sessionId, anchor.id, scopeFor(mode, withFiles))
+    setPlan(null)
+    setFilePreviewUnavailable(false)
+    const loadPlan = async () => {
+      try {
+        const next = await previewRewind(sessionId, anchor.id, mode === 'files' ? 'workspace' : 'both')
+        if (next || mode === 'files') return next
+      } catch (error) {
+        if (mode === 'files') throw error
+      }
+      // 文件预览失败不应拦住只撤对话；此范围由宿主保证完全不读盘。
+      if (cancelled) return null
+      setFilePreviewUnavailable(true)
+      setWithFiles(false)
+      return previewRewind(sessionId, anchor.id, 'conversation')
+    }
+    void loadPlan()
       .then((next) => { if (!cancelled) setPlan(next) })
       .catch(() => { if (!cancelled) setPlan(null) })
       .finally(() => { if (!cancelled) setPreviewing(false) })
     return () => { cancelled = true }
-  }, [mode, withFiles, sessionId, anchor.id])
+  }, [mode, sessionId, anchor.id, previewRevision])
 
   const touchesFiles = mode === 'files' || withFiles
   const restored = plan?.safeFiles ?? []
   const conflicts = plan?.unsafeFiles ?? []
   const gaps = plan?.gaps ?? []
+  const files = filePreviewUnavailable ? { enabled: false, reason: 'previewUnavailable' as const }
+    : !plan ? { enabled: false, reason: 'noFiles' as const }
+    : anchor.filesReverted ? { enabled: false, reason: 'reverted' as const }
+    : gaps.length > 0 ? { enabled: false, reason: 'gaps' as const }
+    : restored.length + conflicts.length === 0 ? { enabled: false, reason: 'noFiles' as const }
+    : { enabled: true, reason: 'available' as const }
+  const sessionReason = rewinding ? t('chat.rewind.busy.rewinding')
+    : submitting ? t('chat.rewind.busy.submitting')
+    : compacting ? t('chat.rewind.busy.compacting')
+    : streaming || stopping ? t('chat.rewind.busy.running')
+    : queued ? t('chat.rewind.busy.queued')
+    : null
+  const draftConflict = mode === 'recall' && hasChatDraft(currentDraft)
   // 只有「确实要动文件」时才拿计划卡住确认；只撤对话时冲突照样列出来，供用户改选
   const blocked = touchesFiles && (conflicts.length > 0 || gaps.length > 0 || (plan !== null && !plan.canApply))
   // 只撤文件却一个都恢复不了：确认下去是空动作，不给这个按钮
-  const nothingToDo = previewing || plan === null || (mode === 'files' && restored.length === 0)
+  const emptyResend = (mode === 'edit' || mode === 'retry') &&
+    !(mode === 'edit' ? draft : anchor.content).trim() && !anchor.attachments?.length
+  const nothingToDo = previewing || plan === null || (mode === 'files' && restored.length === 0) || emptyResend
 
   const confirm = useCallback(async () => {
-    if (busy || nothingToDo) return
+    if (busyRef.current || busy || nothingToDo || blocked || sessionReason || draftConflict) return
+    busyRef.current = true
     setBusy(true)
     setFailure(null)
     let outcome
     try {
-      outcome = await applyRewind(sessionId, anchor.id, scopeFor(mode, withFiles))
+      outcome = await applyRewind(sessionId, anchor.id, scopeFor(mode, withFiles), {
+        expectedHistoryVersion: plan!.historyVersion,
+        restoreDraft: mode === 'recall',
+      })
     } catch (err) {
       // 宿主通道 reject（IPC 层异常）也要落到界面文案上：
       // 不接住它就是「点了确认，按钮永远转圈」，用户连重试的入口都找不到
       console.error('[rewind] apply threw:', err)
+      busyRef.current = false
       setBusy(false)
       setFailure(t('chat.rewind.error.truncate-failed'))
       return
     }
+    busyRef.current = false
     setBusy(false)
     if (!outcome.ok) {
       setFailure(t(`chat.rewind.error.${outcome.error ?? 'plan-blocked'}`))
       return
     }
     onClose()
-    // 空文本不发：截断已经生效，静默返回就是「消息没了也没跑起来」
+    // 附件消息允许没有正文；空文本且无附件已在确认前阻止。
     if (mode === 'edit' || mode === 'retry') {
       const text = (mode === 'edit' ? draft : anchor.content).trim()
-      if (text) onResend?.(text, anchor)
+      if (text || anchor.attachments?.length) onResend?.(text, anchor)
     }
-  }, [busy, nothingToDo, sessionId, anchor, mode, withFiles, draft, onClose, onResend, t])
+  }, [busy, nothingToDo, blocked, sessionReason, draftConflict, sessionId, anchor, mode, withFiles, draft, plan, onClose, onResend, t])
 
   const title =
     mode === 'edit' ? t('chat.rewind.editTitle') :
@@ -128,59 +180,88 @@ export default function RewindDialog({ sessionId, anchor, mode, onClose, onResen
 
   const showsFileToggle = mode !== 'files'
 
-  return (
+  const panel = (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 animate-fade-in"
-      onClick={() => { if (!busy) onClose() }}
+      className={`fixed ${vibe ? 'inset-0 bg-black/50 backdrop-blur-sm' : 'inset-x-0 bottom-0 top-11 max-md:top-14 bg-black/60'} z-[80] flex items-center justify-center p-4 animate-fade-in`}
+      onMouseDown={(event) => { if (event.target === event.currentTarget) close() }}
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
-        aria-label={title}
-        className="w-[520px] max-w-[calc(100vw-2rem)] max-h-[calc(100vh-6rem)] bg-dark-surfaceDim rounded-md3-xl border border-dark-onSurfaceVariant/10 flex flex-col shadow-elevation-3 animate-pop-in"
-        onClick={(e) => e.stopPropagation()}
+        aria-labelledby={titleId}
+        aria-describedby={descriptionId}
+        aria-busy={busy}
+        tabIndex={-1}
+        className="w-[540px] max-w-full max-h-[calc(100dvh-6rem)] text-dark-onSurface bg-dark-surfaceDim rounded-md3-xl border border-dark-onSurfaceVariant/10 flex flex-col shadow-elevation-3 animate-pop-in outline-none overflow-hidden"
+        onMouseDown={(e) => e.stopPropagation()}
         onKeyDown={(e) => {
-          if (e.key === 'Escape' && !busy) onClose()
-          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !busy && !blocked && !nothingToDo) void confirm()
+          if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return
+          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+            e.preventDefault()
+            void confirm()
+          }
         }}
       >
-        <div className="px-5 py-3.5 border-b border-dark-onSurfaceVariant/10 flex items-center gap-2">
+        <div className="shrink-0 px-5 py-4 border-b border-dark-onSurfaceVariant/10 flex items-center gap-2">
           {blocked && <AlertTriangle size={16} className="text-md-error shrink-0" />}
-          <h2 className="text-sm font-semibold">{title}</h2>
+          <h2 id={titleId} className="flex-1 text-sm font-semibold">{title}</h2>
+          <button type="button" onClick={close} disabled={busy || rewinding} aria-label={t('common.close')} className="md-focus flex h-9 w-9 shrink-0 items-center justify-center rounded-md3-sm text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh disabled:opacity-40">
+            <X size={15} />
+          </button>
         </div>
 
-        <div className="px-5 py-4 overflow-y-auto space-y-3 text-[12px] leading-relaxed">
+        <div className="min-h-0 px-5 py-4 overflow-y-auto overscroll-contain space-y-4 text-ui-sm leading-relaxed">
           {mode === 'edit' && (
             <textarea
               ref={textareaRef}
               value={draft}
+              aria-label={t('chat.rewind.editTitle')}
+              disabled={busy || !!sessionReason}
               onChange={(e) => setDraft(e.target.value)}
               rows={Math.min(10, Math.max(3, draft.split('\n').length))}
               className="w-full px-3 py-2 rounded-md3-sm bg-dark-surfaceContainer border border-dark-onSurfaceVariant/15 text-sm resize-y outline-none focus:border-md-primary/50"
             />
           )}
 
-          <p className="text-dark-onSurfaceVariant">
-            {mode === 'retry' ? t('chat.rewind.retryWillRemove') : t('chat.rewind.willRemove', { count: plan?.removedMessages ?? 0 })}
+          <p id={descriptionId} className="text-dark-onSurfaceVariant">
+            {mode === 'files' ? t('chat.rewind.filesOnly')
+              : plan ? t('chat.rewind.willRemove', { count: plan.removedMessages })
+              : t('chat.rewind.rangeDescription')}
           </p>
+          {mode !== 'files' && (
+            <section aria-label={t('chat.rewind.selectedMessage')} className="min-w-0 rounded-md3-md border border-dark-onSurfaceVariant/10 bg-dark-surfaceContainer/60 px-3 py-3">
+              <h3 className="mb-2 text-ui-xs font-medium text-dark-onSurfaceVariant">{t('chat.rewind.selectedMessage')}</h3>
+              {anchor.content && <p className="max-h-28 overflow-y-auto overscroll-contain whitespace-pre-wrap break-words text-ui-sm">{anchor.content}</p>}
+              {(!!anchor.attachments?.length || !!anchor.taskMode) && (
+                <div className="mt-2 flex min-w-0 flex-wrap gap-1.5 text-ui-xs text-dark-onSurfaceVariant">
+                  {anchor.taskMode && <span className="rounded-md3-xs bg-md-primary/10 px-2 py-1 text-md-primary">{t('chat.rewind.selectedTaskMode', { mode: t({ spec: 'chat.cmdSpecName', plan: 'chat.cmdPlanName', goal: 'chat.cmdGoalName' }[anchor.taskMode]) })}</span>}
+                  {anchor.attachments?.map((attachment) => <span key={attachment.id} title={attachment.name} className="max-w-full truncate rounded-md3-xs bg-dark-surfaceContainerHigh px-2 py-1">{attachment.name}</span>)}
+                </div>
+              )}
+            </section>
+          )}
+          {mode === 'recall' && <p className="text-dark-onSurfaceVariant/75">{t('chat.rewind.restoreDraft')}</p>}
+          {mode === 'retry' && <p className="text-dark-onSurfaceVariant/75">{t('chat.rewind.retryWillRemove')}</p>}
 
           {showsFileToggle && (
             <label className="flex items-start gap-2 cursor-pointer select-none">
               <input
                 type="checkbox"
                 checked={withFiles}
-                disabled={!files.enabled || busy}
-                onChange={(e) => setWithFiles(e.target.checked)}
+                disabled={!files.enabled || busy || !!sessionReason || previewing}
+                onChange={(e) => { setWithFiles(e.target.checked); setFailure(null) }}
                 className="mt-0.5"
               />
               <span className="text-dark-onSurfaceVariant">
                 {t('chat.rewind.withFiles')}
-                {!files.enabled && (
+                {!previewing && !files.enabled && (
                   <span className="block text-[11px] opacity-70">{t(`chat.rewind.filesDisabled.${files.reason}`)}</span>
                 )}
               </span>
             </label>
           )}
+          {showsFileToggle && !withFiles && <p className="text-[11px] text-dark-onSurfaceVariant/70">{t('chat.rewind.filesKept')}</p>}
 
           {previewing && (
             <div className="flex items-center gap-2 text-[11px] text-dark-onSurfaceVariant/60">
@@ -190,17 +271,18 @@ export default function RewindDialog({ sessionId, anchor, mode, onClose, onResen
           )}
 
           {!previewing && plan === null && (
-            <p className="text-[11px] text-md-error">{t('chat.rewind.previewFailed')}</p>
+            <p role="alert" className="text-[11px] text-md-error">{t('chat.rewind.previewFailed')}</p>
           )}
 
           {!previewing && plan && (
             <>
               {restored.length > 0 && (
                 <FileList
-                  heading={t('chat.rewind.willRestore', { count: restored.length })}
+                  heading={t(touchesFiles ? 'chat.rewind.willRestore' : 'chat.rewind.affectedFiles', { count: restored.length })}
                   rows={restored.map((f) => ({
                     key: f.path,
                     label: shortPath(f.path),
+                    title: f.path,
                     note: f.action === 'delete' ? t('chat.rewind.deleteNew') : formatBytes(f.bytes),
                   }))}
                 />
@@ -212,6 +294,7 @@ export default function RewindDialog({ sessionId, anchor, mode, onClose, onResen
                   rows={conflicts.map((f) => ({
                     key: f.path,
                     label: shortPath(f.path),
+                    title: f.path,
                     note: t(`chat.rewind.conflictReason.${f.reason ?? 'unreadable'}`),
                   }))}
                 />
@@ -235,14 +318,21 @@ export default function RewindDialog({ sessionId, anchor, mode, onClose, onResen
             </p>
           )}
 
-          {failure && <p className="text-[11px] text-md-error">{failure}</p>}
+          {sessionReason && <p role="status" className="text-ui-xs text-dark-onSurfaceVariant">{sessionReason}</p>}
+          {draftConflict && <p role="alert" className="text-ui-xs text-md-error">{t('chat.rewind.error.draft-conflict')}</p>}
+          {failure && <p role="alert" className="text-ui-xs text-md-error">{failure}</p>}
+          {!busy && !previewing && (failure || !plan) && (
+            <button type="button" onClick={() => { setFailure(null); setPreviewRevision((value) => value + 1) }} className="md-focus rounded-md3-sm px-3 py-2 text-ui-xs text-md-primary hover:bg-md-primary/10">
+              {t('chat.rewind.refreshPreview')}
+            </button>
+          )}
         </div>
 
-        <div className="flex items-center justify-end gap-2 px-5 py-3.5 border-t border-dark-onSurfaceVariant/10">
+        <div className="shrink-0 flex flex-wrap items-center justify-end gap-2 px-5 py-4 border-t border-dark-onSurfaceVariant/10 bg-dark-surfaceContainer/40">
           {(mode === 'recall' || mode === 'retry') && blocked && !busy && (
             <button
               type="button"
-              onClick={() => setWithFiles(false)}
+              onClick={() => { setWithFiles(false); setFailure(null) }}
               className="md-focus px-3 py-2 rounded-md3-sm text-xs text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh transition-colors"
             >
               {t('chat.rewind.keepFiles')}
@@ -250,30 +340,32 @@ export default function RewindDialog({ sessionId, anchor, mode, onClose, onResen
           )}
           <button
             type="button"
-            onClick={onClose}
-            disabled={busy}
-            className="md-focus px-4 py-2 rounded-md3-sm text-sm text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh transition-colors disabled:opacity-50"
+            ref={cancelRef}
+            onClick={close}
+            disabled={busy || rewinding}
+            className="md-focus min-h-10 max-md:min-h-11 px-4 py-2 rounded-md3-sm text-sm text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh transition-colors disabled:opacity-50"
           >
             {t('chat.rewind.cancel')}
           </button>
           <button
             type="button"
             onClick={() => void confirm()}
-            disabled={busy || nothingToDo || blocked}
-            className="md-focus px-4 py-2 rounded-md3-sm text-sm font-medium bg-md-error text-white hover:bg-md-error/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            disabled={busy || nothingToDo || blocked || !!sessionReason || draftConflict}
+            className="md-focus min-h-10 max-md:min-h-11 px-4 py-2 rounded-md3-sm text-sm font-medium bg-md-error text-white hover:bg-md-error/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            {busy ? <Loader2 size={13} className="animate-spin" /> : confirmLabel}
+            {busy ? <span className="flex items-center gap-2"><Loader2 size={13} className="animate-spin" />{t('chat.rewind.busy.rewinding')}</span> : confirmLabel}
           </button>
         </div>
       </div>
     </div>
   )
+  return typeof document === 'undefined' ? null : createPortal(panel, document.body)
 }
 
 function FileList(props: {
   heading: string
   tone?: 'error'
-  rows: Array<{ key: string; label: string; note: string }>
+  rows: Array<{ key: string; label: string; note: string; title?: string }>
 }) {
   return (
     <div>
@@ -283,7 +375,7 @@ function FileList(props: {
       <ul className="space-y-0.5">
         {props.rows.map((row) => (
           <li key={row.key} className="flex items-center justify-between gap-3 font-mono text-[11px] text-dark-onSurfaceVariant/85">
-            <span className="truncate" title={row.label}>{row.label}</span>
+            <span className="min-w-0 truncate" title={row.title ?? row.label}>{row.label}</span>
             <span className="shrink-0 opacity-70">{row.note}</span>
           </li>
         ))}

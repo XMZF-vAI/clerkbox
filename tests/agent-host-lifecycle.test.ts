@@ -149,12 +149,16 @@ afterEach(() => {
 const requested = () => sent.filter((e) => e.type === 'permission.requested')
 const addMessageCalls = (store: ChatStore): number =>
   (store.addMessage as unknown as { mock: { calls: unknown[] } }).mock.calls.length
+const waitForIdle = (manager: AgentSessionManager) => vi.waitFor(() => {
+  expect(manager.inspect().every((session) => !session.hasRun)).toBe(true)
+})
 
 describe('BE-06 删除会话时兑现等待中的 Promise', () => {
   it('待批期间删除会话：等待收尾、工具不执行、迟到回调不再写库', async () => {
     h.turns = [toolTurn('execute_command', DANGER), textTurn('收尾')]
     const store = fakeStore(workDir)
     const m = new AgentSessionManager(store)
+    const execution = vi.spyOn(m as unknown as { executeRun: (...args: unknown[]) => Promise<void> }, 'executeRun')
     const running = m.handleCommand({ type: 'run', sessionId: 's1', content: '跑一下', settings })
 
     await vi.waitFor(() => expect(requested()).toHaveLength(1))
@@ -165,6 +169,7 @@ describe('BE-06 删除会话时兑现等待中的 Promise', () => {
     // 回归点：旧实现只清 timer 与 Map，等待审批的 Promise 永远不返回，
     // 于是这里的 await 永远挂着，ReAct 循环的闭包也一起泄漏。
     await running
+    await execution.mock.results[0].value
 
     expect(toolRegistry.execute).not.toHaveBeenCalled()
     expect(m.inspect()).toHaveLength(0)
@@ -176,12 +181,14 @@ describe('BE-06 删除会话时兑现等待中的 Promise', () => {
     h.turns = [toolTurn('execute_command', DANGER), textTurn('收尾')]
     const store = fakeStore(workDir)
     const m = new AgentSessionManager(store)
+    const execution = vi.spyOn(m as unknown as { executeRun: (...args: unknown[]) => Promise<void> }, 'executeRun')
     const running = m.handleCommand({ type: 'run', sessionId: 's1', content: '跑一下', settings })
     await vi.waitFor(() => expect(requested()).toHaveLength(1))
     const [req] = requested() as Array<Extract<AgentEvent, { type: 'permission.requested' }>>
 
     m.dropSession('s1')
     await running
+    await execution.mock.results[0].value
 
     expect(await m.handleCommand({ type: 'permission.resolve', sessionId: 's1', requestId: req.requestId, approved: true }))
       .toEqual({ ok: false, error: 'stale-request' })
@@ -196,7 +203,8 @@ describe('BE-03 手动压缩与新运行共用互斥', () => {
     const running = m.handleCommand({ type: 'run', sessionId: 's1', content: '跑一下', settings })
     await vi.waitFor(() => expect(requested()).toHaveLength(1))
 
-    await m.handleCommand({ type: 'manual.compact', sessionId: 's1' })
+    await expect(m.handleCommand({ type: 'manual.compact', sessionId: 's1' }))
+      .resolves.toEqual({ ok: false, error: 'compaction-busy' })
     await new Promise((resolve) => setTimeout(resolve, 50))
 
     expect(store.compactMessages).not.toHaveBeenCalled()
@@ -204,6 +212,7 @@ describe('BE-03 手动压缩与新运行共用互斥', () => {
     const [req] = requested() as Array<Extract<AgentEvent, { type: 'permission.requested' }>>
     await m.handleCommand({ type: 'permission.resolve', sessionId: 's1', requestId: req.requestId, approved: false })
     await running
+    await waitForIdle(m)
   })
 
   it('压缩进行中提交的新任务排队，不与压缩并发', async () => {
@@ -212,8 +221,9 @@ describe('BE-03 手动压缩与新运行共用互斥', () => {
     const store = fakeStore(workDir, 12)
     const m = new AgentSessionManager(store)
     await m.handleCommand({ type: 'run', sessionId: 's1', content: '第一轮', settings })
+    await waitForIdle(m)
 
-    await m.handleCommand({ type: 'manual.compact', sessionId: 's1' })
+    await expect(m.handleCommand({ type: 'manual.compact', sessionId: 's1' })).resolves.toEqual({ ok: true })
     await vi.waitFor(() => expect(m.inspect().find((s) => s.sessionId === 's1')?.compacting).toBe(true))
 
     // 压缩期间提交新任务：必须排队，不能并发开跑
@@ -223,5 +233,8 @@ describe('BE-03 手动压缩与新运行共用互斥', () => {
     expect(state?.hasRun).toBe(false)
     // 压缩没有并发开跑：工具层不该被第二次调用
     expect(toolRegistry.execute).not.toHaveBeenCalled()
+    expect(sent).toContainEqual({ type: 'compaction.status', sessionId: 's1', compacting: true })
+    await expect(m.handleCommand({ type: 'manual.compact', sessionId: 's1' }))
+      .resolves.toEqual({ ok: false, error: 'compaction-busy' })
   })
 })

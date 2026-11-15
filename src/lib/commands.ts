@@ -13,6 +13,7 @@
 import { useChatStore } from '../stores/chat-store'
 import { useSettingsStore } from '../stores/settings-store'
 import { useUIStore } from '../stores/ui-store'
+import { useVibeStore } from '../stores/vibe-store'
 
 export interface CommandShortcut {
   /** KeyboardEvent.key 的小写形式（如 'k'、','） */
@@ -69,7 +70,11 @@ export const COMMANDS: CommandDef[] = [
     keywords: ['sidebar', 'cebianlan'],
     shortcut: { key: 'b' },
     when: onboardingDone,
-    run: () => useUIStore.getState().toggleSidebar(),
+    run: () => {
+      const ui = useUIStore.getState()
+      if (useVibeStore.getState().isVibeMode) ui.toggleVibeSidebar()
+      else ui.toggleSidebar()
+    },
   },
   {
     id: 'theme.toggle',

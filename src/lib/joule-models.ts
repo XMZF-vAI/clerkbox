@@ -1,5 +1,13 @@
-import type { JouleModel } from '../types/joule'
+import type { JouleModel, JoulePlan, JouleStatus, JouleSubscription } from '../types/joule'
 import type { ProviderModel } from '../types/agent'
+
+/** Keep welcome setup and the composer on the same existing subscription gate. */
+export function canSelectJouleModel(
+  account: { plan: JoulePlan | null; subscription: JouleSubscription | null; status: JouleStatus },
+  now = Date.now(),
+): boolean {
+  return !!account.plan && (account.subscription?.expiresAt ?? 0) > now && account.status !== 'needs_reauth'
+}
 
 /**
  * Joule 目录模型 → ClerkBox ProviderModel。

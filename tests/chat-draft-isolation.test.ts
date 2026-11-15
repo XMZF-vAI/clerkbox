@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs'
 import { EMPTY_CHAT_DRAFT, hasChatDraft, useChatStore } from '../src/stores/chat-store'
 
 const chatInputSource = readFileSync(new URL('../src/components/chat/ChatInput.tsx', import.meta.url), 'utf8')
+const queueSource = readFileSync(new URL('../src/lib/composer-queue.ts', import.meta.url), 'utf8')
 
 const session = (id: string) => ({ id, title: '新会话', messages: [], createdAt: 1, updatedAt: 1 })
 
@@ -86,7 +87,8 @@ describe('输入区发送契约', () => {
   })
 
   it('排队消息编辑整份覆盖草稿（含空附件），并且先问过用户', () => {
-    expect(chatInputSource).toContain('attachments: item.attachments ?? []')
+    expect(queueSource).toContain('attachments: item.attachments ?? []')
+    expect(chatInputSource).toContain("mutateComposerQueue(sessionId, item, 'edit')")
     expect(chatInputSource).toContain('hasChatDraft(useChatStore.getState().drafts[sessionId])')
     expect(chatInputSource).toContain('queuedEditReplaceTitle')
   })

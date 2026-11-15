@@ -4,10 +4,9 @@
  * ReAct 编排逻辑已抽至 src/agent-core/loop.ts（进程无关）。
  * 本文件只负责：React 状态、store 订阅、把 zustand store / api-transport /
  * toolRegistry / QuestionCard 回调接成 AgentPorts，然后驱动 runReactLoop。
- * 导出面（sendMessage/abort/manualCompact/isCompacting/error/sendQueuedNow/
- * requestQueuedFlush）与抽核前保持不变。
+ * 受理结果与执行状态分离：动作返回是否受理，运行、停止和压缩状态按会话订阅。
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import { useSettingsStore } from '../stores/settings-store'
 import { useChatStore, getSessionAbortController, setSessionAbortController, type QueuedMessageItem } from '../stores/chat-store'
 import { useTokenUsageStore } from '../stores/token-usage-store'
@@ -49,15 +48,29 @@ import { formatWorkflowRunReport, encodeWorkflowRunTail } from '../lib/workflow-
 function hostRejectionText(error?: string): string {
   if (error === 'run-command-missing-settings') return i18n.t('agent.hostNeedsLocalRun')
   if (error === 'approval-local-only') return i18n.t('agent.approvalLocalOnly')
+  if (error === 'compaction-busy') return i18n.t('agent.compactBusy')
+  if (error === 'compaction-unavailable') return i18n.t('agent.compactUnavailable')
   return error || i18n.t('agent.busy')
 }
 
 /** 会话级 Agent 能力注册表：供 TitleBar 等 hook 外部组件调用当前会话的手动压缩 / 用量统计 */
 export interface SessionAgentEntry {
-  manualCompact: (instructions?: string) => Promise<void>
+  manualCompact: (instructions?: string) => Promise<boolean>
   getUsage: (messages: Message[]) => ContextUsageInfo
 }
 const sessionAgentRegistry = new Map<string, SessionAgentEntry>()
+const queuedSendInFlight = new Set<string>()
+
+function abortRendererSession(sessionId: string): void {
+  getSessionAbortController(sessionId)?.abort()
+  abortWorkflowRunsForSession(sessionId)
+  void ipc.cancelSessionCommands(sessionId).catch(() => undefined)
+  const chat = useChatStore.getState()
+  chat.setStreaming(false, sessionId)
+  chat.setSessionStatus(sessionId, null)
+  useInteractiveStore.getState().cancelQuestion(sessionId)
+  cancelLocalPermissions(sessionId)
+}
 export function getSessionAgent(sessionId: string | null | undefined): SessionAgentEntry | undefined {
   return sessionId ? sessionAgentRegistry.get(sessionId) : undefined
 }
@@ -127,9 +140,21 @@ export function useAgent(sessionId: string) {
   // 「本次运行」状态按 sessionId 隔离（per-session 并发）：多会话同时跑 ReAct 循环时，
   // 后台会话的 run 仍持有自己的 SessionContext（token 锚点/读取快照/任务模式）。
   const contextsRef = useRef(new SessionContextStore())
+  useEffect(() => useChatStore.subscribe((state, previous) => {
+    if (state.rewindRevisions === previous.rewindRevisions) return
+    for (const id of contextsRef.current.sessionIds()) {
+      if (state.rewindRevisions[id] === previous.rewindRevisions[id]) continue
+      const ctx = contextsRef.current.peek(id)!
+      ctx.tokenTracker.reset()
+      ctx.readFiles.clear()
+      ctx.beginRewindTurn(null)
+      ctx.pendingSubagentNotifications.length = 0
+      ctx.subagentRuns.clear()
+    }
+  }), [])
   /** 手动压缩进行中（/压缩 命令）：输入栏即时反馈 + 锁定，防止压缩期间并发发送 */
-  const [isCompacting, setIsCompacting] = useState(false)
-  const isCompactingRef = useRef(false)
+  const isCompacting = useChatStore((s) => s.compactingSessionIds.has(sessionId))
+  const isStopping = useChatStore((s) => s.stoppingSessionIds.has(sessionId))
 
   // Agent 动作能力（Browser/Computer Use）推给工具注册表：关掉的族不进模型可见的
   // 工具列表，也进不了执行路径。放 effect 而不是 makePorts 里 —— makePorts 是
@@ -282,7 +307,7 @@ export function useAgent(sessionId: string) {
   const sendMessage = useCallback(
     async (content: string, attachments?: MessageAttachment[], taskMode?: TaskMode, skills?: MessageSkillSnapshot[]): Promise<boolean> => {
       // Prevent concurrent sends on the same session（per-session 粒度，不阻塞其他会话并发）
-      if (getSessionAbortController(sessionId)) {
+      if (useChatStore.getState().rewindingSessionIds.has(sessionId) || getSessionAbortController(sessionId)) {
         setError(i18n.t('agent.busy'))
         return false
       }
@@ -298,11 +323,15 @@ export function useAgent(sessionId: string) {
         return false
       }
       if (!useChatStore.getState().sessions.some((session) => session.id === sessionId)) return false
-      if (getSessionAbortController(sessionId)) {
+      if (useChatStore.getState().rewindingSessionIds.has(sessionId) || getSessionAbortController(sessionId)) {
         setError(i18n.t('agent.busy'))
         return false
       }
       if (!hostMode) {
+        if (useChatStore.getState().compactingSessionIds.has(sessionId)) {
+          setError(i18n.t('agent.compactBusy'))
+          return false
+        }
         if (!settings.baseUrl) {
           setError(i18n.t('agent.needBaseUrl'))
           return false
@@ -320,22 +349,30 @@ export function useAgent(sessionId: string) {
       if (hostMode) {
         if (taskMode === 'goal' && content.trim()) useGoalStore.getState().setGoal(sessionId, content.trim())
         const catalog = useSkillsStore.getState().getSkillCatalog()
-        const res = await agentClient.send({
-          type: 'run',
-          sessionId,
-          content,
-          attachments,
-          taskMode,
-          skills,
-          settings,
-          skillCatalog: catalog,
-          skillReminder: buildRelevantSkillReminder(content, catalog) ?? undefined,
-          goal: useGoalStore.getState().bySession[sessionId] ?? null,
-          todos: useTodoStore.getState().bySession[sessionId] ?? [],
-        }).catch((err: unknown) => ({ ok: false, error: err instanceof Error ? err.message : String(err) }))
-        if (!res.ok) setError(hostRejectionText(res.error))
-        else setError(null)
-        return res.ok
+        try {
+          const res = await agentClient.send({
+            type: 'run',
+            sessionId,
+            content,
+            attachments,
+            taskMode,
+            skills,
+            settings,
+            skillCatalog: catalog,
+            skillReminder: buildRelevantSkillReminder(content, catalog) ?? undefined,
+            goal: useGoalStore.getState().bySession[sessionId] ?? null,
+            todos: useTodoStore.getState().bySession[sessionId] ?? [],
+          })
+          if (!res.ok) setError(hostRejectionText(res.error))
+          else setError(null)
+          return res.ok
+        } catch {
+          // ACK 丢失不等于未受理：只读恢复运行态，绝不自动重发或回队。
+          // 对账后再写提示，避免快照把这条不确定反馈立即覆盖掉。
+          await agentClient.resync(sessionId).catch(() => undefined)
+          setError(i18n.t('agent.commandUnknown'))
+          return false
+        }
       }
 
       setError(null)
@@ -445,46 +482,68 @@ export function useAgent(sessionId: string) {
       if (!state.sessions.some((s) => s.id === sessionId)) return
       if (state.streamingSessionIds.has(sessionId)) return
       if (getSessionAbortController(sessionId)) return
-      if (isCompactingRef.current) return
+      if (state.compactingSessionIds.has(sessionId)) return
+      if (state.rewindingSessionIds.has(sessionId)) return
+      // 宿主独占它的队列，renderer 不能从镜像弹出并绕回 run 指令。
+      if (agentClient.getState().mode === 'main') return
       const next = state.dequeueQueuedMessage(sessionId)
       if (!next) return
       void sendMessage(next.content, next.attachments, next.taskMode ?? undefined, next.skills).then((ok) => {
         // 发送未真正开始（配置缺失等入口守卫拦截）：放回队首等下次触发，不丢消息
         if (!ok) useChatStore.getState().requeueQueuedMessage(sessionId, next)
-      })
+      }).catch(() => useChatStore.getState().requeueQueuedMessage(sessionId, next))
     }, delayMs)
   }, [sessionId, sendMessage])
 
-  /** 立即发送排队消息：中断当前运行 → 等待旧 run 收尾释放 → 移出队列 → 立即发送。
+  /** 立即发送排队消息：中断当前运行 → 等待旧 run 收尾释放 → 受理后移出队列。
    *  剩余排队消息由新 run 正常结束后的自动 flush 继续 FIFO 逐条发出。 */
   const sendQueuedNow = useCallback(
     async (item: QueuedMessageItem) => {
-      if ((await agentClient.ensureMode()) === 'main') {
-        // 宿主模式：中断当前轮、把这条提到队首并发出，全部由宿主执行；
-        // 本地队列只是视图，随宿主的 queue.snapshot 回灌，绝不在这里各自删一份
-        await hostQueue.flush(sessionId, item.id)
-        return
-      }
-      const ctrl = getSessionAbortController(sessionId)
-      if (ctrl) {
-        try {
-          ctrl.abort()
-        } catch {
-          /* ignore */
+      if (queuedSendInFlight.has(sessionId) || useChatStore.getState().rewindingSessionIds.has(sessionId)) return false
+      queuedSendInFlight.add(sessionId)
+      try {
+        const mode = await agentClient.ensureMode()
+        if (useChatStore.getState().rewindingSessionIds.has(sessionId)) return false
+        if (mode === 'main') {
+          // 宿主模式：中断当前轮、把这条提到队首并发出，全部由宿主执行；
+          // 本地队列只是视图，随宿主的 queue.snapshot 回灌，绝不在这里各自删一份
+          const result = await hostQueue.flush(sessionId, item.id)
+          if (result.status !== 'accepted') {
+            setError(i18n.t(result.status === 'unknown' ? 'agent.commandUnknown' : 'agent.queueSendFailed'))
+            return false
+          }
+          return true
         }
-        // 等旧 run 收尾释放 controller（abort 后流式立刻抛错，通常 <300ms；5s 兜底）
-        for (let i = 0; i < 100; i++) {
-          if (!getSessionAbortController(sessionId)) break
-          await new Promise((resolve) => setTimeout(resolve, 50))
+        if (!useChatStore.getState().queuedMessages[sessionId]?.some((queued) => queued.id === item.id)) return false
+        const ctrl = getSessionAbortController(sessionId)
+        if (ctrl) {
+          abortRendererSession(sessionId)
+          // 等旧 run 收尾释放 controller（abort 后流式立刻抛错，通常 <300ms；5s 兜底）
+          for (let i = 0; i < 100; i++) {
+            if (!getSessionAbortController(sessionId)) break
+            await new Promise((resolve) => setTimeout(resolve, 50))
+          }
         }
+        // 手动压缩中：等压缩收尾（压缩不占 controller；30s 兜底防极端挂死）
+        for (let i = 0; i < 300; i++) {
+          if (!useChatStore.getState().compactingSessionIds.has(sessionId)) break
+          await new Promise((resolve) => setTimeout(resolve, 100))
+        }
+        const state = useChatStore.getState()
+        if (!state.queuedMessages[sessionId]?.some((queued) => queued.id === item.id)) return false
+        if (getSessionAbortController(sessionId) || state.compactingSessionIds.has(sessionId)) {
+          setError(i18n.t('agent.queueSendFailed'))
+          return false
+        }
+        const accepted = await sendMessage(item.content, item.attachments, item.taskMode ?? undefined, item.skills)
+        if (accepted) useChatStore.getState().removeQueuedMessage(sessionId, item.id)
+        return accepted
+      } catch {
+        setError(i18n.t('agent.commandUnknown'))
+        return false
+      } finally {
+        queuedSendInFlight.delete(sessionId)
       }
-      // 手动压缩中：等压缩收尾（压缩不占 controller；30s 兜底防极端挂死）
-      for (let i = 0; i < 300; i++) {
-        if (!isCompactingRef.current) break
-        await new Promise((resolve) => setTimeout(resolve, 100))
-      }
-      useChatStore.getState().removeQueuedMessage(sessionId, item.id)
-      await sendMessage(item.content, item.attachments, item.taskMode ?? undefined, item.skills)
     },
     [sessionId, sendMessage]
   )
@@ -493,34 +552,56 @@ export function useAgent(sessionId: string) {
    *  编排与 reactLoop 内的自动压缩完全一致（占位提示 → compactConversation → 双消息数组 → 原子持久化 → 重置计数），
    *  仅两处差异：trigger 标记为 'manual'、支持可选自定义指令（留空则行为等同自动压缩）。 */
   const manualCompact = useCallback(
-    async (customInstructions?: string) => {
+    async (customInstructions?: string): Promise<boolean> => {
+      if (useChatStore.getState().rewindingSessionIds.has(sessionId)) return false
       // 同 abort：压缩也必须先问实模式。凭未解析的 null 落回本地路径，会与宿主
       // 同时对同一会话做原子重写（compactMessages 是整段覆盖，两边各写一次就互相踩）
-      if ((await agentClient.ensureMode()) === 'main') {
+      let hostMode: boolean
+      try {
+        hostMode = (await agentClient.ensureMode()) === 'main'
+      } catch {
+        setError(i18n.t('agent.commandUnknown'))
+        return false
+      }
+      if (useChatStore.getState().rewindingSessionIds.has(sessionId)) return false
+      if (hostMode) {
         // 宿主模式：压缩由宿主的同一套编排执行，占位提示与结果都走事件回流
-        void agentClient.send({ type: 'manual.compact', sessionId, instructions: customInstructions })
-        return
+        try {
+          const result = await agentClient.send({ type: 'manual.compact', sessionId, instructions: customInstructions })
+          if (!result.ok) setError(hostRejectionText(result.error))
+          else setError(null)
+          return result.ok
+        } catch {
+          setError(i18n.t('agent.commandUnknown'))
+          void agentClient.resync(sessionId)
+          return false
+        }
       }
       // 重入防护 + Agent 运行中忽略（避免与 ReAct 循环中途的消息状态冲突）
-      if (isCompactingRef.current || getSessionAbortController(sessionId)) return
+      if (useChatStore.getState().compactingSessionIds.has(sessionId) || getSessionAbortController(sessionId)) {
+        setError(i18n.t('agent.compactBusy'))
+        return false
+      }
       if (!settings.baseUrl) {
         setError(i18n.t('agent.needBaseUrl'))
-        return
+        return false
       }
       const activeProvider = settings.providers.find((p) => p.id === settings.activeProviderId)
       if (!settings.apiKey && requiresApiKey(settings.baseUrl, activeProvider?.presetId)) {
         setError(i18n.t('agent.needApiKey'))
-        return
+        return false
       }
 
       const session = useChatStore.getState().sessions.find((s) => s.id === sessionId)
       const conversationMessages = session?.messages ?? []
-      if (conversationMessages.length === 0) return
+      if (conversationMessages.length === 0) {
+        setError(i18n.t('agent.compactUnavailable'))
+        return false
+      }
 
       const ctx = contextsRef.current.get(sessionId)
       setError(null)
-      isCompactingRef.current = true
-      setIsCompacting(true)
+      useChatStore.getState().setCompacting(sessionId, true)
 
       // ── 压缩过程展示：插入"正在压缩上下文"占位消息（同自动压缩路径） ──
       const compactingId = makeId()
@@ -531,52 +612,55 @@ export function useAgent(sessionId: string) {
         timestamp: Date.now(),
         _isCompacting: true,
       })
-      try {
-        const compactionResult = await compactConversation(
-          conversationMessages,
-          settings,
-          ctx.readFiles,
-          customInstructions?.trim() || undefined,
-          'manual'
-        )
-        // Recompute the keep boundary (same logic as inside compactConversation)
-        const keepStartIndex = findKeepBoundaryIndex(conversationMessages)
-        const keptMessages = conversationMessages.slice(keepStartIndex)
-        // 被压缩的历史消息（压缩点之前）——用户仍要在界面上看到它们，故保留但不发给 API
-        const summarizedMessages = conversationMessages.slice(0, keepStartIndex)
+      void (async () => {
+        try {
+          const compactionResult = await compactConversation(
+            conversationMessages,
+            settings,
+            ctx.readFiles,
+            customInstructions?.trim() || undefined,
+            'manual'
+          )
+          // Recompute the keep boundary (same logic as inside compactConversation)
+          const keepStartIndex = findKeepBoundaryIndex(conversationMessages)
+          const keptMessages = conversationMessages.slice(keepStartIndex)
+          // 被压缩的历史消息（压缩点之前）——用户仍要在界面上看到它们，故保留但不发给 API
+          const summarizedMessages = conversationMessages.slice(0, keepStartIndex)
 
-        // 界面/DB 消息：完整保留全部历史，压缩组件（边界 + 摘要）插在压缩点位置。
-        // 手动压缩不接续对话循环，无需构建 API 子集。
-        const newMessages = [
-          ...summarizedMessages,
-          compactionResult.boundaryMessage,
-          compactionResult.summaryMessage,
-          ...keptMessages,
-          ...compactionResult.fileAttachments,
-        ]
+          // 界面/DB 消息：完整保留全部历史，压缩组件（边界 + 摘要）插在压缩点位置。
+          // 手动压缩不接续对话循环，无需构建 API 子集。
+          const newMessages = [
+            ...summarizedMessages,
+            compactionResult.boundaryMessage,
+            compactionResult.summaryMessage,
+            ...keptMessages,
+            ...compactionResult.fileAttachments,
+          ]
 
-        // Sync to store and DB（保留全部历史）
-        compactSession(sessionId, newMessages, compactionResult.boundaryMessage.id)
+          // Sync to store and DB（保留全部历史）
+          if (!useChatStore.getState().sessions.some((current) => current.id === sessionId)) return
+          compactSession(sessionId, newMessages, compactionResult.boundaryMessage.id)
 
-        // Clear the read file state (it's now in file attachments)
-        ctx.readFiles = new Map()
-        // Reset the token tracker after compaction so stale usage cannot retrigger auto-compact.
-        ctx.tokenTracker.reset()
+          // Clear the read file state (it's now in file attachments)
+          ctx.readFiles = new Map()
+          // Reset the token tracker after compaction so stale usage cannot retrigger auto-compact.
+          ctx.tokenTracker.reset()
 
-        console.log(`[compact] Manually compacted: ${compactionResult.preCompactTokenCount} → ${compactionResult.postCompactTokenCount} tokens, ${compactionResult.boundaryMessage.compactMetadata?.messagesSummarized} messages summarized`)
-      } catch (err) {
-        console.error('[compact] Manual compaction failed:', err)
-        // 失败：把"正在压缩"占位消息改为可见提示，避免残留空白占位
-        updateMessage(sessionId, compactingId, {
-          content: i18n.t('chat.compactFailed'),
-          _isCompacting: false,
-        })
-      } finally {
-        isCompactingRef.current = false
-        setIsCompacting(false)
-        // 压缩期间入队的排队消息：压缩完成后（无论成败）继续自动发送
-        scheduleQueuedFlush()
-      }
+          console.log(`[compact] Manually compacted: ${compactionResult.preCompactTokenCount} → ${compactionResult.postCompactTokenCount} tokens, ${compactionResult.boundaryMessage.compactMetadata?.messagesSummarized} messages summarized`)
+        } catch (err) {
+          console.error('[compact] Manual compaction failed:', err)
+          // 失败：把"正在压缩"占位消息改为可见提示，避免残留空白占位
+          updateMessage(sessionId, compactingId, {
+            content: i18n.t('chat.compactFailed'),
+            _isCompacting: false,
+          })
+        } finally {
+          useChatStore.getState().setCompacting(sessionId, false)
+          // 压缩期间入队的排队消息：压缩完成后（无论成败）继续自动发送
+          scheduleQueuedFlush()
+        }
+      })()
+      return true
     },
     [sessionId, settings, addMessage, updateMessage, compactSession]
   )
@@ -628,7 +712,8 @@ export function useAgent(sessionId: string) {
     if (!state.sessions.some((s) => s.id === sessionId)) return
     if (state.streamingSessionIds.has(sessionId)) return
     if (getSessionAbortController(sessionId)) return
-    if (isCompactingRef.current) return
+    if (state.compactingSessionIds.has(sessionId)) return
+    if (state.rewindingSessionIds.has(sessionId)) return
     const ctx = contextsRef.current.get(sessionId)
     if (ctx.pendingSubagentNotifications.length === 0) return
     // 模式与配置守卫与 sendMessage 同口径；任一不满足时通知静留队列，等下条消息
@@ -639,7 +724,8 @@ export function useAgent(sessionId: string) {
     // await 之后重查一次：模式询问的间隙里用户可能刚好发出新消息
     const recheck = useChatStore.getState()
     if (recheck.streamingSessionIds.has(sessionId) || getSessionAbortController(sessionId)) return
-    if (isCompactingRef.current) return
+    if (recheck.compactingSessionIds.has(sessionId)) return
+    if (recheck.rewindingSessionIds.has(sessionId)) return
     if (ctx.pendingSubagentNotifications.length === 0) return
     const currentSession = recheck.sessions.find((s) => s.id === sessionId)
     if (!currentSession) return
@@ -727,42 +813,34 @@ export function useAgent(sessionId: string) {
     return () => { cancelled = true }
   }, [])
 
-  const abort = useCallback(() => {
-    // per-session abort：只中止当前会话的 controller，不影响其他并发会话
-    const abortLocally = () => {
-      const ctrl = getSessionAbortController(sessionId)
-      if (ctrl) {
-        ctrl.abort()
+  const abort = useCallback(async (): Promise<boolean> => {
+    const state = useChatStore.getState()
+    if (state.stoppingSessionIds.has(sessionId)) return false
+    state.setStopping(sessionId, true)
+    try {
+      if ((await agentClient.ensureMode()) !== 'main') {
+        abortRendererSession(sessionId)
+        setError(null)
+        return true
       }
-      // 停止会话 = 停止该会话所有在跑的后台工作流（兑现 create_workflow 描述的承诺）
-      abortWorkflowRunsForSession(sessionId)
-      // 杀掉该会话在主进程里还在跑的 shell 子进程，让阻塞中的 execute_command 立即返回
-      if (sessionId) {
-        void ipc.cancelSessionCommands(sessionId).catch(() => { /* ignore */ })
+      const result = await agentClient.send({ type: 'abort', sessionId })
+      if (!result.ok) {
+        setError(i18n.t('agent.stopFailed'))
+        void agentClient.resync(sessionId)
+        return false
       }
-      // 仅清当前会话的 streaming 状态
-      useChatStore.getState().setStreaming(false, sessionId)
-      // 用户主动 abort：清当前会话工作状态，不发通知
-      if (sessionId) {
-        useChatStore.getState().setSessionStatus(sessionId, null)
-        useInteractiveStore.getState().cancelQuestion(sessionId)
-        // 挂起的对话内确认（工作流）要兑现成拒绝，否则 loop 永远等在这个 promise 上
-        cancelLocalPermissions(sessionId)
-      }
-    }
-    // 必须走 ensureMode：冷启动那一刻模式还没问出来，凭 null 判定会落回本地路径，
-    // 于是宿主在跑、本地也在中断同一会话（sendMessage 已按同一口径修过）
-    void agentClient.ensureMode().then((mode) => {
-      if (mode !== 'main') {
-        abortLocally()
-        return
-      }
-      // 宿主模式：中断指令交给宿主（它会停模型流并杀本会话 shell），界面状态等事件回流
-      void agentClient.send({ type: 'abort', sessionId })
-      void ipc.cancelSessionCommands(sessionId).catch(() => { /* ignore */ })
+      void ipc.cancelSessionCommands(sessionId).catch(() => undefined)
       useInteractiveStore.getState().cancelQuestion(sessionId)
-    })
+      setError(null)
+      return true
+    } catch {
+      setError(i18n.t('agent.commandUnknown'))
+      void agentClient.resync(sessionId)
+      return false
+    } finally {
+      useChatStore.getState().setStopping(sessionId, false)
+    }
   }, [sessionId])
 
-  return { sendMessage, abort, manualCompact, isCompacting, error, sendQueuedNow, requestQueuedFlush: scheduleQueuedFlush }
+  return { sendMessage, abort, manualCompact, isCompacting, isStopping, error, sendQueuedNow, requestQueuedFlush: scheduleQueuedFlush }
 }

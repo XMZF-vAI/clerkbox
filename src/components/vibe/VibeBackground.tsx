@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { useVibeStore, DEFAULT_VIBE_BACKGROUND, type VibeGlassTrack } from '../../stores/vibe-store'
+import { useVibeStore, type VibeGlassTrack } from '../../stores/vibe-store'
 import { ipc, isWebUIMode } from '../../lib/ipc-client'
 import { toFileUrl } from '../../lib/file-url'
 
@@ -18,46 +18,46 @@ function ext(name: string): string {
 /** 本地图片路径 → 可渲染 src：Electron 走 file://，WebUI 走 base64 data URL */
 async function resolveImageSrc(path: string): Promise<string> {
   if (isWebUIMode) {
-    try {
-      return await ipc.readImageFileBase64(path)
-    } catch {
-      return toFileUrl(path)
-    }
+    return await ipc.readImageFileBase64(path)
   }
   return toFileUrl(path)
 }
 
 export default function VibeBackground() {
   const backgroundMode = useVibeStore((s) => s.backgroundMode)
-  if (backgroundMode === 'glass') return <GlassBackground />
-  if (backgroundMode === 'slideshow') return <SlideshowBackground />
-  return <SingleBackground />
+  return <>
+    {backgroundMode === 'glass' ? <GlassBackground /> : backgroundMode === 'slideshow' ? <SlideshowBackground /> : <SingleBackground />}
+    <div aria-hidden className="pointer-events-none fixed inset-0 z-0 bg-black/20" />
+  </>
 }
 
-/** 模式一：单张图片（原图逻辑，加载淡入 + 失效回退默认图） */
-function SingleBackground() {
+/** Single image: preserve the chosen source and show a recoverable gradient fallback. */
+function SingleBackground({ reportStatus = true }: { reportStatus?: boolean }) {
   const background = useVibeStore((s) => s.background)
-  const setBackground = useVibeStore((s) => s.setBackground)
-  const [src, setSrc] = useState(background.value)
+  const retryToken = useVibeStore((s) => s.backgroundRetryToken)
+  const setBackgroundState = useVibeStore((s) => s.setBackgroundState)
+  const [src, setSrc] = useState('')
   const [fade, setFade] = useState(false)
 
   useEffect(() => {
     let cancelled = false
     setFade(false)
+    setSrc('')
+    if (reportStatus) setBackgroundState('loading')
 
     const resolveSrc = async () => {
-      if (background.type === 'local') {
-        const exists = await ipc.fileExists(background.value)
-        if (cancelled) return
-        if (!exists) {
-          setBackground(DEFAULT_VIBE_BACKGROUND)
-          setSrc(DEFAULT_VIBE_BACKGROUND.value)
-          return
+      try {
+        if (background.type === 'local') {
+          const exists = await ipc.fileExists(background.value)
+          if (cancelled) return
+          if (!exists) throw new Error('Background file unavailable')
+          const next = await resolveImageSrc(background.value)
+          if (!cancelled) setSrc(next)
+        } else {
+          if (!cancelled) setSrc(background.value)
         }
-        setSrc(toFileUrl(background.value))
-      } else {
-        if (cancelled) return
-        setSrc(background.value)
+      } catch {
+        if (!cancelled && reportStatus) setBackgroundState('error', 'single')
       }
     }
 
@@ -66,13 +66,11 @@ function SingleBackground() {
     return () => {
       cancelled = true
     }
-  }, [background, setBackground])
+  }, [background, retryToken, reportStatus, setBackgroundState])
 
   const handleError = () => {
-    if (src !== DEFAULT_VIBE_BACKGROUND.value) {
-      setBackground(DEFAULT_VIBE_BACKGROUND)
-      setSrc(DEFAULT_VIBE_BACKGROUND.value)
-    }
+    setFade(false)
+    if (reportStatus) setBackgroundState('error', 'single')
   }
 
   return (
@@ -86,15 +84,14 @@ function SingleBackground() {
           opacity: fade ? 1 : 0,
         }}
       />
-      <img
+      {src && <img
+        key={`${retryToken}:${src}`}
         src={src}
         alt=""
         className="hidden"
-        onLoad={() => setFade(true)}
+        onLoad={() => { setFade(true); if (reportStatus) setBackgroundState('ready') }}
         onError={handleError}
-      />
-      {/* Dark overlay for readability */}
-      <div className="absolute inset-0 bg-black/30" />
+      />}
     </div>
   )
 }
@@ -107,6 +104,8 @@ function SingleBackground() {
 function SlideshowBackground() {
   const slideshowFolder = useVibeStore((s) => s.slideshowFolder)
   const slideshowIntervalSec = useVibeStore((s) => s.slideshowIntervalSec)
+  const retryToken = useVibeStore((s) => s.backgroundRetryToken)
+  const setBackgroundState = useVibeStore((s) => s.setBackgroundState)
   const [files, setFiles] = useState<string[]>([])
   const [tick, setTick] = useState(0)
   const [layers, setLayers] = useState<{ base: string; top: string | null; topKey: number }>({
@@ -141,8 +140,10 @@ function SlideshowBackground() {
   useEffect(() => {
     let cancelled = false
     const load = async () => {
+      setFiles([])
+      setBackgroundState('loading')
       if (!slideshowFolder) {
-        setFiles([])
+        setBackgroundState('empty', 'slideshow')
         return
       }
       try {
@@ -157,16 +158,20 @@ function SlideshowBackground() {
         setNextSrc(null)
         setLayers({ base: '', top: null, topKey: topKeyRef.current })
         setFiles(paths.slice(0, SLIDESHOW_MAX_IMAGES))
+        if (paths.length === 0) setBackgroundState('empty', 'slideshow')
         setTick(0)
       } catch {
-        if (!cancelled) setFiles([])
+        if (!cancelled) {
+          setFiles([])
+          setBackgroundState('error', 'slideshow')
+        }
       }
     }
     void load()
     return () => {
       cancelled = true
     }
-  }, [slideshowFolder])
+  }, [slideshowFolder, retryToken, setBackgroundState])
 
   // 当前图变化：解析后交叉淡入（旧上层降级为新的底层），随后预热下一张，切换时零等待。
   // 用递增 tick 取模得到当前图，避免整轮回绕到 0 时跳过切换
@@ -176,26 +181,26 @@ function SlideshowBackground() {
     const current = files[tick % files.length]
     const next = files[(tick + 1) % files.length]
     void (async () => {
-      const src = await resolveSrc(current)
-      if (cancelled) return
-      if (!initializedRef.current) {
-        initializedRef.current = true
-        setLayers({ base: src, top: null, topKey: topKeyRef.current })
-      } else {
-        setLayers((prev) => ({
-          base: prev.top ?? prev.base,
-          top: src,
-          topKey: ++topKeyRef.current,
-        }))
+      try {
+        const src = await resolveSrc(current)
+        if (cancelled) return
+        if (!initializedRef.current) {
+          initializedRef.current = true
+          setLayers({ base: src, top: null, topKey: topKeyRef.current })
+        } else {
+          setLayers((prev) => ({ base: prev.top ?? prev.base, top: src, topKey: ++topKeyRef.current }))
+        }
+        setNextSrc(null)
+        const pre = await resolveSrc(next)
+        if (!cancelled) setNextSrc(pre)
+      } catch {
+        if (!cancelled) setBackgroundState('error', 'slideshow')
       }
-      setNextSrc(null)
-      const pre = await resolveSrc(next)
-      if (!cancelled) setNextSrc(pre)
     })()
     return () => {
       cancelled = true
     }
-  }, [files, tick, resolveSrc])
+  }, [files, tick, resolveSrc, setBackgroundState])
 
   useEffect(() => {
     if (files.length <= 1) return
@@ -206,12 +211,20 @@ function SlideshowBackground() {
   }, [files.length, slideshowIntervalSec])
 
   // 文件夹未选 / 为空：回退单图模式
-  if (files.length === 0) return <SingleBackground />
+  if (files.length === 0) return <SingleBackground reportStatus={false} />
 
   return (
     <div className="fixed inset-0 z-0">
       {/* 兜底渐变：任何一层图片失效时不至于死黑 */}
       <div className={`absolute inset-0 ${GRADIENT_FALLBACK}`} />
+      {(layers.top || layers.base) && <img src={layers.top || layers.base} alt="" aria-hidden className="hidden"
+        onLoad={() => setBackgroundState('ready')}
+        onError={() => {
+          const failedPath = files[tick % files.length]
+          srcCacheRef.current.delete(failedPath)
+          setFiles((previous) => previous.filter((path) => path !== failedPath))
+          setBackgroundState('error', 'slideshow')
+        }} />}
       {/* 预加载下一张（WebUI 为已解析的 base64），切换时零白屏；
           加载失败则把该图从轮播列表剔除并立即切下一张（对齐单图模式的失效兜底） */}
       {nextSrc && (
@@ -242,7 +255,6 @@ function SlideshowBackground() {
           style={{ backgroundImage: `url(${JSON.stringify(layers.top)})` }}
         />
       )}
-      <div className="absolute inset-0 bg-black/30" />
     </div>
   )
 }
@@ -256,20 +268,26 @@ function SlideshowBackground() {
 function GlassBackground() {
   const glassLevel = useVibeStore((s) => s.glassLevel)
   const setGlassTrack = useVibeStore((s) => s.setGlassTrack)
+  const retryToken = useVibeStore((s) => s.backgroundRetryToken)
+  const setBackgroundState = useVibeStore((s) => s.setBackgroundState)
   const [track, setTrack] = useState<VibeGlassTrack | 'pending'>('pending')
   const [wallpaper, setWallpaper] = useState<string | null>(null)
 
+  useEffect(() => () => { void ipc.vibeGlassClear().catch(() => {}) }, [])
+
   useEffect(() => {
     let cancelled = false
-    setTrack('pending')
-    setGlassTrack('pending')
+    setBackgroundState('loading')
 
     const loadWallpaper = async () => {
       try {
         const wp = await ipc.vibeGetWallpaper()
-        if (!cancelled) setWallpaper(wp)
+        if (!cancelled) {
+          setWallpaper(wp)
+          setBackgroundState(wp ? 'ready' : 'error', wp ? null : 'glass')
+        }
       } catch {
-        // 壁纸快照不可用时保持纯透明
+        if (!cancelled) setBackgroundState('error', 'glass')
       }
     }
 
@@ -279,7 +297,10 @@ function GlassBackground() {
         if (cancelled) return
         setTrack(res.track)
         setGlassTrack(res.track)
-        if (res.track === 'fallback') void loadWallpaper()
+        if (res.track === 'fallback') {
+          if (wallpaper && retryToken === 0) setBackgroundState('ready')
+          else void loadWallpaper()
+        } else setBackgroundState('ready')
       } catch {
         if (cancelled) return
         setTrack('fallback')
@@ -291,9 +312,8 @@ function GlassBackground() {
 
     return () => {
       cancelled = true
-      void ipc.vibeGlassClear()
     }
-  }, [glassLevel, setGlassTrack])
+  }, [glassLevel, retryToken, setGlassTrack, setBackgroundState])
 
   // 原生轨道：页面不绘制任何背景，系统亚克力/纯透明直接透出桌面
   if (track === 'acrylic' || track === 'transparent') return null
@@ -302,6 +322,7 @@ function GlassBackground() {
   const blurPx = Math.round(glassLevel * 0.4)
   return (
     <div className="fixed inset-0 z-0 overflow-hidden">
+      {!wallpaper && <div className={`absolute inset-0 ${GRADIENT_FALLBACK}`} />}
       {wallpaper && (
         <div
           className="absolute -inset-10 bg-cover bg-center bg-no-repeat"
@@ -311,7 +332,6 @@ function GlassBackground() {
           }}
         />
       )}
-      <div className="absolute inset-0 bg-black/25" />
     </div>
   )
 }

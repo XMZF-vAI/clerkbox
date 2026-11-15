@@ -186,6 +186,12 @@ export function unregisterSubagentControl(sessionId: string, runId: string): voi
   subagentSteerSinks.delete(key)
 }
 
+/** 撤回期间不能截断仍被后台子代理写入的历史。 */
+export function hasRunningSubagents(sessionId: string): boolean {
+  const prefix = `${sessionId}\u0000`
+  return [...subagentControllers.keys()].some((key) => key.startsWith(prefix))
+}
+
 /** 单子代理取消（进程内路径）：返回 false 表示该 run 不在本进程运行 */
 export function abortSubagentLocal(sessionId: string, runId: string): boolean {
   const controller = subagentControllers.get(subagentControlKey(sessionId, runId))

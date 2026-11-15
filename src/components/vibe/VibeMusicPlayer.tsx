@@ -1,474 +1,357 @@
-import { useEffect, useRef, useState, useCallback } from 'react'
-import { Play, Pause, SkipBack, SkipForward, Music, Volume2 } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { AlertCircle, Loader2, Music, Pause, Play, RotateCcw, SkipBack, SkipForward, Volume2 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { useVibeStore, DEFAULT_VIBE_MUSIC } from '../../stores/vibe-store'
+import { useVibeStore, type VibeMusic } from '../../stores/vibe-store'
 import { ipc, isWebUIMode } from '../../lib/ipc-client'
-import { toFileUrl } from '../../lib/file-url'
-import type { SystemMediaState } from '../../types/ipc'
+import {
+  AudioPlaybackIntent, AudioSourceError, audioTrackName, audioTracksFromFolder,
+  clampAudioPosition, formatAudioTime, resolveAudioSource, type AudioFailure, type AudioTrack,
+} from '../../lib/vibe-audio'
+import type { SystemMediaState, VibeMediaCommand } from '../../types/ipc'
 
-const AUDIO_EXTENSIONS = ['mp3', 'wav', 'ogg', 'flac', 'm4a', 'aac', 'wma']
-
-interface Track {
-  name: string
-  src: string
-}
-
-function fileNameFromPath(path: string): string {
-  return path.replace(/\\/g, '/').split('/').pop() || ''
-}
-
-function ext(path: string): string {
-  return path.split('.').pop()?.toLowerCase() || ''
-}
-
-function formatTime(ms: number): string {
-  if (!isFinite(ms) || isNaN(ms) || ms < 0) return '0:00'
-  const totalSec = Math.floor(ms / 1000)
-  const m = Math.floor(totalSec / 60)
-  const s = totalSec % 60
-  return `${m}:${s.toString().padStart(2, '0')}`
+const controlClass = 'md-focus flex h-10 w-10 shrink-0 items-center justify-center rounded-md3-sm text-white/80 transition-colors hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-30'
+const rangeClass = 'md-focus h-9 min-w-0 w-full cursor-pointer accent-white disabled:cursor-not-allowed disabled:opacity-30'
+const failureKeys: Record<AudioFailure, string> = {
+  unavailable: 'vibe.audioUnavailable',
+  'empty-folder': 'vibe.audioEmptyFolder',
+  'web-local-unavailable': 'vibe.audioWebUILocalUnsupported',
+  'too-large': 'vibe.audioFileTooLarge',
 }
 
 export default function VibeMusicPlayer() {
-  const audioMode = useVibeStore((s) => s.audioMode)
-  if (audioMode === 'system') return <SystemMusicPlayer />
-  return <LocalMusicPlayer />
+  const mode = useVibeStore((state) => state.audioMode)
+  const music = useVibeStore((state) => state.music)
+  const folder = useVibeStore((state) => state.musicFolder)
+  if (mode === 'system') return <SystemMusicPlayer />
+  // Source replacement starts paused; opening/closing the panel preserves this instance.
+  return <LocalMusicPlayer key={JSON.stringify([music?.type, music?.value, folder])} music={music} folder={folder} />
 }
 
-/** 模式一：本地音频（原有逻辑） */
-function LocalMusicPlayer() {
+function Recovery({ message, onRetry }: { message: string; onRetry: () => void }) {
   const { t } = useTranslation()
-  const music = useVibeStore((s) => s.music)
-  const musicFolder = useVibeStore((s) => s.musicFolder)
+  return (
+    <div role="alert" className="rounded-md3-sm border border-white/15 bg-black/20 p-3 text-ui-xs text-white/80">
+      <p className="flex items-start gap-2 leading-relaxed"><AlertCircle size={15} className="mt-0.5 shrink-0" aria-hidden /><span className="min-w-0 break-words">{message}</span></p>
+      <button type="button" onClick={onRetry} className="md-focus mt-2 inline-flex min-h-9 items-center gap-1.5 rounded-md3-sm px-2 text-ui-xs text-white/90 hover:bg-white/10"><RotateCcw size={14} aria-hidden />{t('vibe.audioRetry')}</button>
+    </div>
+  )
+}
+
+function LocalMusicPlayer({ music, folder }: { music: VibeMusic | null; folder: string | null }) {
+  const { t } = useTranslation()
+  const volume = useVibeStore((state) => state.volume)
+  const setVolume = useVibeStore((state) => state.setVolume)
   const audioRef = useRef<HTMLAudioElement | null>(null)
-  const [tracks, setTracks] = useState<Track[]>([])
-  const [trackIndex, setTrackIndex] = useState(0)
-  const [isPlaying, setIsPlaying] = useState(false)
-  const [progress, setProgress] = useState(0)
+  const intent = useRef(new AudioPlaybackIntent())
+  const hasPlayed = useRef(false)
+  const [tracks, setTracks] = useState<AudioTrack[]>([])
+  const [index, setIndex] = useState(0)
+  const [resolved, setResolved] = useState<{ track: AudioTrack; src: string } | null>(null)
+  const [reload, setReload] = useState(0)
+  const [status, setStatus] = useState<'loading' | 'ready' | 'playing' | 'paused' | 'blocked' | 'error'>('loading')
+  const [failure, setFailure] = useState<AudioFailure | null>(null)
+  const [position, setPosition] = useState(0)
   const [duration, setDuration] = useState(0)
-  const [needsUserInteraction, setNeedsUserInteraction] = useState(false)
-  const [trackError, setTrackError] = useState(false)
-  const [volume, setVolume] = useState(100)
-  // 拖动进度时本地暂存，松手才提交 seek（对齐系统播放器手感，避免逐帧 seek 卡顿）
   const [scrub, setScrub] = useState<number | null>(null)
   const scrubRef = useRef<number | null>(null)
-  const currentTrack = tracks[trackIndex] || tracks[0]
+  const track = tracks[index]
+  const source = resolved?.track === track ? resolved?.src ?? '' : ''
+  const off = !music && !folder
 
-  // Build track list
   useEffect(() => {
     let cancelled = false
-    const loadTracks = async () => {
-      if (musicFolder) {
-        try {
-          const entries = await ipc.listDir(musicFolder)
-          const files = entries
-            .filter((e) => e.isFile && AUDIO_EXTENSIONS.includes(ext(e.name)))
-            .map((e) => e.name)
-            .sort()
-          if (files.length > 0) {
-            if (cancelled) return
-            setTracks(files.map((name) => ({ name, src: toFileUrl(`${musicFolder}/${name}`) })))
-            setTrackIndex(0)
-            return
-          }
-        } catch (e) {
-          console.error('Failed to load music folder:', e)
-        }
-      }
-      if (cancelled) return
-
-      if (music) {
-        if (music.type === 'local') {
-          const exists = await ipc.fileExists(music.value)
-          if (cancelled) return
-          if (!exists) {
-            setTracks([{ name: fileNameFromPath(DEFAULT_VIBE_MUSIC.value), src: DEFAULT_VIBE_MUSIC.value }])
-          } else {
-            setTracks([{ name: fileNameFromPath(music.value), src: toFileUrl(music.value) }])
-          }
-        } else {
-          setTracks([{ name: fileNameFromPath(music.value), src: music.value }])
-        }
-        setTrackIndex(0)
-        return
-      }
-
-      setTracks([{ name: fileNameFromPath(DEFAULT_VIBE_MUSIC.value), src: DEFAULT_VIBE_MUSIC.value }])
-      setTrackIndex(0)
-    }
-
-    void loadTracks()
-    return () => {
-      cancelled = true
-    }
-  }, [music, musicFolder])
-
-  useEffect(() => {
-    setProgress(0)
-    setDuration(0)
-    setTrackError(false)
-  }, [currentTrack?.src])
-
-  // 音量滑块 → audio 元素（换轨后 src 重建同样生效）
-  useEffect(() => {
-    if (audioRef.current) audioRef.current.volume = volume / 100
-  }, [volume, currentTrack?.src])
-
-  // Auto-play when track changes
-  const tryPlay = useCallback(async () => {
-    if (!audioRef.current || !currentTrack) return
-    try {
-      setNeedsUserInteraction(false)
-      await audioRef.current.play()
-      setIsPlaying(true)
-    } catch {
-      setNeedsUserInteraction(true)
-      setIsPlaying(false)
-    }
-  }, [currentTrack])
-
-  useEffect(() => {
-    if (currentTrack) {
-      tryPlay()
-    }
-  }, [currentTrack, tryPlay])
-
-  const handlePlayPause = async () => {
-    if (!audioRef.current) return
-    if (isPlaying) {
-      audioRef.current.pause()
-      setIsPlaying(false)
-    } else {
+    intent.current.resetSource()
+    hasPlayed.current = false
+    audioRef.current?.pause()
+    setResolved(null)
+    setFailure(null)
+    setTracks([])
+    setIndex(0)
+    setStatus('loading')
+    if (off) return
+    void (async () => {
       try {
-        await audioRef.current.play()
-        setIsPlaying(true)
-        setNeedsUserInteraction(false)
-      } catch {
-        setNeedsUserInteraction(true)
+        let next: AudioTrack[]
+        if (folder) {
+          let entries
+          try { entries = await ipc.listDir(folder) }
+          catch { throw new AudioSourceError(isWebUIMode ? 'web-local-unavailable' : 'unavailable') }
+          next = audioTracksFromFolder(folder, entries)
+          if (!next.length) throw new AudioSourceError('empty-folder')
+        } else {
+          next = music ? [{ name: audioTrackName(music.value), value: music.value, local: music.type === 'local' }] : []
+        }
+        if (!cancelled) setTracks(next)
+      } catch (error) {
+        if (!cancelled) {
+          setFailure(error instanceof AudioSourceError ? error.reason : 'unavailable')
+          setStatus('error')
+        }
       }
-    }
-  }
+    })()
+    return () => { cancelled = true; intent.current.resetSource() }
+  }, [music, folder, off, reload])
 
-  const handlePrev = () => {
-    if (tracks.length <= 1) return
-    setTrackIndex((i) => (i - 1 + tracks.length) % tracks.length)
-  }
+  useEffect(() => {
+    let cancelled = false
+    intent.current.changeTrack()
+    audioRef.current?.pause()
+    setResolved(null)
+    setPosition(0)
+    setDuration(0)
+    scrubRef.current = null
+    setScrub(null)
+    if (!track) return
+    setFailure(null)
+    setStatus('loading')
+    void resolveAudioSource(track, {
+      webUI: isWebUIMode,
+      fileExists: (path) => ipc.fileExists(path),
+      readFileBase64: (path) => ipc.readFileBase64(path),
+    }).then((src) => {
+      if (!cancelled) setResolved({ track, src })
+    }).catch((error) => {
+      if (!cancelled) {
+        intent.current.pause()
+        setFailure(error instanceof AudioSourceError ? error.reason : 'unavailable')
+        setStatus('error')
+      }
+    })
+    return () => { cancelled = true; intent.current.changeTrack() }
+  }, [track])
 
-  const handleNext = () => {
-    if (tracks.length <= 1) return
-    setTrackIndex((i) => (i + 1) % tracks.length)
-  }
-
-  const handleTimeUpdate = () => {
+  const attemptPlayback = useCallback(async () => {
     const audio = audioRef.current
     if (!audio) return
-    // 拖动中不回写进度，保持用户手感
-    if (scrubRef.current === null) setProgress(audio.currentTime)
-    setDuration(Number.isFinite(audio.duration) ? audio.duration : 0)
+    const outcome = await intent.current.play(audio)
+    if (outcome === 'stale' || outcome === 'idle') return
+    setStatus(outcome)
+    if (outcome === 'error') setFailure('unavailable')
+  }, [])
+
+  useEffect(() => {
+    const audio = audioRef.current
+    if (!audio || !source) return
+    audio.volume = volume / 100
+    if (intent.current.wantsPlayback) void attemptPlayback()
+  }, [source, attemptPlayback])
+
+  useEffect(() => {
+    if (audioRef.current) audioRef.current.volume = volume / 100
+  }, [volume])
+
+  const togglePlayback = () => {
+    const audio = audioRef.current
+    if (!audio || !source) return
+    if (intent.current.wantsPlayback) {
+      intent.current.pause()
+      audio.pause()
+      setStatus('paused')
+    } else {
+      hasPlayed.current = true
+      intent.current.request()
+      setFailure(null)
+      setStatus('loading')
+      void attemptPlayback()
+    }
   }
 
-  const beginScrub = (value: number) => {
-    scrubRef.current = value
-    setScrub(value)
+  const changeTrack = (step: number) => {
+    if (tracks.length < 2) return
+    intent.current.changeTrack()
+    audioRef.current?.pause()
+    setIndex((current) => (current + step + tracks.length) % tracks.length)
   }
 
-  const commitScrub = () => {
+  const readPosition = () => {
+    const audio = audioRef.current
+    if (!audio) return
+    const total = Number.isFinite(audio.duration) ? audio.duration : 0
+    setDuration(total)
+    if (scrubRef.current === null) setPosition(clampAudioPosition(audio.currentTime, total))
+  }
+
+  const commitSeek = () => {
     const value = scrubRef.current
     if (value === null) return
     scrubRef.current = null
     setScrub(null)
     const audio = audioRef.current
-    if (!audio) return
-    audio.currentTime = value
-    setProgress(value)
+    if (!audio || duration <= 0) return
+    try {
+      audio.currentTime = clampAudioPosition(value, duration)
+      setPosition(audio.currentTime)
+    } catch { /* Metadata may have changed between a drag and its commit. */ }
   }
 
-  if (!currentTrack) return null
+  const visibleStatus = off ? 'vibe.audioOff' : status === 'error' ? 'vibe.audioUnavailable'
+    : status === 'blocked' ? 'vibe.audioInteractionRequired' : `vibe.audio${status[0].toUpperCase()}${status.slice(1)}`
+  const displayPosition = clampAudioPosition(scrub ?? position, duration)
+  const playingIntent = intent.current.wantsPlayback
 
-  // 根元素不再自带定位：由 VibeControls 的顶部右侧统一槽位容器负责摆放
   return (
-    <div className="flex items-center gap-3 px-4 py-2 liquid-glass rounded-full text-white/90 max-w-[min(92vw,560px)]">
-      <audio
-        ref={audioRef}
-        src={currentTrack.src}
-        onTimeUpdate={handleTimeUpdate}
-        onLoadedMetadata={handleTimeUpdate}
-        onPlay={() => setIsPlaying(true)}
-        onPause={() => setIsPlaying(false)}
-        onEnded={handleNext}
-        onError={() => setTrackError(true)}
-        loop={tracks.length === 1}
-      />
-
-      <Music size={16} className="text-white/70" />
-
-      <div className="flex flex-col min-w-[140px]">
-        <span className="text-xs font-medium truncate max-w-[160px]">{currentTrack.name || t('vibe.unknownAudio')}</span>
-        <div className="flex items-center gap-2 mt-1">
-          <input
-            type="range"
-            min={0}
-            max={duration || 1}
-            step={0.1}
-            value={scrub ?? progress}
-            onChange={(e) => beginScrub(Number(e.target.value))}
-            onPointerUp={commitScrub}
-            onKeyUp={commitScrub}
-            onBlur={commitScrub}
-            aria-label={t('vibe.seek')}
-            className="flex-1 h-1 bg-white/20 rounded-full appearance-none cursor-pointer accent-white"
-          />
-          <span className="text-[10px] text-white/60 tabular-nums">
-            {formatTime((scrub ?? progress) * 1000)}/{formatTime(duration * 1000)}
-          </span>
+    <section className="min-w-0 w-full max-w-full space-y-3 text-white/90" aria-label={t('vibe.tabAudio')}>
+      <audio key={track?.value ?? 'off'} ref={audioRef} src={source || undefined} preload="metadata" loop={tracks.length === 1}
+        onLoadedMetadata={() => { readPosition(); if (!intent.current.wantsPlayback) setStatus((current) => current === 'blocked' || current === 'error' ? current : hasPlayed.current ? 'paused' : 'ready') }}
+        onCanPlay={() => { if (!intent.current.wantsPlayback) setStatus((current) => current === 'blocked' || current === 'error' ? current : hasPlayed.current ? 'paused' : 'ready') }}
+        onTimeUpdate={readPosition}
+        onPlay={() => { if (intent.current.wantsPlayback) setStatus('playing'); else audioRef.current?.pause() }}
+        onPlaying={() => { if (intent.current.wantsPlayback) setStatus('playing') }}
+        onPause={() => { if (!intent.current.wantsPlayback && hasPlayed.current) setStatus((current) => current === 'blocked' || current === 'error' ? current : 'paused') }}
+        onWaiting={() => { if (intent.current.wantsPlayback) setStatus('loading') }}
+        onEnded={() => { if (intent.current.wantsPlayback) changeTrack(1) }}
+        onError={() => { if (source) { intent.current.pause(); setStatus('error'); setFailure('unavailable') } }} />
+      <div className="flex min-w-0 items-center gap-3">
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md3-sm bg-white/10"><Music size={18} aria-hidden /></span>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-ui-sm font-medium" title={off ? undefined : track?.name}>{off ? t('vibe.audioOff') : track?.name || t('vibe.unknownAudio')}</p>
+          <p role="status" aria-live="polite" className="mt-0.5 text-ui-xs leading-relaxed text-white/60">{t(visibleStatus)}{tracks.length > 1 && <span className="ml-2 font-mono tabular-nums">{index + 1}/{tracks.length}</span>}</p>
         </div>
       </div>
-
-      <div className="flex items-center gap-1">
-        <button
-          type="button"
-          onClick={handlePrev}
-          disabled={tracks.length <= 1}
-          aria-label={t('vibe.previousTrack')}
-          className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-white/15 disabled:opacity-30 transition-colors"
-        >
-          <SkipBack size={14} />
-        </button>
-        <button
-          type="button"
-          onClick={handlePlayPause}
-          aria-label={isPlaying ? t('vibe.pause') : t('vibe.play')}
-          className="w-8 h-8 flex items-center justify-center rounded-full bg-white/20 hover:bg-white/30 transition-colors"
-        >
-          {isPlaying ? <Pause size={14} /> : <Play size={14} className="ml-0.5" />}
-        </button>
-        <button
-          type="button"
-          onClick={handleNext}
-          disabled={tracks.length <= 1}
-          aria-label={t('vibe.nextTrack')}
-          className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-white/15 disabled:opacity-30 transition-colors"
-        >
-          <SkipForward size={14} />
-        </button>
-      </div>
-
-      {/* 本地音量（与系统播放器对称；窄屏隐藏防溢出） */}
-      <div className="flex items-center gap-1.5 shrink-0 max-md:hidden">
-        <Volume2 size={13} className="text-white/60" />
-        <input
-          type="range"
-          min={0}
-          max={100}
-          value={volume}
-          onChange={(e) => setVolume(Number(e.target.value))}
-          aria-label={t('vibe.localVolume')}
-          className="w-16 h-1 bg-white/20 rounded-full appearance-none cursor-pointer accent-white"
-        />
-      </div>
-
-      {/* 曲目加载失败（外链过期/文件被删）：轻量提示，不再静默无声 */}
-      {trackError && (
-        <span className="ml-1 text-[10px] px-2 py-0.5 rounded-full bg-white/15 text-white/80 shrink-0">
-          {t('vibe.audioLoadFailed')}
-        </span>
-      )}
-
-      {needsUserInteraction && (
-        <button
-          type="button"
-          onClick={handlePlayPause}
-          className="ml-1 text-[10px] px-2 py-0.5 rounded-full bg-white/20 hover:bg-white/30 transition-colors shrink-0"
-        >
-          {t('vibe.clickToPlay')}
-        </button>
-      )}
-    </div>
+      {off ? <p className="text-ui-xs leading-relaxed text-white/60">{t('vibe.audioOffHint')}</p> : <>
+        <div className="flex items-center justify-center gap-2">
+          <button type="button" onClick={() => changeTrack(-1)} disabled={tracks.length < 2} aria-label={t('vibe.previousTrack')} title={t('vibe.previousTrack')} className={controlClass}><SkipBack size={18} aria-hidden /></button>
+          <button type="button" onClick={togglePlayback} disabled={!source || status === 'error'} aria-label={t(playingIntent ? 'vibe.pause' : 'vibe.play')} title={t(playingIntent ? 'vibe.pause' : 'vibe.play')} className={`${controlClass} bg-white/15 text-white hover:bg-white/25`}>
+            {status === 'loading' && playingIntent ? <Loader2 size={19} className="animate-spin" aria-hidden /> : playingIntent ? <Pause size={19} aria-hidden /> : <Play size={19} aria-hidden />}
+          </button>
+          <button type="button" onClick={() => changeTrack(1)} disabled={tracks.length < 2} aria-label={t('vibe.nextTrack')} title={t('vibe.nextTrack')} className={controlClass}><SkipForward size={18} aria-hidden /></button>
+        </div>
+        <div className="min-w-0">
+          <input type="range" min={0} max={duration || 1} step={0.1} value={displayPosition} disabled={!source || duration <= 0}
+            onChange={(event) => { const value = Number(event.target.value); scrubRef.current = value; setScrub(value) }}
+            onPointerUp={commitSeek} onKeyUp={commitSeek} onBlur={commitSeek} onPointerCancel={commitSeek}
+            aria-label={t('vibe.seek')} aria-valuetext={`${formatAudioTime(displayPosition * 1000)} / ${formatAudioTime(duration * 1000)}`} className={rangeClass} />
+          <div className="flex justify-between gap-2 font-mono text-ui-xs tabular-nums text-white/60"><span>{formatAudioTime(displayPosition * 1000)}</span><span>{formatAudioTime(duration * 1000)}</span></div>
+        </div>
+        <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 text-white/60">
+          <Volume2 size={16} aria-hidden />
+          <input type="range" min={0} max={100} value={volume} onChange={(event) => setVolume(Number(event.target.value))} aria-label={t('vibe.localVolume')} aria-valuetext={`${volume}%`} className={rangeClass} />
+          <span className="w-10 text-right font-mono text-ui-xs tabular-nums">{volume}%</span>
+        </div>
+      </>}
+      {failure && <Recovery message={t(failureKeys[failure])} onRetry={() => setReload((value) => value + 1)} />}
+      {status === 'blocked' && <button type="button" onClick={togglePlayback} className="md-focus min-h-9 w-full rounded-md3-sm bg-white/10 px-3 text-ui-xs hover:bg-white/15">{t('vibe.clickToPlay')}</button>}
+    </section>
   )
 }
 
-/** 模式二：系统正在播放 —— SMTC 会话卡片（封面/进度/控制/音量） */
 function SystemMusicPlayer() {
   const { t } = useTranslation()
   const [state, setState] = useState<SystemMediaState | null>(null)
-  const [positionMs, setPositionMs] = useState(0)
-  const [scrubMs, setScrubMs] = useState<number | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [failed, setFailed] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [position, setPosition] = useState(0)
+  const [scrub, setScrub] = useState<number | null>(null)
   const [volume, setVolume] = useState<number | null>(null)
   const scrubRef = useRef<number | null>(null)
-  const volumeTimerRef = useRef<number | null>(null)
+  const volumeDraft = useRef<number | null>(null)
+  const mounted = useRef(true)
 
-  // 拉起主进程轮询助手 + 订阅状态推送（WebUI 无推送通道，走 2s 轮询）
-  useEffect(() => {
-    let cancelled = false
-
-    const pull = async () => {
-      try {
-        const s = await ipc.vibeMediaGetState()
-        if (!cancelled && s) setState(s)
-      } catch { /* 主进程暂时不可用：等待下一轮 */ }
-    }
-    void pull()
-
-    const off = ipc.onVibeMediaState((s) => setState(s))
-
-    let pollId: number | null = null
-    if (isWebUIMode) {
-      pollId = window.setInterval(() => void pull(), 2000)
-    }
-
-    return () => {
-      cancelled = true
-      off()
-      if (pollId !== null) window.clearInterval(pollId)
-      void ipc.vibeMediaStop()
-    }
+  const pull = useCallback(async () => {
+    try {
+      const snapshot = await ipc.vibeMediaGetState()
+      if (mounted.current) { setState(snapshot); setFailed(!snapshot) }
+    } catch { if (mounted.current) setFailed(true) }
+    finally { if (mounted.current) setLoading(false) }
   }, [])
 
-  // 状态到达：同步进度与音量（拖动中的滑块不覆盖用户手感；scrub 走 ref 避免提交瞬间被旧状态回写）
+  useEffect(() => {
+    mounted.current = true
+    void pull()
+    const off = ipc.onVibeMediaState((snapshot) => { if (mounted.current) { setState(snapshot); setLoading(false); setFailed(false) } })
+    const poll = isWebUIMode ? window.setInterval(() => void pull(), 2000) : undefined
+    return () => {
+      mounted.current = false
+      off()
+      if (poll !== undefined) window.clearInterval(poll)
+      // Stops observation, not playback in the user's external media application.
+      void ipc.vibeMediaStop().catch(() => {})
+    }
+  }, [pull])
+
   useEffect(() => {
     if (!state) return
-    const pos = state.positionMs
-    if (typeof pos === 'number' && scrubRef.current === null) {
-      setPositionMs(pos)
-    }
-    if (typeof state.volume === 'number' && volumeTimerRef.current === null) {
-      setVolume(state.volume)
-    }
+    if (scrubRef.current === null) setPosition(state.positionMs ?? 0)
+    if (volumeDraft.current === null) setVolume(state.volume ?? null)
   }, [state])
 
-  // 播放中本地插值进度，进度条每 500ms 平滑走一格
+  useEffect(() => {
+    scrubRef.current = null
+    setScrub(null)
+    setPosition(state?.positionMs ?? 0)
+  }, [state?.title, state?.artist, state?.durationMs])
+
   useEffect(() => {
     if (state?.status !== 'Playing') return
-    const id = window.setInterval(() => {
-      setPositionMs((p) => (scrubRef.current !== null ? p : p + 500))
+    const timer = window.setInterval(() => {
+      if (scrubRef.current === null) setPosition((current) => clampAudioPosition(current + 500, state.durationMs ?? 0))
     }, 500)
-    return () => window.clearInterval(id)
-  }, [state?.status])
+    return () => window.clearInterval(timer)
+  }, [state?.status, state?.durationMs])
 
-  const sendCommand = useCallback((cmd: Parameters<typeof ipc.vibeMediaCommand>[0]) => {
-    void ipc.vibeMediaCommand(cmd)
-  }, [])
-
-  const beginScrub = (value: number) => {
-    scrubRef.current = value
-    setScrubMs(value)
+  const send = async (command: VibeMediaCommand) => {
+    setBusy(true)
+    setFailed(false)
+    try {
+      if (!(await ipc.vibeMediaCommand(command))) throw new Error('media command unavailable')
+      await pull()
+    } catch { if (mounted.current) setFailed(true) }
+    finally { if (mounted.current) setBusy(false) }
   }
 
-  const commitScrub = () => {
+  const duration = state?.durationMs ?? 0
+  const displayPosition = clampAudioPosition(scrub ?? position, duration)
+  const playing = state?.status === 'Playing'
+  const available = !!state?.available
+  const commitSeek = () => {
     const value = scrubRef.current
     if (value === null) return
     scrubRef.current = null
-    setScrubMs(null)
-    sendCommand({ type: 'seek', positionMs: value })
-    setPositionMs(value)
+    setScrub(null)
+    setPosition(clampAudioPosition(value, duration))
+    void send({ type: 'seek', positionMs: clampAudioPosition(value, duration) })
   }
-
-  const handleVolume = (value: number) => {
-    setVolume(value)
-    if (volumeTimerRef.current !== null) window.clearTimeout(volumeTimerRef.current)
-    volumeTimerRef.current = window.setTimeout(() => {
-      volumeTimerRef.current = null
-      sendCommand({ type: 'volume', volume: value })
-    }, 180)
+  const commitVolume = () => {
+    const value = volumeDraft.current
+    if (value === null) return
+    volumeDraft.current = null
+    void send({ type: 'volume', volume: value })
   }
-
-  useEffect(() => {
-    return () => {
-      if (volumeTimerRef.current !== null) window.clearTimeout(volumeTimerRef.current)
-    }
-  }, [])
-
-  const durationMs = state?.durationMs ?? 0
-  const isPlaying = state?.status === 'Playing'
-  const displayMs = scrubMs ?? positionMs
-
-  // 无活跃会话：不渲染任何占位胶囊（无音频时保持右上角干净，布局由统一槽位容器负责）
-  if (!state || !state.available) return null
+  const retry = () => { setLoading(true); setFailed(false); void pull() }
 
   return (
-    <div className="flex items-center gap-3 px-4 py-2 liquid-glass rounded-full text-white/90 max-w-[min(92vw,520px)]">
-      {/* 封面 */}
-      {state.cover ? (
-        <img
-          src={state.cover}
-          alt=""
-          className="w-10 h-10 rounded-full object-cover border border-white/20 shrink-0"
-        />
-      ) : (
-        <div className="w-10 h-10 rounded-full bg-white/10 border border-white/20 flex items-center justify-center shrink-0">
-          <Music size={16} className="text-white/70" />
-        </div>
-      )}
-
-      {/* 曲目信息 + 进度 */}
-      <div className="flex flex-col min-w-[140px] flex-1">
-        <span className="text-xs font-medium truncate max-w-[180px]">
-          {state.title || t('vibe.unknownAudio')}
-        </span>
-        <span className="text-[10px] text-white/60 truncate max-w-[180px]">
-          {state.artist || t('vibe.unknownArtist')}
-        </span>
-        <div className="flex items-center gap-2 mt-1">
-          <input
-            type="range"
-            min={0}
-            max={durationMs || 1}
-            step={1000}
-            value={displayMs}
-            onChange={(e) => beginScrub(Number(e.target.value))}
-            onPointerUp={commitScrub}
-            onKeyUp={commitScrub}
-            onBlur={commitScrub}
-            aria-label={t('vibe.seek')}
-            className="flex-1 h-1 bg-white/20 rounded-full appearance-none cursor-pointer accent-white"
-          />
-          <span className="text-[10px] text-white/60 tabular-nums whitespace-nowrap">
-            {formatTime(displayMs)}/{formatTime(durationMs)}
-          </span>
+    <section className="min-w-0 w-full max-w-full space-y-3 text-white/90" aria-label={t('vibe.audioModeSystem')}>
+      <div className="flex min-w-0 items-center gap-3">
+        {state?.cover ? <img src={state.cover} alt="" className="h-10 w-10 shrink-0 rounded-md3-sm object-cover" /> : <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md3-sm bg-white/10"><Music size={18} aria-hidden /></span>}
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-ui-sm font-medium" title={state?.title}>{state?.title || t('vibe.audioModeSystem')}</p>
+          <p role="status" aria-live="polite" className="mt-0.5 text-ui-xs leading-relaxed text-white/60">{loading ? t('vibe.audioLoading') : !available ? t('vibe.audioNoSystemSession') : t(playing ? 'vibe.audioPlaying' : 'vibe.audioPaused')}</p>
+          {state?.artist && <p className="mt-0.5 truncate text-ui-xs text-white/60" title={state.artist}>{state.artist}</p>}
         </div>
       </div>
-
-      {/* 播放控制 */}
-      <div className="flex items-center gap-1 shrink-0">
-        <button
-          type="button"
-          onClick={() => sendCommand({ type: 'prev' })}
-          aria-label={t('vibe.previousTrack')}
-          className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-white/15 transition-colors"
-        >
-          <SkipBack size={14} />
-        </button>
-        <button
-          type="button"
-          onClick={() => sendCommand(isPlaying ? { type: 'pause' } : { type: 'play' })}
-          aria-label={isPlaying ? t('vibe.pause') : t('vibe.play')}
-          className="w-8 h-8 flex items-center justify-center rounded-full bg-white/20 hover:bg-white/30 transition-colors"
-        >
-          {isPlaying ? <Pause size={14} /> : <Play size={14} className="ml-0.5" />}
-        </button>
-        <button
-          type="button"
-          onClick={() => sendCommand({ type: 'next' })}
-          aria-label={t('vibe.nextTrack')}
-          className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-white/15 transition-colors"
-        >
-          <SkipForward size={14} />
-        </button>
+      <div className="flex items-center justify-center gap-2">
+        <button type="button" onClick={() => void send({ type: 'prev' })} disabled={!available || busy} aria-label={t('vibe.previousTrack')} title={t('vibe.previousTrack')} className={controlClass}><SkipBack size={18} aria-hidden /></button>
+        <button type="button" onClick={() => void send({ type: playing ? 'pause' : 'play' })} disabled={!available || busy} aria-label={t(playing ? 'vibe.pause' : 'vibe.play')} title={t(playing ? 'vibe.pause' : 'vibe.play')} className={`${controlClass} bg-white/15 text-white hover:bg-white/25`}>{busy || loading ? <Loader2 size={19} className="animate-spin" aria-hidden /> : playing ? <Pause size={19} aria-hidden /> : <Play size={19} aria-hidden />}</button>
+        <button type="button" onClick={() => void send({ type: 'next' })} disabled={!available || busy} aria-label={t('vibe.nextTrack')} title={t('vibe.nextTrack')} className={controlClass}><SkipForward size={18} aria-hidden /></button>
       </div>
-
-      {/* 系统音量 */}
-      <div className="flex items-center gap-1.5 shrink-0 max-md:hidden">
-        <Volume2 size={13} className="text-white/60" />
-        <input
-          type="range"
-          min={0}
-          max={100}
-          value={volume ?? state.volume ?? 100}
-          onChange={(e) => handleVolume(Number(e.target.value))}
-          aria-label={t('vibe.volume')}
-          className="w-16 h-1 bg-white/20 rounded-full appearance-none cursor-pointer accent-white"
-        />
+      <div className="min-w-0">
+        <input type="range" min={0} max={duration || 1} step={1000} value={displayPosition} disabled={!available || duration <= 0 || busy}
+          onChange={(event) => { const value = Number(event.target.value); scrubRef.current = value; setScrub(value) }}
+          onPointerUp={commitSeek} onKeyUp={commitSeek} onBlur={commitSeek} onPointerCancel={commitSeek}
+          aria-label={t('vibe.seek')} aria-valuetext={`${formatAudioTime(displayPosition)} / ${formatAudioTime(duration)}`} className={rangeClass} />
+        <div className="flex justify-between gap-2 font-mono text-ui-xs tabular-nums text-white/60"><span>{formatAudioTime(displayPosition)}</span><span>{formatAudioTime(duration)}</span></div>
       </div>
-    </div>
+      <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 text-white/60">
+        <Volume2 size={16} aria-hidden />
+        <input type="range" min={0} max={100} value={volume ?? 0} disabled={volume === null || busy}
+          onChange={(event) => { const value = Number(event.target.value); volumeDraft.current = value; setVolume(value) }}
+          onPointerUp={commitVolume} onKeyUp={commitVolume} onBlur={commitVolume} onPointerCancel={commitVolume}
+          aria-label={t('vibe.volume')} aria-valuetext={volume === null ? t('vibe.audioSystemUnavailable') : `${volume}%`} className={rangeClass} />
+        <span className="w-10 text-right font-mono text-ui-xs tabular-nums">{volume === null ? '—' : `${volume}%`}</span>
+      </div>
+      {failed && <Recovery message={t('vibe.audioSystemUnavailable')} onRetry={retry} />}
+      {!loading && !available && !failed && <button type="button" onClick={retry} className="md-focus min-h-9 w-full rounded-md3-sm bg-white/10 px-3 text-ui-xs hover:bg-white/15">{t('vibe.audioRetry')}</button>}
+    </section>
   )
 }

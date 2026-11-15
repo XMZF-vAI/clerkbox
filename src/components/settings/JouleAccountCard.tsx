@@ -63,6 +63,7 @@ export default function JouleAccountCard() {
   const userCode = useJouleStore((s) => s.userCode)
   const loginExpiresAt = useJouleStore((s) => s.loginExpiresAt)
   const verificationUri = useJouleStore((s) => s.verificationUri)
+  const loginPending = loggingIn || !!userCode
   const login = useJouleStore((s) => s.login)
   const cancelLogin = useJouleStore((s) => s.cancelLogin)
   const logout = useJouleStore((s) => s.logout)
@@ -74,13 +75,13 @@ export default function JouleAccountCard() {
   const [now, setNow] = useState(Date.now())
 
   useEffect(() => {
-    if (!loggingIn) return
+    if (!loginPending) return
     const timer = window.setInterval(() => setNow(Date.now()), 1000)
     return () => window.clearInterval(timer)
-  }, [loggingIn])
+  }, [loginPending])
 
   const doRefresh = () => {
-    if (busy || loggingIn) return
+    if (busy || loginPending) return
     setBusy(true)
     void refresh().finally(() => setBusy(false))
   }
@@ -131,7 +132,7 @@ export default function JouleAccountCard() {
   const w5h = quotas?.w5h
   const w5hRatio = w5h && w5h.cap > 0 ? Math.min(1, Math.max(0, w5h.used / w5h.cap)) : 0
   const displayName = user?.username || user?.email || t('joule.userFallback')
-  const showRefresh = status !== 'unlinked' && !loggingIn
+  const showRefresh = !isWebUIMode && status !== 'unlinked' && !loginPending
   const showAccount = status === 'connected' || status === 'expired'
   const primaryIsSubscribe = !plan
 
@@ -148,7 +149,7 @@ export default function JouleAccountCard() {
           <button
             type="button"
             onClick={doRefresh}
-            disabled={busy || loggingIn}
+            disabled={busy || loginPending}
             title={t('joule.refresh')}
             aria-label={t('joule.refresh')}
             className="w-6 h-6 flex items-center justify-center rounded-md3-sm text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh disabled:opacity-50"
@@ -169,20 +170,20 @@ export default function JouleAccountCard() {
             <ExternalLink size={12} /> {t('joule.openDashboard')}
           </button>
         </div>
-      ) : loggingIn ? (
+      ) : loginPending ? (
         <div className="space-y-3">
           <div className="flex items-center gap-2">
             <Loader2 size={13} className="animate-spin text-md-primary flex-shrink-0" />
-            <span className="text-xs text-dark-onSurface">{t('joule.loggingIn')}</span>
+            <span className="text-xs text-dark-onSurface">{t(userCode ? 'joule.loggingIn' : 'joule.setup.preparingDescription')}</span>
           </div>
-          <div className="flex items-center justify-between gap-3 p-3 rounded-md3-sm bg-dark-surfaceContainer">
+          {userCode && <div className="flex items-center justify-between gap-3 p-3 rounded-md3-sm bg-dark-surfaceContainer">
             <div className="min-w-0">
               <div className="text-[10px] text-dark-onSurfaceVariant/70">{t('joule.userCodeLabel')}</div>
-              <div className="text-lg font-semibold tracking-[0.18em] text-dark-onSurface tabular-nums">{userCode || '----'}</div>
+              <div className="text-lg font-semibold tracking-[0.18em] text-dark-onSurface tabular-nums">{userCode}</div>
             </div>
-            <div className="text-[11px] text-dark-onSurfaceVariant tabular-nums flex-shrink-0">{remainingLabel}</div>
-          </div>
-          <p className="text-[11px] text-dark-onSurfaceVariant/60 leading-relaxed">{t('joule.userCodeHint')}</p>
+            {!!loginExpiresAt && <div className="text-[11px] text-dark-onSurfaceVariant tabular-nums flex-shrink-0">{remainingLabel}</div>}
+          </div>}
+          {userCode && <p className="text-[11px] text-dark-onSurfaceVariant/60 leading-relaxed">{t('joule.userCodeHint')}</p>}
           {copyFailed && <p className="text-[11px] text-md-error">{t('joule.copyFailed')}</p>}
           <div className="flex items-center gap-2">
             <button
@@ -196,8 +197,10 @@ export default function JouleAccountCard() {
             </button>
             <button
               type="button"
-              onClick={() => void cancelLogin()}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md3-sm text-xs text-dark-onSurfaceVariant hover:bg-md-error/15 hover:text-md-error transition-colors"
+              onClick={() => { if (userCode) void cancelLogin() }}
+              disabled={!userCode}
+              title={!userCode ? t('joule.setup.preparingDescription') : undefined}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md3-sm text-xs text-dark-onSurfaceVariant hover:bg-md-error/15 hover:text-md-error transition-colors disabled:cursor-wait disabled:opacity-50"
             >
               <X size={12} /> {t('joule.cancelLogin')}
             </button>

@@ -159,6 +159,8 @@ export interface RewindPlanFile {
 
 /** dry-run 出来的回滚计划：canApply 是 all-or-nothing 的（照抄 ZCode） */
 export interface RewindPlan {
+  /** 确认时必须仍是预览过的历史，避免删除预览之后新增的消息。 */
+  historyVersion: string
   canApply: boolean
   safeFiles: RewindPlanFile[]
   unsafeFiles: RewindPlanFile[]
@@ -174,7 +176,7 @@ export interface RewindOutcome {
    * 失败原因；ok=true 时省略。
    * truncate-failed 是半程状态：文件已经回滚、消息还在，必须让用户看见并自己核对。
    */
-  error?: 'cancelled' | 'plan-blocked' | 'write-failed' | 'truncate-failed' | 'no-checkpoint' | 'session-busy'
+  error?: 'cancelled' | 'plan-blocked' | 'write-failed' | 'truncate-failed' | 'no-checkpoint' | 'session-busy' | 'history-changed' | 'draft-conflict'
   restored: Array<{ path: string; action: 'restore' | 'delete' }>
   /** 写入中途失败时按 journal 逆序补偿的结果 */
   compensated: boolean

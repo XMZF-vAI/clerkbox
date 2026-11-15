@@ -1,481 +1,165 @@
-import { useEffect, useRef, useState } from 'react'
-import { X, Image, Music, FolderOpen, File } from 'lucide-react'
+import { useId, useState, type KeyboardEvent } from 'react'
+import { createPortal } from 'react-dom'
+import { X, Image, Music, FolderOpen, File, RefreshCw } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import {
-  useVibeStore,
-  DEFAULT_VIBE_BACKGROUND,
-  DEFAULT_VIBE_MUSIC,
-  VIBE_SLIDESHOW_MIN_INTERVAL_SEC,
-  VIBE_SLIDESHOW_MAX_INTERVAL_SEC,
-} from '../../stores/vibe-store'
+import { useVibeStore, DEFAULT_VIBE_BACKGROUND, DEFAULT_VIBE_MUSIC, VIBE_SLIDESHOW_MIN_INTERVAL_SEC, VIBE_SLIDESHOW_MAX_INTERVAL_SEC } from '../../stores/vibe-store'
 import { ipc, isWebUIMode } from '../../lib/ipc-client'
+import { useModalAccessibility } from '../../hooks/use-modal-accessibility'
 import HostFolderPicker from '../ui/HostFolderPicker'
 
-interface VibeCustomizeMenuProps {
-  onClose: () => void
-}
-
 type MenuTab = 'background' | 'audio'
+type AudioSource = 'off' | 'url' | 'file' | 'folder' | 'system'
+const control = 'md-focus min-h-10 max-md:min-h-11 rounded-md3-sm border border-white/15 bg-white/5 px-3 py-2 text-ui-xs text-white/90 transition-colors hover:bg-white/10 disabled:opacity-40'
+const input = 'md-focus min-h-10 max-md:min-h-11 min-w-0 w-full rounded-md3-sm border border-white/20 bg-black/20 px-3 py-2 text-ui-sm text-white placeholder:text-white/40 outline-none'
+const GLASS_COPY: Record<string, string> = { pending: 'vibe.glassTrackPending', acrylic: 'vibe.glassTrackAcrylic', transparent: 'vibe.glassTrackTransparent', fallback: 'vibe.glassTrackFallback' }
 
-/** 玻璃模式实际生效轨道 → 提示文案 key（VibeBackground 检测后写入 store） */
-const GLASS_TRACK_LABEL_KEY: Record<string, string> = {
-  pending: 'vibe.glassTrackPending',
-  acrylic: 'vibe.glassTrackAcrylic',
-  transparent: 'vibe.glassTrackTransparent',
-  fallback: 'vibe.glassTrackFallback',
+export function isVibeMediaUrl(value: string): boolean {
+  try { return ['http:', 'https:'].includes(new URL(value.trim()).protocol) } catch { return false }
 }
 
-function formatInterval(sec: number): string {
-  if (sec < 60) return `${sec}s`
-  const m = Math.floor(sec / 60)
-  const s = sec % 60
-  return s === 0 ? `${m}min` : `${m}min${s}s`
+// The host picker joins the same keyboard stack as its enclosing settings dialog.
+function VibeHostFolderPicker(props: { onClose: () => void; onSelect: (path: string) => void; initialPath: string }) {
+  const ref = useModalAccessibility(props.onClose)
+  return <div ref={ref} tabIndex={-1}><HostFolderPicker open {...props} variant="vibe" /></div>
 }
 
-export default function VibeCustomizeMenu({ onClose }: VibeCustomizeMenuProps) {
+export default function VibeCustomizeMenu({ onClose, initialTab = 'background' }: { onClose: () => void; initialTab?: MenuTab }) {
   const { t } = useTranslation()
-  const [tab, setTab] = useState<MenuTab>('background')
-
+  const id = useId()
   const background = useVibeStore((s) => s.background)
-  const music = useVibeStore((s) => s.music)
-  const musicFolder = useVibeStore((s) => s.musicFolder)
   const backgroundMode = useVibeStore((s) => s.backgroundMode)
   const slideshowFolder = useVibeStore((s) => s.slideshowFolder)
   const slideshowIntervalSec = useVibeStore((s) => s.slideshowIntervalSec)
   const glassLevel = useVibeStore((s) => s.glassLevel)
   const glassTrack = useVibeStore((s) => s.glassTrack)
+  const readingOpacity = useVibeStore((s) => s.readingOpacity)
+  const volume = useVibeStore((s) => s.volume)
+  const music = useVibeStore((s) => s.music)
+  const musicFolder = useVibeStore((s) => s.musicFolder)
   const audioMode = useVibeStore((s) => s.audioMode)
-  const setBackground = useVibeStore((s) => s.setBackground)
-  const setMusic = useVibeStore((s) => s.setMusic)
-  const setMusicFolder = useVibeStore((s) => s.setMusicFolder)
-  const setBackgroundMode = useVibeStore((s) => s.setBackgroundMode)
-  const setSlideshowFolder = useVibeStore((s) => s.setSlideshowFolder)
-  const setSlideshowIntervalSec = useVibeStore((s) => s.setSlideshowIntervalSec)
-  const setGlassLevel = useVibeStore((s) => s.setGlassLevel)
-  const setAudioMode = useVibeStore((s) => s.setAudioMode)
+  const backgroundStatus = useVibeStore((s) => s.backgroundStatus)
+  const backgroundIssue = useVibeStore((s) => s.backgroundIssue)
+  const [tab, setTab] = useState<MenuTab>(initialTab)
+  const [bgSource, setBgSource] = useState(background.type === 'local' || background.value.startsWith('data:') ? 'file' : 'url')
+  const [audioSource, setAudioSource] = useState<AudioSource>(audioMode === 'system' ? 'system' : musicFolder ? 'folder' : !music ? 'off' : music.type === 'local' || music.value.startsWith('data:') ? 'file' : 'url')
+  const [bgUrl, setBgUrl] = useState(background.type === 'url' && !background.value.startsWith('data:') ? background.value : '')
+  const [musicUrl, setMusicUrl] = useState(music?.type === 'url' && !music.value.startsWith('data:') ? music.value : '')
+  const [urlError, setUrlError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [picker, setPicker] = useState<'slideshow' | 'music' | null>(null)
+  const panelRef = useModalAccessibility(onClose)
+  const settings = () => useVibeStore.getState()
 
-  const [bgUrl, setBgUrl] = useState(background.type === 'url' ? background.value : '')
-  const [musicUrl, setMusicUrl] = useState(music?.type === 'url' ? music.value : '')
-  const [hostFolderPickerOpen, setHostFolderPickerOpen] = useState(false)
-  const [hostFolderPickerTarget, setHostFolderPickerTarget] = useState<'slideshow' | 'music'>('music')
-
-  const dialogRef = useRef<HTMLDivElement>(null)
-  const previousFocusRef = useRef<HTMLElement | null>(null)
-
-  /** Trap modal focus while preserving the trigger for keyboard users. */
-  useEffect(() => {
-    const dialog = dialogRef.current
-    previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    if (dialog) dialog.focus()
-
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.stopPropagation()
-        onClose()
-        return
-      }
-      // 简易焦点陷阱：Tab/Shift+Tab 在 dialog 内循环
-      if (e.key === 'Tab' && dialog) {
-        const focusable = dialog.querySelectorAll<HTMLElement>(
-          'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])'
-        )
-        if (focusable.length === 0) return
-        const first = focusable[0]
-        const last = focusable[focusable.length - 1]
-        if (e.shiftKey && document.activeElement === first) {
-          e.preventDefault()
-          last.focus()
-        } else if (!e.shiftKey && document.activeElement === last) {
-          e.preventDefault()
-          first.focus()
-        }
-      }
-    }
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('keydown', onKey)
-      const previousFocus = previousFocusRef.current
-      if (previousFocus && document.contains(previousFocus)) previousFocus.focus()
-    }
-  }, [onClose])
-
-  const handleSelectLocalBackground = async () => {
-    const path = await ipc.selectImageFile()
-    if (path) {
-      setBackground({ type: isWebUIMode ? 'url' : 'local', value: path })
-    }
+  const selectFile = async (target: 'background' | 'music') => {
+    setBusy(true)
+    setNotice(null)
+    try {
+      const path = await (target === 'background' ? ipc.selectImageFile() : ipc.selectAudioFile())
+      if (!path) return
+      const source = { type: isWebUIMode ? 'url' as const : 'local' as const, value: path }
+      if (target === 'background') settings().setBackground(source)
+      else { settings().setAudioMode('local'); settings().setMusic(source) }
+    } catch { setNotice('vibe.sourceSelectionFailed') } finally { setBusy(false) }
   }
-
-  const handleApplyBackgroundUrl = () => {
-    if (bgUrl.trim()) {
-      setBackground({ type: 'url', value: bgUrl.trim() })
-    }
+  const selectFolder = async (target: 'slideshow' | 'music') => {
+    setNotice(null)
+    if (isWebUIMode) { setPicker(target); return }
+    setBusy(true)
+    try {
+      const path = await (target === 'slideshow' ? ipc.selectFolder() : ipc.selectMusicFolder())
+      if (path) target === 'slideshow' ? settings().setSlideshowFolder(path) : settings().setMusicFolder(path)
+    } catch { setNotice('vibe.sourceSelectionFailed') } finally { setBusy(false) }
   }
-
-  const handleResetBackground = () => {
-    setBackground(DEFAULT_VIBE_BACKGROUND)
-    setBgUrl(DEFAULT_VIBE_BACKGROUND.value)
+  const applyUrl = (target: 'background' | 'music') => {
+    const value = (target === 'background' ? bgUrl : musicUrl).trim()
+    if (!isVibeMediaUrl(value)) { setUrlError(target === 'background' ? 'vibe.invalidImageUrl' : 'vibe.invalidAudioUrl'); return }
+    setUrlError(null)
+    if (target === 'background') settings().setBackground({ type: 'url', value })
+    else { settings().setAudioMode('local'); settings().setMusic({ type: 'url', value }) }
   }
-
-  const handleSelectSlideshowFolder = async () => {
-    if (isWebUIMode) {
-      setHostFolderPickerTarget('slideshow')
-      setHostFolderPickerOpen(true)
-      return
-    }
-    const folder = await ipc.selectFolder()
-    if (folder) setSlideshowFolder(folder)
+  const changeAudioSource = (source: AudioSource) => {
+    setAudioSource(source)
+    setNotice(null)
+    setUrlError(null)
+    settings().setAudioMode(source === 'system' ? 'system' : 'local')
+    if (source !== 'system') settings().setMusic(null)
   }
-
-  const handleClearSlideshowFolder = () => setSlideshowFolder(null)
-
-  const handleSelectLocalMusic = async () => {
-    const path = await ipc.selectAudioFile()
-    if (path) {
-      setMusic({ type: isWebUIMode ? 'url' : 'local', value: path })
-      setMusicUrl('')
-    }
+  const tabKey = (event: KeyboardEvent<HTMLButtonElement>) => {
+    if (event.nativeEvent.isComposing || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+    event.preventDefault()
+    const next: MenuTab = event.key === 'Home' ? 'background' : event.key === 'End' ? 'audio' : tab === 'background' ? 'audio' : 'background'
+    setTab(next)
+    event.currentTarget.parentElement?.querySelector<HTMLButtonElement>(`[data-vibe-tab="${next}"]`)?.focus()
   }
-
-  const handleApplyMusicUrl = () => {
-    if (musicUrl.trim()) {
-      setMusic({ type: 'url', value: musicUrl.trim() })
-    }
-  }
-
-  const handleResetMusic = () => {
-    setMusic(DEFAULT_VIBE_MUSIC)
-    setMusicUrl(DEFAULT_VIBE_MUSIC.value)
-  }
-
-  const handleSelectMusicFolder = async () => {
-    if (isWebUIMode) {
-      setHostFolderPickerTarget('music')
-      setHostFolderPickerOpen(true)
-      return
-    }
-    const folder = await ipc.selectMusicFolder()
-    if (folder) {
-      setMusicFolder(folder)
-      setMusicUrl('')
-    }
-  }
-
-  const handleClearMusicFolder = () => {
-    setMusicFolder(null)
-    setMusic(DEFAULT_VIBE_MUSIC)
-    setMusicUrl(DEFAULT_VIBE_MUSIC.value)
-  }
-
-  const segButton = (active: boolean) =>
-    `flex-1 px-3 py-1.5 text-xs rounded-lg transition-colors ${
-      active ? 'bg-white/25 text-white font-medium' : 'text-white/70 hover:bg-white/10'
-    }`
-
-  return (
-    <div className="fixed inset-0 z-[60] flex items-end justify-start p-4">
-      {/* Backdrop */}
-      <div className="absolute inset-0 bg-black/20" onClick={onClose} aria-hidden="true" />
-
-      {/* Menu panel */}
-      <div
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-label={t('vibe.customizeTitle')}
-        tabIndex={-1}
-        className="relative z-10 w-full max-w-sm liquid-glass-strong rounded-3xl p-5 text-white/90 animate-slide-up focus:outline-none"
-      >
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-sm font-medium">{t('vibe.customizeTitle')}</h3>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label={t('common.close')}
-            className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-white/15 transition-colors"
-          >
-            <X size={14} />
-          </button>
-        </div>
-
-        {/* Tabs */}
-        <div className="flex gap-1 p-1 mb-4 rounded-xl bg-white/10" role="tablist">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tab === 'background'}
-            onClick={() => setTab('background')}
-            className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs rounded-lg transition-colors ${
-              tab === 'background' ? 'bg-white/25 text-white font-medium' : 'text-white/70 hover:bg-white/10'
-            }`}
-          >
-            <Image size={13} />
-            {t('vibe.tabBackground')}
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tab === 'audio'}
-            onClick={() => setTab('audio')}
-            className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs rounded-lg transition-colors ${
-              tab === 'audio' ? 'bg-white/25 text-white font-medium' : 'text-white/70 hover:bg-white/10'
-            }`}
-          >
-            <Music size={13} />
-            {t('vibe.tabAudio')}
-          </button>
-        </div>
-
-        {tab === 'background' && (
-          <div className="space-y-4">
-            {/* 背景模式三选 */}
-            <div className="flex gap-1 p-1 rounded-xl bg-white/10">
-              <button type="button" onClick={() => setBackgroundMode('single')} className={segButton(backgroundMode === 'single')}>
-                {t('vibe.bgModeSingle')}
-              </button>
-              <button type="button" onClick={() => setBackgroundMode('slideshow')} className={segButton(backgroundMode === 'slideshow')}>
-                {t('vibe.bgModeSlideshow')}
-              </button>
-              <button type="button" onClick={() => setBackgroundMode('glass')} className={segButton(backgroundMode === 'glass')}>
-                {t('vibe.bgModeGlass')}
-              </button>
-            </div>
-
-            {/* ── 单图模式 ── */}
-            {backgroundMode === 'single' && (
-              <div className="space-y-3 animate-fade-up">
-                <div className="flex gap-2">
-                  <input
-                    type="url"
-                    aria-label={t('vibe.bgUrlPlaceholder')}
-                    value={bgUrl}
-                    onChange={(e) => setBgUrl(e.target.value)}
-                    placeholder={t('vibe.bgUrlPlaceholder')}
-                    className="flex-1 px-3 py-1.5 text-xs bg-white/10 border border-white/20 rounded-lg placeholder-white/40 outline-none focus:border-white/40 transition-colors"
-                  />
-                  <button
-                    type="button"
-                    onClick={handleApplyBackgroundUrl}
-                    disabled={!bgUrl.trim()}
-                    className="px-3 py-1.5 text-xs rounded-lg bg-white/20 hover:bg-white/30 disabled:opacity-40 transition-colors"
-                  >
-                    {t('common.apply')}
-                  </button>
-                </div>
-
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={handleSelectLocalBackground}
-                    className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/15 border border-white/20 transition-colors"
-                  >
-                    <File size={13} />
-                    {t('vibe.selectLocalImage')}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleResetBackground}
-                    className="px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/15 border border-white/20 transition-colors"
-                  >
-                    {t('common.default')}
-                  </button>
-                </div>
-
-                {background.type === 'local' && (
-                  <div className="text-[10px] text-white/50 truncate">{t('vibe.currentPrefix')}{background.value}</div>
-                )}
-              </div>
-            )}
-
-            {/* ── 轮播模式 ── */}
-            {backgroundMode === 'slideshow' && (
-              <div className="space-y-3 animate-fade-up">
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={handleSelectSlideshowFolder}
-                    className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/15 border border-white/20 transition-colors"
-                  >
-                    <FolderOpen size={13} />
-                    {t('vibe.selectFolder')}
-                  </button>
-                  {slideshowFolder && (
-                    <button
-                      type="button"
-                      onClick={handleClearSlideshowFolder}
-                      className="px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/15 border border-white/20 transition-colors"
-                    >
-                      {t('vibe.clear')}
-                    </button>
-                  )}
-                </div>
-                {slideshowFolder ? (
-                  <div className="text-[10px] text-white/50 truncate">{t('vibe.currentFolderPrefix')}{slideshowFolder}</div>
-                ) : (
-                  <div className="text-[10px] text-white/50">{t('vibe.slideshowEmptyHint')}</div>
-                )}
-
-                <div className="space-y-1.5">
-                  <div className="flex items-center justify-between text-[11px] text-white/70">
-                    <span>{t('vibe.slideshowInterval')}</span>
-                    <span className="tabular-nums text-white/90">{formatInterval(slideshowIntervalSec)}</span>
-                  </div>
-                  <input
-                    type="range"
-                    min={VIBE_SLIDESHOW_MIN_INTERVAL_SEC}
-                    max={VIBE_SLIDESHOW_MAX_INTERVAL_SEC}
-                    step={5}
-                    value={slideshowIntervalSec}
-                    onChange={(e) => setSlideshowIntervalSec(Number(e.target.value))}
-                    aria-label={t('vibe.slideshowInterval')}
-                    className="w-full h-1 bg-white/20 rounded-full appearance-none cursor-pointer accent-white"
-                  />
-                </div>
-              </div>
-            )}
-
-            {/* ── 玻璃模式 ── */}
-            {backgroundMode === 'glass' && (
-              <div className="space-y-3 animate-fade-up">
-                <div className="text-[10px] text-white/60 leading-relaxed">{t('vibe.glassHint')}</div>
-                {/* 实际生效轨道：让用户看懂当前是系统亚克力还是壁纸模拟 */}
-                <div className="text-[10px] text-white/45 leading-relaxed">{t(GLASS_TRACK_LABEL_KEY[glassTrack])}</div>
-                <div className="space-y-1.5">
-                  <div className="flex items-center justify-between text-[11px] text-white/70">
-                    <span>{t('vibe.glassLevel')}</span>
-                    <span className="tabular-nums text-white/90">
-                      {glassLevel === 0 ? t('vibe.glassTransparent') : `${glassLevel}%`}
-                    </span>
-                  </div>
-                  <input
-                    type="range"
-                    min={0}
-                    max={100}
-                    step={5}
-                    value={glassLevel}
-                    onChange={(e) => setGlassLevel(Number(e.target.value))}
-                    aria-label={t('vibe.glassLevel')}
-                    className="w-full h-1 bg-white/20 rounded-full appearance-none cursor-pointer accent-white"
-                  />
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {tab === 'audio' && (
-          <div className="space-y-4">
-            {/* 音频模式二选 */}
-            <div className="flex gap-1 p-1 rounded-xl bg-white/10">
-              <button type="button" onClick={() => setAudioMode('local')} className={segButton(audioMode === 'local')}>
-                {t('vibe.audioModeLocal')}
-              </button>
-              <button type="button" onClick={() => setAudioMode('system')} className={segButton(audioMode === 'system')}>
-                {t('vibe.audioModeSystem')}
-              </button>
-            </div>
-
-            {/* ── 本地音乐模式 ── */}
-            {audioMode === 'local' && (
-              <div className="space-y-3 animate-fade-up">
-                <div className="flex gap-2">
-                  <input
-                    type="url"
-                    aria-label={t('vibe.musicUrlPlaceholder')}
-                    value={musicUrl}
-                    onChange={(e) => setMusicUrl(e.target.value)}
-                    placeholder={t('vibe.musicUrlPlaceholder')}
-                    className="flex-1 px-3 py-1.5 text-xs bg-white/10 border border-white/20 rounded-lg placeholder-white/40 outline-none focus:border-white/40 transition-colors"
-                  />
-                  <button
-                    type="button"
-                    onClick={handleApplyMusicUrl}
-                    disabled={!musicUrl.trim()}
-                    className="px-3 py-1.5 text-xs rounded-lg bg-white/20 hover:bg-white/30 disabled:opacity-40 transition-colors"
-                  >
-                    {t('common.apply')}
-                  </button>
-                </div>
-
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={handleSelectLocalMusic}
-                    className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/15 border border-white/20 transition-colors"
-                  >
-                    <File size={13} />
-                    {t('vibe.selectLocalAudio')}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleResetMusic}
-                    className="px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/15 border border-white/20 transition-colors"
-                  >
-                    {t('common.default')}
-                  </button>
-                </div>
-
-                <div className="h-px bg-white/10" />
-
-                <div className="space-y-2">
-                  <div className="flex items-center gap-2 text-xs font-medium text-white/80">
-                    <FolderOpen size={14} />
-                    <span>{t('vibe.musicFolder')}</span>
-                  </div>
-                  <div className="flex gap-2">
-                    <button
-                      type="button"
-                      onClick={handleSelectMusicFolder}
-                      className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/15 border border-white/20 transition-colors"
-                    >
-                      <FolderOpen size={13} />
-                      {t('vibe.selectFolder')}
-                    </button>
-                    {musicFolder && (
-                      <button
-                        type="button"
-                        onClick={handleClearMusicFolder}
-                        className="px-3 py-2 text-xs rounded-lg bg-white/10 hover:bg-white/15 border border-white/20 transition-colors"
-                      >
-                        {t('vibe.clear')}
-                      </button>
-                    )}
-                  </div>
-                  {musicFolder && (
-                    <div className="text-[10px] text-white/50 truncate">{t('vibe.currentFolderPrefix')}{musicFolder}</div>
-                  )}
-                </div>
-
-                {music?.type === 'local' && !musicFolder && (
-                  <div className="text-[10px] text-white/50 truncate">{t('vibe.currentAudioPrefix')}{music.value}</div>
-                )}
-              </div>
-            )}
-
-            {/* ── 系统音频模式 ── */}
-            {audioMode === 'system' && (
-              <div className="space-y-2 animate-fade-up">
-                <div className="text-[11px] text-white/70 leading-relaxed">{t('vibe.systemAudioHint')}</div>
-                <div className="text-[10px] text-white/45 leading-relaxed">{t('vibe.systemAudioControlHint')}</div>
-              </div>
-            )}
-          </div>
-        )}
+  const pathLabel = (value: string) => value.startsWith('data:') ? t('vibe.sourceFile') : value || t('vibe.sourceNone')
+  const statusKey = backgroundStatus === 'loading' ? 'vibe.backgroundLoading' : backgroundStatus === 'ready' ? 'vibe.backgroundReady'
+    : backgroundStatus === 'empty' ? 'vibe.slideshowEmpty' : backgroundIssue === 'slideshow' ? 'vibe.slideshowLoadFailed' : backgroundIssue === 'glass' ? 'vibe.glassUnavailable' : 'vibe.backgroundLoadFailed'
+  const range = (label: string, value: number, change: (value: number) => void, min = 0, max = 100, step = 1, suffix = '%') => (
+    <label className="block space-y-2 text-ui-xs text-white/80">
+      <span className="flex justify-between gap-3"><span>{t(label)}</span><output className="tabular-nums">{value}{suffix}</output></span>
+      <input type="range" min={min} max={max} step={step} value={value} aria-label={t(label)} aria-valuetext={`${value}${suffix}`} onChange={(event) => change(Number(event.target.value))} className="h-8 w-full cursor-pointer accent-white" />
+    </label>
+  )
+  const urlForm = (target: 'background' | 'music') => (
+    <form className="space-y-2" onSubmit={(event) => { event.preventDefault(); applyUrl(target) }}>
+      <label htmlFor={`${id}-${target}-url`} className="block text-ui-xs font-medium text-white/80">{t(target === 'background' ? 'vibe.bgUrlPlaceholder' : 'vibe.musicUrlPlaceholder')}</label>
+      <div className="flex gap-2">
+        <input id={`${id}-${target}-url`} type="url" value={target === 'background' ? bgUrl : musicUrl} onChange={(event) => { target === 'background' ? setBgUrl(event.target.value) : setMusicUrl(event.target.value); setUrlError(null) }} placeholder="https://" className={input} aria-invalid={!!urlError} aria-describedby={urlError ? `${id}-url-error` : undefined} />
+        <button type="submit" className={`${control} shrink-0`} disabled={!(target === 'background' ? bgUrl : musicUrl).trim()}>{t('common.apply')}</button>
       </div>
-      <HostFolderPicker
-        open={hostFolderPickerOpen}
-        onClose={() => setHostFolderPickerOpen(false)}
-        onSelect={(folder) => {
-          if (hostFolderPickerTarget === 'slideshow') {
-            setSlideshowFolder(folder)
-          } else {
-            setMusicFolder(folder)
-            setMusicUrl('')
-          }
-        }}
-        initialPath={hostFolderPickerTarget === 'slideshow' ? slideshowFolder || ipc.homeDir() : musicFolder || ipc.homeDir()}
-        variant="vibe"
-      />
+      {urlError && <p id={`${id}-url-error`} role="alert" className="text-ui-xs text-white/80">{t(urlError)}</p>}
+    </form>
+  )
+
+  const panel = (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/55 p-4 backdrop-blur-sm max-sm:p-2" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
+      <div ref={panelRef} role="dialog" aria-modal="true" aria-labelledby={`${id}-title`} aria-describedby={`${id}-description`} tabIndex={-1} className="liquid-glass-strong relative flex max-h-[calc(100dvh-2rem)] w-full max-w-lg flex-col overflow-hidden rounded-md3-xl text-white outline-none shadow-elevation-3 max-sm:max-h-[calc(100dvh-1rem)]">
+        <header className="flex shrink-0 items-start justify-between gap-4 border-b border-white/10 p-5 max-sm:p-4">
+          <div className="min-w-0"><h2 id={`${id}-title`} className="text-ui-lg font-semibold">{t('vibe.customizeTitle')}</h2><p id={`${id}-description`} className="mt-1 text-ui-xs leading-relaxed text-white/60">{t('vibe.settingsDescription')}</p></div>
+          <button type="button" onClick={onClose} aria-label={t('common.close')} className="md-focus flex h-10 w-10 shrink-0 items-center justify-center rounded-md3-sm text-white/70 transition-colors hover:bg-white/10 max-md:h-11 max-md:w-11"><X size={18} aria-hidden /></button>
+        </header>
+        <div role="tablist" aria-label={t('vibe.customizeTitle')} className="mx-5 mt-4 flex shrink-0 gap-1 rounded-md3-md bg-black/20 p-1 max-sm:mx-4">
+          {(['background', 'audio'] as MenuTab[]).map((item) => <button key={item} type="button" id={`${id}-${item}-tab`} data-vibe-tab={item} role="tab" aria-selected={tab === item} aria-controls={`${id}-${item}-panel`} tabIndex={tab === item ? 0 : -1} onKeyDown={tabKey} onClick={() => { setTab(item); setUrlError(null); setNotice(null) }} className={`md-focus flex min-h-10 flex-1 items-center justify-center gap-2 rounded-md3-sm px-3 py-2 text-ui-xs transition-colors max-md:min-h-11 ${tab === item ? 'bg-white/10 font-medium text-white' : 'text-white/60 hover:bg-white/5'}`}>
+            {item === 'background' ? <Image size={15} aria-hidden /> : <Music size={15} aria-hidden />}{t(item === 'background' ? 'vibe.tabBackground' : 'vibe.tabAudio')}
+          </button>)}
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-5 max-sm:p-4">
+          {notice && <p role="alert" className="mb-4 rounded-md3-sm border border-white/15 bg-white/5 p-3 text-ui-xs text-white/80">{t(notice)}</p>}
+          {tab === 'background' ? <section role="tabpanel" id={`${id}-background-panel`} aria-labelledby={`${id}-background-tab`} className="space-y-5">
+            <fieldset className="space-y-2"><legend className="mb-2 text-ui-xs font-medium text-white/80">{t('vibe.backgroundSource')}</legend>
+              <div className="grid grid-cols-3 gap-2">{(['single', 'slideshow', 'glass'] as const).map((mode) => <label key={mode} className={`${control} flex cursor-pointer items-center justify-center gap-2 ${backgroundMode === mode ? 'border-white/40 bg-white/10' : ''}`}>
+                <input type="radio" name={`${id}-background-mode`} value={mode} checked={backgroundMode === mode} onChange={() => settings().setBackgroundMode(mode)} className="accent-white" />{t(mode === 'single' ? 'vibe.bgModeSingle' : mode === 'slideshow' ? 'vibe.bgModeSlideshow' : 'vibe.bgModeGlass')}
+              </label>)}</div>
+            </fieldset>
+            {backgroundMode === 'single' && <div className="space-y-3">
+              <label className="block space-y-2 text-ui-xs font-medium text-white/80"><span>{t('vibe.sourceCurrent')}</span><select value={bgSource} onChange={(event) => { setBgSource(event.target.value); setUrlError(null) }} className={input}><option value="url">{t('vibe.sourceUrl')}</option><option value="file">{t('vibe.sourceFile')}</option></select></label>
+              {bgSource === 'url' ? urlForm('background') : <button type="button" onClick={() => void selectFile('background')} disabled={busy} className={`${control} flex w-full items-center justify-center gap-2`}><File size={15} aria-hidden />{t('vibe.selectLocalImage')}</button>}
+              <p className="truncate text-ui-xs text-white/60" title={background.value.startsWith('data:') ? undefined : background.value}>{pathLabel(background.value)}</p>
+              <button type="button" className={control} onClick={() => { settings().setBackground(DEFAULT_VIBE_BACKGROUND); setBgUrl(DEFAULT_VIBE_BACKGROUND.value); setBgSource('url'); setUrlError(null) }}>{t('vibe.resetBackground')}</button>
+            </div>}
+            {backgroundMode === 'slideshow' && <div className="space-y-3">
+              <div className="flex gap-2"><button type="button" disabled={busy} onClick={() => void selectFolder('slideshow')} className={`${control} flex flex-1 items-center justify-center gap-2`}><FolderOpen size={15} aria-hidden />{t(isWebUIMode ? 'vibe.sourceHostFolder' : 'vibe.selectFolder')}</button>{slideshowFolder && <button type="button" onClick={() => settings().setSlideshowFolder(null)} className={control}>{t('vibe.clear')}</button>}</div>
+              <p className="truncate text-ui-xs text-white/60" title={slideshowFolder || undefined}>{pathLabel(slideshowFolder || '')}</p>
+              {range('vibe.slideshowInterval', slideshowIntervalSec, settings().setSlideshowIntervalSec, VIBE_SLIDESHOW_MIN_INTERVAL_SEC, VIBE_SLIDESHOW_MAX_INTERVAL_SEC, 5, 's')}
+            </div>}
+            {backgroundMode === 'glass' && <div className="space-y-3"><p className="text-ui-xs leading-relaxed text-white/60">{t('vibe.glassHint')}</p>{range('vibe.glassLevel', glassLevel, settings().setGlassLevel, 0, 100, 5)}<p className="text-ui-xs leading-relaxed text-white/50">{t(GLASS_COPY[glassTrack])}</p></div>}
+            <div role={backgroundStatus === 'error' ? 'alert' : 'status'} className="flex flex-wrap items-center justify-between gap-3 rounded-md3-md border border-white/10 bg-black/10 p-3"><p className="min-w-0 flex-1 text-ui-xs leading-relaxed text-white/60">{t(statusKey)}</p>{(backgroundStatus === 'error' || backgroundStatus === 'empty') && <button type="button" onClick={() => settings().retryBackground()} className={`${control} flex items-center gap-2`}><RefreshCw size={14} aria-hidden />{t('vibe.backgroundRetry')}</button>}</div>
+            <div className="space-y-2 border-t border-white/10 pt-4">{range('vibe.readingOpacity', readingOpacity, settings().setReadingOpacity)}<p className="text-ui-xs leading-relaxed text-white/50">{t('vibe.readingOpacityHint')}</p></div>
+          </section> : <section role="tabpanel" id={`${id}-audio-panel`} aria-labelledby={`${id}-audio-tab`} className="space-y-4">
+            <label className="block space-y-2 text-ui-xs font-medium text-white/80"><span>{t('vibe.audioSource')}</span><select value={audioSource} onChange={(event) => changeAudioSource(event.target.value as AudioSource)} className={input}>{(['off', 'url', 'file', 'folder', 'system'] as AudioSource[]).map((source) => <option key={source} value={source}>{t(source === 'system' ? 'vibe.audioModeSystem' : source === 'off' ? 'vibe.sourceOff' : source === 'url' ? 'vibe.sourceUrl' : source === 'file' ? 'vibe.sourceFile' : 'vibe.sourceFolder')}</option>)}</select></label>
+            {audioSource === 'url' && urlForm('music')}
+            {audioSource === 'file' && <button type="button" disabled={busy} onClick={() => void selectFile('music')} className={`${control} flex w-full items-center justify-center gap-2`}><File size={15} aria-hidden />{t('vibe.selectLocalAudio')}</button>}
+            {audioSource === 'folder' && <button type="button" disabled={busy} onClick={() => void selectFolder('music')} className={`${control} flex w-full items-center justify-center gap-2`}><FolderOpen size={15} aria-hidden />{t(isWebUIMode ? 'vibe.sourceHostFolder' : 'vibe.selectFolder')}</button>}
+            {audioSource === 'system' ? <p className="text-ui-xs leading-relaxed text-white/60">{t('vibe.systemAudioHint')}</p> : audioSource === 'off' ? <p className="text-ui-xs text-white/60">{t('vibe.audioOff')}</p> : <p className="truncate text-ui-xs text-white/60" title={(musicFolder || music?.value)?.startsWith('data:') ? undefined : musicFolder || music?.value}>{pathLabel(musicFolder || music?.value || '')}</p>}
+            {isWebUIMode && (audioSource === 'folder' || audioSource === 'file') && <p className="text-ui-xs leading-relaxed text-white/50">{t('vibe.audioWebUILocalHint')}</p>}
+            {audioSource !== 'system' && <div className="space-y-2 border-t border-white/10 pt-4">{range('vibe.localVolume', volume, settings().setVolume)}<p className="text-ui-xs leading-relaxed text-white/50">{t('vibe.musicVolumeHint')}</p></div>}
+            <button type="button" className={control} onClick={() => { settings().setAudioMode('local'); settings().setMusic(DEFAULT_VIBE_MUSIC); setAudioSource('url'); setMusicUrl(DEFAULT_VIBE_MUSIC.value); setUrlError(null) }}>{t('vibe.resetMusic')}</button>
+          </section>}
+        </div>
+      </div>
+      {picker && <VibeHostFolderPicker onClose={() => setPicker(null)} onSelect={(path) => { picker === 'slideshow' ? settings().setSlideshowFolder(path) : settings().setMusicFolder(path); setPicker(null) }} initialPath={(picker === 'slideshow' ? slideshowFolder : musicFolder) || ipc.homeDir()} />}
     </div>
   )
+  return typeof document === 'undefined' ? panel : createPortal(panel, document.body)
 }

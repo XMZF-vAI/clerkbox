@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { ArrowUpRight, FolderOpen, Search, Store } from 'lucide-react'
 import { useChatStore, getSessionAbortController } from '../../stores/chat-store'
 import { useAgent } from '../../hooks/use-agent'
 import { useSkillsStore } from '../../stores/skills-store'
@@ -16,6 +17,8 @@ import GoalBanner from './GoalBanner'
 import ChatErrorBanner from './ChatErrorBanner'
 import RewindDialog from './RewindDialog'
 import { PermissionApprovalCard } from './PermissionCard'
+import { useUIStore } from '../../stores/ui-store'
+import ModelSetupGuidance from './ModelSetupGuidance'
 
 interface ChatPageProps {
   vibe?: boolean
@@ -30,10 +33,15 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
   const createSession = useChatStore((s) => s.createSession)
   // 界面模式：编程=按时段问候原文案；通用=固定一条工作导向问候
   const interfaceMode = useSettingsStore((s) => s.interfaceMode)
+  const modelConfigured = useSettingsStore((s) => !!s.baseUrl.trim() && !!s.model.trim())
+  const modelLabel = useSettingsStore((s) => {
+    const provider = s.providers.find((item) => item.id === s.activeProviderId)
+    return provider?.models.find((item) => item.id === s.activeModelId)?.label || s.model
+  })
   const initialized = useChatStore((s) => s.initialized)
   const loadFromDb = useChatStore((s) => s.loadFromDb)
   const sessionId = activeSessionId || ''
-  const { sendMessage, abort, manualCompact, isCompacting, error, sendQueuedNow, requestQueuedFlush } = useAgent(sessionId)
+  const { sendMessage, abort, manualCompact, isCompacting, isStopping, error, sendQueuedNow, requestQueuedFlush } = useAgent(sessionId)
 
   useEffect(() => {
     if (!initialized) {
@@ -68,6 +76,9 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
   // Initialize .clerkbox directory when working directory is set (user-picked or default)
   const currentSession = sessions.find((s) => s.id === activeSessionId)
   const workingDir = currentSession?.workingDir || currentSession?.defaultWorkDir
+  const workingDirLabel = currentSession?.workingDir
+    ? currentSession.workingDir.split(/[\\/]/).filter(Boolean).pop() || currentSession.workingDir
+    : workingDir ? t('shell.defaultDirectory') : t('shell.autoDirectory')
 
   useEffect(() => {
     if (workingDir) {
@@ -139,40 +150,69 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
     />
   ) : null
 
-  // Welcome screen: centered layout with icon + greeting + skill loader + input
+  // 空态与消息态共用同一输入契约；欢迎区只提供已有功能的可发现入口。
   if (isEmpty) {
     return (
-      <div className={`relative flex flex-col h-full ${vibe ? 'bg-transparent' : 'bg-dark-surface'}`}>
-        <div className="flex-1 flex flex-col items-center justify-center px-4">
-          <div className="w-full max-w-3xl">
-            {!vibe && (
-              <>
-                {/* Icon + Welcome text */}
-                <div className="flex items-center gap-4 mb-6">
-                  <img
-                    src={NEW_CHAT_ICON}
-                    alt="Welcome"
-                    className="w-14 h-14 rounded-md3-lg object-cover"
-                  />
-                  <span className="text-xl font-medium text-dark-onSurface">
+      <div aria-busy={!initialized} className={`relative flex min-h-0 flex-col h-full overflow-hidden ${vibe ? 'bg-transparent' : 'bg-dark-surface'}`}>
+        <div className={`relative z-10 flex-1 min-h-0 overflow-y-auto ${vibe ? 'vibe-empty-layout' : ''}`}>
+          <div className={`flex min-h-full flex-col items-center justify-center px-4 py-8 sm:px-8 sm:py-12 ${vibe ? 'vibe-empty-inner' : ''}`}>
+            <div className={`w-full max-w-3xl ${vibe ? 'vibe-empty-content' : ''}`}>
+              <div className={vibe ? 'vibe-empty-intro' : undefined}>
+              {vibe && (
+                <header className="vibe-welcome">
+                  <span className="text-ui-xs font-medium tracking-widest text-white/50">ClerkBox · VIBE</span>
+                  <h1 className="mt-4 text-ui-2xl font-medium tracking-tight text-white/90">{t('vibe.welcomeTitle')}</h1>
+                  <p className="mt-3 max-w-md text-ui-sm leading-relaxed text-white/60">{t('vibe.welcomeDescription')}</p>
+                </header>
+              )}
+              {!vibe && (
+                <header className="mb-7 sm:mb-8">
+                  <div className="mb-4 flex items-center gap-2.5">
+                    <img src={NEW_CHAT_ICON} alt="" className="w-9 h-9 rounded-md3-md object-cover" />
+                    <span className="text-ui-xs font-medium text-dark-onSurfaceVariant/60">{t('shell.welcomeEyebrow')}</span>
+                  </div>
+                  <h1 className="text-ui-2xl font-semibold tracking-tight text-dark-onSurface">
                     {t(interfaceMode === 'general' ? 'chat.emptyWelcomeGeneral' : 'chat.emptyWelcome')}
-                  </span>
-                </div>
-              </>
-            )}
-            {/* Centered input */}
-            <div className={vibe ? '' : 'mt-2'}>
-              <ChatInput key={sessionId} sessionId={sessionId}
-                onSend={handleSend}
-                onStop={abort}
-                onManualCompact={manualCompact}
-                isCompacting={isCompacting}
-                isStreaming={isCurrentSessionStreaming}
-                onSendNow={sendQueuedNow}
-                onEnqueueQueued={requestQueuedFlush}
-                variant={vibe ? 'default' : 'welcome'}
-                vibe={vibe}
-              />
+                  </h1>
+                  <p className="mt-3 max-w-xl text-ui-sm leading-relaxed text-dark-onSurfaceVariant">
+                    {t('shell.welcomeDescription')}
+                  </p>
+                </header>
+              )}
+              {!modelConfigured && <ModelSetupGuidance />}
+              </div>
+              <ChatInput key={`composer:${sessionId}`} sessionId={sessionId}
+                  onSend={handleSend}
+                  onStop={() => { void abort() }}
+                  onManualCompact={manualCompact}
+                  isCompacting={isCompacting}
+                  isStopping={isStopping}
+                  isStreaming={isCurrentSessionStreaming}
+                  onSendNow={sendQueuedNow}
+                  onEnqueueQueued={requestQueuedFlush}
+                  variant={vibe ? 'default' : 'welcome'}
+                  vibe={vibe}
+                />
+              {!vibe && (
+                <>
+                  <div className="mt-5 flex flex-wrap gap-3">
+                    <button type="button" onClick={() => useUIStore.getState().setShowSkillStore(true)} className="md-focus group flex min-w-0 flex-1 basis-64 items-start gap-3 rounded-md3-md border border-dark-onSurfaceVariant/10 bg-dark-surface/60 p-4 text-left hover:bg-dark-surfaceContainer/60 hover:border-dark-onSurfaceVariant/20 transition-colors">
+                      <Store size={17} className="mt-0.5 shrink-0 text-dark-onSurfaceVariant" aria-hidden="true" />
+                      <span className="min-w-0 flex-1"><span className="block text-ui-sm font-medium text-dark-onSurface">{t('shell.browseSkills')}</span><span className="mt-1 block text-ui-xs leading-relaxed text-dark-onSurfaceVariant">{t('shell.browseSkillsDescription')}</span></span>
+                      <ArrowUpRight size={14} className="mt-0.5 shrink-0 text-dark-onSurfaceVariant/40 group-hover:text-dark-onSurfaceVariant" aria-hidden="true" />
+                    </button>
+                    <button type="button" onClick={() => useUIStore.getState().setCommandPaletteOpen(true)} className="md-focus group flex min-w-0 flex-1 basis-64 items-start gap-3 rounded-md3-md border border-dark-onSurfaceVariant/10 bg-dark-surface/60 p-4 text-left hover:bg-dark-surfaceContainer/60 hover:border-dark-onSurfaceVariant/20 transition-colors">
+                      <Search size={17} className="mt-0.5 shrink-0 text-dark-onSurfaceVariant" aria-hidden="true" />
+                      <span className="min-w-0 flex-1"><span className="block text-ui-sm font-medium text-dark-onSurface">{t('shell.viewHistory')}</span><span className="mt-1 block text-ui-xs leading-relaxed text-dark-onSurfaceVariant">{t('shell.viewHistoryDescription')}</span></span>
+                      <ArrowUpRight size={14} className="mt-0.5 shrink-0 text-dark-onSurfaceVariant/40 group-hover:text-dark-onSurfaceVariant" aria-hidden="true" />
+                    </button>
+                  </div>
+                  <div className="mt-5 flex flex-wrap items-center gap-x-4 gap-y-2 text-ui-xs text-dark-onSurfaceVariant/60">
+                    {modelConfigured && <span className="min-w-0 max-w-full truncate" title={modelLabel}>{t('shell.modelConfigured')} · {modelLabel}</span>}
+                    <span className="flex min-w-0 max-w-full items-center gap-1.5" title={workingDir ? `${t('shell.workDirectory')} · ${workingDir}` : t('shell.autoDirectory')}><FolderOpen size={13} className="shrink-0" aria-hidden="true" /><span className="truncate">{workingDirLabel}</span></span>
+                  </div>
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -189,14 +229,14 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
           穿透成列的 scrollHeight，列就变成滚动容器 —— 滚轮/选区自动滚动落在输入框上时，
           消息+输入框会作为刚体被一起卷走（看起来像输入框被拖走且停住）。 */}
       <div className="flex flex-1 flex-col min-h-0 min-w-0 overflow-clip">
-        {/* key=会话 id：切会话强制重挂载，重置滚动粘底状态并回到最新消息 */}
-        <MessageList key={sessionId} sessionId={sessionId} messages={messages} isStreaming={isCurrentSessionStreaming} vibe={vibe} onResend={handleResend} />
+        {/* 同级组件的 key 必须唯一；各自按会话重挂载，隔离滚动与输入状态。 */}
+        <MessageList key={`messages:${sessionId}`} sessionId={sessionId} messages={messages} isStreaming={isCurrentSessionStreaming} vibe={vibe} onResend={handleResend} />
         <GoalBanner sessionId={sessionId} vibe={vibe} />
         <TodoListCard sessionId={sessionId} vibe={vibe} />
         <QuestionCard sessionId={sessionId} vibe={vibe} />
         <PermissionApprovalCard sessionId={sessionId} vibe={vibe} />
         {errorBanner}
-        <ChatInput key={sessionId} sessionId={sessionId} onSend={handleSend} onStop={abort} onManualCompact={manualCompact} isCompacting={isCompacting} isStreaming={isCurrentSessionStreaming} onSendNow={sendQueuedNow} onEnqueueQueued={requestQueuedFlush} vibe={vibe} />
+        <ChatInput key={`composer:${sessionId}`} sessionId={sessionId} onSend={handleSend} onStop={() => { void abort() }} onManualCompact={manualCompact} isCompacting={isCompacting} isStopping={isStopping} isStreaming={isCurrentSessionStreaming} onSendNow={sendQueuedNow} onEnqueueQueued={requestQueuedFlush} vibe={vibe} />
       </div>
       {rewindRetry?.sessionId === sessionId && rewindRetry.messageId === lastUserMessage?.id && lastUserMessage && (
         <RewindDialog

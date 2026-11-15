@@ -5,7 +5,9 @@
  * + 展开懒加载 per-file diff；写操作（提交/推送）走独立弹窗，面板本体保持只读。
  * 刷新 = 打开时拉取 + 操作成功后广播 + 手动刷新按钮；没有 watcher 自动刷新。
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import { useModalAccessibility } from '../../hooks/use-modal-accessibility'
 import {
   Check,
   ChevronDown,
@@ -33,7 +35,7 @@ function FilePathLabel({ path, vibe }: { path: string; vibe?: boolean }) {
   const dir = idx === -1 ? '' : path.slice(0, idx + 1)
   const base = idx === -1 ? path : path.slice(idx + 1)
   return (
-    <span className="min-w-0 truncate font-mono text-[11px]">
+    <span className="min-w-0 truncate font-mono text-ui-xs">
       <span className={vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/55'}>{dir}</span>
       <span className={vibe ? 'text-white/90' : 'text-dark-onSurface'}>{base}</span>
     </span>
@@ -45,18 +47,18 @@ function ChangeStat({ change }: { change: GitFileChange }) {
   const { t } = useTranslation()
   if (change.added === null && change.removed === null) {
     return (
-      <span className="shrink-0 rounded px-1 text-[10px] font-medium bg-dark-surfaceContainerHigh text-dark-onSurfaceVariant/70">
+      <span className="shrink-0 rounded px-1 text-ui-xs font-medium bg-dark-surfaceContainerHigh text-dark-onSurfaceVariant/70">
         BIN
       </span>
     )
   }
   return (
-    <span className="flex shrink-0 items-center gap-1 font-mono text-[10px]">
+    <span className="flex shrink-0 items-center gap-1 font-mono text-ui-xs">
       {change.kind !== 'deleted' && change.added !== null && change.added > 0 && (
-        <span className="text-emerald-400">+{change.added}</span>
+        <span className="text-md-success">+{change.added}</span>
       )}
       {change.kind !== 'added' && change.removed !== null && change.removed > 0 && (
-        <span className="text-red-400">-{change.removed}</span>
+        <span className="text-md-error">-{change.removed}</span>
       )}
       {change.added === 0 && change.removed === 0 && (
         <span className="text-dark-onSurfaceVariant/50">{t('git.noLineChanges')}</span>
@@ -68,16 +70,16 @@ function ChangeStat({ change }: { change: GitFileChange }) {
 function KindBadge({ change }: { change: GitFileChange }) {
   const { t } = useTranslation()
   const map: Record<string, { label: string; className: string }> = {
-    added: { label: t('git.kind.added'), className: 'text-emerald-400 border-emerald-500/30' },
-    deleted: { label: t('git.kind.deleted'), className: 'text-red-400 border-red-500/30' },
-    renamed: { label: t('git.kind.renamed'), className: 'text-sky-400 border-sky-500/30' },
-    conflict: { label: t('git.kind.conflict'), className: 'text-amber-400 border-amber-500/30' },
+    added: { label: t('git.kind.added'), className: 'text-md-success border-md-success/30' },
+    deleted: { label: t('git.kind.deleted'), className: 'text-md-error border-md-error/30' },
+    renamed: { label: t('git.kind.renamed'), className: 'text-md-info border-md-info/30' },
+    conflict: { label: t('git.kind.conflict'), className: 'text-md-warning border-md-warning/30' },
     untracked: { label: t('git.kind.untracked'), className: 'text-dark-onSurfaceVariant/70 border-dark-onSurfaceVariant/25' },
   }
   const meta = map[change.kind]
   if (!meta) return null
   return (
-    <span className={`shrink-0 rounded border px-1 text-[9px] leading-[14px] ${meta.className}`}>
+    <span className={`shrink-0 rounded border px-1 text-ui-xs leading-normal ${meta.className}`}>
       {meta.label}
     </span>
   )
@@ -99,6 +101,8 @@ function CommitDialog({
   const [selected, setSelected] = useState<Set<string>>(() => new Set(changes.map((c) => c.path)))
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState<string | null>(null)
+  const messageRef = useRef<HTMLTextAreaElement>(null)
+  const dialogRef = useModalAccessibility(() => { if (!busy) onClose() }, messageRef)
 
   const allSelected = selected.size === changes.length
   const toggleAll = () => {
@@ -127,29 +131,29 @@ function CommitDialog({
     }
   }
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 animate-fade-in" onClick={() => !busy && onClose()}>
+  return typeof document === 'undefined' ? null : createPortal((
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 animate-fade-in" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose() }}>
       <div
+        ref={dialogRef}
         role="dialog"
+        tabIndex={-1}
         aria-modal="true"
         aria-label={t('git.commitTitle')}
-        className="w-[520px] max-w-[calc(100vw-2rem)] max-h-[calc(100vh-6rem)] bg-dark-surfaceDim rounded-md3-xl border border-dark-onSurfaceVariant/10 flex flex-col shadow-elevation-3 animate-pop-in"
-        onClick={(e) => e.stopPropagation()}
+        className="w-[560px] max-w-[calc(100vw-2rem)] max-h-[calc(100dvh-6rem)] bg-dark-surfaceDim text-dark-onSurface rounded-md3-xl border border-dark-onSurfaceVariant/10 flex flex-col shadow-elevation-3 animate-pop-in outline-none overflow-hidden"
         onKeyDown={(e) => {
-          if (e.key === 'Escape' && !busy) onClose()
           if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !busy) void submit()
         }}
       >
         <div className="px-5 py-3.5 border-b border-dark-onSurfaceVariant/10">
-          <h2 className="text-sm font-semibold">{t('git.commitTitle')}</h2>
+          <h2 className="text-ui-sm font-semibold">{t('git.commitTitle')}</h2>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-3">
           <div className="flex items-center justify-between pb-2">
-            <label className="flex items-center gap-2 text-xs text-dark-onSurfaceVariant cursor-pointer">
+            <label className="flex items-center gap-2 text-ui-xs text-dark-onSurfaceVariant cursor-pointer">
               <input type="checkbox" checked={allSelected} onChange={toggleAll} className="accent-md-primary" />
               {t('git.selectAll')}
             </label>
-            <span className="text-[11px] text-dark-onSurfaceVariant/60">
+            <span className="text-ui-xs text-dark-onSurfaceVariant/60">
               {t('git.selectedCount', { count: selected.size })}
             </span>
           </div>
@@ -167,7 +171,7 @@ function CommitDialog({
                 />
                 <FilePathLabel path={c.path} />
                 {c.origPath && (
-                  <span className="shrink-0 truncate font-mono text-[10px] text-dark-onSurfaceVariant/45">
+                  <span className="shrink-0 truncate font-mono text-ui-xs text-dark-onSurfaceVariant/45">
                     ← {c.origPath}
                   </span>
                 )}
@@ -179,23 +183,24 @@ function CommitDialog({
             ))}
           </div>
           <textarea
-            autoFocus
+            ref={messageRef}
+            aria-label={t('git.commitMessagePlaceholder')}
             value={message}
             onChange={(e) => setMessage(e.target.value)}
             placeholder={t('git.commitMessagePlaceholder')}
             rows={3}
-            className="mt-3 w-full resize-none rounded-md3-md border border-dark-onSurfaceVariant/10 bg-dark-surfaceContainer px-3 py-2 text-sm outline-none focus:border-md-primary/50 placeholder:text-dark-onSurfaceVariant/40"
+            className="md-focus mt-4 w-full resize-none rounded-md3-md border border-dark-onSurfaceVariant/10 bg-dark-surfaceContainer px-3 py-2 text-ui-sm outline-none focus:border-md-primary/50 placeholder:text-dark-onSurfaceVariant/40"
           />
           {failure && (
-            <p className="mt-2 break-all rounded-md3-sm bg-md-error/10 px-2.5 py-1.5 text-xs text-md-error">{failure}</p>
+            <p role="alert" className="mt-2 break-all rounded-md3-sm bg-md-error/10 px-2.5 py-1.5 text-ui-xs text-md-error">{failure}</p>
           )}
         </div>
-        <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-dark-onSurfaceVariant/10">
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 px-5 py-4 border-t border-dark-onSurfaceVariant/10">
           <button
             type="button"
             onClick={onClose}
             disabled={busy}
-            className="rounded-md3-md px-3 py-1.5 text-xs hover:bg-dark-surfaceContainerHigh text-dark-onSurfaceVariant transition-colors disabled:opacity-50"
+            className="md-focus min-h-9 rounded-md3-sm px-4 py-2 text-ui-xs hover:bg-dark-surfaceContainerHigh text-dark-onSurfaceVariant transition-colors disabled:opacity-50"
           >
             {t('common.cancel')}
           </button>
@@ -203,7 +208,7 @@ function CommitDialog({
             type="button"
             onClick={() => void submit()}
             disabled={busy || !message.trim() || selected.size === 0}
-            className="flex items-center gap-1.5 rounded-md3-md bg-md-primary px-3.5 py-1.5 text-xs font-medium text-md-onPrimary hover:opacity-90 transition-opacity disabled:opacity-40"
+            className="md-focus flex min-h-9 items-center gap-1.5 rounded-md3-sm bg-md-primary px-4 py-2 text-ui-xs font-medium text-md-onPrimary hover:opacity-90 transition-opacity disabled:opacity-40"
           >
             {busy ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
             {busy ? t('git.commitRunning') : t('git.commitButton')}
@@ -211,7 +216,7 @@ function CommitDialog({
         </div>
       </div>
     </div>
-  )
+  ), document.body)
 }
 
 // ── 推送弹窗 ──
@@ -229,6 +234,7 @@ function PushDialog({
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState<string | null>(null)
   const [done, setDone] = useState<string | null>(null)
+  const dialogRef = useModalAccessibility(() => { if (!busy) onClose() })
 
   const submit = async () => {
     if (busy) return
@@ -245,23 +251,21 @@ function PushDialog({
     }
   }
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 animate-fade-in" onClick={() => !busy && onClose()}>
+  return typeof document === 'undefined' ? null : createPortal((
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 animate-fade-in" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose() }}>
       <div
+        ref={dialogRef}
         role="dialog"
+        tabIndex={-1}
         aria-modal="true"
         aria-label={t('git.pushTitle')}
-        className="w-[460px] max-w-[calc(100vw-2rem)] bg-dark-surfaceDim rounded-md3-xl border border-dark-onSurfaceVariant/10 flex flex-col shadow-elevation-3 animate-pop-in"
-        onClick={(e) => e.stopPropagation()}
-        onKeyDown={(e) => {
-          if (e.key === 'Escape' && !busy) onClose()
-        }}
+        className="w-[480px] max-w-[calc(100vw-2rem)] max-h-[calc(100dvh-6rem)] bg-dark-surfaceDim text-dark-onSurface rounded-md3-xl border border-dark-onSurfaceVariant/10 flex flex-col shadow-elevation-3 animate-pop-in outline-none overflow-hidden"
       >
         <div className="px-5 py-3.5 border-b border-dark-onSurfaceVariant/10">
-          <h2 className="text-sm font-semibold">{t('git.pushTitle')}</h2>
+          <h2 className="text-ui-sm font-semibold">{t('git.pushTitle')}</h2>
         </div>
-        <div className="px-5 py-3 space-y-2 text-xs">
-          <div className="flex items-center gap-2">
+        <div className="min-h-0 overflow-y-auto px-5 py-4 space-y-3 text-ui-sm">
+          <div className="flex flex-wrap items-center gap-2">
             <GitBranch size={13} className="text-dark-onSurfaceVariant shrink-0" />
             <span className="font-medium">{summary.branchName}</span>
             <span className="text-dark-onSurfaceVariant/60">
@@ -271,21 +275,22 @@ function PushDialog({
             </span>
           </div>
           {done && (
-            <pre className="whitespace-pre-wrap break-all rounded-md3-sm bg-dark-surfaceContainer px-2.5 py-2 text-[11px] text-emerald-300">
+            <pre role="status" className="whitespace-pre-wrap break-all rounded-md3-sm bg-dark-surfaceContainer px-2.5 py-2 text-ui-xs text-md-success">
               {done}
             </pre>
           )}
           {failure && (
-            <pre className="whitespace-pre-wrap break-all rounded-md3-sm bg-md-error/10 px-2.5 py-2 text-[11px] text-md-error">
+            <pre role="alert" className="whitespace-pre-wrap break-all rounded-md3-sm bg-md-error/10 px-2.5 py-2 text-ui-xs text-md-error">
               {failure}
             </pre>
           )}
         </div>
-        <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-dark-onSurfaceVariant/10">
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 px-5 py-4 border-t border-dark-onSurfaceVariant/10">
           <button
             type="button"
             onClick={onClose}
-            className="rounded-md3-md px-3 py-1.5 text-xs hover:bg-dark-surfaceContainerHigh text-dark-onSurfaceVariant transition-colors"
+            disabled={busy}
+            className="md-focus min-h-9 rounded-md3-sm px-4 py-2 text-ui-xs hover:bg-dark-surfaceContainerHigh text-dark-onSurfaceVariant transition-colors"
           >
             {done ? t('common.close') : t('common.cancel')}
           </button>
@@ -294,7 +299,7 @@ function PushDialog({
               type="button"
               onClick={() => void submit()}
               disabled={busy}
-              className="flex items-center gap-1.5 rounded-md3-md bg-md-primary px-3.5 py-1.5 text-xs font-medium text-md-onPrimary hover:opacity-90 transition-opacity disabled:opacity-40"
+              className="md-focus flex min-h-9 items-center gap-1.5 rounded-md3-sm bg-md-primary px-4 py-2 text-ui-xs font-medium text-md-onPrimary hover:opacity-90 transition-opacity disabled:opacity-40"
             >
               {busy ? <Loader2 size={13} className="animate-spin" /> : <CloudUpload size={13} />}
               {busy ? t('git.pushRunning') : t('git.pushButton')}
@@ -303,16 +308,18 @@ function PushDialog({
         </div>
       </div>
     </div>
-  )
+  ), document.body)
 }
 
 // ── 面板本体 ──
 
 export default function GitPanel({
+  active,
   vibe,
   workDir,
   onClose,
 }: {
+  active: boolean
   vibe?: boolean
   workDir?: string
   onClose?: () => void
@@ -324,21 +331,24 @@ export default function GitPanel({
   const [diffs, setDiffs] = useState<Record<string, GitDiffResult | 'loading'>>({})
   const [showCommit, setShowCommit] = useState(false)
   const [showPush, setShowPush] = useState(false)
+  const diffEpochRef = useRef(0)
 
   // 目录切换或数据刷新后清空 diff 缓存与展开态：缓存按「当时的仓库状态」渲染，不能跨刷新复用
   useEffect(() => {
+    diffEpochRef.current += 1
     setDiffs({})
     setExpanded(null)
   }, [workDir, data])
 
   // Escape 关闭整个 tab（与 tab 栏 X 同义）
   useEffect(() => {
+    if (!active) return
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && onClose) onClose()
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [onClose])
+  }, [active, onClose])
 
   const changes = source === 'unstaged' ? data?.unstaged ?? [] : data?.staged ?? []
   const totalChanges = (data?.unstaged.length ?? 0) + (data?.staged.length ?? 0)
@@ -351,13 +361,14 @@ export default function GitPanel({
     setExpanded(path)
     const key = `${source}:${path}`
     if (!workDir || diffs[key]) return
+    const epoch = diffEpochRef.current
     setDiffs((prev) => ({ ...prev, [key]: 'loading' }))
     ipc
       .gitGetDiff(workDir, path, source)
-      .then((res) => setDiffs((prev) => ({ ...prev, [key]: res })))
-      .catch(() =>
-        setDiffs((prev) => ({ ...prev, [key]: { path, availability: 'unavailable', patch: null } })),
-      )
+      .then((res) => { if (diffEpochRef.current === epoch) setDiffs((prev) => ({ ...prev, [key]: res })) })
+      .catch(() => {
+        if (diffEpochRef.current === epoch) setDiffs((prev) => ({ ...prev, [key]: { path, availability: 'unavailable', patch: null } }))
+      })
   }
 
   const summary = data?.summary
@@ -377,17 +388,17 @@ export default function GitPanel({
     const res = diffs[`${source}:${path}`]
     if (!res || res === 'loading') {
       return (
-        <div className="flex items-center gap-1.5 px-3 py-2 text-xs text-dark-onSurfaceVariant">
+        <div className="flex items-center gap-1.5 px-3 py-2 text-ui-xs text-dark-onSurfaceVariant">
           <Loader2 size={12} className="animate-spin" />
           {t('git.loadingDiff')}
         </div>
       )
     }
     if (res.availability === 'binary') {
-      return <div className="px-3 py-2 text-xs text-dark-onSurfaceVariant/70">{t('git.binaryFile')}</div>
+      return <div className="px-3 py-2 text-ui-xs text-dark-onSurfaceVariant/70">{t('git.binaryFile')}</div>
     }
     if (res.availability === 'unavailable' || !res.patch) {
-      return <div className="px-3 py-2 text-xs text-dark-onSurfaceVariant/70">{t('git.diffUnavailable')}</div>
+      return <div className="px-3 py-2 text-ui-xs text-dark-onSurfaceVariant/70">{t('git.diffUnavailable')}</div>
     }
     return <DiffView patch={res.patch} />
   }
@@ -396,35 +407,37 @@ export default function GitPanel({
     <div className={`flex h-full flex-col ${vibe ? 'text-white' : 'bg-dark-surface'}`}>
       {/* 顶部：数据源 + 操作 */}
       <div
-        className={`flex h-10 shrink-0 items-center gap-1 border-b px-2 ${
+        className={`flex min-h-12 shrink-0 flex-wrap items-center gap-1 border-b px-2 py-1.5 ${
           vibe ? 'border-white/10' : 'border-dark-onSurfaceVariant/10'
         }`}
       >
         <button
           type="button"
+          aria-pressed={source === 'unstaged'}
           onClick={() => { setSource('unstaged'); setExpanded(null) }}
-          className={`flex h-7 items-center gap-1.5 rounded-md3-md px-2 text-xs transition-colors ${
+          className={`md-focus flex h-9 items-center gap-1.5 rounded-md3-md px-2 text-ui-xs transition-colors ${
             source === 'unstaged'
               ? 'bg-md-primary/15 text-md-primary'
               : 'text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh'
           }`}
         >
           {t('git.source.unstaged')}
-          <span className="rounded-full bg-dark-surfaceContainerHigh px-1.5 text-[10px]">
+          <span className="rounded-full bg-dark-surfaceContainerHigh px-1.5 text-ui-xs">
             {data?.unstaged.length ?? 0}
           </span>
         </button>
         <button
           type="button"
+          aria-pressed={source === 'staged'}
           onClick={() => { setSource('staged'); setExpanded(null) }}
-          className={`flex h-7 items-center gap-1.5 rounded-md3-md px-2 text-xs transition-colors ${
+          className={`md-focus flex h-9 items-center gap-1.5 rounded-md3-md px-2 text-ui-xs transition-colors ${
             source === 'staged'
               ? 'bg-md-primary/15 text-md-primary'
               : 'text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh'
           }`}
         >
           {t('git.source.staged')}
-          <span className="rounded-full bg-dark-surfaceContainerHigh px-1.5 text-[10px]">
+          <span className="rounded-full bg-dark-surfaceContainerHigh px-1.5 text-ui-xs">
             {data?.staged.length ?? 0}
           </span>
         </button>
@@ -437,7 +450,7 @@ export default function GitPanel({
           disabled={!canWrite}
           title={t('git.pushTitle')}
           aria-label={t('git.pushTitle')}
-          className="flex h-7 w-7 items-center justify-center rounded-md3-sm text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh hover:text-dark-onSurface transition-colors disabled:opacity-40"
+          className="md-focus flex h-9 w-9 items-center justify-center rounded-md3-sm text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh hover:text-dark-onSurface transition-colors disabled:opacity-40"
         >
           <CloudUpload size={14} />
         </button>
@@ -445,7 +458,7 @@ export default function GitPanel({
           type="button"
           onClick={() => setShowCommit(true)}
           disabled={!canWrite || totalChanges === 0}
-          className="flex h-7 items-center gap-1.5 rounded-md3-md bg-md-primary/15 px-2 text-xs font-medium text-md-primary hover:bg-md-primary/25 transition-colors disabled:opacity-40"
+          className="md-focus flex h-9 items-center gap-1.5 rounded-md3-md bg-md-primary/15 px-2 text-ui-xs font-medium text-md-primary hover:bg-md-primary/25 transition-colors disabled:opacity-40"
         >
           <Plus size={13} />
           {t('git.commit')}
@@ -453,10 +466,10 @@ export default function GitPanel({
         <button
           type="button"
           onClick={refresh}
-          disabled={!workDir}
+          disabled={!workDir || loading}
           title={t('git.refresh')}
           aria-label={t('git.refresh')}
-          className="flex h-7 w-7 items-center justify-center rounded-md3-sm text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh hover:text-dark-onSurface transition-colors disabled:opacity-40"
+          className="md-focus flex h-9 w-9 items-center justify-center rounded-md3-sm text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh hover:text-dark-onSurface transition-colors disabled:opacity-40"
         >
           <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
         </button>
@@ -465,7 +478,7 @@ export default function GitPanel({
       {/* 分支行 */}
       {summary?.isRepository && (
         <div
-          className={`flex h-8 shrink-0 items-center gap-2 border-b px-3 text-[11px] ${
+          className={`flex h-8 shrink-0 items-center gap-2 border-b px-3 text-ui-xs ${
             vibe ? 'border-white/10' : 'border-dark-onSurfaceVariant/10'
           }`}
         >
@@ -494,12 +507,12 @@ export default function GitPanel({
         {emptyHint ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
             <FileDiff size={22} className="text-dark-onSurfaceVariant/40" />
-            <p className="text-xs text-dark-onSurfaceVariant/70">{emptyHint}</p>
+            <p className="text-ui-xs text-dark-onSurfaceVariant/70">{emptyHint}</p>
           </div>
         ) : changes.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
-            <Check size={22} className="text-emerald-400/70" />
-            <p className="text-xs text-dark-onSurfaceVariant/70">{t('git.noChanges', { source: t(`git.source.${source}`) })}</p>
+            <Check size={22} className="text-md-success/70" />
+            <p className="text-ui-xs text-dark-onSurfaceVariant/70">{t('git.noChanges', { source: t(`git.source.${source}`) })}</p>
           </div>
         ) : (
           changes.map((change) => {
@@ -509,7 +522,7 @@ export default function GitPanel({
                 <button
                   type="button"
                   onClick={() => toggleExpand(change.path)}
-                  className={`flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors ${
+                  className={`md-focus flex min-h-10 w-full items-center gap-2 px-3 py-2 text-left transition-colors ${
                     vibe ? 'hover:bg-white/5' : 'hover:bg-dark-surfaceContainer'
                   }`}
                   aria-expanded={isOpen}
@@ -535,12 +548,12 @@ export default function GitPanel({
       {/* 底部错误条（拉取失败但已有旧数据时仍然可见） */}
       {error && data && (
         <div
-          className={`flex shrink-0 items-center gap-1.5 border-t px-3 py-1.5 text-[11px] text-md-error ${
+          className={`flex shrink-0 items-center gap-1.5 border-t px-3 py-1.5 text-ui-xs text-md-error ${
             vibe ? 'border-white/10' : 'border-dark-onSurfaceVariant/10'
           }`}
         >
           <CircleAlert size={12} className="shrink-0" />
-          <span className="truncate">{error}</span>
+          <span className="break-words leading-relaxed">{error}</span>
         </div>
       )}
 

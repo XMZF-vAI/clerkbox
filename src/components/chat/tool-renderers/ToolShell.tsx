@@ -4,10 +4,13 @@ import { Check, Copy } from 'lucide-react'
 import { formatElapsed } from './shared'
 
 /** 折叠壳：与 MessageItem 的工具行折叠交互保持同一份 grid-rows 动效与类名 */
-export function ToolShell({ open, children }: { open: boolean; children?: ReactNode }) {
+export function ToolShell({ open, id, children }: { open: boolean; id?: string; children?: ReactNode }) {
   return (
     <div
-      className="grid transition-[grid-template-rows,opacity] duration-300"
+      id={id}
+      inert={!open}
+      aria-hidden={!open}
+      className="grid transition-[grid-template-rows,opacity] duration-300 motion-reduce:transition-none"
       style={{
         gridTemplateRows: open ? '1fr' : '0fr',
         opacity: open ? 1 : 0,

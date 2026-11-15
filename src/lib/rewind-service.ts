@@ -12,7 +12,7 @@
  *    否则循环还在往一个已经被删掉的锚点上追加快照。
  */
 import type { Message, RewindOutcome, RewindPlan, RewindScope } from '../types/agent'
-import { buildRewindNotice, buildRewindPlan, isRewindableUserMessage, isTruncatedRead, rangeAlreadyReverted } from './rewind'
+import { buildRewindNotice, buildRewindPlan, contentFingerprint, isRewindableUserMessage, isTruncatedRead, MISSING_FINGERPRINT, rangeAlreadyReverted, rewindHistoryVersion } from './rewind'
 import { dropSnapshotFiles, readSnapshotFile } from './checkpoint-recorder'
 import { makeId } from '../agent-core/loop'
 import { ipc } from './ipc-client'
@@ -47,6 +47,7 @@ export interface RewindRequest {
   getMessages: () => Promise<Message[]>
   anchorMessageId: string
   scope: RewindScope
+  expectedHistoryVersion?: string
   /**
    * 中止该会话正在进行的运行，返回 true 表示已确认停下。
    * 拿不到这个保证时（宿主没提供）绝不截断 —— ZCode 对后台任务就是 fail-closed。
@@ -110,7 +111,10 @@ async function applyFileRewind(
   try {
     for (const file of plan.safeFiles) {
       if (isCancelled?.()) throw new Error('cancelled')
-      journal.push({ path: file.path, content: await io.readFile(file.path) })
+      const current = await io.readFile(file.path)
+      const currentHash = current === null ? MISSING_FINGERPRINT : contentFingerprint(current)
+      if (currentHash !== file.expectedHash) throw new Error('plan-blocked')
+      journal.push({ path: file.path, content: current })
       if (file.action === 'delete') {
         await io.deleteFile(file.path)
       } else {
@@ -175,8 +179,12 @@ export async function executeRewind(io: RewindIo, request: RewindRequest): Promi
   }
   const messages = request.abortActiveRun ? await request.getMessages() : initial
   const fromIndex = messages.findIndex((m) => m.id === anchorMessageId)
-  if (fromIndex < 0) {
+  if (fromIndex < 0 || !isRewindableUserMessage(messages[fromIndex]!)) {
     return { ok: false, error: 'no-checkpoint', restored: [], compensated: false, removedMessages: 0 }
+  }
+
+  if (request.expectedHistoryVersion && request.expectedHistoryVersion !== rewindHistoryVersion(messages)) {
+    return { ok: false, error: 'history-changed', restored: [], compensated: false, removedMessages: 0 }
   }
 
   const touchesFiles = scope !== 'conversation'
@@ -195,6 +203,9 @@ export async function executeRewind(io: RewindIo, request: RewindRequest): Promi
     readFile: io.readFile,
     readSnapshot: readSnapshotOnce,
   })
+
+  if (request.isCancelled?.()) return blocked(plan, 'cancelled')
+  if (rewindHistoryVersion(await request.getMessages()) !== plan.historyVersion) return blocked(plan, 'history-changed')
 
   // 已经撤销过的轮次不允许再来一次：第二次会把已经恢复好的文件按错的哈希再写一遍
   if (touchesFiles && rangeAlreadyReverted(messages, fromIndex)) {
@@ -218,7 +229,7 @@ export async function executeRewind(io: RewindIo, request: RewindRequest): Promi
     if (!applied.ok) {
       return {
         ok: false,
-        error: applied.detail === 'cancelled' ? 'cancelled' : 'write-failed',
+        error: applied.detail === 'cancelled' ? 'cancelled' : applied.detail === 'plan-blocked' ? 'plan-blocked' : 'write-failed',
         restored: [],
         compensated: applied.compensated,
         removedMessages: 0,
@@ -243,7 +254,12 @@ export async function executeRewind(io: RewindIo, request: RewindRequest): Promi
     console.error('[rewind] 对话截断失败（文件已回滚，消息仍在）:', err)
     return { ok: false, error: 'truncate-failed', restored, compensated: false, removedMessages: 0 }
   }
-  await io.dropSnapshots(refs)
+  // 历史截断已提交，回收孤儿快照失败不能再把成功撤回报告为失败。
+  try {
+    await io.dropSnapshots(refs)
+  } catch (error) {
+    console.error('[rewind] snapshot cleanup failed:', error)
+  }
   return { ok: true, restored, compensated: false, removedMessages: plan.removedMessages }
 }
 

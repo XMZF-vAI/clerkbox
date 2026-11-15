@@ -1,7 +1,25 @@
 import { describe, expect, it } from 'vitest'
-import { mergeJouleModels } from '../src/lib/joule-models'
-import type { JouleModel } from '../src/types/joule'
+import { canSelectJouleModel, mergeJouleModels } from '../src/lib/joule-models'
+import type { JouleModel, JoulePlan, JouleStatus } from '../src/types/joule'
 import type { ProviderModel } from '../src/types/agent'
+
+describe('shared Joule model selection eligibility', () => {
+  const plan = { tier: 'test' } as JoulePlan
+  it.each([
+    [plan, 1001, 'connected', true],
+    [plan, 1000, 'connected', false],
+    [plan, 999, 'connected', false],
+    [plan, null, 'connected', false],
+    [null, 1001, 'connected', false],
+    [plan, 1001, 'needs_reauth', false],
+  ] as const)('checks plan, current expiry and reauthorization (%j, %s, %s)', (activePlan, expiresAt, status, expected) => {
+    expect(canSelectJouleModel({
+      plan: activePlan,
+      subscription: expiresAt === null ? null : { tier: 'test', label: 'Test', expiresAt },
+      status: status as JouleStatus,
+    }, 1000)).toBe(expected)
+  })
+})
 
 const remoteModel = (over: Partial<JouleModel> = {}): JouleModel => ({
   id: 'model-a',

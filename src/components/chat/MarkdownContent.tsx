@@ -30,7 +30,8 @@ export const MarkdownContent = memo(function MarkdownContent({
   vibe?: boolean
   size?: MarkdownSize
 }) {
-  const highlightVersion = useSyncExternalStore(subscribeHighlightVersion, getHighlightVersion)
+  // 第三参 getServerSnapshot：SSR（renderToStaticMarkup 预览 harness）必需，服务端取同一初始版本号
+  const highlightVersion = useSyncExternalStore(subscribeHighlightVersion, getHighlightVersion, getHighlightVersion)
   const html = useMemo(() => renderMarkdown(content), [content, highlightVersion])
   const classes = ['markdown-body']
   if (vibe) classes.push('md-vibe')

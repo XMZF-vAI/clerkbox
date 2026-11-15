@@ -2,9 +2,9 @@ import { useEffect, useRef } from 'react'
 
 // 三层波浪参数：不同波长 / 振幅 / 速度 / 透明度，营造纵深
 const LAYERS = [
-  { varName: '--md-primary-rgb', alpha: 0.12, amplitude: 16, wavelength: 1.1, speed: 0.00042, phase: 0 },
-  { varName: '--md-tertiary-rgb', alpha: 0.09, amplitude: 22, wavelength: 0.8, speed: -0.00031, phase: 2.1 },
-  { varName: '--md-secondary-rgb', alpha: 0.06, amplitude: 28, wavelength: 0.6, speed: 0.00022, phase: 4.4 },
+  { varName: '--md-primary-rgb', alpha: 0.06, amplitude: 12, wavelength: 1.1, speed: 0.00028, phase: 0 },
+  { varName: '--md-tertiary-rgb', alpha: 0.04, amplitude: 16, wavelength: 0.8, speed: -0.00021, phase: 2.1 },
+  { varName: '--md-secondary-rgb', alpha: 0.03, amplitude: 20, wavelength: 0.6, speed: 0.00015, phase: 4.4 },
 ]
 
 function readColors(): string[] {
@@ -29,20 +29,10 @@ export default function ThemeWaves() {
     let colors = readColors()
     const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)')
 
-    // 兜底：下一帧再读一次，规避挂载时 ThemeProvider 尚未写入 CSS 变量的竞态
-    requestAnimationFrame(() => { colors = readColors() })
-
-    const resize = () => {
-      const dpr = window.devicePixelRatio || 1
-      canvas.width = canvas.clientWidth * dpr
-      canvas.height = canvas.clientHeight * dpr
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-    }
-    resize()
-
     const draw = (time: number) => {
       const w = canvas.clientWidth
       const h = canvas.clientHeight
+      if (!w || !h) return
       ctx.clearRect(0, 0, w, h)
 
       LAYERS.forEach((layer, i) => {
@@ -68,15 +58,33 @@ export default function ThemeWaves() {
 
     const loop = (time: number) => {
       draw(time)
-      rafId = requestAnimationFrame(loop)
+      if (!reducedMotion.matches && !document.hidden) rafId = requestAnimationFrame(loop)
     }
 
-    if (reducedMotion.matches) {
+    const updateMotion = () => {
+      cancelAnimationFrame(rafId)
       draw(0)
-    } else {
-      rafId = requestAnimationFrame(loop)
+      if (!reducedMotion.matches && !document.hidden) rafId = requestAnimationFrame(loop)
     }
 
+    const resize = () => {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2)
+      canvas.width = canvas.clientWidth * dpr
+      canvas.height = canvas.clientHeight * dpr
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+      // canvas 改尺寸会清空像素，静态/减少动态模式也需要重画。
+      draw(0)
+    }
+    resize()
+    updateMotion()
+    reducedMotion.addEventListener('change', updateMotion)
+    document.addEventListener('visibilitychange', updateMotion)
+
+    // 下一帧重读一次，规避主题尚未写入 CSS 变量的挂载时序。
+    const colorFrame = requestAnimationFrame(() => {
+      colors = readColors()
+      if (reducedMotion.matches || document.hidden) draw(0)
+    })
     // 色系 / 亮暗切换时重读颜色（theme-engine 会改写 documentElement 内联样式）
     const observer = new MutationObserver(() => {
       colors = readColors()
@@ -89,6 +97,9 @@ export default function ThemeWaves() {
 
     return () => {
       cancelAnimationFrame(rafId)
+      cancelAnimationFrame(colorFrame)
+      reducedMotion.removeEventListener('change', updateMotion)
+      document.removeEventListener('visibilitychange', updateMotion)
       observer.disconnect()
       resizeObserver.disconnect()
     }

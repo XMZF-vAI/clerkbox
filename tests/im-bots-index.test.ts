@@ -215,8 +215,12 @@ describe('初始化与 IPC 注册', () => {
     const storage = new BotsStorage(base)
     await storage.writeConfig({ version: 1, bots: [bot({ enabled: false })] })
     initImBots(fakeHost(base))
-    await new Promise((resolve) => setTimeout(resolve, 60))
-    expect(imBotsDiagnostics().statuses.find((item) => item.botId === 'bot1')?.state).toBe('disabled')
+    // 初始化需异步读写配置；等待真实状态，避免磁盘繁忙时把「尚未落位」误判成失败。
+    await vi.waitFor(() => {
+      const snapshot = imBotsDiagnostics()
+      expect(snapshot.statuses.find((item) => item.botId === 'bot1')?.state).toBe('disabled')
+      expect(snapshot.running).toEqual([])
+    }, { timeout: 2000, interval: 50 })
   })
 
   it('落盘目录不可用时只放弃机器人，不拖累应用启动', async () => {

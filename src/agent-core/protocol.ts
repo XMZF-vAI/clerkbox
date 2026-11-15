@@ -59,7 +59,7 @@ export type AgentCommand =
    * - apply：按 plan 执行；scope=conversation 时不碰文件
    */
   | { type: 'rewind.preview'; sessionId: string; anchorMessageId: string; scope: RewindScope }
-  | { type: 'rewind.apply'; sessionId: string; anchorMessageId: string; scope: RewindScope }
+  | { type: 'rewind.apply'; sessionId: string; anchorMessageId: string; scope: RewindScope; expectedHistoryVersion?: string }
 
 /** rewind 两条命令的回执：受理状态 + 计划 / 执行结果（其余命令仍只有 ok/error） */
 export interface AgentCommandResult {
@@ -93,6 +93,7 @@ export type AgentEvent =
   | { type: 'permission.settled'; sessionId: string; requestId: string; approved: boolean; timedOut: boolean }
   | { type: 'question.requested'; sessionId: string; requestId: string; question: unknown } // QuestionCard
   | { type: 'queue.snapshot';   sessionId: string; items: QueuedMessageItem[] }
+  | { type: 'compaction.status'; sessionId: string; compacting: boolean }
   | { type: 'run.status';       sessionId: string; status: 'working' | 'awaiting' | 'idle'; error?: string }
   | { type: 'run.completed';    sessionId: string; runId: string }
   | { type: 'run.aborted';      sessionId: string; runId: string; byUser: boolean }

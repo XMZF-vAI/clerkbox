@@ -45,6 +45,11 @@ export function contentFingerprint(text: string): string {
   return `${text.length}:${h1.toString(16)}${h2.toString(16)}${h3.toString(16)}${h4.toString(16)}`
 }
 
+/** 与 scope 无关的历史版本：预览与执行之间新增/改写任意一条消息都需要重新确认。 */
+export function rewindHistoryVersion(messages: Message[]): string {
+  return contentFingerprint(JSON.stringify(messages))
+}
+
 /** 快照里读不到当前文件内容时的哨兵值：让「文件已被外部删除」也变成一次可识别的指纹不符 */
 export const MISSING_FINGERPRINT = 'missing'
 
@@ -90,7 +95,7 @@ export function isRewindableUserMessage(message: Message): boolean {
   )
 }
 
-/** 唯一允许撤回/编辑的锚点：最后一条真实用户消息（照抄 ZCode「只能编辑最后一轮」的收窄） */
+/** 编辑重发/单轮文件回滚的锚点；消息撤回允许选择任意真实用户消息。 */
 export function lastRewindableTurnIndex(messages: Message[]): number {
   for (let i = messages.length - 1; i >= 0; i--) {
     if (isRewindableUserMessage(messages[i]!)) return i
@@ -129,7 +134,9 @@ export function foldEarliestPerPath(checkpoints: FileCheckpoint[]): FileCheckpoi
   for (const cp of checkpoints) {
     // 路径比对前统一分隔符：Windows 下同一文件可能一次是 \ 一次是 /
     const key = normalizePathKey(cp.path)
-    if (!byPath.has(key)) byPath.set(key, cp)
+    const earliest = byPath.get(key)
+    // 恢复最早一次写入前的内容，但当前磁盘必须与最后一次已跟踪写入一致。
+    byPath.set(key, earliest ? { ...earliest, afterHash: cp.afterHash } : { ...cp })
   }
   return [...byPath.values()]
 }
@@ -153,6 +160,7 @@ export async function buildRewindPlan(options: {
   readSnapshot: (ref: string) => Promise<string | null>
 }): Promise<RewindPlan> {
   const { messages, fromIndex, scope, readFile, readSnapshot } = options
+  const historyVersion = rewindHistoryVersion(messages)
   const removedMessages = scope === 'workspace' ? 0 : Math.max(0, messages.length - Math.max(0, fromIndex))
 
   const gaps: FileMutationGap[] = []
@@ -176,6 +184,10 @@ export async function buildRewindPlan(options: {
 
   const safeFiles: RewindPlanFile[] = []
   const unsafeFiles: RewindPlanFile[] = []
+  // 只撤对话与文件可否恢复无关，也不应因失效的磁盘/快照读取而失败。
+  if (scope === 'conversation') {
+    return { historyVersion, canApply: true, safeFiles, unsafeFiles, gaps, removedMessages }
+  }
   const checkpoints = foldEarliestPerPath(collectRangeCheckpoints(messages, fromIndex))
 
   for (const cp of checkpoints) {
@@ -209,10 +221,11 @@ export async function buildRewindPlan(options: {
       push({ ...base, reason: 'unreadable' }, true)
       continue
     }
-    push(base, false)
+    push({ ...base, expectedHash: cp.afterHash }, false)
   }
 
   return {
+    historyVersion,
     canApply: unsafeFiles.length === 0 && gaps.length === 0,
     safeFiles,
     unsafeFiles,

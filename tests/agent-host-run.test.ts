@@ -75,6 +75,10 @@ function kinds(events: AgentEvent[]): string[] {
   return events.map((e) => e.type)
 }
 
+const waitForIdle = (manager: AgentSessionManager) => vi.waitFor(() => {
+  expect(manager.inspect().every((session) => !session.hasRun)).toBe(true)
+})
+
 beforeEach(() => {
   streamCalls.length = 0
   script = []
@@ -88,6 +92,7 @@ describe('宿主跑完一轮纯文本对话', () => {
     const m = new AgentSessionManager(store)
     const res = await m.handleCommand({ type: 'run', sessionId: 's1', content: '说句话', settings })
     expect(res.ok).toBe(true)
+    await waitForIdle(m)
 
     const ring = m.peekRing('s1')
     const types = kinds(ring)
@@ -115,6 +120,7 @@ describe('宿主跑完一轮纯文本对话', () => {
     ]
     const m = new AgentSessionManager(fakeStore().store)
     await m.handleCommand({ type: 'run', sessionId: 's1', content: 'hi', settings })
+    await waitForIdle(m)
     const ring = m.peekRing('s1')
     const deltas = ring.filter((e): e is Extract<AgentEvent, { type: 'stream.delta' }> => e.type === 'stream.delta')
     expect(deltas.length).toBeGreaterThan(0)
@@ -131,6 +137,7 @@ describe('宿主跑完一轮纯文本对话', () => {
     script = textStream('ok')
     const m = new AgentSessionManager(fakeStore().store)
     await m.handleCommand({ type: 'run', sessionId: 's1', content: 'hi', settings })
+    await waitForIdle(m)
     expect(streamCalls).toHaveLength(1)
     const body = streamCalls[0].body as { model: string; messages: unknown[] }
     expect(body.model).toBe('test-model')
@@ -147,6 +154,17 @@ describe('宿主跑完一轮纯文本对话', () => {
 })
 
 describe('宿主侧中断与排队', () => {
+  it('run 在流仍进行时就确认受理，不让输入框等待生成结束', async () => {
+    script = [{ chunk: sse({ choices: [{ delta: { content: '半' }, finish_reason: null }] }) }]
+    const m = new AgentSessionManager(fakeStore().store)
+    await expect(m.handleCommand({ type: 'run', sessionId: 's1', content: 'hi', settings }))
+      .resolves.toEqual({ ok: true })
+    expect(m.inspect()[0]).toMatchObject({ status: 'working', hasRun: true })
+    expect(kinds(m.peekRing('s1'))).toContain('run.started')
+    await m.handleCommand({ type: 'abort', sessionId: 's1' })
+    await waitForIdle(m)
+  })
+
   it('abort 落到 run.aborted 并释放运行位', async () => {
     // 只给半条流且不收尾：循环会挂在等待上，正好给 abort 留窗口
     script = [{ chunk: sse({ choices: [{ delta: { content: '半' }, finish_reason: null }] }) }]
@@ -155,6 +173,7 @@ describe('宿主侧中断与排队', () => {
     await vi.waitFor(() => expect(streamCalls.length).toBe(1))
     await m.handleCommand({ type: 'abort', sessionId: 's1' })
     await running
+    await waitForIdle(m)
     const types = kinds(m.peekRing('s1'))
     expect(types).toContain('run.aborted')
     expect(m.inspect()[0]).toMatchObject({ status: 'idle', hasRun: false })
@@ -177,6 +196,47 @@ describe('宿主侧中断与排队', () => {
     expect(m.inspect()[0].queued).toBe(0)
     const userRows = rows.filter((r) => r.role === 'user').map((r) => r.content)
     expect(userRows).toEqual(['第一条', '第二条'])
+    await m.handleCommand({ type: 'abort', sessionId: 's1' })
+    await waitForIdle(m)
+  })
+
+  it('受理后的执行失败不会重发用户消息，后续队列保留等待处理', async () => {
+    script = textStream('ready')
+    const { store, rows } = fakeStore()
+    const m = new AgentSessionManager(store)
+    await m.handleCommand({ type: 'run', sessionId: 's1', content: '设置快照', settings })
+    await waitForIdle(m)
+
+    script = [{ error: 'model failed' }]
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    try {
+      const first = m.handleCommand({ type: 'queue.enqueue', sessionId: 's1', item: { id: 'q1', content: '只发送一次', queuedAt: 1 } })
+      const second = m.handleCommand({ type: 'queue.enqueue', sessionId: 's1', item: { id: 'q2', content: '保留下一条', queuedAt: 2 } })
+      await expect(first).resolves.toEqual({ ok: true })
+      await expect(second).resolves.toEqual({ ok: true })
+      await waitForIdle(m)
+      expect(rows.filter((row) => row.role === 'user' && row.content === '只发送一次')).toHaveLength(1)
+      expect(rows.some((row) => row.content === '保留下一条')).toBe(false)
+      expect(m.inspect()[0]).toMatchObject({ queued: 1, hasRun: false })
+      expect(m.peekRing('s1').at(-1)).toMatchObject({ type: 'run.status', status: 'idle', error: 'model failed' })
+      expect(streamCalls).toHaveLength(2)
+    } finally {
+      log.mockRestore()
+    }
+  })
+
+  it('受理后的准备失败也释放运行位并广播错误', async () => {
+    const { store } = fakeStore()
+    vi.mocked(store.getAllSessions).mockRejectedValueOnce(new Error('read failed'))
+    const m = new AgentSessionManager(store)
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    try {
+      await expect(m.handleCommand({ type: 'run', sessionId: 's1', content: 'hi', settings })).resolves.toEqual({ ok: true })
+      await waitForIdle(m)
+      expect(m.peekRing('s1').at(-1)).toMatchObject({ type: 'run.status', status: 'idle', error: 'read failed' })
+    } finally {
+      log.mockRestore()
+    }
   })
 })
 
@@ -187,11 +247,13 @@ describe('宿主对远程命令的策略', () => {
     script = textStream('第一段')
     const m = new AgentSessionManager(fakeStore().store)
     await m.handleCommand({ type: 'run', sessionId: 's1', content: '本地起一轮', settings })
+    await waitForIdle(m)
 
     script = textStream('第二段')
     const remoteSettings = { ...settings, apiKey: 'sk-attacker', baseUrl: 'https://attacker.test/v1', approvalMode: 'full' as const }
     const res = await m.handleCommand({ type: 'run', sessionId: 's1', content: '远程触发', settings: remoteSettings }, { remote: true })
     expect(res.ok).toBe(true)
+    await waitForIdle(m)
 
     // 上游连接参数取自本地快照：远程自带的那份被整段丢弃，否则等于让远程端指定端点与 Key
     const conn = streamCalls[1]!.cfg as { apiKey: string; baseUrl: string }
@@ -228,6 +290,7 @@ describe('宿主对远程命令的策略', () => {
     const unsub = registerAgentEventSink((payload) => seen.push(payload))
     try {
       await m.handleCommand({ type: 'run', sessionId: 's1', content: '说句话', settings })
+      await waitForIdle(m)
     } finally {
       unsub()
     }
@@ -250,6 +313,7 @@ describe('IM bot 的设置快照回退', () => {
     expect(m.hasLocalSettingsSnapshot).toBe(true)
     const res = await m.handleCommand({ type: 'run', sessionId: 's1', content: '手机来的任务' })
     expect(res.ok).toBe(true)
+    await waitForIdle(m)
     const ring = m.peekRing('s1')
     expect(ring[ring.length - 1]?.type).toBe('run.status')
   })
