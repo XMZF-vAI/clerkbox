@@ -4,7 +4,7 @@ import type { HarnessMode, Message, MessageAttachment, MessageSkillSnapshot, Ses
 import { normalizeHarnessMode } from '../lib/harness-modes'
 import { deriveSessionTitle, mapMessageRows, messageRewindPatch, messageToRow, messageUpdateArgs, NEW_SESSION_TITLE } from '../lib/chat-row'
 import { dropSessionSnapshots } from '../lib/checkpoint-recorder'
-import type { SessionRow } from '../types/ipc'
+import type { MessageRow, SessionRow } from '../types/ipc'
 import { useInteractiveStore } from './interactive-store'
 import { getRemoteBootstrap, getRemoteConnection, getRemoteStorageScope, isCloudRemoteMode } from '../remote/browser'
 
@@ -381,8 +381,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       const rows = await ipc.dbGetAllSessions()
       const sessions: Session[] = []
-      for (const row of rows) {
-        const msgRows = await ipc.dbGetMessages(row.id)
+      const cloudRemote = isCloudRemoteMode()
+      const batchSize = 4
+      let cloudMessageBatch: MessageRow[][] = []
+      for (const [index, row] of rows.entries()) {
+        // Pipeline cloud history reads without filling the remote request queue.
+        if (cloudRemote && index % batchSize === 0) {
+          cloudMessageBatch = await Promise.all(rows.slice(index, index + batchSize).map((session) => ipc.dbGetMessages(session.id)))
+        }
+        const msgRows = cloudRemote ? cloudMessageBatch[index % batchSize] : await ipc.dbGetMessages(row.id)
         // 空会话不再落库，DB 里的空壳全是遗留垃圾，启动时直接清掉
         if (msgRows.length === 0 && row.title === NEW_SESSION_TITLE) {
           if (!isCloudRemoteMode()) logPersistenceFailure('delete empty session', ipc.dbDeleteSession(row.id))
