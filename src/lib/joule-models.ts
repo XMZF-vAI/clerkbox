@@ -1,6 +1,13 @@
 import type { JouleModel, JoulePlan, JouleStatus, JouleSubscription } from '../types/joule'
 import type { ProviderModel } from '../types/agent'
 
+/** Only prefer models that the account's live catalog actually exposes. */
+export function defaultJouleModelId(models: Pick<ProviderModel, 'id'>[], selectedId?: string): string | undefined {
+  return models.find((model) => model.id === selectedId)?.id
+    ?? models.find((model) => model.id === 'deepseek-v4.1-flash')?.id
+    ?? models[0]?.id
+}
+
 /** Keep welcome setup and the composer on the same existing subscription gate. */
 export function canSelectJouleModel(
   account: { plan: JoulePlan | null; subscription: JouleSubscription | null; status: JouleStatus },

@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { ipc, isWebUIMode } from '../lib/ipc-client'
 import { sharedStorage } from '../lib/shared-storage'
-import { mergeJouleModels } from '../lib/joule-models'
+import { defaultJouleModelId, mergeJouleModels } from '../lib/joule-models'
 import { useSettingsStore } from './settings-store'
 import type { ModelProvider, ProviderModel } from '../types/agent'
 import type {
@@ -79,6 +79,7 @@ const errMsg = (error: unknown): string => (error instanceof Error ? error.messa
 let unsubscribeState: (() => void) | null = null
 let activateWhenReady = false
 let fellBackFromJoule = false
+let fallbackJouleModelId: string | undefined
 let syncingModels = false
 
 function jouleProviderFrom(models: ProviderModel[], key: string): ModelProvider {
@@ -107,9 +108,11 @@ function syncModelsFromSnapshot(models: JouleModel[] | undefined): void {
         .then((keys) => {
           const key = keys[JOULE_PROVIDER_ID]
           if (!key) return
-          const latest = useSettingsStore.getState().providers.find((item) => item.id === JOULE_PROVIDER_ID)
+          const current = useSettingsStore.getState()
+          const latest = current.providers.find((item) => item.id === JOULE_PROVIDER_ID)
           if (latest) return
-          useSettingsStore.getState().upsertProvider(jouleProviderFrom(mergeJouleModels([], models), key))
+          if (!current.model) activateWhenReady = true
+          current.upsertProvider(jouleProviderFrom(mergeJouleModels([], models), key))
           maybeActivateJoule()
         })
         .catch(() => {
@@ -118,6 +121,7 @@ function syncModelsFromSnapshot(models: JouleModel[] | undefined): void {
       return
     }
     const merged = mergeJouleModels(provider.models, models)
+    if (!settings.model) activateWhenReady = true
     if (JSON.stringify(merged) !== JSON.stringify(provider.models)) {
       settings.setProviderModels(JOULE_PROVIDER_ID, merged)
     }
@@ -128,12 +132,18 @@ function syncModelsFromSnapshot(models: JouleModel[] | undefined): void {
 }
 
 function maybeActivateJoule(): void {
-  if (!activateWhenReady) return
+  const settings = useSettingsStore.getState()
+  // A refreshed catalog or another login must never replace an existing user choice.
+  if (settings.model && (!activateWhenReady || settings.activeProviderId !== JOULE_PROVIDER_ID)) {
+    activateWhenReady = false
+    return
+  }
   const account = useJouleStore.getState()
   if (!account.plan) return
-  const provider = useSettingsStore.getState().providers.find((item) => item.id === JOULE_PROVIDER_ID)
-  if (!provider || provider.models.length === 0) return
-  useSettingsStore.getState().activateModel(JOULE_PROVIDER_ID, provider.models[0].id)
+  const provider = settings.providers.find((item) => item.id === JOULE_PROVIDER_ID)
+  const modelId = defaultJouleModelId(provider?.models ?? [])
+  if (!modelId) return
+  settings.activateModel(JOULE_PROVIDER_ID, modelId)
   activateWhenReady = false
 }
 
@@ -142,6 +152,7 @@ function handleStatusTransition(previous: JouleStatus, next: JouleStatus): void 
   if (next === 'expired' && previous !== 'expired') {
     const settings = useSettingsStore.getState()
     if (settings.activeProviderId !== JOULE_PROVIDER_ID) return
+    fallbackJouleModelId = settings.activeModelId
     const fallback = settings.providers.find((p) => p.id !== JOULE_PROVIDER_ID && p.models.length > 0)
     if (fallback) {
       settings.activateModel(fallback.id, fallback.models[0].id)
@@ -164,9 +175,11 @@ function handleStatusTransition(previous: JouleStatus, next: JouleStatus): void 
   if (previous === 'expired' && next === 'connected' && fellBackFromJoule) {
     const account = useJouleStore.getState()
     const provider = useSettingsStore.getState().providers.find((item) => item.id === JOULE_PROVIDER_ID)
-    if (account.plan && provider && provider.models.length > 0) {
-      useSettingsStore.getState().activateModel(JOULE_PROVIDER_ID, provider.models[0].id)
+    const modelId = defaultJouleModelId(provider?.models ?? [], fallbackJouleModelId)
+    if (account.plan && modelId) {
+      useSettingsStore.getState().activateModel(JOULE_PROVIDER_ID, modelId)
       fellBackFromJoule = false
+      fallbackJouleModelId = undefined
     }
   }
 }
@@ -193,6 +206,7 @@ function applySnapshot(snapshot: JouleStateSnapshot | null | undefined): void {
   })
   if (snapshot.models) syncModelsFromSnapshot(snapshot.models)
   if (previous !== snapshot.status) handleStatusTransition(previous, snapshot.status)
+  maybeActivateJoule()
 }
 
 export const useJouleStore = create<JouleStoreState>()(
@@ -236,19 +250,17 @@ export const useJouleStore = create<JouleStoreState>()(
             set({ error: result.error || '登录失败，请重试' })
             return
           }
-          const models = mergeJouleModels([], result.models ?? [])
-          useSettingsStore.getState().upsertProvider(jouleProviderFrom(models, result.key))
+          const settings = useSettingsStore.getState()
+          const existingModels = settings.providers.find((item) => item.id === JOULE_PROVIDER_ID)?.models ?? []
+          const models = mergeJouleModels(existingModels, result.models ?? [])
+          if (!settings.model) activateWhenReady = true
+          settings.upsertProvider(jouleProviderFrom(models, result.key))
           if (result.account) {
             applySnapshot(result.account)
           } else {
             set({ status: 'connected', stale: true })
           }
-          if (result.account?.plan && models.length > 0) {
-            useSettingsStore.getState().activateModel(JOULE_PROVIDER_ID, models[0].id)
-          } else {
-            activateWhenReady = true
-            maybeActivateJoule()
-          }
+          maybeActivateJoule()
         } catch (error) {
           set({ error: errMsg(error) })
         } finally {
@@ -273,6 +285,7 @@ export const useJouleStore = create<JouleStoreState>()(
         useSettingsStore.getState().removeProvider(JOULE_PROVIDER_ID)
         activateWhenReady = false
         fellBackFromJoule = false
+        fallbackJouleModelId = undefined
         set({ ...emptyAccount, notice: null, loggingIn: false, userCode: null, loginExpiresAt: null, verificationUri: null })
       },
 

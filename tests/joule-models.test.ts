@@ -1,7 +1,24 @@
 import { describe, expect, it } from 'vitest'
-import { canSelectJouleModel, mergeJouleModels } from '../src/lib/joule-models'
+import { canSelectJouleModel, defaultJouleModelId, mergeJouleModels } from '../src/lib/joule-models'
 import type { JouleModel, JoulePlan, JouleStatus } from '../src/types/joule'
 import type { ProviderModel } from '../src/types/agent'
+
+describe('Joule default model', () => {
+  const models = [{ id: 'other-model' }, { id: 'deepseek-v4.1-flash' }]
+
+  it('prefers the real DeepSeek V4.1 Flash catalog ID without changing catalog order', () => {
+    expect(defaultJouleModelId(models)).toBe('deepseek-v4.1-flash')
+    expect(models.map((model) => model.id)).toEqual(['other-model', 'deepseek-v4.1-flash'])
+  })
+
+  it('preserves an existing selection and handles removed or missing catalog entries', () => {
+    expect(defaultJouleModelId(models, 'other-model')).toBe('other-model')
+    expect(defaultJouleModelId([{ id: 'claude-sonnet-5-5' }, ...models], 'claude-sonnet-5-5')).toBe('claude-sonnet-5-5')
+    expect(defaultJouleModelId(models, 'removed-model')).toBe('deepseek-v4.1-flash')
+    expect(defaultJouleModelId([{ id: 'available-model' }])).toBe('available-model')
+    expect(defaultJouleModelId([])).toBeUndefined()
+  })
+})
 
 describe('shared Joule model selection eligibility', () => {
   const plan = { tier: 'test' } as JoulePlan
