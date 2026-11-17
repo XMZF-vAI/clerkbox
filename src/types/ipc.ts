@@ -1,5 +1,6 @@
 ﻿import type { ApiCompat, MemoryEntry, MemoryType } from './agent'
 import type { AgentCommand, AgentCommandResult, AgentEvent, AgentSnapshot } from '../agent-core/protocol'
+import type { RemoteAccessStatus, RemoteEnableOptions } from '../remote/protocol'
 import type { JouleLoginResult, JouleStateSnapshot } from './joule'
 /**
  * IM 机器人的跨进程类型与主进程共用一份定义（该模块只依赖 zod，且这里全是 type import，
@@ -616,6 +617,14 @@ export interface ClerkBoxAPI {
   startWebUI: (lanAccess?: boolean, fileAccess?: boolean) => Promise<{ port: number; token: string; url: string } | { error: string }>
   stopWebUI: () => Promise<{ ok: boolean }>
   getWebUIStatus: () => Promise<{ running: boolean; url?: string }>
+  remoteGetStatus: () => Promise<RemoteAccessStatus>
+  remotePrepare: () => Promise<{ ok: true }>
+  remoteEnable: (options: RemoteEnableOptions) => Promise<RemoteAccessStatus>
+  remoteDisable: () => Promise<RemoteAccessStatus>
+  remoteCreateInvite: () => Promise<RemoteAccessStatus>
+  remoteApprovePair: (peerId: string, approved: boolean) => Promise<RemoteAccessStatus>
+  remoteRevokeDevice: (deviceId: string) => Promise<RemoteAccessStatus>
+  onRemoteStatus: (callback: (status: RemoteAccessStatus) => void) => () => void
   getLanAddresses: () => Promise<string[]>
   // IM 机器人（微信 / 飞书遥控）：整组桌面专属，WebUI 远程模式一律不可达（见 webui-server 黑名单）。
   // 凭据明文永不出主进程：列表只带 hasCredential 这类布尔与脱敏后的运行状态。

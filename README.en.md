@@ -82,7 +82,7 @@
 | **AGENTS.md project instructions** | Auto-reads `AGENTS.md` from the working directory and injects it into the system prompt; falls back to `CLAUDE.md`. |
 | **VIBE immersive mode** | Fullscreen background in three modes (single / slideshow / glass), liquid-glass UI, and a floating music player (system audio supported). |
 | **MD3 dynamic theming** | Material Design 3 color engine with light / dark / system modes and custom seed color. |
-| **WebUI remote access** | Built-in web server exposes the full UI to any browser; binds to localhost by default, with a one-click LAN toggle and scan-to-connect QR code, real-time data sync between desktop and web, and an auto-switching mobile layout on narrow screens. |
+| **WebUI remote access** | Optional encrypted public relay and LAN access. Public access needs no port forwarding: approve browser pairing on the desktop, use the actual workbench, send tasks, receive streamed results, and revoke individual devices. |
 | **Local-first** | All sessions, memory, skills, and config live on disk — no cloud dependency. |
 
 ---
@@ -601,17 +601,37 @@ Companion interactive cards keep the AI communicating proactively:
 
 ## WebUI Remote Access
 
+### Public paired access
+
+Open Remote Access in the desktop app, select public access and an allowed project folder, then enable the outbound connection. Finish or stop active tasks before first enabling it. No router port forwarding is required.
+
+Open the invitation link or scan its QR code on another device. Invitations expire after ten minutes and are single use. Compare the pairing codes and approve the device on the desktop before it can operate your workspace. Paired browsers can create conversations, send, queue and stop tasks. File access and single-use tool approvals require explicit desktop authorization; API keys and model execution remain on the desktop.
+
+Paired browsers can reopen the public entry point and reconnect without a new invitation. Each desktop supports up to eight authorized browser devices. Generating a new invitation invalidates only the previous unpaired invitation; existing paired devices keep their access. Revoke one browser from the desktop device list without disconnecting the others.
+
+Desktop and browser views share execution state. Each conversation has one active executor, with further messages placed in a shared FIFO queue. Devices can view that queue, stop the current task, or remove a message that has not started; simultaneous sends do not create two executors for the same conversation.
+
+The entry point is `https://webui.clerkbox.xmzf.space`. Invitation secrets travel only in the URL fragment, which is cleared immediately. Business messages are encrypted with AES-GCM; the relay stores routing and credential hashes, not chat bodies. Browsers retain independently revocable credentials: pair only trusted devices, and revoke them or disable public access from the desktop at any time. The computer must remain running and online; tray mode works, while quitting or sleeping makes it unavailable.
+
+Relay rooms expire after seven days without a host connection. On return, the desktop creates a new room and clears the old device authorizations; generate a new invitation and pair again.
+
+Disabling public access or revoking a browser immediately blocks new operations from that connection and removes authorization from queued remote tasks. It does not guarantee cancellation of model requests, commands or background tasks that have already started. To interrupt an accepted task, use Stop in its conversation before disabling access.
+
+The public transport uses an explicit API allowlist and real-path workspace checks. It does not expose arbitrary IPC, keys, account or MCP administration, raw terminals, or file rollback. Agent shell tools are not an operating-system sandbox: manual approval remains enforced, and remote approval applies only to one pending request.
+
+For development or self-hosting, build the real standalone UI with `npm run build:webui`, then run `npm ci && npm run check` in `workers/remote-gateway` and deploy its `wrangler.jsonc` using Wrangler. A private desktop deployment can set `CLERKBOX_REMOTE_ORIGIN` to its own HTTPS origin. Public pairing requires a desktop build containing the new connector; older installers support only the legacy local/LAN mode below.
+
 ClerkBox ships with a built-in web server that exposes the full UI to any browser for remote control — perfect for deploying the app on a server and accessing it from any device.
 
 ### How to Start
 
-- **Manual start from desktop**: click the 🌐 icon above the settings button in the sidebar. A dialog shows the tokenized access URL — copy it with one click or open it directly in your default browser. The service can be stopped from the same dialog at any time.
+- **Manual start from desktop**: open Remote Access in the sidebar and select local access. A dialog shows the tokenized access URL — copy it with one click or open it directly in your default browser. The service can be stopped from the same dialog at any time.
 - **LAN access & QR scan**: ticking "Allow LAN access" in the dialog binds the server to all network interfaces and generates a QR code when a LAN IP is detected — scan it with your phone to connect instantly (shown only when LAN access is on and a network adapter address is found; never points to localhost).
 - **Auto start for servers**: set the environment variable `CLERKBOX_WEBUI_AUTO=1` before launching the app; the WebUI starts automatically and prints the access URL to the console (auto-start binds to localhost by default — enable LAN access in the desktop app first for remote use).
 
 ### Features
 
-- **Full functionality**: chat, tool calls, streaming output (SSE), settings, and skills work the same as on desktop
+- **Shared interface**: browse conversations with the desktop components. Agent commands and sensitive management APIs are restricted in legacy mode; use public paired access above to send remote tasks.
 - **Real-time data sync**: settings, skills, VIBE config, and token usage are synchronized between desktop and web via a shared main-process store; sessions and messages share the same local database
 - **Security**: a random token is generated on every start and required for all API requests; the static file server includes path-traversal protection
 - **Adaptive UI**: window control buttons (minimize / maximize / close) are automatically hidden in WebUI mode

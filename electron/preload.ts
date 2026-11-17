@@ -1,4 +1,5 @@
 ﻿import { contextBridge, ipcRenderer, webUtils } from 'electron'
+import type { RemoteAccessStatus, RemoteEnableOptions } from '../src/remote/protocol'
 import type {
   AccountStatus,
   AccountSyncDownloadResult,
@@ -361,6 +362,18 @@ contextBridge.exposeInMainWorld('clerkbox', {
     ipcRenderer.invoke('startWebUI', lanAccess === true, fileAccess === true),
   stopWebUI: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('stopWebUI'),
   getWebUIStatus: (): Promise<{ running: boolean; url?: string }> => ipcRenderer.invoke('getWebUIStatus'),
+  remoteGetStatus: (): Promise<RemoteAccessStatus> => ipcRenderer.invoke('remoteGetStatus'),
+  remotePrepare: (): Promise<{ ok: true }> => ipcRenderer.invoke('remotePrepare'),
+  remoteEnable: (options: RemoteEnableOptions): Promise<RemoteAccessStatus> => ipcRenderer.invoke('remoteEnable', options),
+  remoteDisable: (): Promise<RemoteAccessStatus> => ipcRenderer.invoke('remoteDisable'),
+  remoteCreateInvite: (): Promise<RemoteAccessStatus> => ipcRenderer.invoke('remoteCreateInvite'),
+  remoteApprovePair: (peerId: string, approved: boolean): Promise<RemoteAccessStatus> => ipcRenderer.invoke('remoteApprovePair', peerId, approved),
+  remoteRevokeDevice: (deviceId: string): Promise<RemoteAccessStatus> => ipcRenderer.invoke('remoteRevokeDevice', deviceId),
+  onRemoteStatus: (callback: (status: RemoteAccessStatus) => void): (() => void) => {
+    const listener = (_event: unknown, status: RemoteAccessStatus) => callback(status)
+    ipcRenderer.on('remote:status', listener)
+    return () => ipcRenderer.removeListener('remote:status', listener)
+  },
   getLanAddresses: (): Promise<string[]> => ipcRenderer.invoke('getLanAddresses'),
 
   // ── IM 机器人（微信 / 飞书遥控）──

@@ -28,3 +28,12 @@ jobs:
 
       - name: Unit tests
         run: npm run test
+
+      - name: Build standalone WebUI
+        run: npm run build:webui
+
+      - name: Check remote gateway
+        working-directory: workers/remote-gateway
+        run: |
+          npm ci
+          npm run check

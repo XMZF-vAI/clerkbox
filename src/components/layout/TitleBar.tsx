@@ -9,6 +9,7 @@ import UpdateBadge from './UpdateBadge'
 import { isWebUIMode } from '../../lib/ipc-client'
 import { useChatStore } from '../../stores/chat-store'
 import { useUIStore } from '../../stores/ui-store'
+import { getRemoteBootstrap, isCloudRemoteMode } from '../../remote/browser'
 
 interface TitleBarProps {
   onToggleSidebar: () => void
@@ -17,6 +18,7 @@ interface TitleBarProps {
 
 export default function TitleBar({ onToggleSidebar, sidebarVisible }: TitleBarProps) {
   const { t } = useTranslation()
+  const cloudRemote = isCloudRemoteMode()
   const vibeMode = useVibeStore((s) => s.isVibeMode)
   const toggleVibeMode = useVibeStore((s) => s.toggleVibeMode)
   const sessionTitle = useChatStore((s) => s.sessions.find((session) => session.id === s.activeSessionId)?.title)
@@ -72,8 +74,8 @@ export default function TitleBar({ onToggleSidebar, sidebarVisible }: TitleBarPr
       </div>
 
       <div className="flex shrink-0 items-center gap-1 max-md:gap-0" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-        <div className="mr-1 hidden md:block"><UpdateBadge /></div>
-        <button
+        {!cloudRemote && <div className="mr-1 hidden md:block"><UpdateBadge /></div>}
+        {!cloudRemote && <button
           type="button"
           onClick={() => toggleVibeMode()}
           className="md-focus h-8 max-md:h-11 max-md:w-11 flex shrink-0 items-center justify-center gap-1.5 px-2 rounded-md3-sm text-dark-onSurfaceVariant hover:bg-dark-surfaceContainerHigh transition-colors"
@@ -85,16 +87,16 @@ export default function TitleBar({ onToggleSidebar, sidebarVisible }: TitleBarPr
           <span className="hidden lg:inline text-ui-xs font-medium whitespace-nowrap">
             {t('titlebar.vibeCompact')}
           </span>
-        </button>
+        </button>}
 
         {/* Context usage indicator：环形用量 + 统计面板（含手动压缩入口） */}
         <ContextUsageIndicator />
 
         {/* Joule 5 小时额度：长条用量 + 详情入口（未连接 Joule 时不渲染） */}
-        <JouleQuotaButton />
+        {!cloudRemote && <JouleQuotaButton />}
 
         {/* 工作台面板开关（普通模式；VIBE 模式无标题栏，走 VibeControls 里的入口） */}
-        <button
+        {(!cloudRemote || getRemoteBootstrap()?.capabilities.files) && <button
           type="button"
           onClick={toggleWorkbench}
           aria-label={t('titlebar.toggleWorkbench')}
@@ -107,7 +109,7 @@ export default function TitleBar({ onToggleSidebar, sidebarVisible }: TitleBarPr
           }`}
         >
           <PanelRight size={16} />
-        </button>
+        </button>}
 
         {/* Window controls：WebUI 模式下隐藏（浏览器无窗口控制）；mac 走系统红绿灯 */}
         {!isWebUIMode && !isMac && (

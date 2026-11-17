@@ -7,6 +7,8 @@ import { applyAgentEvent } from '../src/lib/agent-event-apply'
 import { useChatStore } from '../src/stores/chat-store'
 import { useAgentRunsStore } from '../src/stores/agent-runs-store'
 import { useGoalStore } from '../src/stores/goal-store'
+import { useInteractiveStore } from '../src/stores/interactive-store'
+import { agentClient } from '../src/lib/agent-client'
 import type { Message, SubAgentRun } from '../src/types/agent'
 
 const sid = 'sess-x'
@@ -35,6 +37,7 @@ function session() {
 }
 
 beforeEach(() => {
+  useInteractiveStore.getState().cancelQuestion(sid)
   useChatStore.setState({
     sessions: [{ id: sid, title: '新会话', messages: [], createdAt: 1, updatedAt: 1 }],
     activeSessionId: sid,
@@ -49,6 +52,96 @@ beforeEach(() => {
   })
   useAgentRunsStore.setState({ runsBySession: {} })
   useGoalStore.setState({ bySession: {} })
+})
+
+describe('host question receipts and reconnect replay', () => {
+  const requested = { type: 'question.requested', sessionId: sid, requestId: 'question-ack', question: [{ id: 'q1', header: 'Choose', question: 'Choose', options: [{ label: 'A', description: '' }] }] } as const
+
+  it('keeps the same card until the host acknowledges, then ignores historical replays', async () => {
+    let accept!: (result: { ok: true }) => void
+    const send = vi.spyOn(agentClient, 'send').mockImplementation(() => new Promise(resolve => { accept = resolve }))
+    try {
+      applyAgentEvent(requested as never)
+      const card = useInteractiveStore.getState().pendingQuestions[sid]!
+      const first = useInteractiveStore.getState().resolveQuestion(sid, card.id, { q1: ['A'] })
+      const duplicate = useInteractiveStore.getState().resolveQuestion(sid, card.id, { q1: ['B'] })
+      applyAgentEvent(requested as never) // Same request from a reconnect snapshot.
+      expect(useInteractiveStore.getState().pendingQuestions[sid]).toBe(card)
+      await Promise.resolve()
+      expect(send).toHaveBeenCalledOnce()
+      expect(send).toHaveBeenCalledWith({ type: 'question.resolve', sessionId: sid, requestId: requested.requestId, payload: { q1: ['A'] } })
+      accept({ ok: true })
+      await Promise.all([first, duplicate])
+      expect(useInteractiveStore.getState().pendingQuestions[sid]).toBeUndefined()
+      applyAgentEvent(requested as never)
+      expect(useInteractiveStore.getState().pendingQuestions[sid]).toBeUndefined()
+    } finally { send.mockRestore(); applyAgentEvent({ type: 'run.completed', sessionId: sid, runId: 'r' }) }
+  })
+
+  it.each(['transport', 'rejected'])('keeps a %s failure retryable through a same-request snapshot', async failure => {
+    const send = vi.spyOn(agentClient, 'send')
+    if (failure === 'transport') send.mockRejectedValueOnce(new Error('remoteAccess.cloudDisconnected'))
+    else send.mockResolvedValueOnce({ ok: false, error: 'remote-control-disabled' })
+    send.mockResolvedValueOnce({ ok: true })
+    try {
+      applyAgentEvent(requested as never)
+      const card = useInteractiveStore.getState().pendingQuestions[sid]!
+      await expect(useInteractiveStore.getState().resolveQuestion(sid, card.id, { q1: ['A'] })).rejects.toThrow()
+      expect(useInteractiveStore.getState().pendingQuestions[sid]).toBe(card)
+      applyAgentEvent(requested as never)
+      expect(useInteractiveStore.getState().pendingQuestions[sid]).toBe(card)
+      await useInteractiveStore.getState().resolveQuestion(sid, card.id, { q1: ['A'] })
+      expect(send).toHaveBeenCalledTimes(2)
+      expect(useInteractiveStore.getState().pendingQuestions[sid]).toBeUndefined()
+    } finally { send.mockRestore(); applyAgentEvent({ type: 'run.completed', sessionId: sid, runId: 'r' }) }
+  })
+
+  it('restores an unanswered request missing from local state instead of blocking it forever', () => {
+    applyAgentEvent(requested as never)
+    const card = useInteractiveStore.getState().pendingQuestions[sid]!
+    useInteractiveStore.setState({ pendingQuestions: {} }) // A cleared local view before the reconnect snapshot.
+    applyAgentEvent(requested as never)
+    expect(useInteractiveStore.getState().pendingQuestions[sid]).toEqual(card)
+    expect(useInteractiveStore.getState().pendingQuestions[sid]?.id).toBe(requested.requestId)
+    useInteractiveStore.getState().cancelQuestion(sid)
+  })
+
+  it('settles only the matching request across devices and prevents replay reopening it', () => {
+    applyAgentEvent(requested as never)
+    applyAgentEvent({ type: 'question.settled', sessionId: sid, requestId: requested.requestId, timedOut: false })
+    expect(useInteractiveStore.getState().pendingQuestions[sid]).toBeUndefined()
+    applyAgentEvent(requested as never)
+    expect(useInteractiveStore.getState().pendingQuestions[sid]).toBeUndefined()
+
+    applyAgentEvent({ ...requested, requestId: 'next-question' } as never)
+    applyAgentEvent({ type: 'question.settled', sessionId: sid, requestId: requested.requestId, timedOut: true })
+    expect(useInteractiveStore.getState().pendingQuestions[sid]?.id).toBe('next-question')
+    applyAgentEvent({ type: 'run.completed', sessionId: sid, runId: 'r' })
+  })
+
+  it('does not send a blank host answer during run cleanup or clear a newer question with a late receipt', async () => {
+    let accept!: (result: { ok: true }) => void
+    const send = vi.spyOn(agentClient, 'send').mockImplementation(() => new Promise(resolve => { accept = resolve }))
+    try {
+      applyAgentEvent(requested as never)
+      const submission = useInteractiveStore.getState().resolveQuestion(sid, requested.requestId, { q1: ['A'] })
+      await Promise.resolve()
+      applyAgentEvent({ type: 'run.completed', sessionId: sid, runId: 'r' })
+      applyAgentEvent({ ...requested, requestId: 'next-question' } as never)
+      accept({ ok: true })
+      await submission
+      expect(send).toHaveBeenCalledOnce()
+      expect(useInteractiveStore.getState().pendingQuestions[sid]?.id).toBe('next-question')
+    } finally { send.mockRestore(); applyAgentEvent({ type: 'run.completed', sessionId: sid, runId: 'r' }) }
+  })
+
+  it('keeps renderer questions synchronous and resolves their original promise', async () => {
+    const answer = useInteractiveStore.getState().requestQuestion(sid, [])
+    const id = useInteractiveStore.getState().pendingQuestions[sid]!.id
+    useInteractiveStore.getState().resolveQuestion(sid, id, { q1: ['local'] })
+    expect(useInteractiveStore.getState().pendingQuestions[sid]).toBeUndefined()
+    await expect(answer).resolves.toEqual({ q1: ['local'] })
+  })
 })
 
 describe('运行态与消息回灌', () => {

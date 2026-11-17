@@ -8,7 +8,7 @@
  */
 import { useCallback, useEffect, useRef } from 'react'
 import { useSettingsStore } from '../stores/settings-store'
-import { useChatStore, getSessionAbortController, setSessionAbortController, type QueuedMessageItem } from '../stores/chat-store'
+import { useChatStore, getSessionAbortController, setSessionAbortController, prepareCloudSession, type QueuedMessageItem } from '../stores/chat-store'
 import { useTokenUsageStore } from '../stores/token-usage-store'
 import { useSkillsStore } from '../stores/skills-store'
 import { toolRegistry } from '../lib/tool-registry'
@@ -39,6 +39,7 @@ import { SessionContextStore } from '../agent-core/session-context'
 import type { AgentPorts } from '../agent-core/ports'
 import { abortWorkflowRunsForSession, parseWorkflowRunTail, type WorkflowRun } from '../lib/workflow-runtime'
 import { formatWorkflowRunReport, encodeWorkflowRunTail } from '../lib/workflow-runtime'
+import { getRemoteConnection, isCloudRemoteMode } from '../remote/browser'
 
 /**
  * 宿主拒绝理由 → 界面上看得懂的话。错误码原样回显等于把内部术语甩给用户，
@@ -160,6 +161,7 @@ export function useAgent(sessionId: string) {
   // 工具列表，也进不了执行路径。放 effect 而不是 makePorts 里 —— makePorts 是
   // useMemo，在渲染期做副作用会破坏 React 的纯渲染假设。
   useEffect(() => {
+    if (isCloudRemoteMode()) return
     toolRegistry.setAgentActionCapabilities({
       browser: settings.browserUseEnabled,
       computer: settings.computerUseEnabled,
@@ -306,6 +308,10 @@ export function useAgent(sessionId: string) {
    *  返回 true 表示运行真正开始（排队消息 flush 据此决定是否放回队首）。 */
   const sendMessage = useCallback(
     async (content: string, attachments?: MessageAttachment[], taskMode?: TaskMode, skills?: MessageSkillSnapshot[]): Promise<boolean> => {
+      if (isCloudRemoteMode() && getRemoteConnection().state !== 'connected') {
+        setError(i18n.t('remoteAccess.cloudDisconnected'))
+        return false
+      }
       // Prevent concurrent sends on the same session（per-session 粒度，不阻塞其他会话并发）
       if (useChatStore.getState().rewindingSessionIds.has(sessionId) || getSessionAbortController(sessionId)) {
         setError(i18n.t('agent.busy'))
@@ -347,8 +353,15 @@ export function useAgent(sessionId: string) {
       // 宿主模式（批次 B · P4）：把这一轮整个交给主进程 AgentHost
       // ——界面状态一律靠事件回流，本地不再跑循环。
       if (hostMode) {
-        if (taskMode === 'goal' && content.trim()) useGoalStore.getState().setGoal(sessionId, content.trim())
-        const catalog = useSkillsStore.getState().getSkillCatalog()
+        const cloudRemote = isCloudRemoteMode()
+        if (cloudRemote) {
+          try { await prepareCloudSession(sessionId) } catch {
+            setError(i18n.t('remoteAccess.cloudSessionUnavailable'))
+            return false
+          }
+        }
+        if (!cloudRemote && taskMode === 'goal' && content.trim()) useGoalStore.getState().setGoal(sessionId, content.trim())
+        const catalog = cloudRemote ? [] : useSkillsStore.getState().getSkillCatalog()
         try {
           const res = await agentClient.send({
             type: 'run',
@@ -359,9 +372,9 @@ export function useAgent(sessionId: string) {
             skills,
             settings,
             skillCatalog: catalog,
-            skillReminder: buildRelevantSkillReminder(content, catalog) ?? undefined,
-            goal: useGoalStore.getState().bySession[sessionId] ?? null,
-            todos: useTodoStore.getState().bySession[sessionId] ?? [],
+            skillReminder: cloudRemote ? undefined : buildRelevantSkillReminder(content, catalog) ?? undefined,
+            goal: cloudRemote ? undefined : useGoalStore.getState().bySession[sessionId],
+            todos: cloudRemote ? [] : useTodoStore.getState().bySession[sessionId] ?? [],
           })
           if (!res.ok) setError(hostRejectionText(res.error))
           else setError(null)
@@ -499,6 +512,7 @@ export function useAgent(sessionId: string) {
    *  剩余排队消息由新 run 正常结束后的自动 flush 继续 FIFO 逐条发出。 */
   const sendQueuedNow = useCallback(
     async (item: QueuedMessageItem) => {
+      if (isCloudRemoteMode() && getRemoteConnection().state !== 'connected') return false
       if (queuedSendInFlight.has(sessionId) || useChatStore.getState().rewindingSessionIds.has(sessionId)) return false
       queuedSendInFlight.add(sessionId)
       try {
@@ -553,6 +567,7 @@ export function useAgent(sessionId: string) {
    *  仅两处差异：trigger 标记为 'manual'、支持可选自定义指令（留空则行为等同自动压缩）。 */
   const manualCompact = useCallback(
     async (customInstructions?: string): Promise<boolean> => {
+      if (isCloudRemoteMode() && getRemoteConnection().state !== 'connected') return false
       if (useChatStore.getState().rewindingSessionIds.has(sessionId)) return false
       // 同 abort：压缩也必须先问实模式。凭未解析的 null 落回本地路径，会与宿主
       // 同时对同一会话做原子重写（compactMessages 是整段覆盖，两边各写一次就互相踩）
@@ -767,6 +782,7 @@ export function useAgent(sessionId: string) {
   // 但卡片不能永远空转），并按 assistantMessageId 把消息里卡在 running 的尾巴补成终态。
   // 终态快照不回灌 store——settle 时的尾巴更新已落库，这里只修崩溃留下的残局。
   useEffect(() => {
+    if (isCloudRemoteMode()) return
     let cancelled = false
     void (async () => {
       try {
@@ -814,6 +830,7 @@ export function useAgent(sessionId: string) {
   }, [])
 
   const abort = useCallback(async (): Promise<boolean> => {
+    if (isCloudRemoteMode() && getRemoteConnection().state !== 'connected') return false
     const state = useChatStore.getState()
     if (state.stoppingSessionIds.has(sessionId)) return false
     state.setStopping(sessionId, true)
@@ -829,7 +846,7 @@ export function useAgent(sessionId: string) {
         void agentClient.resync(sessionId)
         return false
       }
-      void ipc.cancelSessionCommands(sessionId).catch(() => undefined)
+      if (!isCloudRemoteMode()) void ipc.cancelSessionCommands(sessionId).catch(() => undefined)
       useInteractiveStore.getState().cancelQuestion(sessionId)
       setError(null)
       return true

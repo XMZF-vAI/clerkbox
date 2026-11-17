@@ -19,6 +19,9 @@ import CommandPalette from './components/ui/CommandPalette'
 import { applyColorScheme, applyAppFont, applyUiScale, resolveSeed } from './lib/theme-engine'
 import { I18nProvider } from './components/I18nProvider'
 import { isWebUIMode } from './lib/ipc-client'
+import { getRemoteBootstrap, isCloudRemoteMode } from './remote/browser'
+import Modal from './components/ui/Modal'
+import { useTranslation } from 'react-i18next'
 import { useIsMobile } from './hooks/use-mobile'
 import { useGlobalShortcuts } from './hooks/use-global-shortcuts'
 import { VibeResourceBoundary } from './components/vibe/VibeErrorBoundary'
@@ -88,16 +91,19 @@ function ThemeProvider({ children }: { children: React.ReactNode }) {
 }
 
 export default function App() {
+  const cloudRemote = isCloudRemoteMode()
   // 侧边栏折叠态在 ui-store（命令面板/快捷键可驱动）；移动端抽屉仍为本地状态
   const sidebarCollapsed = useUIStore((s) => s.sidebarCollapsed)
   const toggleSidebar = useUIStore((s) => s.toggleSidebar)
   useGlobalShortcuts()
   const showSettings = useSettingsStore((s) => s.showSettings)
-  const showSkillStore = useUIStore((s) => s.showSkillStore)
-  const showScheduledTasks = useUIStore((s) => s.showScheduledTasks)
+  const requestedSkillStore = useUIStore((s) => s.showSkillStore)
+  const requestedScheduledTasks = useUIStore((s) => s.showScheduledTasks)
+  const showSkillStore = requestedSkillStore && !cloudRemote
+  const showScheduledTasks = requestedScheduledTasks && !cloudRemote
   // 定时任务执行队列：队首任务由不可见的 TaskRunHost 承载
   const headTaskRun = useScheduledTasksStore((s) => s.queue[0])
-  const isVibeMode = useVibeStore((s) => s.isVibeMode)
+  const isVibeMode = useVibeStore((s) => s.isVibeMode) && !cloudRemote
   const readingOpacity = useVibeStore((s) => s.readingOpacity)
   const vibeSidebarOpen = useUIStore((s) => s.vibeSidebarOpen)
   const commandPaletteOpen = useUIStore((s) => s.commandPaletteOpen)
@@ -137,16 +143,17 @@ export default function App() {
 
   // 启动后稍作空闲预取设置页 chunk，首次打开即点即开、不再闪白（延迟加载，不影响启动）
   useEffect(() => {
+    if (cloudRemote) return
     const timer = window.setTimeout(() => {
       void import('./components/settings/SettingsPage')
       void import('./components/settings/MSettingsPage')
     }, 2500)
     return () => window.clearTimeout(timer)
-  }, [])
+  }, [cloudRemote])
 
   // 老用户迁移：把扁平 customModels 归并成 providers（必须等水合完成再读 state）
   useEffect(() => {
-    if (!hydrated) return
+    if (!hydrated || cloudRemote) return
     migrateProvidersIfNeeded()
     void hydrateProviderApiKeys()
     void useAccountStore.getState().init()
@@ -164,7 +171,7 @@ export default function App() {
       cleanupUpdater()
       cleanupScheduledTasks()
     }
-  }, [hydrated])
+  }, [hydrated, cloudRemote])
 
   // 圆角 + transform 创建包含块，使内部 fixed 元素（弹窗、VIBE 控件）也被圆角裁剪
   // WebUI 模式运行在浏览器标签页中，不需要窗口圆角和细边框
@@ -229,11 +236,11 @@ export default function App() {
             )}
           </main>
         </div>
-        <AgentActionBridge key="agent-bridge" />
+        {!cloudRemote && <AgentActionBridge key="agent-bridge" />}
         {isVibeMode && vibeSidebarOpen && <VibeSessionDrawer />}
         <Suspense fallback={null}>
           {showSettings && (
-            isMobile ? (
+            cloudRemote ? <RemotePreferences onClose={() => useSettingsStore.getState().updateSettings({ showSettings: false })} /> : isMobile ? (
               <MSettingsPage onClose={() => useSettingsStore.getState().updateSettings({ showSettings: false })} />
             ) : (
               <SettingsPage onClose={() => useSettingsStore.getState().updateSettings({ showSettings: false })} />
@@ -253,7 +260,7 @@ export default function App() {
         <CommandPalette />
         <Suspense fallback={null}>{content}</Suspense>
         {/* 定时任务执行宿主：全局唯一实例，队首任务到点即在此运行（onboarding 完成后） */}
-        {hasCompletedOnboarding && headTaskRun && (
+        {!cloudRemote && hasCompletedOnboarding && headTaskRun && (
           <TaskRunHost
             key={headTaskRun.runId}
             runId={headTaskRun.runId}
@@ -266,5 +273,20 @@ export default function App() {
       </I18nProvider>
     </ThemeProvider>
   )
+}
+
+function RemotePreferences({ onClose }: { onClose(): void }) {
+  const { t } = useTranslation()
+  const theme = useSettingsStore(state => state.theme)
+  const language = useSettingsStore(state => state.language)
+  const update = useSettingsStore(state => state.updateSettings)
+  return <Modal title={t('remoteAccess.cloudPreferences')} onClose={onClose} widthClass="w-[480px]">
+    <div className="space-y-5">
+      <p className="text-ui-sm leading-relaxed text-dark-onSurfaceVariant">{t('remoteAccess.cloudPreferencesNote')}</p>
+      <div><label htmlFor="remote-theme" className="mb-2 block text-ui-sm">{t('remoteAccess.cloudTheme')}</label><select id="remote-theme" className="md-input w-full min-h-11 bg-dark-surfaceContainer rounded-md3-sm px-3 text-ui-sm" value={theme} onChange={event => update({ theme: event.target.value as 'dark' | 'light' | 'system' })}><option value="system">{t('remoteAccess.cloudThemeSystem')}</option><option value="dark">{t('remoteAccess.cloudThemeDark')}</option><option value="light">{t('remoteAccess.cloudThemeLight')}</option></select></div>
+      <div><label htmlFor="remote-language" className="mb-2 block text-ui-sm">{t('remoteAccess.cloudLanguage')}</label><select id="remote-language" className="md-input w-full min-h-11 bg-dark-surfaceContainer rounded-md3-sm px-3 text-ui-sm" value={language} onChange={event => update({ language: event.target.value as 'zh-CN' | 'en' })}><option value="zh-CN">中文</option><option value="en">English</option></select></div>
+      <div className="rounded-md3-sm border border-dark-onSurfaceVariant/15 p-3 text-ui-xs leading-relaxed text-dark-onSurfaceVariant"><span className="block font-medium text-dark-onSurface">{t('remoteAccess.cloudWorkspace')}</span><code className="break-all">{getRemoteBootstrap()?.workspace}</code></div>
+    </div>
+  </Modal>
 }
 //别蹦别蹦别蹦

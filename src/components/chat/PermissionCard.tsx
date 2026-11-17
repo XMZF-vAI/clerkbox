@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Ban, Check, ChevronDown, ChevronRight, ChevronUp, Clock, GitBranch, ShieldAlert, ShieldCheck, ShieldQuestion } from 'lucide-react'
 import { DiffLineList } from './tool-renderers/ToolShell'
 import { useChatStore } from '../../stores/chat-store'
 import { agentClient } from '../../lib/agent-client'
 import { isWebUIMode } from '../../lib/ipc-client'
+import { canRemoteApprove, getRemoteConnection, isCloudRemoteMode, subscribeRemoteConnection } from '../../remote/browser'
 import { usePermissionStore, resolveLocalPermission, type HostPermission, type LocalPermission } from '../../stores/permission-store'
 import { useSettingsStore } from '../../stores/settings-store'
 import { buildSuggestedRule } from '../../lib/permission-rules'
@@ -100,6 +101,7 @@ function persistProjectRule(
   decision: PermissionDecision,
   target: { tool: string; args: Record<string, unknown>; workingDir: string }
 ): void {
+  if (isCloudRemoteMode()) return
   if (decision !== 'allow_project' && decision !== 'deny_always') return
   const rule = buildSuggestedRule(
     target,
@@ -357,7 +359,7 @@ function WorkflowPermissionCard({ request, onResolve, interactive = true, vibe =
           key={request.id}
           vibe={vibe}
           onResolve={resolve}
-          options={APPROVAL_OPTIONS.map((option) => ({
+          options={APPROVAL_OPTIONS.filter(option => !isCloudRemoteMode() || option.decision === 'allow_once' || option.decision === 'deny').map((option) => ({
             ...option,
             label: t(option.decision === 'allow_session' ? 'chat.permission.allowSessionWorkflow' : option.labelKey),
           }))}
@@ -417,6 +419,7 @@ export function PermissionCard({ request, onResolve, interactive = true, vibe = 
   const dangerOnce = preview.kind === 'command' && preview.risk === 'dangerous'
   const projectRules = supportsProjectRules(preview)
   const approvalOptions = APPROVAL_OPTIONS
+    .filter(option => !isCloudRemoteMode() || option.decision === 'allow_once' || option.decision === 'deny')
     .filter((option) => !(dangerOnce && ['allow_session', 'allow_project', 'deny_always'].includes(option.decision)))
     .filter((option) => projectRules || !['allow_project', 'deny_always'].includes(option.decision))
     .map((option) => ({ ...option, label: t(option.labelKey) }))
@@ -515,6 +518,9 @@ const NO_PENDING: HostPermission[] = []
 
 function HostPermissionCard({ request, vibe }: { request: HostPermission; vibe: boolean }) {
   const { t } = useTranslation()
+  useSyncExternalStore(subscribeRemoteConnection, getRemoteConnection)
+  const [resolving, setResolving] = useState(false)
+  const [resolutionError, setResolutionError] = useState(false)
   const preview = useMemo(
     () => buildPermissionPreview(request.tool, request.args, { workingDir: request.workingDir }),
     [request.tool, request.args, request.workingDir]
@@ -531,25 +537,33 @@ function HostPermissionCard({ request, vibe }: { request: HostPermission; vibe: 
     [request.requestId, request.tool, request.requestedAt, preview]
   )
 
-  const resolve = (decision: PermissionDecision) => {
+  const resolve = async (decision: PermissionDecision) => {
+    const cloud = isCloudRemoteMode()
+    if (resolving || (cloud && (!canRemoteApprove() || !['allow_once', 'deny'].includes(decision)))) return
+    setResolving(true)
+    setResolutionError(false)
     // 项目级规则由渲染层 settings 落盘（宿主下一轮 run 的 settings 快照会带上）
     persistProjectRule(decision, { tool: request.tool, args: request.args, workingDir: request.workingDir })
     // 只回布尔给宿主不够：「本会话允许」要让它记住匹配键，否则后台无人看管的 run
     // 会带着同一个目标一次次撞回 120s 超时
-    void agentClient.send({
+    try {
+      const result = await agentClient.send({
       type: 'permission.resolve',
       sessionId: request.sessionId,
       requestId: request.requestId,
       approved: decision === 'allow_once' || decision === 'allow_session' || decision === 'allow_project',
-      scope: decisionToScope(decision),
-    })
+      scope: cloud ? 'once' : decisionToScope(decision),
+      })
+      if (!result.ok) throw new Error('Approval rejected')
     // 乐观收尾；宿主的 permission.settled 到达时再 settle 一次是幂等的
-    usePermissionStore.getState().settle(request.sessionId, request.requestId)
+      usePermissionStore.getState().settle(request.sessionId, request.requestId)
+    } catch { setResolutionError(true) }
+    finally { setResolving(false) }
   }
 
   // 远程视图（WebUI）只读：宿主侧 permission.resolve 对远程命令一律拒绝，
   // 这里把按钮画出来就是骗人——点下去卡片乐观收尾，宿主那边却在等 120s 超时。
-  if (isWebUIMode) {
+  if (isWebUIMode && !canRemoteApprove()) {
     return (
       <div className="space-y-1.5">
         <p className={`text-[11px] ${vibe ? 'text-white/55' : 'text-dark-onSurfaceVariant/70'}`}>
@@ -560,7 +574,7 @@ function HostPermissionCard({ request, vibe }: { request: HostPermission; vibe: 
     )
   }
 
-  return <PermissionCard request={view} onResolve={(_id, decision) => resolve(decision)} interactive vibe={vibe} />
+  return <div className="space-y-1.5">{resolutionError && <p role="alert" className="text-ui-xs text-md-error">{t('remoteAccess.cloudApprovalFailed')}</p>}<PermissionCard request={view} onResolve={(_id, decision) => { void resolve(decision) }} interactive={!resolving} vibe={vibe} /></div>
 }
 
 /**

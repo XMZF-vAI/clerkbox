@@ -92,6 +92,7 @@ export type AgentEvent =
   /** 审批收尾：批准/拒绝/超时/运行结束回收都发这条，卡片才不会永远挂着 */
   | { type: 'permission.settled'; sessionId: string; requestId: string; approved: boolean; timedOut: boolean }
   | { type: 'question.requested'; sessionId: string; requestId: string; question: unknown } // QuestionCard
+  | { type: 'question.settled'; sessionId: string; requestId: string; timedOut: boolean }
   | { type: 'queue.snapshot';   sessionId: string; items: QueuedMessageItem[] }
   | { type: 'compaction.status'; sessionId: string; compacting: boolean }
   | { type: 'run.status';       sessionId: string; status: 'working' | 'awaiting' | 'idle'; error?: string }

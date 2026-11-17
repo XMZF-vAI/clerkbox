@@ -19,7 +19,7 @@ export default function QrCode({ text, size = 168 }: QrCodeProps) {
     let cancelled = false
     QRCode.toString(text, {
       type: 'svg',
-      margin: 0,
+      margin: 4,
       width: size,
       errorCorrectionLevel: 'M',
       color: { dark: '#111111', light: '#ffffff' },
@@ -32,8 +32,8 @@ export default function QrCode({ text, size = 168 }: QrCodeProps) {
   if (failed || !svg) return null
   return (
     <div
-      className="bg-white p-2 rounded-md3-md inline-flex [&>svg]:block"
-      style={{ width: size + 16, height: size + 16 }}
+      className="bg-white p-2 rounded-md3-md inline-flex [&>svg]:block [&>svg]:h-auto [&>svg]:w-full"
+      style={{ width: size + 16, maxWidth: '100%', aspectRatio: '1' }}
       // 内容为 qrcode 库对本地 URL 字符串生成的纯 path SVG，无外部输入参与拼装
       dangerouslySetInnerHTML={{ __html: svg }}
     />

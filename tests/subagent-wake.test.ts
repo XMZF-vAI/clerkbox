@@ -31,11 +31,12 @@ describe('两种宿主都装配唤醒', () => {
     expect(useAgent).toContain('ctx.requestWake = () => wakeFnRef.current?.()')
   })
 
-  it('主进程宿主：wakeIdleSession + startRun 的 wake 分支不落 user 消息', () => {
+  it('主进程宿主：wake 保留原运行来源，不落 user 消息', () => {
     expect(host).toContain('ctx.requestWake = () => this.wakeIdleSession(s)')
     expect(host).toContain('private wakeIdleSession(s: HostSession): void')
     expect(host).toContain('if (s.run || ctx.pendingSubagentNotifications.length === 0) return')
-    expect(host).toContain('void this.startRun(s, { ...cmd, content: \'\' }, { wake: true })')
+    expect(host).toContain('void this.startRun(s, { ...cmd, content: \'\' }, { ...this.snapshotOrigins.get(s.sessionId), wake: true })')
+    expect(host).toContain('this.snapshotOrigins.set(sessionId, meta)')
     expect(host).toContain('const userMsg: Message | null = meta.wake ? null : {')
     expect(host).toContain('if (userMsg) this.persistMessage(s, userMsg)')
     expect(host).toContain('!userMsg ? history')

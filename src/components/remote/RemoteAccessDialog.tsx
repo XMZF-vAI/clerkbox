@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { AlertCircle, Check, ChevronRight, Copy, ExternalLink, Globe, Loader2, MessageSquare, Play, Smartphone, Square, SlidersHorizontal } from 'lucide-react'
+import { AlertCircle, Check, ChevronRight, Copy, ExternalLink, FolderOpen, Globe, Loader2, MessageSquare, Play, RefreshCw, ShieldCheck, Smartphone, Square, SlidersHorizontal, Trash2 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import Modal from '../ui/Modal'
 import QrCode from '../ui/QrCode'
@@ -8,6 +8,10 @@ import { ChannelBadge } from '../bots/channelIcons'
 import { useBots } from '../bots/useBots'
 import { ipc } from '../../lib/ipc-client'
 import { useSettingsStore } from '../../stores/settings-store'
+import { useChatStore } from '../../stores/chat-store'
+import { agentClient } from '../../lib/agent-client'
+import { attachAgentEvents } from '../../lib/agent-event-apply'
+import type { RemoteAccessStatus } from '../../remote/protocol'
 import type { BotProvider } from '../../../electron/im-bots/types'
 
 interface RemoteAccessDialogProps {
@@ -48,6 +52,7 @@ function parseWebUIRuntime(url: string): WebUIRuntime | null {
  */
 export default function RemoteAccessDialog({ onClose }: RemoteAccessDialogProps) {
   const { t } = useTranslation()
+  const [accessTab, setAccessTab] = useState<'cloud' | 'local'>('cloud')
   const { bots, loading: botsLoading } = useBots()
 
   // ── WebUI 控制（自 Sidebar 原样搬运）──
@@ -217,7 +222,10 @@ export default function RemoteAccessDialog({ onClose }: RemoteAccessDialogProps)
         bodyClassName="p-0"
         titleIcon={<Globe size={18} />}
       >
-        <div className="grid md:grid-cols-2">
+        <div role="tablist" aria-label={t('remoteAccess.title')} className="flex gap-1 border-b border-dark-onSurfaceVariant/10 px-5 pt-3">
+          {(['cloud', 'local'] as const).map(tab => <button type="button" role="tab" id={`remote-tab-${tab}`} aria-controls={`remote-panel-${tab}`} aria-selected={accessTab === tab} key={tab} onClick={() => setAccessTab(tab)} className={`md-focus min-h-11 border-b-2 px-4 py-2 text-ui-sm transition-colors ${accessTab === tab ? 'border-md-primary text-md-primary' : 'border-transparent text-dark-onSurfaceVariant hover:bg-dark-surfaceContainer'}`}>{t(tab === 'cloud' ? 'remoteAccess.cloudTab' : 'remoteAccess.localTab')}</button>)}
+        </div>
+        {accessTab === 'cloud' ? <div role="tabpanel" id="remote-panel-cloud" aria-labelledby="remote-tab-cloud"><CloudRemotePanel /></div> : <div role="tabpanel" id="remote-panel-local" aria-labelledby="remote-tab-local" className="grid md:grid-cols-2">
           {/* ── 左栏：手机访问（WebUI）── */}
           <section className="min-w-0 p-6 max-md:p-4 md:border-r border-dark-onSurfaceVariant/10 max-md:border-b max-md:border-r-0">
             <div className="flex items-center gap-2.5 mb-2">
@@ -402,7 +410,7 @@ export default function RemoteAccessDialog({ onClose }: RemoteAccessDialogProps)
               </button>
             </div>
           </section>
-        </div>
+        </div>}
       </Modal>
 
       {botsOpen && (
@@ -417,3 +425,91 @@ export default function RemoteAccessDialog({ onClose }: RemoteAccessDialogProps)
     </>
   )
 }
+
+function CloudRemotePanel() {
+  const { t } = useTranslation()
+  const [status, setStatus] = useState<RemoteAccessStatus | null>(null)
+  const [workspace, setWorkspace] = useState(() => {
+    const chat = useChatStore.getState()
+    return chat.sessions.find(session => session.id === chat.activeSessionId)?.workingDir || ''
+  })
+  const [approve, setApprove] = useState(false)
+  const [files, setFiles] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const operation = useRef(false)
+  const [error, setError] = useState('')
+  const [copied, setCopied] = useState(false)
+  const [now, setNow] = useState(Date.now())
+  const [verified, setVerified] = useState<Record<string, boolean>>({})
+  useEffect(() => {
+    let active = true
+    const accept = (value: RemoteAccessStatus) => {
+      if (!active) return
+      setStatus(value)
+      if (value.workspace) setWorkspace(value.workspace)
+    }
+    const unsubscribe = ipc.onRemoteStatus(accept)
+    void ipc.remoteGetStatus().then(accept).catch(() => { if (active) setError('remoteAccess.cloudOperationFailed') })
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => { active = false; unsubscribe(); clearInterval(timer) }
+  }, [])
+  useEffect(() => { if (!copied) return; const timer = setTimeout(() => setCopied(false), 2000); return () => clearTimeout(timer) }, [copied])
+  useEffect(() => { setCopied(false) }, [status?.url])
+  const act = async (operationFn: () => Promise<RemoteAccessStatus>, enable = false) => {
+    if (operation.current) return
+    operation.current = true
+    setBusy(true)
+    setError('')
+    let enableAttempted = false
+    let ownerAttached = false
+    try {
+      if (enable) {
+        const chat = useChatStore.getState()
+        if (chat.streamingSessionIds.size || chat.compactingSessionIds.size || chat.stoppingSessionIds.size || chat.rewindingSessionIds.size) throw new Error('busy')
+        enableAttempted = true
+        agentClient.stop()
+        await ipc.remotePrepare()
+        await attachAgentEvents()
+        ownerAttached = true
+      }
+      const result = await operationFn()
+      setStatus(result)
+    } catch (reason) { setError(reason instanceof Error && reason.message === 'busy' ? 'remoteAccess.cloudAgentBusy' : 'remoteAccess.cloudOperationFailed') }
+    finally {
+      if (enableAttempted && !ownerAttached) {
+        // Main may already own the agent even if the network connection failed.
+        agentClient.stop()
+        try { await attachAgentEvents() } catch { setError('remoteAccess.cloudOperationFailed') }
+      }
+      operation.current = false
+      setBusy(false)
+    }
+  }
+  const validInvite = !!status?.url && (status.inviteExpiresAt || 0) > now
+  const statusError = status?.error === 'remote-room-authentication-failed'
+    ? 'remoteAccess.cloudCredentialsExpired'
+    : status?.error === 'remote-restore-failed'
+      ? 'remoteAccess.cloudRestoreFailed'
+      : status?.state === 'error' ? 'remoteAccess.cloudConnectionError' : ''
+  const visibleError = statusError || error
+  const buttonClass = 'md-focus inline-flex min-h-11 items-center justify-center gap-2 rounded-md3-sm px-4 py-2 text-ui-sm disabled:opacity-40 transition-colors'
+  return <section className="space-y-5 p-6 max-md:p-4" aria-labelledby="cloud-remote-title">
+    <div className="flex items-start gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md3-md bg-md-primary/10 text-md-primary"><Globe size={21} /></span><div><h3 id="cloud-remote-title" className="text-ui-base font-semibold text-dark-onSurface">{t('remoteAccess.cloudTitle')}</h3><p className="mt-1 text-ui-xs leading-relaxed text-dark-onSurfaceVariant">{t('remoteAccess.cloudDescription')}</p></div><span role="status" className="ml-auto shrink-0 rounded-full border border-dark-onSurfaceVariant/15 px-2.5 py-1 text-ui-xs text-dark-onSurfaceVariant">{t(`remoteAccess.cloudState_${status?.state || 'disabled'}`)}</span></div>
+    {visibleError && <p role="alert" className="flex gap-2 rounded-md3-sm border border-md-error/20 bg-md-error/10 p-3 text-ui-xs leading-relaxed text-md-error"><AlertCircle size={15} className="shrink-0" />{t(visibleError)}</p>}
+    {!status && !error && <p role="status" className="flex items-center gap-2 text-ui-xs text-dark-onSurfaceVariant"><Loader2 size={14} className="animate-spin" />{t('common.loading')}</p>}
+    <div className="grid gap-5 md:grid-cols-[minmax(0,1fr)_288px]">
+      <div className="min-w-0 space-y-4">
+        <div><label htmlFor="cloud-workspace" className="mb-2 block text-ui-sm font-medium text-dark-onSurface">{t('remoteAccess.cloudWorkspace')}</label><div className="flex gap-2"><input id="cloud-workspace" value={workspace} readOnly placeholder={t('remoteAccess.cloudSelectWorkspace')} className="min-w-0 flex-1 rounded-md3-sm border border-dark-onSurfaceVariant/20 bg-dark-surfaceContainer px-3 py-2 text-ui-xs text-dark-onSurfaceVariant" /><button type="button" className={`${buttonClass} border border-dark-onSurfaceVariant/20 hover:bg-dark-surfaceContainer`} disabled={busy || status?.enabled} onClick={() => { void ipc.selectFolder().then(path => { if (path) setWorkspace(path) }).catch(() => setError('remoteAccess.cloudOperationFailed')) }}><FolderOpen size={15} /><span>{t('remoteAccess.cloudChooseFolder')}</span></button></div><p className="mt-2 text-ui-xs leading-relaxed text-dark-onSurfaceVariant/70">{t('remoteAccess.cloudWorkspaceNote')}</p></div>
+        <fieldset disabled={busy || status?.enabled} className="space-y-3 rounded-md3-md border border-dark-onSurfaceVariant/15 p-4 disabled:opacity-70"><legend className="px-1 text-ui-xs font-medium text-dark-onSurface">{t('remoteAccess.cloudPermissions')}</legend><p className="text-ui-xs leading-relaxed text-dark-onSurfaceVariant">{t('remoteAccess.cloudControlNote')}</p><label className="flex min-h-8 cursor-pointer items-start gap-2 text-ui-xs leading-relaxed text-dark-onSurface"><input className="mt-0.5 accent-md-primary" type="checkbox" checked={approve} onChange={event => setApprove(event.target.checked)} />{t('remoteAccess.cloudAllowApprove')}</label><label className="flex min-h-8 cursor-pointer items-start gap-2 text-ui-xs leading-relaxed text-dark-onSurface"><input className="mt-0.5 accent-md-primary" type="checkbox" checked={files} onChange={event => setFiles(event.target.checked)} />{t('remoteAccess.cloudAllowFiles')}</label></fieldset>
+        <div className="flex flex-wrap gap-2">{status?.enabled ? <><button type="button" className={`${buttonClass} bg-md-primary text-md-onPrimary hover:bg-md-primary/90`} disabled={busy || status.state !== 'online'} onClick={() => { void act(ipc.remoteCreateInvite) }}><LinkIcon />{t('remoteAccess.cloudNewInvite')}</button><button type="button" className={`${buttonClass} border border-dark-onSurfaceVariant/20 hover:bg-dark-surfaceContainer`} disabled={busy} onClick={() => { void act(ipc.remoteDisable) }}><Square size={13} />{t('remoteAccess.cloudDisable')}</button></> : <button type="button" className={`${buttonClass} bg-md-primary text-md-onPrimary hover:bg-md-primary/90`} disabled={busy || !status || !workspace.trim()} onClick={() => { void act(() => ipc.remoteEnable({ workspace, approve, files }), true) }}>{busy ? <Loader2 size={15} className="animate-spin" /> : <Play size={15} />}{t('remoteAccess.cloudEnable')}</button>}</div>
+      </div>
+      <div className="flex min-w-0 flex-col items-center justify-center gap-3 rounded-md3-md border border-dark-onSurfaceVariant/15 bg-dark-surfaceContainer/30 p-5">{validInvite ? <><QrCode text={status!.url!} size={224} /><span className="text-center text-ui-xs text-dark-onSurfaceVariant">{t('remoteAccess.cloudInviteExpiry', { seconds: Math.max(0, Math.ceil(((status?.inviteExpiresAt || 0) - now) / 1000)) })}</span><button type="button" className={`${buttonClass} w-full border border-dark-onSurfaceVariant/20 hover:bg-dark-surfaceContainer`} onClick={() => { void navigator.clipboard.writeText(status!.url!).then(() => setCopied(true)).catch(() => setError('remoteAccess.webuiCopyError')) }}>{copied ? <Check size={15} /> : <Copy size={15} />}{t(copied ? 'remoteAccess.webuiCopied' : 'remoteAccess.cloudCopyInvite')}</button><p className="text-center text-ui-xs leading-relaxed text-dark-onSurfaceVariant/65">{t('remoteAccess.cloudInviteSecret')}</p></> : <><ShieldCheck size={30} className="text-md-primary/70" /><p className="text-center text-ui-xs leading-relaxed text-dark-onSurfaceVariant">{t(status?.enabled ? 'remoteAccess.cloudInviteHint' : 'remoteAccess.cloudDisabledHint')}</p></>}</div>
+    </div>
+    {status?.enabled && <p className="text-ui-xs leading-relaxed text-dark-onSurfaceVariant/70">{t('remoteAccess.cloudInviteRotationNote')}</p>}
+    {status?.pending.map(peer => <div key={peer.id} className="rounded-md3-md border border-md-primary/30 bg-md-primary/5 p-4"><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-ui-sm font-medium text-dark-onSurface">{t('remoteAccess.cloudPairRequest', { name: peer.name })}</p><code className="mt-2 block text-xl font-semibold tracking-[.25em] text-md-primary">{peer.code}</code></div><div className="flex gap-2"><button type="button" className={`${buttonClass} border border-dark-onSurfaceVariant/20`} disabled={busy} onClick={() => { void act(() => ipc.remoteApprovePair(peer.id, false)) }}>{t('remoteAccess.cloudReject')}</button><button type="button" className={`${buttonClass} bg-md-primary text-md-onPrimary`} disabled={busy || !verified[peer.id]} onClick={() => { void act(() => ipc.remoteApprovePair(peer.id, true)) }}>{t('remoteAccess.cloudApproveDevice')}</button></div></div><label className="mt-3 flex min-h-9 items-center gap-2 text-ui-xs text-dark-onSurfaceVariant"><input type="checkbox" className="accent-md-primary" checked={verified[peer.id] || false} onChange={event => setVerified(value => ({ ...value, [peer.id]: event.target.checked }))} />{t('remoteAccess.cloudCodeVerified')}</label></div>)}
+    {!!status?.devices.length && <div className="space-y-2 border-t border-dark-onSurfaceVariant/15 pt-4"><h4 className="text-ui-xs font-medium text-dark-onSurfaceVariant">{t('remoteAccess.cloudDeviceList')}</h4>{status.devices.map(device => <div key={device.id} className="flex items-center gap-3 rounded-md3-sm bg-dark-surfaceContainer/40 px-3 py-2"><ShieldCheck size={16} className="shrink-0 text-md-primary" /><div className="min-w-0 flex-1"><span className="block truncate text-ui-sm text-dark-onSurface">{device.name}</span><span className="text-ui-xs text-dark-onSurfaceVariant/70">{t(device.online ? 'remoteAccess.cloudDeviceOnline' : 'remoteAccess.cloudDeviceOffline')}</span></div><button type="button" className={`${buttonClass} border border-dark-onSurfaceVariant/15 hover:bg-md-error/10`} disabled={busy} onClick={() => { void ipc.confirmDialog(t('remoteAccess.cloudRevoke'), t('remoteAccess.cloudRevokeConfirm', { name: device.name })).then(accepted => { if (accepted) void act(() => ipc.remoteRevokeDevice(device.id)) }) }}><Trash2 size={14} />{t('remoteAccess.cloudRevoke')}</button></div>)}</div>}
+    <p className="flex gap-2 text-ui-xs leading-relaxed text-dark-onSurfaceVariant/65"><ShieldCheck size={15} className="mt-0.5 shrink-0" /><span>{t('remoteAccess.cloudPrivacy')} {t('remoteAccess.cloudDisconnectNote')}</span></p>
+  </section>
+}
+
+function LinkIcon() { return <RefreshCw size={15} /> }

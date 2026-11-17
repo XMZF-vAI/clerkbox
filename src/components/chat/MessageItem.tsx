@@ -10,6 +10,7 @@ import { CopyButton, MessageActions } from './MessageActions'
 import { isRenderedByUnifiedEntry } from './tool-renderers/resolveRenderer'
 import { ToolCallRow } from './ToolCallRow'
 import { SubAgentCard } from './SubAgentCard'
+import PathImageAttachment from './PathImageAttachment'
 
 interface MessageItemProps {
   message: Message
@@ -321,7 +322,7 @@ function MessageItem({ message, vibe = false, sessionId, extraActions }: Message
   if (!isUser) return null
 
   // 用户消息附件：图片缩略图 + 文件 chip（与正文气泡分开渲染，正文为空时也要显示）
-  const userImages = (message.attachments || []).filter((a) => a.kind === 'image' && a.dataUrl)
+  const userImages = (message.attachments || []).filter((a) => a.kind === 'image')
   const userFiles = (message.attachments || []).filter((a) => a.kind === 'file')
 
   // 发送时选中的任务工作流与 Skill 快照都嵌入对应的用户消息气泡。
@@ -347,13 +348,13 @@ function MessageItem({ message, vibe = false, sessionId, extraActions }: Message
             {userImages.length > 0 && (
               <div className="flex flex-wrap gap-1.5 justify-end">
                 {userImages.map((a) => (
-                  <img
+                  a.dataUrl ? <img
                     key={a.id}
                     src={a.dataUrl}
                     alt={a.name}
                     title={a.path || a.name}
                     className="max-h-40 max-w-[240px] rounded-md3-md object-cover border border-dark-onSurfaceVariant/15"
-                  />
+                  /> : <PathImageAttachment key={a.id} attachment={a} vibe={vibe} />
                 ))}
               </div>
             )}

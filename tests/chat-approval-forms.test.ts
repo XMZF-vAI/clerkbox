@@ -30,6 +30,7 @@ function renderer(source: string, name: string, dependencies: Record<string, unk
     useState,
     useRef: (initial: any) => useState({ current: initial })[0],
     useMemo: (factory: () => unknown) => factory(),
+    useSyncExternalStore: (_subscribe: unknown, getSnapshot: () => unknown) => getSnapshot(),
     useTranslation: () => ({ t: (key: string) => key }),
     ...dependencies,
   }
@@ -171,8 +172,7 @@ function pending(id = 'request-1', labels = ['A', 'B']): PendingQuestion {
   return { id, sessionId: 'session-1', questions: [{ id: 'q1', header: 'First', question: 'Choose', options: labels.map((label) => ({ label, description: '' })) }] }
 }
 
-function questionView() {
-  const resolveQuestion = vi.fn()
+function questionView(remote = { cloud: false, connected: true, control: true }, resolveQuestion = vi.fn()) {
   const state = { pendingQuestions: {} as Record<string, PendingQuestion | undefined>, resolveQuestion }
   const outer = renderer(questionSource, 'QuestionCard', {
     useInteractiveStore: (selector: (value: typeof state) => unknown) => selector(state),
@@ -185,7 +185,13 @@ function questionView() {
     const form = outer({ sessionId })
     if (!form) { mounted = undefined; tree = null; return }
     if (!mounted || mounted.key !== form.key) {
-      mounted = { key: form.key, render: renderer(questionSource, 'QuestionForm', { CircleHelp: 'icon', Check: 'icon', ChevronDown: 'icon' }) }
+      mounted = { key: form.key, render: renderer(questionSource, 'QuestionForm', {
+        CircleHelp: 'icon', Check: 'icon', ChevronDown: 'icon',
+        isCloudRemoteMode: () => remote.cloud,
+        getRemoteConnection: () => ({ state: remote.connected ? 'connected' : 'reconnecting' }),
+        getRemoteBootstrap: () => ({ capabilities: { control: remote.control } }),
+        subscribeRemoteConnection: () => () => {},
+      }) }
     }
     tree = mounted.render(form.props)
   }
@@ -307,5 +313,79 @@ describe('UI-09 question form isolation and validation', () => {
     view.show(pending())
     view.button('question.ignore').props.onClick()
     expect(view.resolveQuestion.mock.calls).toEqual([['session-1', 'request-1', {}]])
+  })
+
+  it('keeps cloud choices while offline and guards even a stale enabled click handler', async () => {
+    const remote = { cloud: true, connected: true, control: true }
+    const view = questionView(remote)
+    view.show(pending())
+    view.choose(2)
+    view.type('kept answer')
+    const oldSubmit = view.button('question.submit').props.onClick
+    remote.connected = false
+    await oldSubmit()
+    expect(view.resolveQuestion).not.toHaveBeenCalled()
+    view.refresh()
+    expect(view.button('question.submit').props.disabled).toBe(true)
+    expect(view.button('question.ignore').props.disabled).toBe(true)
+    await view.button('question.ignore').props.onClick()
+    expect(view.resolveQuestion).not.toHaveBeenCalled()
+    remote.connected = true
+    view.refresh()
+    expect(nodes(view.tree, 'input')[0].props.value).toBe('kept answer')
+    await view.button('question.submit').props.onClick()
+    expect(view.resolveQuestion).toHaveBeenCalledWith('session-1', 'request-1', { q1: ['kept answer'] })
+  })
+
+  it('disables both submit and skip for a cloud browser without control', async () => {
+    const view = questionView({ cloud: true, connected: true, control: false })
+    view.show(pending())
+    view.choose(0)
+    expect(view.button('question.submit').props.disabled).toBe(true)
+    expect(view.button('question.ignore').props.disabled).toBe(true)
+    await view.button('question.submit').props.onClick()
+    await view.button('question.ignore').props.onClick()
+    expect(view.resolveQuestion).not.toHaveBeenCalled()
+    expect(nodes(view.tree, 'p').some(node => node.props.children === 'question.readOnly')).toBe(true)
+  })
+
+  it('preserves the form after a rejected answer and retries with the original text', async () => {
+    const resolveQuestion = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce(undefined)
+    const view = questionView({ cloud: true, connected: true, control: true }, resolveQuestion)
+    view.show(pending())
+    view.choose(2)
+    view.type('original answer')
+    await view.button('question.submit').props.onClick()
+    view.refresh()
+    expect(nodes(view.tree, 'p').find(node => node.props.role === 'alert')?.props.children).toBe('question.submitFailed')
+    expect(nodes(view.tree, 'input')[0].props.value).toBe('original answer')
+    expect(view.button('question.submit').props.disabled).toBe(false)
+    await view.button('question.submit').props.onClick()
+    view.refresh()
+    expect(resolveQuestion.mock.calls).toEqual([
+      ['session-1', 'request-1', { q1: ['original answer'] }],
+      ['session-1', 'request-1', { q1: ['original answer'] }],
+    ])
+    expect(nodes(view.tree, 'p').find(node => node.props.role === 'alert')).toBeUndefined()
+  })
+
+  it('waits for receipt and prevents duplicate submissions or edits while sending', async () => {
+    let accept!: () => void
+    const resolveQuestion = vi.fn(() => new Promise<void>(resolve => { accept = resolve }))
+    const view = questionView({ cloud: true, connected: true, control: true }, resolveQuestion)
+    view.show(pending())
+    view.choose(0)
+    const submit = view.button('question.submit').props.onClick
+    const first = submit()
+    await submit()
+    view.refresh()
+    expect(resolveQuestion).toHaveBeenCalledOnce()
+    expect(view.button('question.submitting').props.disabled).toBe(true)
+    expect(view.button('question.ignore').props.disabled).toBe(true)
+    expect(nodes(view.tree, 'button')[1].props.disabled).toBe(true)
+    accept()
+    await first
+    view.refresh()
+    expect(view.button('question.submit').props.disabled).toBe(false)
   })
 })

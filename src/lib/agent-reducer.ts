@@ -28,6 +28,7 @@ export type StorePatch =
   | { kind: 'append-subagent-message'; sessionId: string; runId: string; message: Message }
   | { kind: 'update-subagent-message'; sessionId: string; runId: string; messageId: string; updates: Partial<Message> }
   | { kind: 'open-question'; sessionId: string; requestId: string; questions: UserQuestion[] }
+  | { kind: 'settle-question'; sessionId: string; requestId: string }
   /** 宿主待批审批：带 tool/args 才画得出富预览与「本会话允许」的匹配键 */
   | {
       kind: 'open-permission'
@@ -114,6 +115,8 @@ export function planAgentEvent(event: AgentEvent): StorePatch[] {
       return [{ kind: 'set-workflow-progress', sessionId: event.sessionId, toolCallId: event.toolCallId, snapshot: event.snapshot }]
     case 'question.requested':
       return [{ kind: 'open-question', sessionId: event.sessionId, requestId: event.requestId, questions: event.question as UserQuestion[] }]
+    case 'question.settled':
+      return [{ kind: 'settle-question', sessionId: event.sessionId, requestId: event.requestId }]
     case 'todos.updated':
       return [{ kind: 'set-todos', sessionId: event.sessionId, items: event.items }]
     case 'goal.updated':

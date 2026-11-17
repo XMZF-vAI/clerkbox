@@ -19,6 +19,7 @@ import RewindDialog from './RewindDialog'
 import { PermissionApprovalCard } from './PermissionCard'
 import { useUIStore } from '../../stores/ui-store'
 import ModelSetupGuidance from './ModelSetupGuidance'
+import { getRemoteConnection, isCloudRemoteMode } from '../../remote/browser'
 
 interface ChatPageProps {
   vibe?: boolean
@@ -33,7 +34,8 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
   const createSession = useChatStore((s) => s.createSession)
   // 界面模式：编程=按时段问候原文案；通用=固定一条工作导向问候
   const interfaceMode = useSettingsStore((s) => s.interfaceMode)
-  const modelConfigured = useSettingsStore((s) => !!s.baseUrl.trim() && !!s.model.trim())
+  const cloudRemote = isCloudRemoteMode()
+  const modelConfigured = useSettingsStore((s) => !!s.model.trim() && (cloudRemote || !!s.baseUrl.trim()))
   const modelLabel = useSettingsStore((s) => {
     const provider = s.providers.find((item) => item.id === s.activeProviderId)
     return provider?.models.find((item) => item.id === s.activeModelId)?.label || s.model
@@ -54,10 +56,11 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
   useEffect(() => {
     if (!initialized) return
     const timer = setInterval(() => {
+      if (cloudRemote && getRemoteConnection().state !== 'connected') return
       void syncFromDb()
     }, 3000)
     return () => clearInterval(timer)
-  }, [initialized, syncFromDb])
+  }, [initialized, syncFromDb, cloudRemote])
 
   useEffect(() => {
     if (initialized && !activeSessionId) {
@@ -67,11 +70,12 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
 
   // Safety: 应用启动时清理上次崩溃遗留的 streaming 状态（全部清空，重启后无 ReAct 循环在跑）
   useEffect(() => {
+    if (cloudRemote) return
     const ids = useChatStore.getState().streamingSessionIds
     if (ids.size > 0) {
       ids.forEach((sid) => useChatStore.getState().setStreaming(false, sid))
     }
-  }, [])
+  }, [cloudRemote])
 
   // Initialize .clerkbox directory when working directory is set (user-picked or default)
   const currentSession = sessions.find((s) => s.id === activeSessionId)
@@ -81,20 +85,20 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
     : workingDir ? t('shell.defaultDirectory') : t('shell.autoDirectory')
 
   useEffect(() => {
-    if (workingDir) {
+    if (workingDir && !cloudRemote) {
       ipc.initClerkbox(workingDir).catch((e) => { console.error('initClerkbox failed:', e) })
       useSkillsStore.getState().discoverStandardSkills(workingDir).catch((e) => { console.error('discoverStandardSkills failed:', e) })
     }
-  }, [workingDir])
+  }, [workingDir, cloudRemote])
 
   // Sync active skills when the directory or enabled skill set changes.
   const sessionSkillIds = useSkillsStore((s) => s.sessionSkillIds)
   const syncSessionSkills = useSkillsStore((s) => s.syncSessionSkills)
 
   useEffect(() => {
-    if (!workingDir) return
+    if (!workingDir || cloudRemote) return
     void syncSessionSkills(workingDir)
-  }, [workingDir, sessionSkillIds, syncSessionSkills])
+  }, [workingDir, sessionSkillIds, syncSessionSkills, cloudRemote])
 
   const messages = currentSession?.messages || []
   const isCurrentSessionStreaming = streamingSessionIds.has(activeSessionId || '')
@@ -179,7 +183,7 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
                   </p>
                 </header>
               )}
-              {!modelConfigured && <ModelSetupGuidance />}
+              {!modelConfigured && (cloudRemote ? <p role="status" className="mb-4 text-ui-sm leading-relaxed text-dark-onSurfaceVariant">{t('remoteAccess.cloudNeedsModel')}</p> : <ModelSetupGuidance />)}
               </div>
               <ChatInput key={`composer:${sessionId}`} sessionId={sessionId}
                   onSend={handleSend}
@@ -196,11 +200,11 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
               {!vibe && (
                 <>
                   <div className="mt-5 flex flex-wrap gap-3">
-                    <button type="button" onClick={() => useUIStore.getState().setShowSkillStore(true)} className="md-focus group flex min-w-0 flex-1 basis-64 items-start gap-3 rounded-md3-md border border-dark-onSurfaceVariant/10 bg-dark-surface/60 p-4 text-left hover:bg-dark-surfaceContainer/60 hover:border-dark-onSurfaceVariant/20 transition-colors">
+                    {!cloudRemote && <button type="button" onClick={() => useUIStore.getState().setShowSkillStore(true)} className="md-focus group flex min-w-0 flex-1 basis-64 items-start gap-3 rounded-md3-md border border-dark-onSurfaceVariant/10 bg-dark-surface/60 p-4 text-left hover:bg-dark-surfaceContainer/60 hover:border-dark-onSurfaceVariant/20 transition-colors">
                       <Store size={17} className="mt-0.5 shrink-0 text-dark-onSurfaceVariant" aria-hidden="true" />
                       <span className="min-w-0 flex-1"><span className="block text-ui-sm font-medium text-dark-onSurface">{t('shell.browseSkills')}</span><span className="mt-1 block text-ui-xs leading-relaxed text-dark-onSurfaceVariant">{t('shell.browseSkillsDescription')}</span></span>
                       <ArrowUpRight size={14} className="mt-0.5 shrink-0 text-dark-onSurfaceVariant/40 group-hover:text-dark-onSurfaceVariant" aria-hidden="true" />
-                    </button>
+                    </button>}
                     <button type="button" onClick={() => useUIStore.getState().setCommandPaletteOpen(true)} className="md-focus group flex min-w-0 flex-1 basis-64 items-start gap-3 rounded-md3-md border border-dark-onSurfaceVariant/10 bg-dark-surface/60 p-4 text-left hover:bg-dark-surfaceContainer/60 hover:border-dark-onSurfaceVariant/20 transition-colors">
                       <Search size={17} className="mt-0.5 shrink-0 text-dark-onSurfaceVariant" aria-hidden="true" />
                       <span className="min-w-0 flex-1"><span className="block text-ui-sm font-medium text-dark-onSurface">{t('shell.viewHistory')}</span><span className="mt-1 block text-ui-xs leading-relaxed text-dark-onSurfaceVariant">{t('shell.viewHistoryDescription')}</span></span>

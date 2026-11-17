@@ -8,6 +8,7 @@ import { resolve } from 'path'
 // 注：vite:define 在 dev 下不替换（源码中 dev 非 SSR 直接跳过，仅 build 生效），
 // 故用 transform 插件统一覆盖 dev 与 build 两端。
 const pkg = JSON.parse(readFileSync(resolve(__dirname, 'package.json'), 'utf8')) as { version: string }
+const webuiBuild = process.env.CLERKBOX_BUILD_TARGET === 'webui'
 
 const injectAppVersion = (): Plugin => ({
   name: 'inject-app-version',
@@ -43,13 +44,14 @@ const injectCsp = (): Plugin => ({
 export default defineConfig({
   plugins: [react(), injectCsp(), injectAppVersion()],
   base: './',
-  root: '.',
+  root: webuiBuild ? resolve(__dirname, 'webui') : '.',
+  publicDir: resolve(__dirname, 'public'),
   build: {
-    outDir: 'dist',
+    outDir: resolve(__dirname, webuiBuild ? 'dist-webui' : 'dist'),
     emptyOutDir: true,
     rollupOptions: {
       input: {
-        index: resolve(__dirname, 'index.html'),
+        index: resolve(__dirname, webuiBuild ? 'webui/index.html' : 'index.html'),
       },
     },
   },

@@ -92,6 +92,13 @@ export const REMOTE_INVOKE_BLOCKLIST: readonly string[] = [
   // 为横向探测提供起点。三者都是「管理 WebUI 自己」，远程调用无正当场景。
   'startWebUI',
   'stopWebUI',
+  'remoteGetStatus',
+  'remotePrepare',
+  'remoteEnable',
+  'remoteDisable',
+  'remoteCreateInvite',
+  'remoteApprovePair',
+  'remoteRevokeDevice',
   'getLanAddresses',
   // 诊断导出（弹保存对话框属桌面端交互，远程调用无意义）
   'diagExport',

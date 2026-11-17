@@ -246,6 +246,18 @@ beforeEach(() => {
   compactConversationMock.mockReset()
 })
 
+it('uses project-only memory with an empty home without reusing a local private memory snapshot', async () => {
+  const { ports, env, model, workingDir } = makePorts()
+  const ctx = new SessionContext('s1')
+  ctx.memorySnapshot = { key: `s1|${env.homeDir()}|${workingDir}`, prompt: 'private-global-secret' }
+  env.homeDir = () => ''
+  env.buildMemoryPrompt.mockResolvedValue('safe-project-memory')
+  await runReactLoop(ports, ctx, [userMsg()], new AbortController())
+  expect(env.buildMemoryPrompt).toHaveBeenCalledWith(workingDir, '')
+  expect(JSON.stringify(model.bodies)).toContain('safe-project-memory')
+  expect(JSON.stringify(model.bodies)).not.toContain('private-global-secret')
+})
+
 // ═══════════════ 纯函数与工具 ═══════════════
 
 describe('createSeqCounter', () => {
@@ -411,6 +423,36 @@ describe('SessionContextStore', () => {
 // ═══════════════ runReactLoop · 黄金序列 ═══════════════
 
 describe('runReactLoop · 黄金序列', () => {
+  it('resolves uploaded image paths only at the model boundary without storing base64', async () => {
+    const { ports, model, session } = makePorts()
+    ports.settings.activeProviderId = 'vision'
+    ports.settings.activeModelId = 'vision-model'
+    ports.settings.providers = [{ id: 'vision', name: 'Vision', apiCompat: 'openai', baseUrl: '', apiKey: '', models: [{ id: 'vision-model', supportsImages: true }] }]
+    const dataUrl = 'data:image/png;base64,iVBORw0KGgo='
+    ports.env.readImageAsDataUrl = vi.fn(async () => dataUrl)
+    const message: Message = { ...userMsg('Describe this'), attachments: [{ id: 'upload-photo', kind: 'image', name: 'photo.png', path: 'D:\\project\\photo.png', mimeType: 'image/png' }] }
+    await runLoop(ports, { messages: [message] })
+    expect(ports.env.readImageAsDataUrl).toHaveBeenCalledWith('D:\\project\\photo.png', 'image/png')
+    expect(JSON.stringify(model.stream.mock.calls)).toContain(dataUrl)
+    expect(JSON.stringify(message)).not.toContain('base64')
+    expect(JSON.stringify(session.messages)).not.toContain('base64')
+  })
+
+  it('does not read image bytes for non-vision models and tolerates missing uploaded images', async () => {
+    const message: Message = { ...userMsg(), attachments: [{ id: 'upload-missing', kind: 'image', name: 'missing.png', path: 'D:\\project\\missing.png', mimeType: 'image/png' }] }
+    const plain = makePorts()
+    await runLoop(plain.ports, { messages: [message] })
+    expect(plain.env.readImageAsDataUrl).not.toHaveBeenCalled()
+    const vision = makePorts()
+    vision.ports.settings.activeProviderId = 'vision'
+    vision.ports.settings.activeModelId = 'vision-model'
+    vision.ports.settings.providers = [{ id: 'vision', name: 'Vision', apiCompat: 'openai', baseUrl: '', apiKey: '', models: [{ id: 'vision-model', supportsImages: true }] }]
+    await runLoop(vision.ports, { messages: [message] })
+    expect(vision.env.readImageAsDataUrl).toHaveBeenCalledTimes(1)
+    expect(JSON.stringify(vision.model.stream.mock.calls)).not.toContain('image_url')
+    expect(vision.session.messages.at(-1)?.content).toBe('ok')
+  })
+
   it('纯文本回复：分片拼装、最终消息字段完整', async () => {
     const { ports, session } = makePorts({ turns: [[
       sse(textDelta('你好')),

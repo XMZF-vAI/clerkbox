@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Target, Check, X, AlertTriangle, Loader2, CircleX } from 'lucide-react'
 import { useGoalStore } from '../../stores/goal-store'
+import { isCloudRemoteMode } from '../../remote/browser'
 
 /**
  * /goal 会话级目标的常驻状态条：
@@ -88,7 +89,7 @@ export default function GoalBanner({ sessionId, vibe = false }: { sessionId: str
             )}
           </div>
         </div>
-        <button
+        {!isCloudRemoteMode() && <button
           type="button"
           onClick={() => clearGoal(sessionId)}
           title={isActive ? t('goal.stop') : t('goal.dismiss')}
@@ -98,7 +99,7 @@ export default function GoalBanner({ sessionId, vibe = false }: { sessionId: str
           }`}
         >
           {isActive ? <CircleX size={15} className="opacity-60" /> : <X size={15} className="opacity-60" />}
-        </button>
+        </button>}
       </div>
       {isActive && (
         <div className="mt-1.5 flex items-center gap-1.5 pl-[26px] text-[11px] opacity-50">

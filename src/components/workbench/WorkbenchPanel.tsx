@@ -17,6 +17,7 @@ import { isWebUIMode } from '../../lib/ipc-client'
 import { useWorkbench, useWorkbenchStore, type WorkbenchTabKind } from '../../stores/workbench-store'
 import { useChatStore } from '../../stores/chat-store'
 import { useSettingsStore } from '../../stores/settings-store'
+import { getRemoteBootstrap, isCloudRemoteMode } from '../../remote/browser'
 
 // 文件预览包含 PDF/Office/3D 等重依赖，只在用户打开对应标签时下载。
 const FilesPanel = lazy(() => import('./FilesPanel'))
@@ -67,10 +68,14 @@ const KIND_ICON: Record<WorkbenchTabKind, typeof Folder> = {
  */
 export default function WorkbenchPanel({ vibe, suspended = false }: { vibe?: boolean; suspended?: boolean }) {
   const { t } = useTranslation()
+  const cloudRemote = isCloudRemoteMode()
+  const cloudFiles = !cloudRemote || getRemoteBootstrap()?.capabilities.files === true
   const {
-    visible, width, tabs, activeTabId,
+    visible, width, tabs: storedTabs, activeTabId: storedActiveTabId,
     setWidth, openFiles, openGit, openTerminal, openBrowser, activateTab, closeTab, toggleVisible,
   } = useWorkbench()
+  const tabs = cloudRemote ? storedTabs.filter(tab => tab.kind === 'subagent' || (cloudFiles && tab.kind === 'files')) : storedTabs
+  const activeTabId = cloudRemote ? (tabs.some(tab => tab.id === storedActiveTabId) ? storedActiveTabId : tabs[0]?.id ?? null) : storedActiveTabId
 
   // 当前会话工作目录：作为新建终端的起始路径（用户未选过则用自动生成的默认目录）
   const sessions = useChatStore((s) => s.sessions)
@@ -97,9 +102,9 @@ export default function WorkbenchPanel({ vibe, suspended = false }: { vibe?: boo
   const foreignAgentBrowserSessions = useMemo(
     () =>
       Object.entries(slices)
-        .filter(([, slice]) => slice.tabs.some((t) => t.kind === 'agent-browser'))
+        .filter(([, slice]) => !cloudRemote && slice.tabs.some((t) => t.kind === 'agent-browser'))
         .map(([id]) => id),
-    [slices],
+    [slices, cloudRemote],
   )
 
   // WebUI（远程浏览器）无桌面 shell/窗口能力：终端与浏览器入口隐藏，仅保留文件浏览。
@@ -108,9 +113,9 @@ export default function WorkbenchPanel({ vibe, suspended = false }: { vibe?: boo
   const availableEntries = useMemo(
     () =>
       MENU_ENTRIES.filter(
-        (e) => (isWebUIMode ? !e.desktopOnly : true) && (e.kind !== 'git' || isCodingMode),
+        (e) => (isWebUIMode ? !e.desktopOnly : true) && (e.kind !== 'files' || cloudFiles) && (e.kind !== 'git' || isCodingMode),
       ),
-    [isCodingMode],
+    [isCodingMode, cloudFiles],
   )
 
   const openByKind = (kind: MenuEntry['kind']) => {
@@ -166,6 +171,7 @@ export default function WorkbenchPanel({ vibe, suspended = false }: { vibe?: boo
   // foreignAgentBrowserSessions 也要算进来：别的会话里可能正跑着浏览器任务，
   // 收起本面板不该顺手把那个 guest 也摘掉。
   const keepAlive = tabs.some((t) => t.kind === 'agent-browser') || foreignAgentBrowserSessions.length > 0
+  if (cloudRemote && !cloudFiles && tabs.length === 0) return null
   if (!visible && !keepAlive) return null
 
   const filteredEntries = availableEntries.filter((e) =>
@@ -305,7 +311,7 @@ export default function WorkbenchPanel({ vibe, suspended = false }: { vibe?: boo
         </div>
 
         {/* 「+」菜单 */}
-        <div className="relative shrink-0" ref={menuRef}>
+        {availableEntries.length > 0 && <div className="relative shrink-0" ref={menuRef}>
           <button
             ref={menuTriggerRef}
             type="button"
@@ -389,7 +395,7 @@ export default function WorkbenchPanel({ vibe, suspended = false }: { vibe?: boo
               </div>
             </div>
           )}
-        </div>
+        </div>}
 
         {/* 窄屏抽屉始终提供收起按钮；桌面普通模式沿用标题栏开关。 */}
         {(

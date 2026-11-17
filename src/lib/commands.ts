@@ -14,6 +14,7 @@ import { useChatStore } from '../stores/chat-store'
 import { useSettingsStore } from '../stores/settings-store'
 import { useUIStore } from '../stores/ui-store'
 import { useVibeStore } from '../stores/vibe-store'
+import { isCloudRemoteMode } from '../remote/browser'
 
 export interface CommandShortcut {
   /** KeyboardEvent.key 的小写形式（如 'k'、','） */
@@ -94,14 +95,14 @@ export const COMMANDS: CommandDef[] = [
     id: 'skillStore.open',
     titleKey: 'commands.openSkillStore',
     keywords: ['skill', 'store', 'jineng'],
-    when: onboardingDone,
+    when: () => onboardingDone() && !isCloudRemoteMode(),
     run: () => useUIStore.getState().setShowSkillStore(true),
   },
   {
     id: 'scheduledTasks.open',
     titleKey: 'commands.openScheduledTasks',
     keywords: ['schedule', 'task', 'dingshi'],
-    when: onboardingDone,
+    when: () => onboardingDone() && !isCloudRemoteMode(),
     run: () => useUIStore.getState().setShowScheduledTasks(true),
   },
 ]

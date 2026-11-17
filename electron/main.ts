@@ -34,7 +34,10 @@ import { createChatStore, registerDbIpcHandlers, type ChatStore } from './db'
 import { registerCheckpointIpcHandlers } from './checkpoint-store'
 import { registerWorkflowJournalIpcHandlers, getWorkflowJournal } from './workflow-journal'
 import { registerGitIpcHandlers } from './git-service'
-import { registerAgentHostIpc, getAgentSessionManager, registerAgentEventSink } from './agent-host'
+import { registerAgentHostIpc, getAgentSessionManager, registerAgentEventSink, setRuntimeAgentHostMode } from './agent-host'
+import { RemoteAccessService } from './remote-access'
+import { createRemoteCredentialStore } from './remote-credential-store'
+import type { RemoteEnableOptions } from '../src/remote/protocol'
 import { initImBots, disposeImBots } from './im-bots'
 import {
   AGENT_BROWSER_PARTITION,
@@ -498,6 +501,8 @@ function parseSkillMd(content: string): {
 }
 
 let mainWindow: BrowserWindow | null = null
+let remoteAccessService: RemoteAccessService | null = null
+let remoteRestorePromise: Promise<void> = Promise.resolve()
 
 /** 真退出标志：区分"关闭到托盘"与"退出应用"（托盘退出/更新安装/系统退出都会置位） */
 let isQuitting = false
@@ -2090,6 +2095,45 @@ function registerIpcHandlers(chatStore: ChatStore) {
   // 运行模式默认 renderer（P6 才切 main），故此处只挂通道，不改变现有渲染层驱动路径；
   // 桥接的 handler 查找是惰性的，放在这里不依赖其它 handler 已注册。
   registerAgentHostIpc(chatStore)
+  const remoteCredentials = createRemoteCredentialStore(app.getPath('userData'))
+  remoteAccessService = new RemoteAccessService({
+    store: chatStore,
+    manager: getAgentSessionManager(chatStore),
+    readCredential: () => remoteCredentials.read(),
+    writeCredential: value => remoteCredentials.write(value),
+    deleteCredential: () => remoteCredentials.remove(),
+    notify: status => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('remote:status', status)
+    },
+    origin: process.env.CLERKBOX_REMOTE_ORIGIN,
+  })
+  const requireRemoteOwner = (event: Electron.IpcMainInvokeEvent | null) => {
+    if (!event || !mainWindow || event.sender !== mainWindow.webContents) throw new Error('Remote access management is desktop-only')
+    return remoteAccessService!
+  }
+  ipcMain.handle('remoteGetStatus', event => requireRemoteOwner(event).getStatus())
+  ipcMain.handle('remotePrepare', event => {
+    requireRemoteOwner(event)
+    if (isAgentBusyNow()) throw new Error('Finish or stop running tasks before enabling remote access')
+    setRuntimeAgentHostMode('main')
+    return { ok: true }
+  })
+  ipcMain.handle('remoteEnable', (event, options: RemoteEnableOptions) => {
+    const service = requireRemoteOwner(event)
+    if (isAgentBusyNow()) throw new Error('Finish or stop running tasks before enabling remote access')
+    return service.enable(options)
+  })
+  ipcMain.handle('remoteDisable', event => requireRemoteOwner(event).disable())
+  ipcMain.handle('remoteCreateInvite', event => requireRemoteOwner(event).createInvite())
+  ipcMain.handle('remoteApprovePair', (event, peerId: string, approved: boolean) => {
+    if (typeof peerId !== 'string' || typeof approved !== 'boolean') throw new Error('Invalid pairing request')
+    return requireRemoteOwner(event).approvePair(peerId, approved)
+  })
+  ipcMain.handle('remoteRevokeDevice', (event, deviceId: string) => {
+    if (typeof deviceId !== 'string') throw new Error('Invalid device')
+    return requireRemoteOwner(event).revokeDevice(deviceId)
+  })
+  remoteRestorePromise = remoteAccessService.restore()
   // 批次 B · P5：宿主事件同时推给 WebUI 的 SSE 订阅者；新连接建立时补发整环，
   // 远程视图与本地窗口共用同一 seq 序列（去重与乱序由渲染层薄客户端负责）。
   registerAgentEventSink((payload) => pushAgentEvent(payload))
@@ -3852,6 +3896,9 @@ app.whenReady().then(async () => {
   console.log(`[db] chat store engine: ${chatStore.kind}`)
 
   registerIpcHandlers(chatStore)
+  // Resolve persisted execution ownership before the renderer caches its host mode.
+  // restore starts network reconnection in the background; this waits only for local state.
+  await remoteRestorePromise
   createWindow()
 
   // Joule 账号：有 Key 时启动即刷一次模型+额度，之后 5 分钟刷额度、每小时刷模型
@@ -3984,6 +4031,7 @@ app.on('before-quit', (event) => {
   event.preventDefault()
   // 真退出：置位后 close 拦截不再把窗口藏进托盘，并回收托盘图标与定时器
   isQuitting = true
+  remoteAccessService?.dispose()
   destroyTray()
   winAcrylic.dispose()
   systemMedia.dispose()

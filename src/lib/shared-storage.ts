@@ -1,5 +1,18 @@
 import { createJSONStorage, type StateStorage } from 'zustand/middleware'
 import { ipc, isWebUIMode } from './ipc-client'
+import { getRemoteBootstrap, getRemoteStorageScope, isCloudRemoteMode } from '../remote/browser'
+
+const REMOTE_UI_SETTINGS = ['theme', 'appFont', 'uiScale', 'colorScheme', 'customSeedColor', 'language', 'interfaceMode'] as const
+function remoteStorageKey(name: string): string { return `clerkbox:remote-state:${getRemoteStorageScope()}:${name}` }
+function readRemoteLocal(name: string): string | null {
+  try { return window.localStorage.getItem(remoteStorageKey(name)) } catch { return null }
+}
+function remoteSettings(): string {
+  let local: Record<string, unknown> = {}
+  try { local = JSON.parse(readRemoteLocal('clerkbox-settings') || '{}').state || {} } catch { /* use bootstrap */ }
+  const preferences = Object.fromEntries(REMOTE_UI_SETTINGS.filter(key => key in local).map(key => [key, local[key]]))
+  return JSON.stringify({ state: { ...getRemoteBootstrap()?.settings, ...preferences, apiKey: '', hasCompletedOnboarding: true, showSettings: false }, version: 0 })
+}
 
 /**
  * 共享持久化存储：把 zustand persist 桥接到主进程 KV 文件，
@@ -32,12 +45,24 @@ async function migrateFromLocalStorage(name: string): Promise<string | null> {
 
 const kvStateStorage: StateStorage = {
   getItem: async (name: string) => {
+    if (isCloudRemoteMode()) return name === 'clerkbox-settings' ? remoteSettings() : readRemoteLocal(name)
     const fromKv = await ipc.kvGet(name).catch(() => null)
     if (fromKv != null) return fromKv
     // KV 为空：可能是存量 Electron 用户，尝试从 localStorage 迁移
     return migrateFromLocalStorage(name)
   },
   setItem: async (name: string, value: string) => {
+    if (isCloudRemoteMode()) {
+      try {
+        if (name === 'clerkbox-settings') {
+          const parsed = JSON.parse(value)
+          const state = parsed?.state || {}
+          value = JSON.stringify({ state: Object.fromEntries(REMOTE_UI_SETTINGS.filter(key => key in state).map(key => [key, state[key]])), version: 0 })
+        }
+        window.localStorage.setItem(remoteStorageKey(name), value)
+      } catch { /* storage quota must not trigger a host KV write */ }
+      return
+    }
     await ipc.kvSet(name, value).catch((e) => console.error('[shared-storage] kvSet failed:', e))
     // 双写 localStorage：真源仍是 KV，这份只是本浏览器的副本。
     // 两个用途：① Electron 侧的本地兜底缓存；② 让 public/theme-init.js 在 React 挂载前
@@ -50,6 +75,10 @@ const kvStateStorage: StateStorage = {
     }
   },
   removeItem: async (name: string) => {
+    if (isCloudRemoteMode()) {
+      try { window.localStorage.removeItem(remoteStorageKey(name)) } catch { /* local only */ }
+      return
+    }
     await ipc.kvRemove(name).catch(() => {})
     try {
       window.localStorage.removeItem(name)

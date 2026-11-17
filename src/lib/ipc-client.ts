@@ -38,9 +38,11 @@
   WebUICapabilities,
   WebUIUploadResult,
 } from '../types/ipc'
-import type { MemoryEntry } from '../types/agent'
+import type { MemoryEntry, MessageAttachment } from '../types/agent'
 import type { JouleLoginResult, JouleStateSnapshot } from '../types/joule'
 import type { AgentCommand, AgentCommandResult, AgentEvent, AgentSnapshot } from '../agent-core/protocol'
+import { getRemoteBootstrap, invokeRemote, isCloudRemoteMode, subscribeRemoteEvents, uploadRemoteFile } from '../remote/browser'
+import type { RemoteAccessStatus, RemoteEnableOptions } from '../remote/protocol'
 // IM 机器人管理面：与主进程共用一份类型（纯 type import，编译后擦除）
 import type {
   BindCodeResult,
@@ -67,9 +69,14 @@ import type {
 // ── 模式检测 ──
 const isElectron = typeof window !== 'undefined' && !!window.clerkbox
 
+/** Images travel through the bounded upload channel; never duplicate base64 in commands. */
+function remoteCommandAttachments(attachments: MessageAttachment[] | undefined): MessageAttachment[] | undefined {
+  return attachments?.map(({ id, kind, name, mimeType, path, size }) => ({ id, kind, name, ...(mimeType ? { mimeType } : {}), ...(path ? { path } : {}), ...(size !== undefined ? { size } : {}) }))
+}
+
 // ── WebUI token：从 URL ?token=xxx 提取，随每个 API 请求发送 ──
 let webuiToken = ''
-if (!isElectron && typeof window !== 'undefined') {
+if (!isElectron && !isCloudRemoteMode() && typeof window !== 'undefined') {
   const params = new URLSearchParams(window.location.search)
   webuiToken = params.get('token') || ''
   // 存入 sessionStorage，刷新页面后仍可复用（SPA 路由切换不丢）
@@ -86,6 +93,7 @@ if (!isElectron && typeof window !== 'undefined') {
 
 /** WebUI 模式下判断当前是否为 WebUI 环境（供 UI 层隐藏窗口控制按钮等） */
 export const isWebUIMode = !isElectron
+export { isCloudRemoteMode }
 
 // ── 宿主模式（批次 B P3）：运行在 Electron 主进程内，复用同一套调用面 ──
 // agent-host 启动时注入实现，使 tool-registry / compact 等既有代码无需改动即可在
@@ -117,6 +125,7 @@ export const isHostMode = (): boolean => hostBridge !== null
 // ── WebUI HTTP 调用封装 ──
 async function webInvoke<T>(method: string, args: unknown[] = []): Promise<T> {
   if (hostBridge) return hostBridge.invoke<T>(method, args)
+  if (isCloudRemoteMode()) return invokeRemote<T>(method, args)
   const res = await fetch('/api/invoke', {
     method: 'POST',
     headers: {
@@ -135,6 +144,13 @@ async function webInvoke<T>(method: string, args: unknown[] = []): Promise<T> {
 }
 
 async function webGet<T>(path: string): Promise<T> {
+  if (isCloudRemoteMode()) {
+    const bootstrap = getRemoteBootstrap()
+    if (path === '/api/capabilities') return { isRemoteClient: true, canUpload: bootstrap?.capabilities.files === true, canBrowseHostFolders: bootstrap?.capabilities.files === true, maxUploadBytes: bootstrap?.capabilities.maxUploadBytes ?? FALLBACK_WEBUI_UPLOAD_BYTES } as T
+    if (path === '/api/platform') return (bootstrap?.platform || (/^[a-z]:[\\/]/i.test(bootstrap?.workspace || '') ? 'win32' : 'linux')) as T
+    if (path === '/api/homedir') return (bootstrap?.workspace || '') as T
+    throw new Error('Unavailable in remote mode')
+  }
   const res = await fetch(path, {
     headers: { 'X-WebUI-Token': webuiToken },
   })
@@ -144,6 +160,7 @@ async function webGet<T>(path: string): Promise<T> {
 }
 
 async function webUploadFile(file: File): Promise<WebUIUploadResult> {
+  if (isCloudRemoteMode()) return uploadRemoteFile(file) as Promise<WebUIUploadResult>
   const query = `?name=${encodeURIComponent(file.name || 'upload.bin')}`
   const res = await fetch(`/api/upload${query}`, {
     method: 'POST',
@@ -416,6 +433,7 @@ function openAgentEventStream(callback: (payload: { seq: number; event: AgentEve
  */
 async function requestAgentResync(sessionId: string | undefined, sinceSeq: number): Promise<AgentSnapshot> {
   if (hostBridge) return hostBridge.invoke<AgentSnapshot>('agent:snapshot', [sessionId, sinceSeq])
+  if (isCloudRemoteMode()) return invokeRemote<AgentSnapshot>('agent:snapshot', [sessionId, sinceSeq])
   const res = await fetch('/api/agent/resync', {
     method: 'POST',
     headers: {
@@ -524,6 +542,7 @@ export const ipc = {
     isElectron ? window.clerkbox.apiTestVision(cfg, modelId) : webInvoke('apiTestVision', [cfg, modelId]),
   apiChatStream: (cfg: ApiConnConfig, body: unknown): Promise<{ requestId: string }> => {
     if (hostBridge) return hostChatStream(cfg, body)
+    if (isCloudRemoteMode()) return Promise.reject(new Error('Remote requests must use the desktop agent'))
     return isElectron ? window.clerkbox.apiChatStream(cfg, body) : webChatStream(cfg, body)
   },
   apiAbort: (requestId: string): Promise<void> => {
@@ -537,10 +556,19 @@ export const ipc = {
   },
 
   // ── Agent 宿主通道（批次 B · P3 主进程注册，P4 渲染层薄客户端消费）──
-  agentCommand: (cmd: AgentCommand): Promise<AgentCommandResult> =>
-    isElectron ? window.clerkbox.agentCommand(cmd) : webInvoke('agent:command', [cmd]),
+  agentCommand: (cmd: AgentCommand): Promise<AgentCommandResult> => {
+    if (isCloudRemoteMode() && cmd.type === 'run') {
+      const { type, sessionId, content, attachments, taskMode } = cmd
+      return invokeRemote('agent:command', [{ type, sessionId, content, ...(attachments ? { attachments: remoteCommandAttachments(attachments) } : {}), ...(taskMode ? { taskMode } : {}), skills: [] }])
+    }
+    if (isCloudRemoteMode() && cmd.type === 'queue.enqueue') {
+      const { id, content, attachments, taskMode, queuedAt } = cmd.item
+      return invokeRemote('agent:command', [{ type: cmd.type, sessionId: cmd.sessionId, item: { id, content, queuedAt, ...(attachments ? { attachments: remoteCommandAttachments(attachments) } : {}), ...(taskMode ? { taskMode } : {}), skills: [] } }])
+    }
+    return isElectron ? window.clerkbox.agentCommand(cmd) : webInvoke('agent:command', [cmd])
+  },
   agentHostMode: (): Promise<'main' | 'renderer'> =>
-    isElectron ? window.clerkbox.agentHostMode() : webInvoke('agent:host-mode'),
+    isCloudRemoteMode() ? Promise.resolve('main') : isElectron ? window.clerkbox.agentHostMode() : webInvoke('agent:host-mode'),
   // 设置快照推送：只有桌面渲染层有资格喂主进程（WebUI 手里没有 Key，主进程也拒收远程推送），
   // 远程分支静默 no-op——调用方是 fire-and-forget 的，不需要错误语义。
   // 可选链兜底：dev 模式下渲染层比主进程新（preload 还没重编）时，旧 preload 上没有这个方法，
@@ -567,6 +595,7 @@ export const ipc = {
    */
   onAgentEvent: (callback: (payload: { seq: number; event: AgentEvent }) => void): (() => void) => {
     if (isElectron) return window.clerkbox.onAgentEvent(callback)
+    if (isCloudRemoteMode()) return subscribeRemoteEvents(callback)
     return openAgentEventStream(callback)
   },
   onBrowserNewTab: (callback: (url: string) => void): (() => void) =>
@@ -769,6 +798,7 @@ agentBrowserEnsurePanel: (sessionId?: string): Promise<boolean> =>
   // 所以 WebUI 模式用缓存值（首次访问时异步拉取并缓存）
   platform: (): string => {
     if (isElectron) return window.clerkbox.platform
+    if (isCloudRemoteMode()) return getRemoteBootstrap()?.platform || (/^[a-z]:[\\/]/i.test(getRemoteBootstrap()?.workspace || '') ? 'win32' : 'linux')
     if (cachedPlatform) return cachedPlatform
     // 主进程宿主模式（无 window）：/api/platform 的异步预取不会执行，cachedPlatform
     // 恒为空。此时直接读 Node 的 process.platform，否则工具层会把 Windows 宿主
@@ -780,10 +810,12 @@ agentBrowserEnsurePanel: (sessionId?: string): Promise<boolean> =>
   },
   homeDir: (): string => {
     if (isElectron) return window.clerkbox.homeDir
+    if (isCloudRemoteMode()) return getRemoteBootstrap()?.workspace || ''
     return cachedHomeDir
   },
   getHomeDir: async (): Promise<string> => {
     if (isElectron) return window.clerkbox.homeDir
+    if (isCloudRemoteMode()) return getRemoteBootstrap()?.workspace || ''
     if (cachedHomeDir) return cachedHomeDir
     cachedHomeDir = await webGet<string>('/api/homedir')
     return cachedHomeDir
@@ -798,6 +830,22 @@ agentBrowserEnsurePanel: (sessionId?: string): Promise<boolean> =>
     isElectron ? window.clerkbox.getWebUIStatus() : Promise.resolve({ running: true, url: window.location.href }),
   getLanAddresses: (): Promise<string[]> =>
     isElectron ? window.clerkbox.getLanAddresses() : Promise.resolve([]),
+  remoteGetStatus: (): Promise<RemoteAccessStatus> =>
+    isElectron ? window.clerkbox.remoteGetStatus() : Promise.reject(new Error('Desktop only')),
+  remotePrepare: (): Promise<{ ok: true }> =>
+    isElectron ? window.clerkbox.remotePrepare() : Promise.reject(new Error('Desktop only')),
+  remoteEnable: (options: RemoteEnableOptions): Promise<RemoteAccessStatus> =>
+    isElectron ? window.clerkbox.remoteEnable(options) : Promise.reject(new Error('Desktop only')),
+  remoteDisable: (): Promise<RemoteAccessStatus> =>
+    isElectron ? window.clerkbox.remoteDisable() : Promise.reject(new Error('Desktop only')),
+  remoteCreateInvite: (): Promise<RemoteAccessStatus> =>
+    isElectron ? window.clerkbox.remoteCreateInvite() : Promise.reject(new Error('Desktop only')),
+  remoteApprovePair: (peerId: string, approved: boolean): Promise<RemoteAccessStatus> =>
+    isElectron ? window.clerkbox.remoteApprovePair(peerId, approved) : Promise.reject(new Error('Desktop only')),
+  remoteRevokeDevice: (deviceId: string): Promise<RemoteAccessStatus> =>
+    isElectron ? window.clerkbox.remoteRevokeDevice(deviceId) : Promise.reject(new Error('Desktop only')),
+  onRemoteStatus: (callback: (status: RemoteAccessStatus) => void): (() => void) =>
+    isElectron ? window.clerkbox.onRemoteStatus(callback) : () => {},
 
   /**
    * IM 机器人（微信 / 飞书遥控）管理面。
@@ -958,7 +1006,7 @@ const WEBUI_UPDATER_UNSUPPORTED: UpdaterState = {
 // ── WebUI 模式下异步预取 platform / homeDir ──
 let cachedPlatform = ''
 let cachedHomeDir = ''
-if (!isElectron && typeof window !== 'undefined') {
+if (!isElectron && !isCloudRemoteMode() && typeof window !== 'undefined') {
   void webGet<string>('/api/platform').then((p) => { cachedPlatform = p }).catch(() => {})
   void webGet<string>('/api/homedir').then((h) => { cachedHomeDir = h }).catch(() => {})
 }

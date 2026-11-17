@@ -1,0 +1,20 @@
+{
+  "name": "@clerkbox/remote-gateway",
+  "version": "4.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test tests/*.integration.mjs",
+    "check": "npm run typecheck && npm test",
+    "deploy:check": "wrangler deploy --dry-run",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261116.1",
+    "esbuild": "0.25.12",
+    "miniflare": "5.20261116.0-beta",
+    "typescript": "6.0.3",
+    "wrangler": "4.163.0"
+  }
+}

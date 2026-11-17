@@ -1,0 +1,31 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "clerkbox-webui",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-16",
+  "workers_dev": true,
+  "preview_urls": false,
+  "assets": {
+    "directory": "../../dist-webui",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": true
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "ROOMS", "class_name": "RelayRoom" },
+      { "name": "CREATION_LIMITER", "class_name": "CreationLimiter" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["RelayRoom", "CreationLimiter"] }
+  ],
+  "routes": [
+    { "pattern": "webui.clerkbox.xmzf.space", "custom_domain": true }
+  ],
+  "vars": {
+    "PUBLIC_ORIGIN": "https://webui.clerkbox.xmzf.space",
+    "ALLOW_LOCALHOST_ORIGINS": "false"
+  },
+  "observability": { "enabled": false }
+}

@@ -16,13 +16,14 @@ import { ipcMain } from 'electron'
 import type { BrowserWindow } from 'electron'
 import os from 'os'
 import fs from 'fs/promises'
+import path from 'path'
 import { abortChatStream, startChatStream, type ApiConnConfig } from './api-proxy'
 import { handlerRegistry } from './webui-server'
 import type { ChatStore } from './db'
 import { ipc, setIpcHostBridge } from '../src/lib/ipc-client'
 import { toolRegistry } from '../src/lib/tool-registry'
 import { findAgent } from '../src/lib/agent-registry'
-import { buildMemoryPrompt } from '../src/lib/memory'
+import { buildMemoryPrompt, MAX_MEMORY_BYTES, MAX_MEMORY_LINES } from '../src/lib/memory'
 import { compactConversation, findKeepBoundaryIndex } from '../src/lib/compact'
 import { normalizeHarnessMode } from '../src/lib/harness-modes'
 import { buildPermissionPreview, formatPermissionAuditContent, type PermissionDecision } from '../src/lib/permission-preview'
@@ -41,6 +42,8 @@ import { saveFileMutation } from '../src/lib/checkpoint-recorder'
 import { abortWorkflowRunsForSession, listRunningWorkflowRuns, stopWorkflowRun } from '../src/lib/workflow-runtime'
 import { getWorkflowJournal } from './workflow-journal'
 import type { QueuedMessageItem } from '../src/stores/chat-store'
+import type { RemotePrincipal } from '../src/remote/protocol'
+import { assertRemoteActive, resolveRemoteWorkspacePath } from './remote-host-dispatcher'
 
 /** 审批挂起上限（计划 §3.3）：超时即拒绝 */
 const PERMISSION_TIMEOUT_MS = 120_000
@@ -52,14 +55,33 @@ const EVENT_RING_LIMIT = 500
 const RESYNC_COALESCE_MS = 1_000
 /** 渲染层尚未升级为带快照的薄客户端时，main 模式受理 run 会明确拒绝而不是猜配置 */
 const MISSING_SETTINGS = 'run-command-missing-settings'
+/** Fixed remote surface: registry additions and local capability toggles cannot grant global access. */
+const PAIRED_REMOTE_TOOLS = new Set([
+  'read_file', 'read_image', 'write_file', 'search_replace', 'list_dir', 'search_files', 'search_content',
+  'execute_command', 'web_search', 'web_fetch', 'question', 'todowrite',
+])
 
 export type AgentHostMode = 'main' | 'renderer'
+let runtimeAgentHostMode: AgentHostMode | null = null
+
+/** Public remote access requires a single host engine for local and remote views. */
+export function setRuntimeAgentHostMode(mode: AgentHostMode | null): void {
+  runtimeAgentHostMode = mode
+}
+
+export interface AgentCommandMeta {
+  remote?: boolean
+  wake?: boolean
+  /** Constructed only by the paired desktop connection, never read from command JSON. */
+  pairedRemote?: RemotePrincipal
+}
 
 /**
  * 运行模式：环境变量优先（回滚演练与调试用），其次用户 KV，默认 renderer。
  * P3~P5 期间恒为 renderer，P6 才把默认值切到 main。
  */
 export function resolveAgentHostMode(): AgentHostMode {
+  if (runtimeAgentHostMode) return runtimeAgentHostMode
   const fromEnv = String(process.env.CLERKBOX_AGENT_HOST || '').trim().toLowerCase()
   if (fromEnv === 'main' || fromEnv === 'renderer') return fromEnv
   try {
@@ -159,10 +181,13 @@ interface HostSession {
   ring: { seq: number; event: AgentEvent }[]
   /** 上一次因环溢出广播 resync 的时刻（合并窗口用） */
   lastResyncAt: number
-  run?: { runId: string; controller: AbortController; startedAt: number }
+  run?: { runId: string; controller: AbortController; startedAt: number; origin: AgentCommandMeta }
   status: RunStatus
   error?: string
   queue: QueuedMessageItem[]
+  /** Queue admission can await remote path checks; reserve the head before yielding. */
+  flushing?: boolean
+  queueOrigins: Map<string, AgentCommandMeta>
   /** 近期入队身份：回执丢失后重复确认同一条不能重复执行。 */
   receivedQueueIds: Set<string>
   pendingPermissions: Map<string, {
@@ -205,6 +230,8 @@ export class AgentSessionManager {
   private readonly contexts = new SessionContextStore()
   /** 宿主不读渲染层的 zustand persist（localStorage），故设置与技能目录靠首次 run 下发后复用 */
   private readonly snapshots = new Map<string, Extract<AgentCommand, { type: 'run' }>>()
+  private readonly snapshotOrigins = new Map<string, AgentCommandMeta>()
+  private remoteApprovalProbe: () => boolean = () => false
   /**
    * 最近一次「本地窗口」run 实际生效的设置快照（跨会话）。
    *
@@ -227,6 +254,7 @@ export class AgentSessionManager {
         lastResyncAt: 0,
         status: 'idle',
         queue: [],
+        queueOrigins: new Map(),
         receivedQueueIds: new Set(),
         pendingPermissions: new Map(),
         sessionGrants: new Set(),
@@ -362,16 +390,18 @@ export class AgentSessionManager {
    */
   private wakeIdleSession(s: HostSession): void {
     if (s.dropped || s.rewinding || s.compacting) return
+    if (s.flushing || s.queue.length > 0) { void this.flushQueue(s); return }
     const ctx = this.contexts.get(s.sessionId)
     if (s.run || ctx.pendingSubagentNotifications.length === 0) return
     const cmd = this.snapshots.get(s.sessionId)
     if (!cmd?.settings) return
-    void this.startRun(s, { ...cmd, content: '' }, { wake: true }).catch(() => undefined)
+    void this.startRun(s, { ...cmd, content: '' }, { ...this.snapshotOrigins.get(s.sessionId), wake: true }).catch(() => undefined)
   }
 
   private buildPorts(s: HostSession, cmd: Extract<AgentCommand, { type: 'run' }>, settings: AgentSettings): AgentPorts {
     const sessionId = s.sessionId
     const ctx = this.contexts.get(sessionId)
+    const origin = s.run?.origin
     // 唤醒入口常驻：ctx 是会话级单例，后台任务可能在两轮 run 之间 settle
     ctx.requestWake = () => this.wakeIdleSession(s)
 
@@ -390,9 +420,29 @@ export class AgentSessionManager {
         ),
       },
       tools: {
-        definitions: (harnessMode) => toolRegistry.getDefinitionsForMode(harnessMode),
-        execute: (name, args, toolCtx) => toolRegistry.execute(name, args, toolCtx),
-        findAgent: (agentType, workingDir) => findAgent(agentType, workingDir),
+        definitions: (harnessMode) => {
+          const definitions = toolRegistry.getDefinitionsForMode(harnessMode)
+          return origin?.pairedRemote
+            ? definitions.filter((tool) => PAIRED_REMOTE_TOOLS.has(tool.name))
+            : definitions
+        },
+        execute: async (name, args, toolCtx) => {
+          const principal = origin?.pairedRemote
+          if (principal) {
+            assertRemoteActive(principal)
+            if (!principal.control) throw new Error('remote-control-disabled')
+            if (name === 'search_memory' || name === 'save_memory') throw new Error('remote-global-memory-disabled')
+            if (name.startsWith('app_')) throw new Error('remote-app-management-disabled')
+            if (!PAIRED_REMOTE_TOOLS.has(name)) throw new Error('remote-tool-unavailable')
+            // A model-generated path must obey the same workspace boundary as direct file requests.
+            // Shell remains an explicitly approved local tool, not an OS filesystem sandbox.
+            for (const key of ['path', 'cwd', 'workingDir', 'directory', 'file_path']) {
+              if (typeof args[key] === 'string') await resolveRemoteWorkspacePath(principal, args[key] as string, true)
+            }
+          }
+          return toolRegistry.execute(name, args, toolCtx)
+        },
+        findAgent: (agentType, workingDir) => origin?.pairedRemote ? Promise.resolve(null) : findAgent(agentType, workingDir),
       },
       store: {
         getSession: () => sessionCache.get(sessionId),
@@ -466,6 +516,7 @@ export class AgentSessionManager {
           s.lastUsage = entry.usage
         },
         agentMemoryCapture: async (payload) => {
+          if (origin?.pairedRemote) return
           await ipc.agentMemoryCapture(payload)
         },
         addSubAgentRun: (_sid, run) => {
@@ -547,11 +598,26 @@ export class AgentSessionManager {
         osDescription: describeOs(),
         shellDescription: process.platform === 'win32' ? 'PowerShell, cmd' : 'zsh, bash',
         isDev: !isPackaged(),
-        homeDir: () => os.homedir(),
+        // An empty home also gives remote runs a separate memory-cache key from local runs.
+        homeDir: () => origin?.pairedRemote ? '' : os.homedir(),
         readFile: (path) => fs.readFile(path, 'utf-8'),
-        readImageAsDataUrl: async (path, mimeType) => {
+        readImageAsDataUrl: async (imagePath, mimeType) => {
           try {
-            return `data:${mimeType || 'image/png'};base64,${(await fs.readFile(path)).toString('base64')}`
+            const principal = origin?.pairedRemote
+            if (!principal) return `data:${mimeType || 'image/png'};base64,${(await fs.readFile(imagePath)).toString('base64')}`
+            assertRemoteActive(principal)
+            if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(mimeType)) return null
+            const resolved = await resolveRemoteWorkspacePath(principal, imagePath)
+            const handle = await fs.open(resolved, 'r')
+            try {
+              const stat = await handle.stat()
+              if (!stat.isFile() || stat.size > 10 * 1024 * 1024) return null
+              const bytes = await handle.readFile()
+              if (bytes.length > 10 * 1024 * 1024) return null
+              await resolveRemoteWorkspacePath(principal, resolved)
+              assertRemoteActive(principal)
+              return `data:${mimeType};base64,${bytes.toString('base64')}`
+            } finally { await handle.close() }
           } catch {
             return null
           }
@@ -561,7 +627,29 @@ export class AgentSessionManager {
         // 但这里直接传 'sh' 更明确，避免依赖兜底）。
         runShell: (command, cwd) =>
           ipc.executeCommandWithShell(command, cwd, process.platform === 'win32' ? 'cmd' : 'sh'),
-        buildMemoryPrompt: (workingDir, homeDir) => buildMemoryPrompt(workingDir, homeDir),
+        buildMemoryPrompt: async (workingDir, homeDir) => {
+          const principal = origin?.pairedRemote
+          if (!principal) return buildMemoryPrompt(workingDir, homeDir)
+          // Read only the granted project's index. The ordinary builder reads private
+          // user memory and cloud context, so it must never serve a paired browser.
+          const directory = await resolveRemoteWorkspacePath(principal, workingDir)
+          const index = path.join(directory, '.clerkbox', 'memory', 'MEMORY.md')
+          let resolved: string
+          try { resolved = await resolveRemoteWorkspacePath(principal, index) }
+          catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return ''; throw error }
+          const handle = await fs.open(resolved, 'r')
+          try {
+            const stat = await handle.stat()
+            if (!stat.isFile() || stat.size > MAX_MEMORY_BYTES) return ''
+            const bytes = Buffer.alloc(MAX_MEMORY_BYTES + 1)
+            const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0)
+            if (bytesRead > MAX_MEMORY_BYTES) return ''
+            await resolveRemoteWorkspacePath(principal, resolved)
+            assertRemoteActive(principal)
+            const content = bytes.subarray(0, bytesRead).toString('utf8').split(/\r?\n/).slice(0, MAX_MEMORY_LINES).join('\n').trim()
+            return content ? `# Project memory\nOnly this workspace's memory index is available. Read referenced files within the workspace using read_file.\n\n${content}` : ''
+          } finally { await handle.close() }
+        },
       },
       emit: (event) => this.emit(s, event),
     }
@@ -583,11 +671,13 @@ export class AgentSessionManager {
   private requestPermission(s: HostSession, request: AgentPermissionRequest, mode: AgentSettings['approvalMode']): Promise<PermissionApproval> {
     const sessionId = s.sessionId
     const preview = buildPermissionPreview(request.tool, request.args, { workingDir: request.workingDir })
-    if (s.sessionGrants.has(preview.grantKey)) {
+    const principal = s.run?.origin.pairedRemote
+    if (principal && (!principal.isActive() || !principal.control)) return Promise.resolve({ approved: false, scope: 'once' })
+    if (!principal && s.sessionGrants.has(preview.grantKey)) {
       console.log(`[agent-host] 会话级放行命中：${request.tool} ${preview.target}`)
       return Promise.resolve({ approved: true, scope: 'session' })
     }
-    if (!this.hasLiveWindow()) {
+    if (!this.hasLiveWindow() && !this.remoteApprovalProbe()) {
       console.warn('[agent-host] 无可用窗口，危险操作按拒绝处理（fail-closed）:', request.title)
       this.writeAudit(s, request, 'deny')
       return Promise.resolve({ approved: false, scope: 'once' })
@@ -701,30 +791,50 @@ export class AgentSessionManager {
     this.emit(s, event)
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
-        if (!s.pendingQuestions.delete(requestId)) return
-        resolve({})
+        this.settleQuestion(s, requestId, {}, true)
       }, QUESTION_TIMEOUT_MS)
       s.pendingQuestions.set(requestId, { resolve, timer, event })
     })
   }
 
+  private settleQuestion(s: HostSession, requestId: string, answers: Record<string, string[]>, timedOut: boolean): void {
+    const pending = s.pendingQuestions.get(requestId)
+    if (!pending) return
+    clearTimeout(pending.timer)
+    s.pendingQuestions.delete(requestId)
+    pending.resolve(answers)
+    this.emit(s, { type: 'question.settled', sessionId: s.sessionId, requestId, timedOut })
+  }
+
   /** 渲染层 → 宿主的指令入口。返回值只表示是否受理，运行结果一律走事件（rewind 两条例外：同步回计划/结果）。 */
-  async handleCommand(cmd: AgentCommand, meta: { remote?: boolean } = {}): Promise<AgentCommandResult> {
+  async handleCommand(cmd: AgentCommand, meta: AgentCommandMeta = {}): Promise<AgentCommandResult> {
+    const principal = meta.pairedRemote
+    if (principal) {
+      if (!principal.isActive()) return { ok: false, error: 'remote-disconnected' }
+      if (!principal.control) return { ok: false, error: 'remote-control-disabled' }
+      if (cmd.type === 'permission.resolve' && (!principal.approve || (cmd.scope !== undefined && cmd.scope !== 'once'))) return { ok: false, error: 'remote-approval-disabled' }
+      const rows = await this.store.getAllSessions()
+      const row = rows.find((item) => item.id === cmd.sessionId)
+      const dir = row?.working_dir || row?.default_work_dir
+      if (typeof dir !== 'string') return { ok: false, error: 'remote-session-unavailable' }
+      try { await resolveRemoteWorkspacePath(principal, dir, true) } catch { return { ok: false, error: 'remote-outside-workspace' } }
+    }
     // 远程通道（WebUI /api/invoke 传 event=null）可回执提问，必须留痕便于事后追责
     if (meta.remote && cmd.type === 'question.resolve') {
       console.log(`[agent-host][audit] remote question.resolve session=${cmd.sessionId} request=${cmd.requestId}`)
     }
     // 危险操作审批只认本地窗口：远程界面能看（SSE/snapshot 里有待批卡片的状态），
     // 但不能替本地用户点头——否则 token 泄漏就等同于「攻击者自批自跑」。
-    if (meta.remote && cmd.type === 'permission.resolve') {
+    if (meta.remote && !principal && cmd.type === 'permission.resolve') {
       return { ok: false, error: 'approval-local-only' }
     }
     // 撤回/回滚同样是本地专属：它会删消息、删文件，远程持 token 者不该有这个权力。
     // agent:command 目前在远程黑名单里，这道门是给「以后有人放开那扇门」准备的第二层。
-    if (meta.remote && (cmd.type === 'rewind.apply' || cmd.type === 'rewind.preview')) {
+    if ((meta.remote || principal) && (cmd.type === 'rewind.apply' || cmd.type === 'rewind.preview')) {
       return { ok: false, error: 'rewind-local-only' }
     }
-    if ((cmd.type === 'rewind.apply' || cmd.type === 'rewind.preview') && this.droppedSessions.has(cmd.sessionId)) {
+    if (this.droppedSessions.has(cmd.sessionId)) {
+      if (cmd.type === 'permission.resolve' || cmd.type === 'question.resolve') return { ok: false, error: 'stale-request' }
       return { ok: false, error: 'session-dropped' }
     }
     const s = this.session(cmd.sessionId)
@@ -743,7 +853,13 @@ export class AgentSessionManager {
       case 'queue.enqueue':
         if (s.dropped) return { ok: false, error: 'session-dropped' }
         if (s.receivedQueueIds.has(cmd.item.id) || s.queue.some((item) => item.id === cmd.item.id)) return { ok: true }
+        if (principal && !this.snapshots.has(s.sessionId)) {
+          if (!this.lastLocalSettings) return { ok: false, error: MISSING_SETTINGS }
+          this.snapshots.set(s.sessionId, { type: 'run', sessionId: s.sessionId, content: '', settings: this.lastLocalSettings })
+          this.snapshotOrigins.set(s.sessionId, meta)
+        }
         s.receivedQueueIds.add(cmd.item.id)
+        s.queueOrigins.set(cmd.item.id, meta)
         if (s.receivedQueueIds.size > 1000) {
           const oldest = s.receivedQueueIds.values().next().value
           if (oldest) s.receivedQueueIds.delete(oldest)
@@ -781,15 +897,13 @@ export class AgentSessionManager {
       }
       case 'permission.resolve': {
         if (!s.pendingPermissions.has(cmd.requestId)) return { ok: false, error: 'stale-request' }
-        this.settlePermission(s, cmd.requestId, cmd.approved === true, false, cmd.scope ?? 'once')
+        this.settlePermission(s, cmd.requestId, cmd.approved === true, false, principal ? 'once' : cmd.scope ?? 'once')
         return { ok: true }
       }
       case 'question.resolve': {
         const pending = s.pendingQuestions.get(cmd.requestId)
         if (!pending) return { ok: false, error: 'stale-request' }
-        clearTimeout(pending.timer)
-        s.pendingQuestions.delete(cmd.requestId)
-        pending.resolve((cmd.payload ?? {}) as Record<string, string[]>)
+        this.settleQuestion(s, cmd.requestId, (cmd.payload ?? {}) as Record<string, string[]>, false)
         return { ok: true }
       }
       case 'manual.compact':
@@ -947,6 +1061,8 @@ export class AgentSessionManager {
 
   private setQueue(s: HostSession, items: QueuedMessageItem[]): void {
     if (s.dropped) return
+    const ids = new Set(items.map((item) => item.id))
+    for (const id of s.queueOrigins.keys()) if (!ids.has(id)) s.queueOrigins.delete(id)
     s.queue = items
     this.emit(s, { type: 'queue.snapshot', sessionId: s.sessionId, items })
   }
@@ -954,7 +1070,8 @@ export class AgentSessionManager {
   private async startRun(
     s: HostSession,
     cmd: Extract<AgentCommand, { type: 'run' }>,
-    meta: { remote?: boolean; wake?: boolean } = {}
+    meta: AgentCommandMeta = {},
+    queueId?: string,
   ): Promise<{ ok: boolean; error?: string }> {
     // 会话已删：不再受理任何新运行（否则会在已删除的会话上重建一整套运行态）
     if (s.dropped) return { ok: false, error: 'session-dropped' }
@@ -964,28 +1081,49 @@ export class AgentSessionManager {
     // 本地 run 自带 settings 时用自带的；不带（IM bot 就是这种）时先查本会话历史快照，
     // 再退到全局最近本地快照——bot 新建的会话没有前者，只有后者能让它开箱即用。
     const cached = this.snapshots.get(s.sessionId)
-    const base = meta.remote
+    const principal = meta.pairedRemote
+    if (principal) {
+      if (!principal.isActive()) return { ok: false, error: 'remote-disconnected' }
+      if (!principal.control) return { ok: false, error: 'remote-control-disabled' }
+      const rows = await this.store.getAllSessions()
+      const row = rows.find((item) => item.id === s.sessionId)
+      const cwd = row?.working_dir || row?.default_work_dir
+      if (typeof cwd !== 'string') return { ok: false, error: 'remote-session-unavailable' }
+      try { await resolveRemoteWorkspacePath(principal, cwd, true) } catch { return { ok: false, error: 'remote-outside-workspace' } }
+    }
+    // A local delete/removal may land while the paired path check is awaiting IO.
+    if (s.dropped) return { ok: false, error: 'session-dropped' }
+    if (queueId && !s.queue.some((item) => item.id === queueId)) return { ok: false, error: 'queue-item-missing' }
+    const base = principal ? (this.lastLocalSettings ?? cached?.settings) : meta.remote
       ? cached?.settings
       : (cmd.settings ?? cached?.settings ?? this.lastLocalSettings)
     if (!base) return { ok: false, error: MISSING_SETTINGS }
     // 远程触发的运行永远按 manual 档门控：危险操作只能由本地窗口批准。
     // full / auto 档在本地是用户自己的选择，落到远程就变成「持 token 即可以用户身份跑 shell」。
-    const settings: AgentSettings = meta.remote ? { ...base, approvalMode: 'manual' } : base
+    const settings: AgentSettings = (meta.remote || principal)
+      ? { ...base, approvalMode: 'manual', ...(principal ? { permissionRules: [], browserUseEnabled: false, computerUseEnabled: false } : {}) }
+      : base
     const resolvedCmd: Extract<AgentCommand, { type: 'run' }> = { ...cmd, settings }
     // 本地 run 才是这份全局快照的唯一合法来源：渲染层每次发都带自己的配置，
     // 于是「桌面换模型」下一步就是 bot 用新模型，不需要重启任何东西。
-    if (!meta.remote) this.lastLocalSettings = settings
+    if (!meta.remote && !principal) this.lastLocalSettings = settings
     if (meta.remote && base.approvalMode !== 'manual') {
       console.log(`[agent-host][audit] remote run downgraded approval ${base.approvalMode} -> manual session=${s.sessionId}`)
     }
-    if (s.run || s.compacting || s.rewinding) {
+    if (s.run || s.compacting || s.rewinding || (s.flushing && !queueId)) {
+      if (queueId || meta.wake) return { ok: false, error: 'session-busy' }
       // 已在跑（或正在压缩）：按排队语义并入队列，而不是并发两个 run 抢同一会话状态。
       // 压缩与 run 共用这把锁：压缩结束时会用旧快照整段替换消息，压缩期间并发跑一轮
       // 就等于用旧快照覆盖新消息。
       // 历史会话可能刚重启还没有 run 快照；撤回期间收到的首条 run 仍需能在解锁后发送。
-      if (s.rewinding && !cached) this.snapshots.set(s.sessionId, resolvedCmd)
+      if (s.rewinding && !cached) {
+        this.snapshots.set(s.sessionId, resolvedCmd)
+        this.snapshotOrigins.set(s.sessionId, meta)
+      }
+      const queuedId = makeId()
+      s.queueOrigins.set(queuedId, meta)
       this.setQueue(s, [...s.queue, {
-        id: makeId(),
+        id: queuedId,
         content: cmd.content,
         attachments: cmd.attachments,
         taskMode: cmd.taskMode,
@@ -997,9 +1135,10 @@ export class AgentSessionManager {
 
     const sessionId = s.sessionId
     this.snapshots.set(sessionId, resolvedCmd)
+    this.snapshotOrigins.set(sessionId, meta)
     const controller = new AbortController()
     const runId = makeId()
-    s.run = { runId, controller, startedAt: Date.now() }
+    s.run = { runId, controller, startedAt: Date.now(), origin: meta }
     s.status = 'working'
     s.error = undefined
     this.emit(s, { type: 'run.started', sessionId, runId, ts: Date.now() })
@@ -1016,7 +1155,7 @@ export class AgentSessionManager {
     settings: AgentSettings,
     controller: AbortController,
     runId: string,
-    meta: { remote?: boolean; wake?: boolean }
+    meta: AgentCommandMeta
   ): Promise<void> {
     const sessionId = s.sessionId
     const ctx = this.contexts.get(sessionId)
@@ -1082,19 +1221,32 @@ export class AgentSessionManager {
 
   /** FIFO 取队首发送；入口守卫拦下的（缺配置等）放回队首，不丢消息 */
   private async flushQueue(s: HostSession): Promise<void> {
-    if (s.run || s.compacting || s.rewinding || s.dropped || s.queue.length === 0) return
+    if (s.flushing || s.run || s.compacting || s.rewinding || s.dropped || s.queue.length === 0) return
     const cmd = this.snapshots.get(s.sessionId)
     if (!cmd) return
     const next = s.queue[0]
-    this.setQueue(s, s.queue.slice(1))
-    const result = await this.startRun(s, {
-      ...cmd,
-      content: next.content,
-      attachments: next.attachments,
-      taskMode: next.taskMode ?? undefined,
-      skills: next.skills,
-    })
-    if (!result.ok) this.setQueue(s, [next, ...s.queue])
+    const origin = s.queueOrigins.get(next.id) ?? this.snapshotOrigins.get(s.sessionId) ?? {}
+    s.flushing = true
+    let advanced = false
+    try {
+      const result = await this.startRun(s, {
+        ...cmd,
+        content: next.content,
+        attachments: next.attachments,
+        taskMode: next.taskMode ?? undefined,
+        skills: next.skills,
+      }, origin, next.id)
+      // Keep the original queue ID visible until admission finishes. Another device
+      // can remove it during validation, and retries still refer to the same item.
+      if (result.ok || result.error === 'queue-item-missing' || (origin.pairedRemote && (!origin.pairedRemote.isActive() || !origin.pairedRemote.control))) {
+        this.setQueue(s, s.queue.filter((item) => item.id !== next.id))
+        advanced = true
+      }
+    } finally {
+      s.flushing = false
+      // An immediately completed run may have attempted a flush while this one held the slot.
+      if (advanced && !s.run && !s.compacting && !s.rewinding && !s.dropped) void this.flushQueue(s)
+    }
   }
 
   private async manualCompact(s: HostSession, instructions?: string): Promise<void> {
@@ -1213,10 +1365,12 @@ export class AgentSessionManager {
       }
       s.pendingQuestions.clear()
       s.queue = []
+      s.queueOrigins.clear()
       this.sessions.delete(sessionId)
     }
     this.contexts.delete(sessionId)
     this.snapshots.delete(sessionId)
+    this.snapshotOrigins.delete(sessionId)
     sessionCache.delete(sessionId)
   }
 
@@ -1258,6 +1412,10 @@ export class AgentSessionManager {
    */
   getLocalSettingsSnapshot(): AgentSettings | null {
     return this.lastLocalSettings ? { ...this.lastLocalSettings } : null
+  }
+
+  setRemoteApprovalProbe(probe: () => boolean): void {
+    this.remoteApprovalProbe = probe
   }
 
   /**

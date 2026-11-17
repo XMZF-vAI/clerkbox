@@ -868,13 +868,14 @@ async function buildAPIMessages(
         if (pathLines.length > 0) {
           msg.content = `${msg.content}\n\n[附件文件]\n${pathLines.join('\n')}`
         }
-        // 支持图片的模型：携带 dataUrl 的图片附件转多模态 images（mimeType 取附件声明，缺失时从 dataUrl 前缀解析）
+        // Remote uploads persist only a path; resolve their bytes at the model boundary.
+        // Keep the base64 out of session history, event replay, and browser RPC frames.
         if (supportsImages) {
           const images: Array<{ dataUrl: string; mimeType: string }> = []
           for (const a of m.attachments) {
-            if (a.kind === 'image' && a.dataUrl) {
-              images.push({ dataUrl: a.dataUrl, mimeType: a.mimeType || mimeFromDataUrl(a.dataUrl) || 'image/png' })
-            }
+            if (a.kind !== 'image') continue
+            const dataUrl = a.dataUrl || (a.path ? await ports.env.readImageAsDataUrl(a.path, a.mimeType || 'image/png') : null)
+            if (dataUrl) images.push({ dataUrl, mimeType: a.mimeType || mimeFromDataUrl(dataUrl) || 'image/png' })
           }
           if (images.length > 0) msg.images = images
         }
@@ -1500,7 +1501,7 @@ async function runAgentLoop(
     }
   }
   let memoryPrompt = ''
-  if (isMain && homeDir) {
+  if (isMain && (homeDir || workingDir)) {
     const snapKey = `${sessionId}|${homeDir}|${workingDir}`
     const snap = ctx.memorySnapshot
     if (snap && snap.key === snapKey) {

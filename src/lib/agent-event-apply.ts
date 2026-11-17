@@ -17,8 +17,8 @@ import { useWorkflowRunsStore } from '../stores/workflow-runs-store'
 import type { AgentEvent } from '../agent-core/protocol'
 import type { SessionGoal } from '../types/agent'
 
-/** 已经向用户弹过一次的提问 id：回放不该重复打扰 */
-const openedQuestions = new Set<string>()
+/** 只对已收到成功回执的答案去重；未完成的问题必须允许快照恢复。 */
+const answeredQuestions = new Set<string>()
 
 function applyPatch(patch: StorePatch): void {
   const chat = useChatStore.getState()
@@ -90,17 +90,19 @@ function applyPatch(patch: StorePatch): void {
       return
     case 'open-question': {
       const key = `${patch.sessionId}:${patch.requestId}`
-      if (openedQuestions.has(key)) return
-      openedQuestions.add(key)
-      // 答案回给宿主由它继续循环；宿主侧另有 10 分钟兜底，不会因窗口关闭而永久挂起
-      void useInteractiveStore
-        .getState()
-        .requestQuestion(patch.sessionId, patch.questions)
-        .then((answers) =>
-          agentClient.send({ type: 'question.resolve', sessionId: patch.sessionId, requestId: patch.requestId, payload: answers })
-        )
+      if (answeredQuestions.has(key)) return
+      useInteractiveStore.getState().openHostQuestion(patch.sessionId, patch.requestId, patch.questions, async (answers) => {
+        const result = await agentClient.send({ type: 'question.resolve', sessionId: patch.sessionId, requestId: patch.requestId, payload: answers })
+        if (!result.ok) throw new Error(result.error || 'question-submit-failed')
+        answeredQuestions.add(key)
+      })
       return
     }
+    case 'settle-question':
+      // 只收掉同一 requestId；旧请求的迟到 settled 不能影响新问题。
+      answeredQuestions.add(`${patch.sessionId}:${patch.requestId}`)
+      useInteractiveStore.getState().settleHostQuestion(patch.sessionId, patch.requestId)
+      return
     case 'notify':
       notifyIfNotViewing(patch.sessionId, patch.channel, patch.message)
       return
@@ -137,7 +139,7 @@ export function applyAgentEvent(event: AgentEvent): void {
     useInteractiveStore.getState().cancelQuestion(event.sessionId)
     // 宿主正常会先发 settled 再收尾；这条兜底防漏发把待批卡片永久留在界面上
     usePermissionStore.getState().clearSession(event.sessionId)
-    for (const key of [...openedQuestions]) if (key.startsWith(`${event.sessionId}:`)) openedQuestions.delete(key)
+    for (const key of [...answeredQuestions]) if (key.startsWith(`${event.sessionId}:`)) answeredQuestions.delete(key)
   }
 }
 
@@ -160,5 +162,5 @@ export async function attachAgentEvents(): Promise<boolean> {
 export function detachAgentEvents(): void {
   subscribed?.()
   subscribed = null
-  openedQuestions.clear()
+  answeredQuestions.clear()
 }

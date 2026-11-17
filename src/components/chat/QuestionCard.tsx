@@ -1,7 +1,8 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { CircleHelp, Check, ChevronDown } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useInteractiveStore, type PendingQuestion } from '../../stores/interactive-store'
+import { getRemoteBootstrap, getRemoteConnection, isCloudRemoteMode, subscribeRemoteConnection } from '../../remote/browser'
 
 type QuestionChoice = { kind: 'option'; label: string } | { kind: 'other' }
 
@@ -17,13 +18,21 @@ export default function QuestionCard({ sessionId, vibe = false }: { sessionId: s
 function QuestionForm({ sessionId, pending, resolveQuestion, vibe }: {
   sessionId: string
   pending: PendingQuestion
-  resolveQuestion: (sessionId: string, requestId: string, answers: Record<string, string[]>) => void
+  resolveQuestion: (sessionId: string, requestId: string, answers: Record<string, string[]>) => void | Promise<void>
   vibe: boolean
 }) {
   const { t } = useTranslation()
   const [selected, setSelected] = useState<Record<string, QuestionChoice>>({})
   const [other, setOther] = useState<Record<string, string>>({})
   const [expanded, setExpanded] = useState(true)
+  const [submitting, setSubmitting] = useState(false)
+  const [submitError, setSubmitError] = useState(false)
+  const sending = useRef(false)
+  const connection = useSyncExternalStore(subscribeRemoteConnection, getRemoteConnection)
+  const blockedReason = isCloudRemoteMode()
+    ? connection.state !== 'connected' ? 'question.connectionRequired'
+      : getRemoteBootstrap()?.capabilities.control !== true ? 'question.readOnly' : null
+    : null
 
   const answers = useMemo(() => {
     return Object.fromEntries(pending.questions.map((question) => {
@@ -38,10 +47,17 @@ function QuestionForm({ sessionId, pending, resolveQuestion, vibe }: {
   }, [other, pending, selected])
 
   const answered = pending.questions.every((question) => (answers[question.id] || []).length > 0)
-  const submit = () => {
-    if (!answered) return
-    resolveQuestion(sessionId, pending.id, answers)
+  const sendAnswers = async (value: Record<string, string[]>) => {
+    // 再读一次实时连接，防止断线与 React 下一次渲染之间的点击绕过禁用态。
+    if (sending.current || (isCloudRemoteMode() && (getRemoteConnection().state !== 'connected' || getRemoteBootstrap()?.capabilities.control !== true))) return
+    sending.current = true
+    setSubmitting(true)
+    setSubmitError(false)
+    try { await resolveQuestion(sessionId, pending.id, value) }
+    catch { setSubmitError(true) }
+    finally { sending.current = false; setSubmitting(false) }
   }
+  const submit = () => { if (answered) return sendAnswers(answers) }
   // 已答数 / 总数（进度展示真实作答进度，而不是恒等的 n/n）
   const answeredCount = pending.questions.filter((question) => (answers[question.id] || []).length > 0).length
 
@@ -74,6 +90,7 @@ function QuestionForm({ sessionId, pending, resolveQuestion, vibe }: {
                       <button
                         type="button"
                         key={option.label}
+                        disabled={submitting}
                         onClick={() => setSelected((state) => ({ ...state, [question.id]: { kind: 'option', label: option.label } }))}
                         className={`flex min-h-11 items-start gap-3 rounded-md3-sm border px-3 py-2 text-left transition-colors ${
                           active
@@ -93,6 +110,7 @@ function QuestionForm({ sessionId, pending, resolveQuestion, vibe }: {
                   })}
                   <button
                     type="button"
+                    disabled={submitting}
                     onClick={() => setSelected((state) => ({ ...state, [question.id]: { kind: 'other' } }))}
                     className={`flex min-h-11 items-center gap-3 rounded-md3-sm border px-3 py-2 text-left transition-colors ${
                       value?.kind === 'other' ? vibe ? 'border-white/60 bg-white/15' : 'border-md-primary bg-md-primary/10' : vibe ? 'border-white/15 bg-white/5 hover:bg-white/10' : 'border-dark-onSurfaceVariant/10 bg-dark-surfaceContainer/40 hover:bg-dark-surfaceContainer'
@@ -104,6 +122,7 @@ function QuestionForm({ sessionId, pending, resolveQuestion, vibe }: {
                   {value?.kind === 'other' && (
                     <input
                       autoFocus
+                      disabled={submitting}
                       value={other[question.id] || ''}
                       onChange={(event) => setOther((state) => ({ ...state, [question.id]: event.target.value }))}
                       placeholder={t('question.otherPlaceholder')}
@@ -114,9 +133,11 @@ function QuestionForm({ sessionId, pending, resolveQuestion, vibe }: {
               </div>
             )
           })}
-          <div className="flex items-center justify-between gap-3 pt-1">
-            <button type="button" onClick={() => resolveQuestion(sessionId, pending.id, {})} className="min-h-10 px-2 text-sm opacity-70 transition-opacity hover:opacity-100">{t('question.ignore')}</button>
-            <button type="button" onClick={submit} disabled={!answered} className="min-h-10 rounded-md3-sm bg-md-primary px-4 text-sm font-medium text-md-onPrimary transition-opacity disabled:cursor-not-allowed disabled:opacity-40">{t('question.submit')}</button>
+          {blockedReason && <p className="text-xs opacity-70">{t(blockedReason)}</p>}
+          {submitError && <p role="alert" className={vibe ? 'text-xs text-red-200' : 'text-xs text-md-error'}>{t('question.submitFailed')}</p>}
+          <div className="flex items-center justify-between gap-3 pt-1" aria-busy={submitting}>
+            <button type="button" onClick={() => sendAnswers({})} disabled={submitting || !!blockedReason} className="min-h-10 px-2 text-sm opacity-70 transition-opacity hover:opacity-100 disabled:cursor-not-allowed disabled:opacity-40">{t('question.ignore')}</button>
+            <button type="button" onClick={submit} disabled={!answered || submitting || !!blockedReason} className="min-h-10 rounded-md3-sm bg-md-primary px-4 text-sm font-medium text-md-onPrimary transition-opacity disabled:cursor-not-allowed disabled:opacity-40">{t(submitting ? 'question.submitting' : 'question.submit')}</button>
           </div>
         </div>
       )}

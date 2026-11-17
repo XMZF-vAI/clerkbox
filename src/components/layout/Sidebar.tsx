@@ -26,6 +26,7 @@ import ConfirmDialog from '../ui/ConfirmDialog'
 import RemoteAccessDialog from '../remote/RemoteAccessDialog'
 import ModeToggle from './ModeToggle'
 import { isWebUIMode } from '../../lib/ipc-client'
+import { isCloudRemoteMode } from '../../remote/browser'
 
 import APP_ICON from '../../assets/icon.png'
 import { useShallow } from 'zustand/react/shallow'
@@ -47,6 +48,7 @@ interface SidebarProps {
 
 export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProps) {
   const { t } = useTranslation()
+  const cloudRemote = isCloudRemoteMode()
   const { sessions, activeSessionId, createSession, setActiveSession, deleteSession } = useChatStore(
     useShallow((s) => ({
       sessions: s.sessions,
@@ -162,7 +164,7 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
         >
           <Search size={17} />
         </button>
-        <button
+        {!cloudRemote && <button
           type="button"
           onClick={() => { setShowScheduledTasks(false); setShowSkillStore(!showSkillStore) }}
           className={`md-focus w-9 h-9 flex items-center justify-center rounded-md3-sm transition-colors ${
@@ -173,8 +175,8 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
           aria-expanded={showSkillStore}
         >
           <Store size={18} />
-        </button>
-        <button
+        </button>}
+        {!cloudRemote && <button
           type="button"
           onClick={() => { setShowSkillStore(false); setShowScheduledTasks(!showScheduledTasks) }}
           className={`md-focus relative w-9 h-9 flex items-center justify-center rounded-md3-sm transition-colors ${
@@ -194,7 +196,7 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
               {pendingProposals > 9 ? '9+' : pendingProposals}
             </span>
           )}
-        </button>
+        </button>}
         <div className="flex-1" />
         {!isWebUIMode && (
           <button
@@ -217,7 +219,7 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
           <Settings size={18} />
         </button>
         {/* 账户按钮：未登录=用户图标 / 已登录=首字母圆头像 */}
-        <button
+        {!cloudRemote && <button
           type="button"
           onClick={handleOpenAccountSettings}
           className={`md-focus w-9 h-9 mt-1 flex items-center justify-center transition-colors ${
@@ -238,7 +240,7 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
           ) : (
             <User size={18} />
           )}
-        </button>
+        </button>}
         {remoteAccessOpen && <RemoteAccessDialog onClose={() => setRemoteAccessOpen(false)} />}
       </aside>
     )
@@ -291,7 +293,7 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
           <kbd aria-hidden="true" className="shrink-0 font-sans text-dark-onSurfaceVariant/60 max-md:hidden">{formatShortcut({ key: 'k' })}</kbd>
         </button>
         {!isWebUIMode && <div className="mb-2"><ModeToggle /></div>}
-        <button
+        {!cloudRemote && <button
           type="button"
           onClick={() => { setShowScheduledTasks(false); setShowSkillStore(!showSkillStore); onNavigate?.() }}
           aria-pressed={showSkillStore}
@@ -303,8 +305,8 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
         >
           <Store size={16} />
           <span>{t('sidebar.skills')}</span>
-        </button>
-        <button
+        </button>}
+        {!cloudRemote && <button
           type="button"
           onClick={() => { setShowSkillStore(false); setShowScheduledTasks(!showScheduledTasks); onNavigate?.() }}
           aria-pressed={showScheduledTasks}
@@ -321,7 +323,7 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
               {pendingProposals > 9 ? '9+' : pendingProposals}
             </span>
           )}
-        </button>
+        </button>}
       </nav>
 
       {/* 任务列表标题 + 全部折叠/展开 */}
@@ -419,7 +421,7 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
                             {statusLabel && <span className={`mt-0.5 block truncate text-ui-xs ${waitingApproval ? 'text-md-askForeground' : sessionStatus[s.id] === 'error' ? 'text-md-error' : 'text-dark-onSurfaceVariant'}`}>{statusLabel}</span>}
                           </span>
                         </button>
-                        <button
+                        {!cloudRemote && <button
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation()
@@ -430,7 +432,7 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
                           title={t('sidebar.deleteSessionAria')}
                         >
                           <Trash2 size={13} />
-                        </button>
+                        </button>}
                       </div>
                     )})}
                   </div>
@@ -462,7 +464,7 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
           <span>{t('sidebar.settings')}</span>
         </button>
         {/* 账户按钮（最底）：未登录=用户图标+"未登录" / 已登录=首字母圆头像+用户名 */}
-        <button
+        {!cloudRemote && <button
           type="button"
           onClick={() => { handleOpenAccountSettings(); onNavigate?.() }}
           className="md-focus w-full flex min-h-10 items-center gap-2.5 px-3 py-2 max-md:min-h-11 rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-ui-sm text-dark-onSurfaceVariant"
@@ -483,7 +485,7 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
           <span className="truncate">
             {accountLoggedIn && accountUser ? accountUser.username : t('sidebar.notLoggedIn')}
           </span>
-        </button>
+        </button>}
       </div>
 
       {/* Delete confirmation dialog */}

@@ -6,6 +6,7 @@ import { deriveSessionTitle, mapMessageRows, messageRewindPatch, messageToRow, m
 import { dropSessionSnapshots } from '../lib/checkpoint-recorder'
 import type { SessionRow } from '../types/ipc'
 import { useInteractiveStore } from './interactive-store'
+import { getRemoteBootstrap, getRemoteConnection, getRemoteStorageScope, isCloudRemoteMode } from '../remote/browser'
 
 export type SessionStatus = 'working' | 'error' | 'confirm-danger'
 
@@ -17,6 +18,43 @@ export type SessionStatus = 'working' | 'error' | 'confirm-danger'
 const sessionAbortControllers = new Map<string, AbortController>()
 
 const sessionMessageWrites = new Map<string, Set<Promise<unknown>>>()
+const preparedCloudSessions = new Set<string>()
+const preparingCloudSessions = new Map<string, Promise<void>>()
+
+function cloudActiveSessionKey(): string | null {
+  if (!isCloudRemoteMode()) return null
+  const scope = getRemoteStorageScope()
+  return /^[a-f0-9]{16,128}:[a-f0-9]{16,128}$/.test(scope) ? `clerkbox:remote-active:${scope}` : null
+}
+
+function readCloudActiveSession(): string | null {
+  try {
+    const key = cloudActiveSessionKey()
+    const id = key ? sessionStorage.getItem(key) : null
+    return id && /^[A-Za-z0-9_-]{1,160}$/.test(id) ? id : null
+  } catch { return null }
+}
+
+/** Remote runs require a host-owned DB session before the first command is admitted. */
+export async function prepareCloudSession(sessionId: string): Promise<void> {
+  if (!isCloudRemoteMode() || preparedCloudSessions.has(sessionId)) return
+  const existing = preparingCloudSessions.get(sessionId)
+  if (existing) return existing
+  const session = useChatStore.getState().sessions.find((item) => item.id === sessionId)
+  const workspace = getRemoteBootstrap()?.workspace
+  if (!session || !workspace) throw new Error('remoteAccess.cloudSessionUnavailable')
+  const pending = ipc.dbCreateSession({
+    id: session.id,
+    title: session.title,
+    created_at: session.createdAt,
+    updated_at: session.updatedAt,
+    working_dir: workspace,
+    default_work_dir: workspace,
+    harness_mode: session.harnessMode ?? 'default',
+  }).then(() => { preparedCloudSessions.add(sessionId) })
+  preparingCloudSessions.set(sessionId, pending)
+  try { await pending } finally { preparingCloudSessions.delete(sessionId) }
+}
 
 function logPersistenceFailure(operation: string, promise: Promise<unknown>, sessionId?: string): void {
   if (sessionId) {
@@ -244,10 +282,12 @@ function restoreWorkDirs(row: SessionRow): { workingDir?: string; defaultWorkDir
 const createEmptySession = (): Session => {
   const now = Date.now()
   const { base, sep } = getDefaultWorkDirBase()
+  const workspace = isCloudRemoteMode() ? getRemoteBootstrap()?.workspace : undefined
   return {
     id: `sess-${now}-${Math.random().toString(36).slice(2, 8)}`,
     title: NEW_SESSION_TITLE,
-    defaultWorkDir: `${base}${sep}${formatTimestamp(now)}`,
+    ...(workspace ? { workingDir: workspace } : {}),
+    defaultWorkDir: workspace || `${base}${sep}${formatTimestamp(now)}`,
     messages: [],
     createdAt: now,
     updatedAt: now,
@@ -348,7 +388,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const msgRows = await ipc.dbGetMessages(row.id)
         // 空会话不再落库，DB 里的空壳全是遗留垃圾，启动时直接清掉
         if (msgRows.length === 0 && row.title === NEW_SESSION_TITLE) {
-          logPersistenceFailure('delete empty session', ipc.dbDeleteSession(row.id))
+          if (!isCloudRemoteMode()) logPersistenceFailure('delete empty session', ipc.dbDeleteSession(row.id))
           continue
         }
         sessions.push({
@@ -360,19 +400,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
           harnessMode: normalizeHarnessMode(row.harness_mode),
           ...restoreWorkDirs(row),
         })
+        if (isCloudRemoteMode()) preparedCloudSessions.add(row.id)
       }
       // 按 updatedAt 降序排序，使最近更新的会话排在最前，与新建会话时的 prepend 行为一致
       sessions.sort((a, b) => b.updatedAt - a.updatedAt)
 
-      // 启动时默认创建一个新会话（纯内存，发首条消息时才落库）
-      const newSession = createEmptySession()
+      // Only the authenticated device's scoped history may restore a browser selection.
+      // Desktop startup continues to open the existing welcome/new-conversation view.
+      const savedActiveId = readCloudActiveSession()
+      const restoredActiveId = sessions.find(session => session.id === savedActiveId)?.id
+      const newSession = restoredActiveId ? null : createEmptySession()
 
       // 加载用户曾选过的文件夹历史
       const recentsFolders = await ipc.dbGetRecents().catch(() => [])
 
       set({
-        sessions: [newSession, ...sessions],
-        activeSessionId: newSession.id,
+        sessions: newSession ? [newSession, ...sessions] : sessions,
+        activeSessionId: restoredActiveId ?? newSession!.id,
         recentsFolders,
         initialized: true,
       })
@@ -382,6 +426,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   syncFromDb: async () => {
+    if (isCloudRemoteMode() && getRemoteConnection().state !== 'connected') return
     const rewindRevisions = get().rewindRevisions
     try {
       // 廉价短路：DB 全局修订号未变 → 无任何写入，跳过全量比对
@@ -419,7 +464,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               if (current) merged.push(current)
               continue
             }
-            logPersistenceFailure('delete empty session', ipc.dbDeleteSession(row.id))
+            if (!isCloudRemoteMode()) logPersistenceFailure('delete empty session', ipc.dbDeleteSession(row.id))
             continue
           }
           const restored = restoreWorkDirs(row)
@@ -478,6 +523,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }))
       lastSyncedRevision = revision
     } catch (e) {
+      if (isCloudRemoteMode() && getRemoteConnection().state !== 'connected' && e instanceof Error &&
+          ['remoteAccess.cloudDisconnected', 'remoteAccess.cloudRevoked'].includes(e.message)) return
       console.error('[chat-store] syncFromDb failed:', e)
     }
   },
@@ -524,7 +571,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const cleanedSessions = state.sessions.filter((s) => !isEmptySession(s) || hasChatDraft(state.drafts[s.id]) || state.draftSubmitting[s.id] || state.rewindingSessionIds.has(s.id))
       for (const s of state.sessions) {
         if (isEmptySession(s) && !hasChatDraft(state.drafts[s.id]) && !state.draftSubmitting[s.id] && !state.rewindingSessionIds.has(s.id)) {
-          logPersistenceFailure('delete empty session', ipc.dbDeleteSession(s.id))
+          if (!isCloudRemoteMode()) logPersistenceFailure('delete empty session', ipc.dbDeleteSession(s.id))
         }
       }
       return {
@@ -541,7 +588,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           return {
             ...s,
             title: opts.title || s.title,
-            ...(opts.workingDir ? { workingDir: opts.workingDir } : {}),
+            ...(opts.workingDir && !isCloudRemoteMode() ? { workingDir: opts.workingDir } : {}),
           }
         }),
       }))
@@ -554,7 +601,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // 切走时清掉非 active 的空会话（没说过话的会话不配留在历史记录里）
       const cleanedSessions = state.sessions.map((s) => {
         if (s.id !== id && isEmptySession(s) && !hasChatDraft(state.drafts[s.id]) && !state.draftSubmitting[s.id] && !state.rewindingSessionIds.has(s.id)) {
-          logPersistenceFailure('delete empty session', ipc.dbDeleteSession(s.id))
+          if (!isCloudRemoteMode()) logPersistenceFailure('delete empty session', ipc.dbDeleteSession(s.id))
           return null
         }
         return s
@@ -706,6 +753,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   updateSessionWorkingDir: (sessionId, dir) => {
+    if (isCloudRemoteMode()) return
     const now = Date.now()
     set((state) => ({
       sessions: state.sessions.map((s) =>
@@ -729,6 +777,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   setSessionHarnessMode: (sessionId, mode) => {
+    if (isCloudRemoteMode()) return
     // 模式锁定：会话已产出消息后不可变更（与 dsh 官方 preset 语义一致，
     // 也保证静态 system 段跨请求字节稳定）。空会话纯内存态，不落库——
     // 首条消息落库时 addMessage 会把 harnessMode 写入会话行。
@@ -740,6 +789,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   pushRecentFolder: async (dir) => {
+    if (isCloudRemoteMode()) return
     // Keep POSIX paths case-sensitive while matching Windows paths case-insensitively.
     const comparableDir = comparableFolderPath(dir)
     const next = [dir, ...get().recentsFolders.filter((path) => comparableFolderPath(path) !== comparableDir)]
@@ -750,6 +800,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   deleteSession: (id) =>
     set((state) => {
+      if (isCloudRemoteMode()) return state
       if (state.rewindingSessionIds.has(id)) return state
       cancelPendingMessageWrites(id)
       const filtered = state.sessions.filter((s) => s.id !== id)
@@ -845,3 +896,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     ), sessionId)
   },
 }))
+
+useChatStore.subscribe((state, previous) => {
+  if (state.activeSessionId === previous.activeSessionId) return
+  try {
+    const key = cloudActiveSessionKey()
+    if (!key) return
+    if (state.activeSessionId) sessionStorage.setItem(key, state.activeSessionId)
+    else sessionStorage.removeItem(key)
+  } catch { /* Browser privacy/storage settings must not prevent a conversation from opening. */ }
+})
