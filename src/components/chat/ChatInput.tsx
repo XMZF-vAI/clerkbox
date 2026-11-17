@@ -219,8 +219,10 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
   const [webuiCapabilities, setWebuiCapabilities] = useState<WebUICapabilities | null>(null)
   const [remoteFolderPickerOpen, setRemoteFolderPickerOpen] = useState(false)
   const [remoteFolderPath, setRemoteFolderPath] = useState('')
+  const [remoteFolderAddress, setRemoteFolderAddress] = useState('')
   const [remoteFolderEntries, setRemoteFolderEntries] = useState<FileEntry[]>([])
   const [remoteFolderLoading, setRemoteFolderLoading] = useState(false)
+  const remoteFolderRequest = useRef(0)
   const folderPickerPanelRef = useModalAccessibility(() => setRemoteFolderPickerOpen(false), undefined, { active: remoteFolderPickerOpen })
 
   const commitAttachments = (next: MessageAttachment[]) => {
@@ -257,7 +259,7 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
   }
 
   const webuiUploadEnabled = isWebUIMode && cloudFilesEnabled
-  const hostFolderEnabled = isWebUIMode && !cloudRemote
+  const hostFolderEnabled = isWebUIMode && cloudFilesEnabled
   const remoteUploadLimit = webuiCapabilities?.maxUploadBytes || FALLBACK_WEBUI_UPLOAD_LIMIT
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   // 只订阅输入区实际使用的字段，避免聊天流式更新或无关设置变化重绘整个输入面板。
@@ -379,10 +381,10 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
   const sessionSkillIds = useSkillsStore((s) => s.sessionSkillIds)
   const toggleSessionSkill = useSkillsStore((s) => s.toggleSessionSkill)
   const { setShowSkillStore } = useUIStore()
-  const activeSkills = cloudRemote ? [] : skills.filter((s) => sessionSkillIds.includes(s.id))
+  const activeSkills = skills.filter((s) => sessionSkillIds.includes(s.id))
 
   // MCP 服务器（"/" 菜单里可快速启停；连接状态点来自主进程推送）
-  const mcpServers = cloudRemote ? [] : settings.mcpServers ?? []
+  const mcpServers = settings.mcpServers ?? []
   const mcpStatuses = useMcpStore((s) => s.statuses)
 
   // ── "/" 命令菜单：过滤 + 键盘导航 + 选择 ──
@@ -391,7 +393,7 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
   const filteredCommands = TASK_COMMANDS.filter((c) =>
     !commandQuery || c.name.toLowerCase().includes(commandQuery) || t(c.nameKey).toLowerCase().includes(commandQuery) || t(c.descKey).toLowerCase().includes(commandQuery)
   )
-  const filteredSkills = (cloudRemote ? [] : skills).filter((s) =>
+  const filteredSkills = skills.filter((s) =>
     !commandQuery || s.name.toLowerCase().includes(commandQuery) || (s.description || '').toLowerCase().includes(commandQuery)
   )
   const filteredMcp = mcpServers.filter((s) =>
@@ -543,7 +545,6 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
     if (/^\/goal\s+\S/i.test(trimmed)) {
       const goalArg = trimmed.replace(/^\/goal\s+/i, '').trim()
       if (/^(clear|stop|off|reset|cancel)$/i.test(goalArg)) {
-        if (cloudRemote) { setFeedback(t('remoteAccess.cloudDesktopManaged')); return }
         if (activeSessionId) useGoalStore.getState().clearGoal(activeSessionId)
         setContent('')
         return
@@ -566,7 +567,7 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
     // 显式 /<skill-slug> 激活：消息以已安装技能的 slug 开头 → 自动激活该技能并剥离前缀，
     // 剩余文本作为正文发送（对齐提示词的 Slash Activation 规则；未命中技能的 "/" 前缀不拦截）
     const slashSkillMatch = trimmed.match(/^\/([a-zA-Z0-9_-]+)(?:\s+([\s\S]*))?$/)
-    if (slashSkillMatch && !cloudRemote) {
+    if (slashSkillMatch) {
       const matchedSkill = skills.find((s) => s.slug.toLowerCase() === slashSkillMatch[1].toLowerCase())
       if (matchedSkill) {
         const rest = (slashSkillMatch[2] || '').trim()
@@ -931,6 +932,7 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
       const homeDir = await ipc.getHomeDir().catch(() => '')
       const candidates = [effectiveWorkDir, ...recentsFolders, homeDir].filter((p): p is string => Boolean(p))
       setRemoteFolderPath('')
+      setRemoteFolderAddress('')
       setRemoteFolderEntries([])
       setRemoteFolderPickerOpen(true)
       for (const candidate of candidates) {
@@ -960,13 +962,16 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
 
   const loadRemoteFolder = async (dir: string) => {
     if (!dir) return
+    const generation = ++remoteFolderRequest.current
     setRemoteFolderLoading(true)
     try {
       const entries = await ipc.listDir(dir)
+      if (generation !== remoteFolderRequest.current) return
       setRemoteFolderPath(dir)
+      setRemoteFolderAddress(dir)
       setRemoteFolderEntries(entries.filter((entry) => entry.isDirectory).sort((a, b) => a.name.localeCompare(b.name)))
     } finally {
-      setRemoteFolderLoading(false)
+      if (generation === remoteFolderRequest.current) setRemoteFolderLoading(false)
     }
   }
 
@@ -1107,7 +1112,7 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
 
   // Harness 模式：会话未开始（无消息）时可改，开始后锁定为只读标识
   const harnessMode = normalizeHarnessMode(currentSession?.harnessMode)
-  const harnessLocked = cloudRemote || (currentSession?.messages.length ?? 0) > 0
+  const harnessLocked = (currentSession?.messages.length ?? 0) > 0
   const harnessMeta = HARNESS_MODE_METAS.find((m) => m.id === harnessMode) ?? HARNESS_MODE_METAS[0]
 
   // 审批档位元数据（图标 + 标签；完全访问用警告色，对齐 TRAE）
@@ -1331,7 +1336,7 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
           <span className={`text-[11px] truncate max-w-[400px] ${vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/50'}`}>
             {effectiveWorkDir}{currentSession?.workingDir ? '' : t('chat.defaultWorkDirSuffix')}
           </span>
-          {!vibe && !cloudRemote && (
+          {!vibe && (
             <span className="ml-auto inline-flex">
               {settings.interfaceMode === 'coding' ? (
                 <BranchSwitcher workDir={effectiveWorkDir} />
@@ -1613,7 +1618,7 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
                 </>
               )}
               {/* 技能 section（对齐 TRAE 的「插件」区：列出已安装技能，点击切换激活态） */}
-              {!cloudRemote && <><div className={`px-3 pt-2 pb-1 text-[10px] uppercase tracking-wider ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/40'}`}>
+              {<><div className={`px-3 pt-2 pb-1 text-[10px] uppercase tracking-wider ${vibe ? 'text-white/40' : 'text-dark-onSurfaceVariant/40'}`}>
                 {t('chat.skillsSection')}
               </div>
               {filteredSkills.length === 0 ? (
@@ -1764,13 +1769,13 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
               ref={folderTriggerRef}
               type="button"
               onClick={() => setShowFolderPopover((v) => !v)}
-              disabled={folderSelecting || cloudRemote}
+              disabled={folderSelecting || !cloudFilesEnabled}
               className={`h-8 max-md:h-11 max-md:px-3 flex items-center gap-1 px-2 flex-shrink-0 rounded-md3-sm transition-colors disabled:opacity-40 ${
                 vibe
                   ? 'hover:bg-white/15 text-white/70'
                   : 'hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant'
               }`}
-              title={cloudRemote ? t('remoteAccess.cloudDesktopManaged') : t('chat.selectFolderTitle')}
+              title={t('chat.selectFolderTitle')}
               aria-label={t('chat.selectFolderAria')}
               aria-controls="chat-folder-menu"
               aria-expanded={showFolderPopover}
@@ -1874,8 +1879,6 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
             <button
               ref={approvalTriggerRef}
               type="button"
-              disabled={cloudRemote}
-              title={cloudRemote ? t('remoteAccess.cloudDesktopManaged') : undefined}
               onClick={() => setShowApprovalMenu((v) => !v)}
               className={`h-8 max-md:h-11 max-md:px-3 flex items-center gap-1.5 px-2.5 flex-shrink-0 rounded-md3-sm transition-colors ${
                 approvalMode === 'full'
@@ -1978,7 +1981,7 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
             <button
               type="button"
               onClick={toggleThinking}
-              disabled={cloudRemote || !thinkingSupported || thinkingAlwaysOn}
+              disabled={!thinkingSupported || thinkingAlwaysOn}
               className={`h-8 max-md:h-11 flex items-center gap-1 px-2 flex-shrink-0 rounded-l-md3-sm transition-colors ${
                 thinkingActive
                   ? vibe
@@ -1988,7 +1991,7 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
                     ? 'hover:bg-white/15 text-white/70 disabled:opacity-30'
                     : 'hover:bg-dark-surfaceContainer text-dark-onSurfaceVariant disabled:opacity-30'
               }`}
-              title={cloudRemote ? t('remoteAccess.cloudDesktopManaged') : thinkingAlwaysOn ? t('chat.thinkingAlwaysOn') : thinkingSupported ? t('chat.thinkingToggle') : t('chat.thinkingUnsupported')}
+              title={thinkingAlwaysOn ? t('chat.thinkingAlwaysOn') : thinkingSupported ? t('chat.thinkingToggle') : t('chat.thinkingUnsupported')}
               aria-pressed={thinkingActive}
               aria-label={thinkingAlwaysOn ? t('chat.thinkingAlwaysOn') : t('chat.thinkingToggle')}
             >
@@ -1999,7 +2002,7 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
                 ref={thinkingTriggerRef}
                 type="button"
                 onClick={() => setShowThinkingMenu((v) => !v)}
-                disabled={cloudRemote || !thinkingSupported}
+                disabled={!thinkingSupported}
                 className={`chat-toolbar-thinking-level h-8 max-md:h-11 flex items-center gap-1 px-1.5 flex-shrink-0 rounded-r-md3-sm transition-colors ${
                   thinkingActive
                     ? vibe
@@ -2009,7 +2012,7 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
                       ? 'text-white/70 disabled:opacity-30'
                       : 'text-dark-onSurfaceVariant disabled:opacity-30'
                 }`}
-                title={cloudRemote ? t('remoteAccess.cloudDesktopManaged') : t('chat.thinkingLevel')}
+                title={t('chat.thinkingLevel')}
                 aria-expanded={showThinkingMenu}
                 aria-controls="chat-reasoning-menu"
               >
@@ -2072,8 +2075,6 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
             <button
               ref={modelTriggerRef}
               type="button"
-              disabled={cloudRemote}
-              title={cloudRemote ? t('remoteAccess.cloudDesktopManaged') : undefined}
               onClick={() => {
                 setShowModelMenu((open) => {
                   if (!open) setModelMenuLevel('root')
@@ -2388,6 +2389,13 @@ export default function ChatInput({ sessionId, onSend, onManualCompact, isCompac
                 <X size={15} />
               </button>
             </div>
+            <form className="flex items-center gap-2 border-b border-dark-onSurfaceVariant/10 p-3" onSubmit={(event) => {
+              event.preventDefault()
+              void loadRemoteFolder(remoteFolderAddress.trim()).catch(() => setFeedback(t('chat.folderSelectionFailed')))
+            }}>
+              <input value={remoteFolderAddress} onChange={(event) => setRemoteFolderAddress(event.target.value)} aria-label={t('chat.folderPathLabel')} placeholder={t('chat.folderPathHint')} autoComplete="off" spellCheck={false} className={`md-focus min-h-11 min-w-0 flex-1 rounded-md3-sm border px-3 text-ui-xs ${vibe ? 'border-white/20 bg-black/20 text-white' : 'border-dark-onSurfaceVariant/20 bg-dark-surface text-dark-onSurface'}`} />
+              <button type="submit" disabled={!remoteFolderAddress.trim() || remoteFolderLoading} className="md-focus min-h-11 rounded-md3-sm px-3 text-ui-xs hover:bg-dark-surfaceContainerHigh disabled:opacity-40">{t('chat.folderGo')}</button>
+            </form>
             <div className="max-h-64 overflow-y-auto p-1">
               {remoteFolderLoading ? (
                 <div className="px-3 py-6 text-center text-xs opacity-60">{t('chat.folderLoading')}</div>

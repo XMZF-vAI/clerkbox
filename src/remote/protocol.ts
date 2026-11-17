@@ -4,19 +4,23 @@ export const DEFAULT_REMOTE_ORIGIN = 'https://webui.clerkbox.xmzf.space'
 export const REMOTE_MAX_FRAME_BYTES = 1024 * 1024
 export interface RemotePrincipal {
   readonly deviceId: string
+  /** Missing on devices paired before full-workbench access; never elevate those grants. */
+  readonly scope?: 'desktop'
   readonly workspace: string
   readonly control: boolean
   readonly approve: boolean
   readonly files: boolean
   isActive(): boolean
 }
-export interface RemoteEnableOptions { workspace: string; approve: boolean; files: boolean }
-export interface RemoteDeviceView { id: string; name: string; createdAt: number; lastSeenAt: number; online: boolean; control: boolean; approve: boolean; files: boolean }
+export interface RemoteEnableOptions { workspace?: string; scope?: 'desktop'; approve: boolean; files: boolean }
+export interface RemoteDeviceView { id: string; name: string; createdAt: number; lastSeenAt: number; online: boolean; control: boolean; approve: boolean; files: boolean; scope?: 'desktop' }
 export interface RemotePendingPair { id: string; name: string; code: string; requestedAt: number }
 export interface RemoteAccessStatus {
   enabled: boolean
   state: 'disabled' | 'connecting' | 'online' | 'reconnecting' | 'error'
   workspace?: string
+  scope?: 'desktop'
+  permissions?: { approve: boolean; files: boolean }
   url?: string
   inviteExpiresAt?: number
   devices: RemoteDeviceView[]

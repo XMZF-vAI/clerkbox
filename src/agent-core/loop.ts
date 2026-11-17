@@ -1987,7 +1987,7 @@ agentId: ${newSubAgentId} (use send_message_to_agent with agent_id: '${newSubAge
 
       // TencentDB Agent Memory：保留本地会话为事实来源，同时异步捕获 L0。
       // Gateway 不可用时静默回退，不阻塞当前回复。
-      void ports.ui.agentMemoryCapture({
+      void Promise.resolve().then(() => ports.ui.agentMemoryCapture({
         sessionId,
         workingDir,
         messages: conversationMessages
@@ -1998,7 +1998,7 @@ agentId: ${newSubAgentId} (use send_message_to_agent with agent_id: '${newSubAge
             content: message.content,
             timestamp: new Date(message.timestamp).toISOString(),
           })),
-      }).catch(() => {})
+      })).catch(() => {})
 
       // 工作流标记处理（/spec /goal）：
       // - spec：检测到完成标记 → 仅从显示中剥离并结束本轮（停下等用户确认，

@@ -1,4 +1,4 @@
-﻿import type {
+import type {
   AccountStatus,
   AccountSyncDownloadResult,
   AccountSyncKind,
@@ -41,7 +41,7 @@
 import type { MemoryEntry, MessageAttachment } from '../types/agent'
 import type { JouleLoginResult, JouleStateSnapshot } from '../types/joule'
 import type { AgentCommand, AgentCommandResult, AgentEvent, AgentSnapshot } from '../agent-core/protocol'
-import { getRemoteBootstrap, invokeRemote, isCloudRemoteMode, subscribeRemoteEvents, uploadRemoteFile } from '../remote/browser'
+import { getRemoteBootstrap, getRemoteStorageScope, invokeRemote, isCloudRemoteMode, subscribeRemoteEvents, subscribeRemoteUiEvents, uploadRemoteFile } from '../remote/browser'
 import type { RemoteAccessStatus, RemoteEnableOptions } from '../remote/protocol'
 // IM 机器人管理面：与主进程共用一份类型（纯 type import，编译后擦除）
 import type {
@@ -72,6 +72,18 @@ const isElectron = typeof window !== 'undefined' && !!window.clerkbox
 /** Images travel through the bounded upload channel; never duplicate base64 in commands. */
 function remoteCommandAttachments(attachments: MessageAttachment[] | undefined): MessageAttachment[] | undefined {
   return attachments?.map(({ id, kind, name, mimeType, path, size }) => ({ id, kind, name, ...(mimeType ? { mimeType } : {}), ...(path ? { path } : {}), ...(size !== undefined ? { size } : {}) }))
+}
+
+function onRemoteUi(channel: string, callback: (...args: any[]) => void): () => void {
+  if (!isCloudRemoteMode()) return () => {}
+  return subscribeRemoteUiEvents(event => { if (event.channel === channel) callback(...event.args) })
+}
+function remoteTerminalId(id: string): string { return `remote-${getRemoteStorageScope().split(':').at(-1)}-${id}` }
+function localTerminalId(id: string): string { return id.replace(`remote-${getRemoteStorageScope().split(':').at(-1)}-`, '') }
+function remoteRunSelection(settings?: Partial<import('../agent-core/ports').AgentSettings>): Record<string, unknown> {
+  if (!settings) return {}
+  const { activeProviderId: providerId, activeModelId, model, temperature, maxInputTokens, maxTokens, enableThinking, thinkingBudget, reasoningEffort } = settings
+  return { providerId, modelId: activeModelId || model, temperature, maxInputTokens, maxTokens, enableThinking, thinkingBudget, reasoningEffort }
 }
 
 // ── WebUI token：从 URL ?token=xxx 提取，随每个 API 请求发送 ──
@@ -148,7 +160,7 @@ async function webGet<T>(path: string): Promise<T> {
     const bootstrap = getRemoteBootstrap()
     if (path === '/api/capabilities') return { isRemoteClient: true, canUpload: bootstrap?.capabilities.files === true, canBrowseHostFolders: bootstrap?.capabilities.files === true, maxUploadBytes: bootstrap?.capabilities.maxUploadBytes ?? FALLBACK_WEBUI_UPLOAD_BYTES } as T
     if (path === '/api/platform') return (bootstrap?.platform || (/^[a-z]:[\\/]/i.test(bootstrap?.workspace || '') ? 'win32' : 'linux')) as T
-    if (path === '/api/homedir') return (bootstrap?.workspace || '') as T
+    if (path === '/api/homedir') return (bootstrap?.homeDir || bootstrap?.workspace || '') as T
     throw new Error('Unavailable in remote mode')
   }
   const res = await fetch(path, {
@@ -556,14 +568,18 @@ export const ipc = {
   },
 
   // ── Agent 宿主通道（批次 B · P3 主进程注册，P4 渲染层薄客户端消费）──
-  agentCommand: (cmd: AgentCommand): Promise<AgentCommandResult> => {
+  agentCommand: async (cmd: AgentCommand): Promise<AgentCommandResult> => {
     if (isCloudRemoteMode() && cmd.type === 'run') {
-      const { type, sessionId, content, attachments, taskMode } = cmd
-      return invokeRemote('agent:command', [{ type, sessionId, content, ...(attachments ? { attachments: remoteCommandAttachments(attachments) } : {}), ...(taskMode ? { taskMode } : {}), skills: [] }])
+      await (await import('../stores/settings-store')).flushProviderApiKeyWrites()
+      await (await import('./shared-storage')).flushSharedStorage()
+      const { type, sessionId, content, attachments, taskMode, skills, skillCatalog, skillReminder, goal, todos } = cmd
+      return invokeRemote('agent:command', [{ type, sessionId, content, ...(attachments ? { attachments: remoteCommandAttachments(attachments) } : {}), ...(taskMode ? { taskMode } : {}), skills: skills ?? [], ...(skillCatalog ? { skillCatalog } : {}), ...(skillReminder ? { skillReminder } : {}), ...(goal ? { goal } : {}), ...(todos ? { todos } : {}), ...remoteRunSelection(cmd.settings) }])
     }
     if (isCloudRemoteMode() && cmd.type === 'queue.enqueue') {
-      const { id, content, attachments, taskMode, queuedAt } = cmd.item
-      return invokeRemote('agent:command', [{ type: cmd.type, sessionId: cmd.sessionId, item: { id, content, queuedAt, ...(attachments ? { attachments: remoteCommandAttachments(attachments) } : {}), ...(taskMode ? { taskMode } : {}), skills: [] } }])
+      await (await import('../stores/settings-store')).flushProviderApiKeyWrites()
+      await (await import('./shared-storage')).flushSharedStorage()
+      const { id, content, attachments, taskMode, queuedAt, skills } = cmd.item
+      return invokeRemote('agent:command', [{ type: cmd.type, sessionId: cmd.sessionId, item: { id, content, queuedAt, ...(attachments ? { attachments: remoteCommandAttachments(attachments) } : {}), ...(taskMode ? { taskMode } : {}), skills: skills ?? [] } }])
     }
     return isElectron ? window.clerkbox.agentCommand(cmd) : webInvoke('agent:command', [cmd])
   },
@@ -633,15 +649,15 @@ agentBrowserEnsurePanel: (sessionId?: string): Promise<boolean> =>
   // ── Joule 账号 ──
   // 设备码登录只在桌面端可用；WebUI 远程视图不接触本机凭据（主进程黑名单也会拒绝）。
   jouleStartLogin: (): Promise<JouleLoginResult> =>
-    isElectron ? window.clerkbox.jouleStartLogin() : Promise.resolve({ error: 'Joule 登录需在桌面端完成' }),
+    isElectron ? window.clerkbox.jouleStartLogin() : isCloudRemoteMode() ? webInvoke('jouleStartLogin') : Promise.resolve({ error: 'Joule 登录需在桌面端完成' }),
   jouleCancelLogin: (): Promise<void> =>
-    isElectron ? window.clerkbox.jouleCancelLogin() : Promise.resolve(),
+    isElectron ? window.clerkbox.jouleCancelLogin() : isCloudRemoteMode() ? webInvoke('jouleCancelLogin') : Promise.resolve(),
   jouleLogout: (): Promise<void> =>
-    isElectron ? window.clerkbox.jouleLogout() : Promise.resolve(),
+    isElectron ? window.clerkbox.jouleLogout() : isCloudRemoteMode() ? webInvoke('jouleLogout') : Promise.resolve(),
   jouleGetState: (): Promise<JouleStateSnapshot> =>
-    isElectron ? window.clerkbox.jouleGetState() : Promise.reject(new Error('Joule 账号仅支持桌面端')),
+    isElectron ? window.clerkbox.jouleGetState() : webInvoke('jouleGetState'),
   jouleRefresh: (): Promise<JouleStateSnapshot> =>
-    isElectron ? window.clerkbox.jouleRefresh() : Promise.reject(new Error('Joule 账号仅支持桌面端')),
+    isElectron ? window.clerkbox.jouleRefresh() : webInvoke('jouleRefresh'),
   jouleOpenDashboard: (section?: string): Promise<void> => {
     if (isElectron) return window.clerkbox.jouleOpenDashboard(section)
     const query = section ? `?section=${encodeURIComponent(section)}` : ''
@@ -649,7 +665,7 @@ agentBrowserEnsurePanel: (sessionId?: string): Promise<boolean> =>
     return Promise.resolve()
   },
   onJouleState: (callback: (snapshot: JouleStateSnapshot) => void): (() => void) =>
-    isElectron ? window.clerkbox.onJouleState(callback) : () => {},
+    isElectron ? window.clerkbox.onJouleState(callback) : onRemoteUi('joule:state', callback),
 
   // MCP 服务器（Model Context Protocol）
   // WebUI 模式无事件推送，onMcpStatus 返回空退订函数（状态靠拉取）
@@ -665,7 +681,7 @@ agentBrowserEnsurePanel: (sessionId?: string): Promise<boolean> =>
     isElectron ? window.clerkbox.mcpCallTool(toolName, args) : webInvoke('mcpCallTool', [toolName, args]),
   onMcpStatus: (callback: (statuses: McpServerStatus[]) => void): (() => void) => {
     if (isElectron) return window.clerkbox.onMcpStatus(callback)
-    return () => {}
+    return onRemoteUi('mcp:statusChanged', callback)
   },
   mcpSearch: (): Promise<{ servers: McpMarketServer[] } | { error: string }> =>
     isElectron ? window.clerkbox.mcpSearch() : webInvoke('mcpSearch'),
@@ -810,12 +826,12 @@ agentBrowserEnsurePanel: (sessionId?: string): Promise<boolean> =>
   },
   homeDir: (): string => {
     if (isElectron) return window.clerkbox.homeDir
-    if (isCloudRemoteMode()) return getRemoteBootstrap()?.workspace || ''
+    if (isCloudRemoteMode()) return getRemoteBootstrap()?.homeDir || getRemoteBootstrap()?.workspace || ''
     return cachedHomeDir
   },
   getHomeDir: async (): Promise<string> => {
     if (isElectron) return window.clerkbox.homeDir
-    if (isCloudRemoteMode()) return getRemoteBootstrap()?.workspace || ''
+    if (isCloudRemoteMode()) return getRemoteBootstrap()?.homeDir || getRemoteBootstrap()?.workspace || ''
     if (cachedHomeDir) return cachedHomeDir
     cachedHomeDir = await webGet<string>('/api/homedir')
     return cachedHomeDir
@@ -858,42 +874,48 @@ agentBrowserEnsurePanel: (sessionId?: string): Promise<boolean> =>
    */
   bots: {
     list: (): Promise<BotListItem[]> =>
-      isElectron ? window.clerkbox.botsList() : Promise.resolve([]),
+      isElectron ? window.clerkbox.botsList() : isCloudRemoteMode() ? webInvoke('bots:list') : Promise.resolve([]),
     upsert: (bot: NewBot): Promise<BotsIpcResult<BotConfig>> =>
-      isElectron ? window.clerkbox.botsUpsert(bot) : Promise.resolve(BOTS_DESKTOP_ONLY),
+      isElectron ? window.clerkbox.botsUpsert(bot) : isCloudRemoteMode() ? webInvoke('bots:upsert', [bot]) : Promise.resolve(BOTS_DESKTOP_ONLY),
     remove: (id: string): Promise<BotsIpcResult> =>
-      isElectron ? window.clerkbox.botsRemove(id) : Promise.resolve(BOTS_DESKTOP_ONLY),
+      isElectron ? window.clerkbox.botsRemove(id) : isCloudRemoteMode() ? webInvoke('bots:remove', [id]) : Promise.resolve(BOTS_DESKTOP_ONLY),
     setEnabled: (id: string, enabled: boolean): Promise<BotsIpcResult> =>
-      isElectron ? window.clerkbox.botsSetEnabled(id, enabled) : Promise.resolve(BOTS_DESKTOP_ONLY),
+      isElectron ? window.clerkbox.botsSetEnabled(id, enabled) : isCloudRemoteMode() ? webInvoke('bots:setEnabled', [id, enabled]) : Promise.resolve(BOTS_DESKTOP_ONLY),
     runtimeStatus: (): Promise<RuntimeStatus[]> =>
-      isElectron ? window.clerkbox.botsRuntimeStatus() : Promise.resolve([]),
+      isElectron ? window.clerkbox.botsRuntimeStatus() : isCloudRemoteMode() ? webInvoke('bots:runtimeStatus') : Promise.resolve([]),
     setCredential: (botId: string, credential: BotCredentialInput): Promise<BotsIpcResult> =>
-      isElectron ? window.clerkbox.botsSetCredential(botId, credential) : Promise.resolve(BOTS_DESKTOP_ONLY),
+      isElectron ? window.clerkbox.botsSetCredential(botId, credential) : isCloudRemoteMode() ? webInvoke('bots:setCredential', [botId, credential]) : Promise.resolve(BOTS_DESKTOP_ONLY),
     resetBot: (botId: string): Promise<BotsIpcResult> =>
-      isElectron ? window.clerkbox.botsResetBot(botId) : Promise.resolve(BOTS_DESKTOP_ONLY),
+      isElectron ? window.clerkbox.botsResetBot(botId) : isCloudRemoteMode() ? webInvoke('bots:resetBot', [botId]) : Promise.resolve(BOTS_DESKTOP_ONLY),
     generateBindCode: (id: string): Promise<BindCodeResult> =>
-      isElectron ? window.clerkbox.botsGenerateBindCode(id) : Promise.resolve({ ok: false }),
+      isElectron ? window.clerkbox.botsGenerateBindCode(id) : isCloudRemoteMode() ? webInvoke('bots:generateBindCode', [id]) : Promise.resolve({ ok: false }),
     unbindActor: (actorKey: string): Promise<BotsIpcResult> =>
-      isElectron ? window.clerkbox.botsUnbindActor(actorKey) : Promise.resolve(BOTS_DESKTOP_ONLY),
+      isElectron ? window.clerkbox.botsUnbindActor(actorKey) : isCloudRemoteMode() ? webInvoke('bots:unbindActor', [actorKey]) : Promise.resolve(BOTS_DESKTOP_ONLY),
     resetActor: (actorKey: string): Promise<BotsIpcResult> =>
-      isElectron ? window.clerkbox.botsResetActor(actorKey) : Promise.resolve(BOTS_DESKTOP_ONLY),
+      isElectron ? window.clerkbox.botsResetActor(actorKey) : isCloudRemoteMode() ? webInvoke('bots:resetActor', [actorKey]) : Promise.resolve(BOTS_DESKTOP_ONLY),
     weixinQrStart: (botId: string): Promise<{ ok: true; session: WeixinQrSession } | { ok: false; error: string }> =>
-      isElectron ? window.clerkbox.botsWeixinQrStart(botId) : Promise.resolve(BOTS_DESKTOP_ONLY),
+      isElectron ? window.clerkbox.botsWeixinQrStart(botId) : isCloudRemoteMode() ? webInvoke('bots:weixinQrStart', [botId]) : Promise.resolve(BOTS_DESKTOP_ONLY),
     weixinQrPoll: (sessionId: string): Promise<WeixinQrSession | null> =>
-      isElectron ? window.clerkbox.botsWeixinQrPoll(sessionId) : Promise.resolve(null),
+      isElectron ? window.clerkbox.botsWeixinQrPoll(sessionId) : isCloudRemoteMode() ? webInvoke('bots:weixinQrPoll', [sessionId]) : Promise.resolve(null),
     weixinQrStop: (sessionId: string): Promise<void> =>
-      isElectron ? window.clerkbox.botsWeixinQrStop(sessionId) : Promise.resolve(),
+      isElectron ? window.clerkbox.botsWeixinQrStop(sessionId) : isCloudRemoteMode() ? webInvoke('bots:weixinQrStop', [sessionId]) : Promise.resolve(),
     onChanged: (callback: () => void): (() => void) =>
-      isElectron ? window.clerkbox.onBotsChanged(callback) : () => {},
+      isElectron ? window.clerkbox.onBotsChanged(callback) : onRemoteUi('bots:changed', callback),
     onStatus: (callback: (statuses: RuntimeStatus[]) => void): (() => void) =>
-      isElectron ? window.clerkbox.onBotsStatus(callback) : () => {},
+      isElectron ? window.clerkbox.onBotsStatus(callback) : onRemoteUi('bots:status', callback),
     onWeixinQr: (callback: (event: WeixinQrEvent) => void): (() => void) =>
-      isElectron ? window.clerkbox.onBotsWeixinQr(callback) : () => {},
+      isElectron ? window.clerkbox.onBotsWeixinQr(callback) : onRemoteUi('bots:weixinQr', callback),
   },
 
   // 共享 KV 存储：双模式读写主进程同一份文件，实现设置/技能等跨模式同步
   kvGet: (key: string): Promise<string | null> =>
     isElectron ? window.clerkbox.kvGet(key) : webInvoke('kvGet', [key]),
+  kvPatch: (patch: { name: string; base: string | null; value: string | null }): Promise<{ value: string | null }> =>
+    isElectron && window.clerkbox.kvPatch ? window.clerkbox.kvPatch(patch) : isCloudRemoteMode() ? webInvoke('remote:state.patch', [patch]) : (patch.value === null ? ipc.kvRemove(patch.name) : ipc.kvSet(patch.name, patch.value)).then(() => ({ value: patch.value })),
+  remoteWorkbenchCommand: (action: 'scheduled.run', taskId: string): Promise<{ runId?: string | null; error?: string }> => webInvoke('remote:ui.command', [{ action, taskId }]),
+  onRemoteWorkbenchCommand: (callback: (command: { id: string; action: 'scheduled.run'; taskId: string }) => void): (() => void) => isElectron ? window.clerkbox.onRemoteWorkbenchCommand?.(callback) ?? (() => {}) : () => {},
+  remoteWorkbenchReply: (id: string, result: { runId?: string | null; error?: string }): void => { if (isElectron) window.clerkbox.remoteWorkbenchReply?.(id, result) },
+  onSharedStateChanged: (callback: (name: string) => void): (() => void) => onRemoteUi('shared:changed', callback),
   kvSet: (key: string, value: string): Promise<void> =>
     isElectron ? window.clerkbox.kvSet(key, value) : webInvoke('kvSet', [key, value]),
   kvRemove: (key: string): Promise<void> =>
@@ -952,21 +974,23 @@ agentBrowserEnsurePanel: (sessionId?: string): Promise<boolean> =>
   agentMemorySave: (scope: 'user' | 'project', slug: string, content: string, workingDir?: string): Promise<{ ok: boolean; error?: string }> =>
     isElectron ? window.clerkbox.agentMemorySave(scope, slug, content, workingDir) : webInvoke('agentMemorySave', [scope, slug, content, workingDir]),
 
-  // 工作台内置终端（node-pty）：仅 Electron 桌面端可用，WebUI 一律拒绝
+  // 工作台终端在主机执行；已配对的公网浏览器通过设备隔离的 PTY 使用。
   ptyCreate: (info: { id: string; cwd?: string; cols?: number; rows?: number }): Promise<{ ok: boolean }> =>
-    isElectron ? window.clerkbox.ptyCreate(info) : Promise.reject(new Error('Terminal is desktop-only')),
+    isElectron ? window.clerkbox.ptyCreate(info) : isCloudRemoteMode() ? webInvoke('ptyCreate', [{ ...info, id: remoteTerminalId(info.id) }]) : Promise.reject(new Error('Terminal is desktop-only')),
   ptyInput: (id: string, data: string): void => {
     if (isElectron) window.clerkbox.ptyInput(id, data)
+    else if (isCloudRemoteMode()) void webInvoke('ptyInput', [remoteTerminalId(id), data]).catch(error => console.warn('[terminal] input failed:', error))
   },
   ptyResize: (id: string, cols: number, rows: number): void => {
     if (isElectron) window.clerkbox.ptyResize(id, cols, rows)
+    else if (isCloudRemoteMode()) void webInvoke('ptyResize', [remoteTerminalId(id), cols, rows]).catch(() => {})
   },
   ptyKill: (id: string): Promise<void> =>
-    isElectron ? window.clerkbox.ptyKill(id) : Promise.resolve(),
+    isElectron ? window.clerkbox.ptyKill(id) : isCloudRemoteMode() ? webInvoke('ptyKill', [remoteTerminalId(id)]) : Promise.resolve(),
   onPtyData: (callback: (id: string, data: string) => void): (() => void) =>
-    isElectron ? window.clerkbox.onPtyData(callback) : () => {},
+    isElectron ? window.clerkbox.onPtyData(callback) : onRemoteUi('pty:data', (id: string, data: string) => callback(localTerminalId(id), data)),
   onPtyExit: (callback: (id: string, exitCode: number) => void): (() => void) =>
-    isElectron ? window.clerkbox.onPtyExit(callback) : () => {},
+    isElectron ? window.clerkbox.onPtyExit(callback) : onRemoteUi('pty:exit', (id: string, exitCode: number) => callback(localTerminalId(id), exitCode)),
 
   // 自动更新：仅 Electron 桌面端（WebUI 浏览器端无本地安装能力，版本号标签保持静态）
   updateCheck: (): Promise<UpdaterState> =>

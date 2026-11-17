@@ -19,7 +19,9 @@ let active: boolean
 let principal: RemotePrincipal
 let dispatcher: ReturnType<typeof createRemoteHostDispatcher>
 let store: ChatStore
+let manager: AgentSessionManager
 let command: ReturnType<typeof vi.fn>
+let handlers: Map<string, (...args: unknown[]) => unknown>
 
 beforeEach(async () => {
   // Keep the granted root and absolute fixtures canonical on macOS (/var -> /private/var).
@@ -43,7 +45,7 @@ beforeEach(async () => {
     updateSessionTitle: vi.fn(async () => undefined),
   } as unknown as ChatStore
   command = vi.fn(async () => ({ ok: true }))
-  const manager = {
+  manager = {
     setRemoteApprovalProbe: vi.fn(),
     getLocalSettingsSnapshot: () => ({
       model: 'trusted-model', apiKey: 'secret-active', baseUrl: 'https://private-endpoint.invalid',
@@ -51,9 +53,12 @@ beforeEach(async () => {
       providers: [{ id: 'p1', name: 'Local provider', apiKey: 'secret-provider', baseUrl: 'https://private-endpoint.invalid', apiCompat: 'openai', models: [{ id: 'trusted-model', label: 'Trusted model', supportsImages: true }] }],
     } as unknown as AgentSettings),
     handleCommand: command,
+    inspect: () => [{ sessionId: 's1', status: 'idle', queued: 0 }, { sessionId: 's2', status: 'idle', queued: 0 }],
+    dropSession: vi.fn(),
+    noteLocalSettings: vi.fn(),
     snapshot: (id: string, since: number) => ({ activeRuns: [{ sessionId: id, runId: 'r1', status: 'working' }], queue: { [id]: [] }, pendingPermissions: [], lastSeq: since }),
   } as unknown as AgentSessionManager
-  const handlers = new Map([['kvGet', vi.fn(() => JSON.stringify({ state: {
+  handlers = new Map([['kvGet', vi.fn(() => JSON.stringify({ state: {
     theme: 'light', language: 'en', apiKey: 'secret-legacy', mcpServers: [{ env: { TOKEN: 'secret-mcp' }, headers: { Authorization: 'secret-header' } }],
     providers: [{ apiKey: 'secret-legacy-provider' }], permissionRules: [{ pattern: 'allow-all' }],
   } }))]])
@@ -199,5 +204,145 @@ describe('bounded chunked uploads', () => {
     expect(await fs.readdir(path.join(workspace, '.clerkbox', 'remote-uploads'))).toEqual([])
     active = false
     await expect(dispatcher.invoke(principal, 'remote:upload.start', [{ name: 'no.bin', size: 1 }])).rejects.toThrow('remote-disconnected')
+  })
+})
+
+describe('explicitly paired full desktop workbench', () => {
+  beforeEach(() => { principal = { ...principal, scope: 'desktop' } })
+
+  it('filters desktop events synchronously without starting an async authorization queue', () => {
+    const payload = { seq: 1, event: { type: 'run.completed' as const, sessionId: 's2', runId: 'r2' } }
+    expect(dispatcher.filterEvent(principal, payload)).toBe(payload)
+    expect(store.getAllSessions).not.toHaveBeenCalled()
+  })
+
+  it('does not create runtimes for 103 idle DB conversations but preserves a precise target snapshot', async () => {
+    rows = Array.from({ length: 103 }, (_, index) => ({ id: `history-${index}`, title: 'History', created_at: 1, updated_at: 1 }))
+    vi.spyOn(manager, 'inspect').mockReturnValue([])
+    const snapshot = vi.spyOn(manager, 'snapshot')
+    expect(await dispatcher.invoke(principal, 'agent:snapshot', [null, 0])).toEqual({ activeRuns: [], queue: {}, pendingPermissions: [], lastSeq: 0 })
+    expect(snapshot).not.toHaveBeenCalled()
+    await dispatcher.invoke(principal, 'agent:snapshot', ['history-100', 4])
+    expect(snapshot).toHaveBeenCalledOnce()
+    expect(snapshot).toHaveBeenCalledWith('history-100', 4)
+  })
+
+  it('lists all sessions including other projects and sessions without a directory', async () => {
+    rows.push({ id: 'no-folder', title: 'General', created_at: 2, updated_at: 2 })
+    expect((await dispatcher.invoke(principal, 'dbGetAllSessions') as Row[]).map(row => row.id)).toEqual(['s1', 's2', 'no-folder'])
+    expect(await dispatcher.invoke(principal, 'dbGetMessages', ['s2'])).toEqual([{ id: 'm1', session_id: 's2', content: 'hello', file_checkpoints: 'private-cache-ref', mutation_gaps: 'private-cache-ref' }])
+    expect(await dispatcher.invoke(principal, 'dbGetRecents')).toEqual(['s1', 's2'])
+    expect(await dispatcher.filterEvent(principal, { seq: 1, event: { type: 'run.completed', sessionId: 's2', runId: 'r2' } })).not.toBeNull()
+    await fs.writeFile(path.join(outside, 'project.txt'), 'other project')
+    expect(await dispatcher.invoke(principal, 'readFile', [path.join(outside, 'project.txt')])).toBe('other project')
+    expect(await resolveRemoteWorkspacePath(principal, '../new-project/missing', true)).toBe(path.join(temp, 'new-project', 'missing'))
+  })
+
+  it('exposes host identity and complete settings but no stored credentials', async () => {
+    handlers.set('loadApiKeys', () => ({ p1: 'safe-storage-secret' }))
+    const bootstrap = await dispatcher.bootstrap(principal)
+    expect(bootstrap).toMatchObject({ scope: 'desktop', homeDir: os.homedir(), platform: process.platform })
+    expect(bootstrap.settings).toMatchObject({ theme: 'light', language: 'en', hasCompletedOnboarding: true })
+    expect(JSON.stringify(bootstrap)).not.toMatch(/secret-|safe-storage-secret|secret-mcp|secret-header/)
+    expect(await dispatcher.invoke(principal, 'loadApiKeys')).toEqual({ p1: '' })
+  })
+
+  it('keeps model credentials on the host while honoring validated model and task controls', async () => {
+    await dispatcher.invoke(principal, 'agent:command', [{ type: 'run', sessionId: 's2', content: 'work', providerId: 'p1', modelId: 'trusted-model', temperature: 0.4, enableThinking: true, skills: [{ id: 'skill-a', name: 'Skill A' }], skillCatalog: [], todos: [] }])
+    expect(command).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 's2', skills: [{ id: 'skill-a', name: 'Skill A' }] }), expect.objectContaining({ pairedRemote: principal, trustedRemoteSettings: expect.objectContaining({ model: 'trusted-model', apiKey: 'secret-provider', temperature: 0.4, enableThinking: true }) }))
+    await expect(dispatcher.invoke(principal, 'agent:command', [{ type: 'run', sessionId: 's1', content: 'work', modelId: 'unknown' }])).rejects.toThrow('remote-model-unavailable')
+    await dispatcher.invoke(principal, 'agent:command', [{ type: 'rewind.preview', sessionId: 's2', anchorMessageId: 'm1', scope: 'conversation' }])
+    expect(command.mock.lastCall?.[0]).toMatchObject({ type: 'rewind.preview', sessionId: 's2' })
+    await expect(dispatcher.invoke({ ...principal, files: false }, 'agent:command', [{ type: 'rewind.apply', sessionId: 's2', anchorMessageId: 'm1', scope: 'both' }])).rejects.toThrow('remote-files-disabled')
+  })
+
+  it('routes registered workbench features explicitly and retains capability and method boundaries', async () => {
+    const git = vi.fn(async () => ({ branch: 'main' }))
+    const commit = vi.fn(async () => ({ ok: true }))
+    handlers.set('gitGetStatus', git); handlers.set('gitCommit', commit)
+    expect(await dispatcher.invoke(principal, 'gitGetStatus', [outside])).toEqual({ branch: 'main' })
+    expect(git).toHaveBeenCalledWith(null, await fs.realpath(outside))
+    await dispatcher.invoke(principal, 'gitCommit', [outside, 'fix: synchronize remote workbench'])
+    await expect(dispatcher.invoke({ ...principal, control: false }, 'gitCommit', [outside, 'bad'])).rejects.toThrow('remote-control-disabled')
+    await expect(dispatcher.invoke({ ...principal, files: false }, 'gitGetStatus', [outside])).rejects.toThrow('remote-files-disabled')
+    await expect(dispatcher.invoke(principal, 'future-unreviewed-ipc', [])).rejects.toThrow('remote-forbidden-method')
+    await expect(dispatcher.invoke(principal, 'remoteEnable', [])).rejects.toThrow('remote-forbidden-method')
+  })
+
+  it('permits file edits and large previews, with terminal ids isolated per device', async () => {
+    const target = path.join(outside, 'notes.txt')
+    await dispatcher.invoke(principal, 'writeFile', [target, 'edited remotely'])
+    expect(await fs.readFile(target, 'utf8')).toBe('edited remotely')
+    await fs.writeFile(target, 'x'.repeat(300 * 1024))
+    expect((await dispatcher.invoke(principal, 'readFile', [target]) as string).length).toBe(300 * 1024)
+    const pty = vi.fn(async () => ({ ok: true }))
+    handlers.set('ptyCreate', pty)
+    await dispatcher.invoke(principal, 'ptyCreate', [{ id: `remote-${principal.deviceId}-term-one#1`, cwd: outside, cols: 80, rows: 24 }])
+    expect(pty).toHaveBeenCalledWith(null, expect.objectContaining({ cwd: await fs.realpath(outside) }))
+    await expect(dispatcher.invoke(principal, 'ptyCreate', [{ id: 'remote-other-device-term', cwd: outside }])).rejects.toThrow('remote-terminal-unavailable')
+  })
+
+  it('never returns the Joule API key from a remote login response', async () => {
+    handlers.set('jouleStartLogin', () => ({ ok: true, key: 'joule-private-key', account: { status: 'connected' } }))
+    expect(await dispatcher.invoke(principal, 'jouleStartLogin')).toEqual({ ok: true, account: { status: 'connected' } })
+  })
+
+  it('keeps newly entered provider keys out of plaintext shared settings storage', async () => {
+    const patch = vi.fn(async (_event: unknown, input: unknown) => ({ value: (input as { value: string }).value }))
+    handlers.set('remote:state.patch', patch)
+    const base = await dispatcher.invoke(principal, 'kvGet', ['clerkbox-settings']) as string
+    const draft = JSON.parse(base)
+    draft.state.apiKey = 'typed-active-key'
+    draft.state.providers = [{ id: 'p1', apiKey: 'typed-provider-key', name: 'Renamed provider' }]
+    await dispatcher.invoke(principal, 'remote:state.patch', [{ name: 'clerkbox-settings', base, value: JSON.stringify(draft) }])
+    expect(JSON.stringify(patch.mock.calls)).not.toMatch(/typed-active-key|typed-provider-key/)
+  })
+
+  it('restores redacted MCP environment credentials only on the host', async () => {
+    handlers.set('kvGet', () => JSON.stringify({ state: { mcpServers: [{ id: 'mcp-one', name: 'Saved server', transport: 'stdio', enabled: true, env: { TOKEN: 'host-mcp-token' }, headers: { Authorization: 'host-header' } }] }, version: 0 }))
+    const test = vi.fn(async (..._args: unknown[]) => ({ ok: true }))
+    handlers.set('mcpTest', test)
+    expect(await dispatcher.invoke(principal, 'mcpTest', [{ id: 'mcp-one', name: 'Saved server', transport: 'stdio', enabled: true, env: { TOKEN: '' }, headers: { Authorization: '' } }])).toEqual({ ok: true })
+    expect(test).toHaveBeenCalledWith(null, expect.objectContaining({ env: { TOKEN: 'host-mcp-token' }, headers: { Authorization: 'host-header' } }))
+  })
+
+  it('uses the exact provider identity for duplicate endpoints and never revives a removed credential', async () => {
+    const manager = {
+      setRemoteApprovalProbe: vi.fn(),
+      getLocalSettingsSnapshot: () => ({ model: 'm', providers: [
+        { id: 'first', baseUrl: 'https://same.invalid/v1', apiKey: 'stale-first' },
+        { id: 'second', baseUrl: 'https://same.invalid/v1', apiKey: 'stale-second' },
+      ] }),
+    } as unknown as AgentSessionManager
+    const local = createRemoteHostDispatcher({ store, manager, handlers })
+    const test = vi.fn(async (..._args: unknown[]) => ({ ok: true }))
+    handlers.set('apiTestConnection', test)
+    handlers.set('loadApiKeys', () => ({ first: 'key-one', second: 'key-two' }))
+    await local.invoke(principal, 'apiTestConnection', [{ baseUrl: 'https://same.invalid/v1', providerId: 'second', apiKey: '', apiCompat: 'openai' }])
+    expect(test.mock.lastCall?.[1]).toMatchObject({ apiKey: 'key-two' })
+    handlers.set('loadApiKeys', () => ({ first: 'key-one' }))
+    await local.invoke(principal, 'apiTestConnection', [{ baseUrl: 'https://same.invalid/v1', providerId: 'second', apiKey: '', apiCompat: 'openai' }])
+    expect(test.mock.lastCall?.[1]).toMatchObject({ apiKey: '' })
+    local.dispose()
+  })
+
+  it('resolves execution keys from encrypted storage during renderer hydration and honors removal', async () => {
+    const handleCommand = vi.fn(async (..._args: unknown[]) => ({ ok: true }))
+    const manager = {
+      setRemoteApprovalProbe: vi.fn(), handleCommand,
+      getLocalSettingsSnapshot: () => ({
+        model: 'trusted-model', activeProviderId: 'p1', activeModelId: 'trusted-model',
+        apiKey: '', baseUrl: 'https://trusted.invalid/v1', apiCompat: 'openai',
+        providers: [{ id: 'p1', baseUrl: 'https://trusted.invalid/v1', apiKey: '', apiCompat: 'openai', models: [{ id: 'trusted-model', label: 'Trusted' }] }],
+      }),
+    } as unknown as AgentSessionManager
+    const local = createRemoteHostDispatcher({ store, manager, handlers })
+    handlers.set('loadApiKeys', () => ({ p1: 'encrypted-host-key' }))
+    await local.invoke(principal, 'agent:command', [{ type: 'run', sessionId: 's1', content: 'during hydration', providerId: 'p1', modelId: 'trusted-model' }])
+    expect(handleCommand.mock.lastCall?.[1]).toMatchObject({ trustedRemoteSettings: { apiKey: 'encrypted-host-key', providers: [{ apiKey: 'encrypted-host-key' }] } })
+    handlers.set('loadApiKeys', () => ({}))
+    await local.invoke(principal, 'agent:command', [{ type: 'run', sessionId: 's1', content: 'after removing key' }])
+    expect(handleCommand.mock.lastCall?.[1]).toMatchObject({ trustedRemoteSettings: { apiKey: '', providers: [{ apiKey: '' }] } })
+    local.dispose()
   })
 })

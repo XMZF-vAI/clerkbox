@@ -55,7 +55,7 @@ const EVENT_RING_LIMIT = 500
 const RESYNC_COALESCE_MS = 1_000
 /** 渲染层尚未升级为带快照的薄客户端时，main 模式受理 run 会明确拒绝而不是猜配置 */
 const MISSING_SETTINGS = 'run-command-missing-settings'
-/** Fixed remote surface: registry additions and local capability toggles cannot grant global access. */
+/** Legacy folder-scoped devices retain their original, smaller tool grant. */
 const PAIRED_REMOTE_TOOLS = new Set([
   'read_file', 'read_image', 'write_file', 'search_replace', 'list_dir', 'search_files', 'search_content',
   'execute_command', 'web_search', 'web_fetch', 'question', 'todowrite',
@@ -74,6 +74,8 @@ export interface AgentCommandMeta {
   wake?: boolean
   /** Constructed only by the paired desktop connection, never read from command JSON. */
   pairedRemote?: RemotePrincipal
+  /** Resolved by the paired dispatcher using host credentials; never deserialized from browser JSON. */
+  trustedRemoteSettings?: AgentSettings
 }
 
 /**
@@ -422,7 +424,7 @@ export class AgentSessionManager {
       tools: {
         definitions: (harnessMode) => {
           const definitions = toolRegistry.getDefinitionsForMode(harnessMode)
-          return origin?.pairedRemote
+          return origin?.pairedRemote && origin.pairedRemote.scope !== 'desktop'
             ? definitions.filter((tool) => PAIRED_REMOTE_TOOLS.has(tool.name))
             : definitions
         },
@@ -431,9 +433,11 @@ export class AgentSessionManager {
           if (principal) {
             assertRemoteActive(principal)
             if (!principal.control) throw new Error('remote-control-disabled')
-            if (name === 'search_memory' || name === 'save_memory') throw new Error('remote-global-memory-disabled')
-            if (name.startsWith('app_')) throw new Error('remote-app-management-disabled')
-            if (!PAIRED_REMOTE_TOOLS.has(name)) throw new Error('remote-tool-unavailable')
+            if (principal.scope !== 'desktop') {
+              if (name === 'search_memory' || name === 'save_memory') throw new Error('remote-global-memory-disabled')
+              if (name.startsWith('app_')) throw new Error('remote-app-management-disabled')
+              if (!PAIRED_REMOTE_TOOLS.has(name)) throw new Error('remote-tool-unavailable')
+            }
             // A model-generated path must obey the same workspace boundary as direct file requests.
             // Shell remains an explicitly approved local tool, not an OS filesystem sandbox.
             for (const key of ['path', 'cwd', 'workingDir', 'directory', 'file_path']) {
@@ -442,7 +446,7 @@ export class AgentSessionManager {
           }
           return toolRegistry.execute(name, args, toolCtx)
         },
-        findAgent: (agentType, workingDir) => origin?.pairedRemote ? Promise.resolve(null) : findAgent(agentType, workingDir),
+        findAgent: (agentType, workingDir) => origin?.pairedRemote && origin.pairedRemote.scope !== 'desktop' ? Promise.resolve(null) : findAgent(agentType, workingDir),
       },
       store: {
         getSession: () => sessionCache.get(sessionId),
@@ -516,7 +520,7 @@ export class AgentSessionManager {
           s.lastUsage = entry.usage
         },
         agentMemoryCapture: async (payload) => {
-          if (origin?.pairedRemote) return
+          if (origin?.pairedRemote && origin.pairedRemote.scope !== 'desktop') return
           await ipc.agentMemoryCapture(payload)
         },
         addSubAgentRun: (_sid, run) => {
@@ -599,7 +603,7 @@ export class AgentSessionManager {
         shellDescription: process.platform === 'win32' ? 'PowerShell, cmd' : 'zsh, bash',
         isDev: !isPackaged(),
         // An empty home also gives remote runs a separate memory-cache key from local runs.
-        homeDir: () => origin?.pairedRemote ? '' : os.homedir(),
+        homeDir: () => origin?.pairedRemote && origin.pairedRemote.scope !== 'desktop' ? '' : os.homedir(),
         readFile: (path) => fs.readFile(path, 'utf-8'),
         readImageAsDataUrl: async (imagePath, mimeType) => {
           try {
@@ -629,7 +633,10 @@ export class AgentSessionManager {
           ipc.executeCommandWithShell(command, cwd, process.platform === 'win32' ? 'cmd' : 'sh'),
         buildMemoryPrompt: async (workingDir, homeDir) => {
           const principal = origin?.pairedRemote
-          if (!principal) return buildMemoryPrompt(workingDir, homeDir)
+          if (!principal || principal.scope === 'desktop') {
+            if (principal) assertRemoteActive(principal)
+            return buildMemoryPrompt(workingDir, homeDir)
+          }
           // Read only the granted project's index. The ordinary builder reads private
           // user memory and cloud context, so it must never serve a paired browser.
           const directory = await resolveRemoteWorkspacePath(principal, workingDir)
@@ -673,7 +680,7 @@ export class AgentSessionManager {
     const preview = buildPermissionPreview(request.tool, request.args, { workingDir: request.workingDir })
     const principal = s.run?.origin.pairedRemote
     if (principal && (!principal.isActive() || !principal.control)) return Promise.resolve({ approved: false, scope: 'once' })
-    if (!principal && s.sessionGrants.has(preview.grantKey)) {
+    if ((!principal || (principal.scope === 'desktop' && principal.approve)) && s.sessionGrants.has(preview.grantKey)) {
       console.log(`[agent-host] 会话级放行命中：${request.tool} ${preview.target}`)
       return Promise.resolve({ approved: true, scope: 'session' })
     }
@@ -812,12 +819,12 @@ export class AgentSessionManager {
     if (principal) {
       if (!principal.isActive()) return { ok: false, error: 'remote-disconnected' }
       if (!principal.control) return { ok: false, error: 'remote-control-disabled' }
-      if (cmd.type === 'permission.resolve' && (!principal.approve || (cmd.scope !== undefined && cmd.scope !== 'once'))) return { ok: false, error: 'remote-approval-disabled' }
+      if (cmd.type === 'permission.resolve' && (!principal.approve || (principal.scope !== 'desktop' && cmd.scope !== undefined && cmd.scope !== 'once'))) return { ok: false, error: 'remote-approval-disabled' }
       const rows = await this.store.getAllSessions()
       const row = rows.find((item) => item.id === cmd.sessionId)
       const dir = row?.working_dir || row?.default_work_dir
-      if (typeof dir !== 'string') return { ok: false, error: 'remote-session-unavailable' }
-      try { await resolveRemoteWorkspacePath(principal, dir, true) } catch { return { ok: false, error: 'remote-outside-workspace' } }
+      if (!row || (typeof dir !== 'string' && principal.scope !== 'desktop')) return { ok: false, error: 'remote-session-unavailable' }
+      if (principal.scope !== 'desktop') try { await resolveRemoteWorkspacePath(principal, dir as string, true) } catch { return { ok: false, error: 'remote-outside-workspace' } }
     }
     // 远程通道（WebUI /api/invoke 传 event=null）可回执提问，必须留痕便于事后追责
     if (meta.remote && cmd.type === 'question.resolve') {
@@ -830,7 +837,7 @@ export class AgentSessionManager {
     }
     // 撤回/回滚同样是本地专属：它会删消息、删文件，远程持 token 者不该有这个权力。
     // agent:command 目前在远程黑名单里，这道门是给「以后有人放开那扇门」准备的第二层。
-    if ((meta.remote || principal) && (cmd.type === 'rewind.apply' || cmd.type === 'rewind.preview')) {
+    if ((meta.remote || principal) && principal?.scope !== 'desktop' && (cmd.type === 'rewind.apply' || cmd.type === 'rewind.preview')) {
       return { ok: false, error: 'rewind-local-only' }
     }
     if (this.droppedSessions.has(cmd.sessionId)) {
@@ -1088,26 +1095,28 @@ export class AgentSessionManager {
       const rows = await this.store.getAllSessions()
       const row = rows.find((item) => item.id === s.sessionId)
       const cwd = row?.working_dir || row?.default_work_dir
-      if (typeof cwd !== 'string') return { ok: false, error: 'remote-session-unavailable' }
-      try { await resolveRemoteWorkspacePath(principal, cwd, true) } catch { return { ok: false, error: 'remote-outside-workspace' } }
+      if (!row || (typeof cwd !== 'string' && principal.scope !== 'desktop')) return { ok: false, error: 'remote-session-unavailable' }
+      if (principal.scope !== 'desktop') try { await resolveRemoteWorkspacePath(principal, cwd as string, true) } catch { return { ok: false, error: 'remote-outside-workspace' } }
     }
     // A local delete/removal may land while the paired path check is awaiting IO.
     if (s.dropped) return { ok: false, error: 'session-dropped' }
     if (queueId && !s.queue.some((item) => item.id === queueId)) return { ok: false, error: 'queue-item-missing' }
-    const base = principal ? (this.lastLocalSettings ?? cached?.settings) : meta.remote
+    const base = principal ? (meta.trustedRemoteSettings ?? this.lastLocalSettings ?? cached?.settings) : meta.remote
       ? cached?.settings
       : (cmd.settings ?? cached?.settings ?? this.lastLocalSettings)
     if (!base) return { ok: false, error: MISSING_SETTINGS }
     // 远程触发的运行永远按 manual 档门控：危险操作只能由本地窗口批准。
     // full / auto 档在本地是用户自己的选择，落到远程就变成「持 token 即可以用户身份跑 shell」。
-    const settings: AgentSettings = (meta.remote || principal)
+    const settings: AgentSettings = principal?.scope === 'desktop'
+      ? { ...base, ...(!principal.approve ? { approvalMode: 'manual' as const, permissionRules: [] } : {}) }
+      : (meta.remote || principal)
       ? { ...base, approvalMode: 'manual', ...(principal ? { permissionRules: [], browserUseEnabled: false, computerUseEnabled: false } : {}) }
       : base
     const resolvedCmd: Extract<AgentCommand, { type: 'run' }> = { ...cmd, settings }
     // 本地 run 才是这份全局快照的唯一合法来源：渲染层每次发都带自己的配置，
     // 于是「桌面换模型」下一步就是 bot 用新模型，不需要重启任何东西。
     if (!meta.remote && !principal) this.lastLocalSettings = settings
-    if (meta.remote && base.approvalMode !== 'manual') {
+    if (meta.remote && settings.approvalMode !== base.approvalMode) {
       console.log(`[agent-host][audit] remote run downgraded approval ${base.approvalMode} -> manual session=${s.sessionId}`)
     }
     if (s.run || s.compacting || s.rewinding || (s.flushing && !queueId)) {

@@ -1,5 +1,4 @@
 import fs from 'fs/promises'
-import path from 'path'
 import os from 'os'
 import { randomHex, seal, open, sha256Hex } from '../src/remote/crypto'
 import { DEFAULT_REMOTE_ORIGIN, REMOTE_MAX_FRAME_BYTES, type RemoteAccessStatus, type RemoteEnableOptions, type RemoteDeviceCredential, type RemotePrincipal, type RemoteRequest } from '../src/remote/protocol'
@@ -7,11 +6,16 @@ import { createRemoteHostDispatcher } from './remote-host-dispatcher'
 import { registerAgentEventSink, setRuntimeAgentHostMode, type AgentSessionManager } from './agent-host'
 import type { ChatStore } from './db'
 import type { AgentEvent } from '../src/agent-core/protocol'
+import { subscribeRemoteUiEvents } from './remote-ui-events'
 
-interface Device extends RemoteDeviceCredential { createdAt: number; lastSeenAt: number; workspace: string; control: boolean; approve: boolean; files: boolean }
+interface Device extends RemoteDeviceCredential { createdAt: number; lastSeenAt: number; workspace: string; scope?: 'desktop'; control: boolean; approve: boolean; files: boolean }
 interface Receipt { id: string; deviceId: string; issuedAt: number; state: 'pending' | 'done'; result?: unknown; error?: string }
-interface Saved { roomId: string; hostToken: string; registered?: boolean; options: RemoteEnableOptions; devices: Device[]; receipts: Receipt[] }
-interface Peer { id: string; deviceId?: string; key: string; challenge: string; ready: boolean; requestedAt: number; name?: string; code?: string; approving?: boolean; inviteToken?: string; inviteExpiresAt?: number; seen: Set<string> }
+interface Saved { roomId: string; hostToken: string; registered?: boolean; options: RemoteEnableOptions & { workspace: string }; devices: Device[]; receipts: Receipt[] }
+interface QueueBudget { count: number; bytes: number }
+interface IncomingBudget extends QueueBudget { dropped: boolean }
+interface EventBuffer { peer: Peer; events: Array<{ seq: number; event: AgentEvent }>; bytes: number; enqueued: number; sent: number; ended: Promise<void>; end(): void; flushing?: Promise<void>; timer?: ReturnType<typeof setTimeout> }
+interface Peer { id: string; deviceId?: string; key: string; challenge: string; ready: boolean; requestedAt: number; name?: string; code?: string; approving?: boolean; inviteToken?: string; inviteExpiresAt?: number; seen: Set<string>; filtering: QueueBudget; uiSending: QueueBudget }
+type DiagnosticReason = 'ui-queue-limit' | 'ui-send-failed' | 'event-filter-queue-limit' | 'event-queue-limit' | 'event-send-failed' | 'peer-decrypt-failed' | 'peer-limit' | 'peer-credential-unavailable' | 'bootstrap-failed' | 'bootstrap-send-failed' | 'incoming-peer-queue-limit' | 'incoming-total-queue-limit' | 'frame-processing-failed' | 'relay-send-failed' | 'peer-send-failed' | 'outbound-backpressure' | 'response-send-failed'
 interface Options {
   store: ChatStore
   manager: AgentSessionManager
@@ -19,6 +23,7 @@ interface Options {
   writeCredential(value: string): Promise<void>
   deleteCredential(): Promise<void>
   notify(status: RemoteAccessStatus): void
+  onDeviceRevoked?(deviceId?: string): void
   origin?: string
 }
 
@@ -41,69 +46,130 @@ export class RemoteAccessService {
   private outboundCount = 0
   private outboundBytes = 0
   private chain: Promise<unknown> = Promise.resolve()
-  private incomingCount = 0
-  private incomingBytes = 0
-  private filteringCount = 0
-  private filteringBytes = 0
+  private incoming = new Map<string, IncomingBudget>()
+  // Includes old-socket callbacks until their captured frames actually leave the chain.
+  // Do not reset on reconnect: doing so would hide retained work from the hard limit.
+  private incomingTotal: QueueBudget = { count: 0, bytes: 0 }
+  private diagnostics = new Map<DiagnosticReason, number>()
   private writes: Promise<void> = Promise.resolve()
   private waiters = new Map<string, { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>()
   private readonly dispatcher
   private readonly origin: string
   private readonly unsubscribe: () => void
-  private eventBuffers = new Map<string, { peer: Peer; events: Array<{ seq: number; event: AgentEvent }>; bytes: number; sending: boolean; timer?: ReturnType<typeof setTimeout> }>()
+  private readonly unsubscribeUi: () => void
+  private eventBuffers = new Map<string, EventBuffer>()
 
   constructor(private options: Options) {
     const origin = new URL(options.origin ?? DEFAULT_REMOTE_ORIGIN)
     if (origin.protocol !== 'https:' && !(origin.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(origin.hostname))) throw new Error('Remote relay must use HTTPS')
     this.origin = origin.origin
-    this.dispatcher = createRemoteHostDispatcher({ store: options.store, manager: options.manager })
+    this.dispatcher = createRemoteHostDispatcher({ store: options.store, manager: options.manager, drainEvents: force => this.drainEvents(force) })
+    this.unsubscribeUi = subscribeRemoteUiEvents(event => {
+      for (const peer of this.peers.values()) {
+        const principal = this.principal(peer)
+        if (!principal?.isActive() || principal.scope !== 'desktop') continue
+        if ((event.channel === 'pty:data' || event.channel === 'pty:exit') &&
+          (typeof event.args[0] !== 'string' || !event.args[0].startsWith(`remote-${principal.deviceId}-`))) continue
+        const bytes = Buffer.byteLength(JSON.stringify(event))
+        if (peer.uiSending.count >= 256 || peer.uiSending.bytes + bytes > 8 * 1024 * 1024) {
+          this.dropPeer(peer, 'ui-queue-limit'); continue
+        }
+        peer.uiSending.count++; peer.uiSending.bytes += bytes
+        void this.sendEncrypted(peer, { kind: 'ui-event', challenge: peer.challenge, channel: event.channel, args: event.args }).catch(() => {
+          this.dropPeer(peer, 'ui-send-failed')
+        }).finally(() => { peer.uiSending.count--; peer.uiSending.bytes -= bytes })
+      }
+    })
     this.unsubscribe = registerAgentEventSink(payload => {
       const bytes = Buffer.byteLength(JSON.stringify(payload))
       for (const peer of this.peers.values()) {
         const principal = this.principal(peer)
         if (!principal || !peer.ready) continue
-        if (this.filteringCount >= 256 || this.filteringBytes + bytes > 16 * 1024 * 1024) {
-          this.forgetPeer(peer.id); this.send({ type: 'disconnect', peerId: peer.id }); continue
-        }
-        this.filteringCount++; this.filteringBytes += bytes
-        void this.dispatcher.filterEvent(principal, payload).then(filtered => {
+        const filtered = this.dispatcher.filterEvent(principal, payload)
+        if (!(filtered instanceof Promise)) {
           if (filtered && principal.isActive()) this.queueEvent(peer, filtered)
-        }).catch(() => {}).finally(() => { this.filteringCount--; this.filteringBytes -= bytes })
+          continue
+        }
+        if (peer.filtering.count >= 256 || peer.filtering.bytes + bytes > 16 * 1024 * 1024) {
+          void filtered.catch(() => {})
+          this.dropPeer(peer, 'event-filter-queue-limit'); continue
+        }
+        peer.filtering.count++; peer.filtering.bytes += bytes
+        void filtered.then(filtered => {
+          if (filtered && principal.isActive()) this.queueEvent(peer, filtered)
+        }).catch(() => {}).finally(() => { peer.filtering.count--; peer.filtering.bytes -= bytes })
       }
     })
   }
 
+  private diagnose(reason: DiagnosticReason): void {
+    const now = Date.now()
+    const previous = this.diagnostics.get(reason)
+    if (previous !== undefined && now - previous < 10000) return
+    this.diagnostics.set(reason, now)
+    // Fixed reason codes only: never log payloads, credentials, room or device IDs.
+    console.warn('[remote-access]', reason)
+  }
+  private dropPeer(peer: Peer, reason: DiagnosticReason): void {
+    if (this.peers.get(peer.id) !== peer) return
+    this.diagnose(reason)
+    this.forgetPeer(peer.id)
+    this.send({ type: 'disconnect', peerId: peer.id })
+    this.publish()
+  }
   private forgetPeer(peerId: string): void {
     this.peers.delete(peerId)
     const buffer = this.eventBuffers.get(peerId)
     if (buffer?.timer) clearTimeout(buffer.timer)
+    buffer?.end()
     this.eventBuffers.delete(peerId)
   }
   private queueEvent(peer: Peer, payload: { seq: number; event: AgentEvent }): void {
     if (this.peers.get(peer.id) !== peer) return
     let buffer = this.eventBuffers.get(peer.id)
-    if (!buffer) { buffer = { peer, events: [], bytes: 0, sending: false }; this.eventBuffers.set(peer.id, buffer) }
+    if (!buffer) {
+      let end!: () => void
+      const ended = new Promise<void>(resolve => { end = resolve })
+      buffer = { peer, events: [], bytes: 0, enqueued: 0, sent: 0, ended, end }
+      this.eventBuffers.set(peer.id, buffer)
+    }
     buffer.events.push(payload)
+    buffer.enqueued++
     buffer.bytes += Buffer.byteLength(JSON.stringify(payload))
-    if (buffer.events.length > 4000 || buffer.bytes > 8 * 1024 * 1024) { this.forgetPeer(peer.id); this.send({ type: 'disconnect', peerId: peer.id }); return }
-    if (buffer.timer || buffer.sending) return
+    if (buffer.events.length > 4000 || buffer.bytes > 8 * 1024 * 1024) { this.dropPeer(peer, 'event-queue-limit'); return }
+    if (buffer.timer || buffer.flushing) return
     const active = buffer
     active.timer = setTimeout(() => { active.timer = undefined; void this.flushEvents(active) }, 100)
     active.timer.unref?.()
   }
-  private async flushEvents(buffer: { peer: Peer; events: Array<{ seq: number; event: AgentEvent }>; bytes: number; sending: boolean; timer?: ReturnType<typeof setTimeout> }): Promise<void> {
-    if (this.peers.get(buffer.peer.id) !== buffer.peer || this.eventBuffers.get(buffer.peer.id) !== buffer) return
-    buffer.sending = true
+  private flushEvents(buffer: EventBuffer): Promise<void> {
+    if (buffer.flushing) return buffer.flushing
+    if (this.peers.get(buffer.peer.id) !== buffer.peer || this.eventBuffers.get(buffer.peer.id) !== buffer) return Promise.resolve()
+    if (buffer.timer) { clearTimeout(buffer.timer); buffer.timer = undefined }
     const payloads = buffer.events.splice(0, 1000)
     buffer.bytes -= payloads.reduce((total, payload) => total + Buffer.byteLength(JSON.stringify(payload)), 0)
-    try { await this.sendEncrypted(buffer.peer, { kind: 'events', challenge: buffer.peer.challenge, payloads }) }
-    catch { this.forgetPeer(buffer.peer.id); this.send({ type: 'disconnect', peerId: buffer.peer.id }) }
-    finally {
-      buffer.sending = false
+    const operation = this.sendEncrypted(buffer.peer, { kind: 'events', challenge: buffer.peer.challenge, payloads }).then(() => {
+      buffer.sent += payloads.length
+    }).catch(() => { this.dropPeer(buffer.peer, 'event-send-failed') })
+    buffer.flushing = operation
+    void operation.then(() => {
+      if (buffer.flushing === operation) buffer.flushing = undefined
       if (this.peers.get(buffer.peer.id) !== buffer.peer || this.eventBuffers.get(buffer.peer.id) !== buffer) return
       if (buffer.events.length) { buffer.timer = setTimeout(() => { buffer.timer = undefined; void this.flushEvents(buffer) }, 100); buffer.timer.unref?.() }
       else this.eventBuffers.delete(buffer.peer.id)
-    }
+    })
+    return operation
+  }
+  private async drainEvents(force = true): Promise<void> {
+    // A fixed barrier does not wait forever for live events arriving afterwards.
+    const buffers = [...this.eventBuffers.values()]
+    if (!force && !buffers.some(buffer => buffer.events.length >= 1000 || buffer.bytes >= 512 * 1024)) return
+    const targets = buffers.map(buffer => ({ buffer, through: buffer.enqueued }))
+    await Promise.all(targets.map(async ({ buffer, through }) => {
+      while (buffer.sent < through && this.peers.get(buffer.peer.id) === buffer.peer && this.eventBuffers.get(buffer.peer.id) === buffer) {
+        await Promise.race([this.flushEvents(buffer), buffer.ended])
+      }
+    }))
   }
 
   getStatus(): RemoteAccessStatus {
@@ -111,9 +177,11 @@ export class RemoteAccessService {
     return {
       ...this.status,
       workspace: this.saved?.options.workspace,
+      scope: this.saved?.options.scope,
+      permissions: this.saved ? { approve: this.saved.options.approve, files: this.saved.options.files } : undefined,
       url: this.invite && this.invite.expiresAt > now && this.saved ? `${this.origin}/#invite=${encodeURIComponent(JSON.stringify({ protocol: 1, roomId: this.saved.roomId, token: this.invite.token, key: this.invite.key }))}` : undefined,
       inviteExpiresAt: this.invite?.expiresAt,
-      devices: this.saved?.devices.map(device => ({ id: device.deviceId, name: device.name, createdAt: device.createdAt, lastSeenAt: device.lastSeenAt, online: [...this.peers.values()].some(peer => peer.deviceId === device.deviceId && peer.ready), control: device.control, approve: device.approve, files: device.files })) ?? [],
+      devices: this.saved?.devices.map(device => ({ id: device.deviceId, name: device.name, createdAt: device.createdAt, lastSeenAt: device.lastSeenAt, online: [...this.peers.values()].some(peer => peer.deviceId === device.deviceId && peer.ready), control: device.control, approve: device.approve, files: device.files, scope: device.scope })) ?? [],
       pending: [...this.peers.values()].filter(peer => !peer.deviceId && peer.name && peer.code && now - peer.requestedAt < 120000).map(peer => ({ id: peer.id, name: peer.name!, code: peer.code!, requestedAt: peer.requestedAt })),
     }
   }
@@ -146,10 +214,10 @@ export class RemoteAccessService {
   }
   async enable(input: RemoteEnableOptions): Promise<RemoteAccessStatus> {
     if (this.saved) return this.getStatus()
-    if (!input || typeof input.workspace !== 'string' || typeof input.approve !== 'boolean' || typeof input.files !== 'boolean') throw new Error('Invalid remote access options')
-    const workspace = await fs.realpath(input.workspace)
-    if (!(await fs.stat(workspace)).isDirectory() || path.parse(workspace).root === workspace) throw new Error('Choose a project folder, not a disk root')
-    this.saved = { roomId: randomHex(16), hostToken: randomHex(), registered: false, options: { workspace, approve: input.approve, files: input.files }, devices: [], receipts: [] }
+    if (!input || (input.workspace !== undefined && typeof input.workspace !== 'string') || (input.scope !== undefined && input.scope !== 'desktop') || typeof input.approve !== 'boolean' || typeof input.files !== 'boolean') throw new Error('Invalid remote access options')
+    const workspace = await fs.realpath(input.workspace?.trim() || os.homedir())
+    if (!(await fs.stat(workspace)).isDirectory()) throw new Error('Invalid default working directory')
+    this.saved = { roomId: randomHex(16), hostToken: randomHex(), registered: false, options: { workspace, scope: 'desktop', approve: input.approve, files: input.files }, devices: [], receipts: [] }
     try { await this.persist() } catch { this.saved = null; throw new Error('Unable to securely save remote access credentials') }
     setRuntimeAgentHostMode('main')
     this.publish({ enabled: true, state: 'connecting', error: undefined })
@@ -161,6 +229,7 @@ export class RemoteAccessService {
     this.inviteOperation = null
     this.send({ type: 'stop' })
     this.saved = null
+    this.options.onDeviceRevoked?.()
     this.invite = null
     this.clearConnection()
     await this.persist()
@@ -211,7 +280,7 @@ export class RemoteAccessService {
       this.publish()
       return this.getStatus()
     }
-    const device: Device = { protocol: 1, roomId: this.saved.roomId, deviceId: randomHex(16), token: randomHex(), key: randomHex(), name: peer.name, createdAt: Date.now(), lastSeenAt: Date.now(), workspace: this.saved.options.workspace, control: true, approve: this.saved.options.approve, files: this.saved.options.files }
+    const device: Device = { protocol: 1, roomId: this.saved.roomId, deviceId: randomHex(16), token: randomHex(), key: randomHex(), name: peer.name, createdAt: Date.now(), lastSeenAt: Date.now(), workspace: this.saved.options.workspace, scope: 'desktop', control: true, approve: this.saved.options.approve, files: this.saved.options.files }
     if (this.saved.devices.length >= 8) throw new Error('Remote device limit reached')
     peer.approving = true
     this.saved.devices.push(device)
@@ -242,6 +311,7 @@ export class RemoteAccessService {
   async revokeDevice(deviceId: string): Promise<RemoteAccessStatus> {
     if (!this.saved || !this.saved.devices.some(device => device.deviceId === deviceId)) throw new Error('Unknown remote device')
     this.saved.devices = this.saved.devices.filter(device => device.deviceId !== deviceId)
+    this.options.onDeviceRevoked?.(deviceId)
     for (const peer of this.peers.values()) if (peer.deviceId === deviceId) this.forgetPeer(peer.id)
     this.send({ type: 'revoke', deviceId })
     await this.persist()
@@ -267,7 +337,9 @@ export class RemoteAccessService {
     return !!this.invite && this.invite.token === peer.inviteToken && Date.now() < (peer.inviteExpiresAt ?? 0) && Date.now() - peer.requestedAt < 120000
   }
   private send(value: unknown): void {
-    if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify(value))
+    if (this.socket?.readyState !== WebSocket.OPEN) return
+    try { this.socket.send(JSON.stringify(value)) }
+    catch { this.diagnose('relay-send-failed'); this.socket?.close() }
   }
   private async sendEncrypted(peer: Peer, value: unknown): Promise<void> {
     const generation = this.generation
@@ -283,7 +355,9 @@ export class RemoteAccessService {
       }
       return
     }
-    const payload = await seal(peer.key, value)
+    let payload: Awaited<ReturnType<typeof seal>>
+    try { payload = await seal(peer.key, value) }
+    catch (error) { this.diagnose('peer-send-failed'); throw error }
     const frame = JSON.stringify({ type: 'data', peerId: peer.id, payload })
     const send = this.outbound.catch(() => {}).then(async () => {
       const now = Date.now()
@@ -296,9 +370,10 @@ export class RemoteAccessService {
       let waited = 0
       while (this.socket && this.socket.bufferedAmount > 2 * REMOTE_MAX_FRAME_BYTES && waited < 30000) { await new Promise(resolve => setTimeout(resolve, 20)); waited += 20 }
       if (generation !== this.generation || this.peers.get(peer.id) !== peer || this.socket?.readyState !== WebSocket.OPEN) return
-      if (waited >= 30000) { this.socket.close(); return }
+      if (waited >= 30000) { this.diagnose('outbound-backpressure'); this.socket.close(); return }
       this.outboundCount++; this.outboundBytes += Buffer.byteLength(frame)
-      this.socket.send(frame)
+      try { this.socket.send(frame) }
+      catch (error) { this.diagnose('peer-send-failed'); throw error }
     })
     this.outbound = send
     await send
@@ -307,7 +382,7 @@ export class RemoteAccessService {
     if (!peer.ready || this.peers.get(peer.id) !== peer) return null
     const device = this.saved?.devices.find(item => item.deviceId === peer.deviceId)
     if (!device) return null
-    return { deviceId: device.deviceId, workspace: device.workspace, control: device.control, approve: device.approve, files: device.files, isActive: () => this.status.enabled && this.saved?.devices.includes(device) === true }
+    return { deviceId: device.deviceId, workspace: device.workspace, scope: device.scope, control: device.control, approve: device.approve, files: device.files, isActive: () => this.status.enabled && this.saved?.devices.includes(device) === true }
   }
   private async connect(generation: number): Promise<void> {
     const saved = this.saved
@@ -350,6 +425,15 @@ export class RemoteAccessService {
           if (frame.type === 'pong' || frame.type === 'renewed') { this.lastPong = Date.now(); return }
           if (frame.type === 'invite.ready' && typeof frame.tokenHash === 'string') { this.resolveWaiter(`invite.ready:${frame.tokenHash}`, frame); return }
           if (frame.type === 'authorized' && typeof frame.deviceId === 'string') { this.resolveWaiter(`authorized:${frame.deviceId}`, frame); return }
+          if (frame.type === 'peer.left' && typeof frame.peerId === 'string') {
+            // A snapshot can be awaiting this peer's flush on the command chain.
+            // Resolve its barrier now, and invalidate an older queued join too.
+            const pending = this.incoming.get(frame.peerId)
+            if (pending) pending.dropped = true
+            this.forgetPeer(frame.peerId)
+            this.publish()
+            return
+          }
           if (frame.type === 'ready' && frame.role === 'host' && !ready) {
             ready = true; clearTimeout(timeout); this.retry = 0; this.lastPong = Date.now(); this.lastRenewed = Date.now(); this.publish({ state: 'online', error: undefined }); resolve()
             this.heartbeat = setInterval(() => {
@@ -359,10 +443,35 @@ export class RemoteAccessService {
             }, 45000)
           } else {
             const bytes = Buffer.byteLength(event.data)
-            if (this.incomingCount >= 128 || this.incomingBytes + bytes > 16 * 1024 * 1024) { socket.close(1008, 'Remote queue limit'); return }
-            this.incomingCount++; this.incomingBytes += bytes
-            this.chain = this.chain.catch(() => {}).then(() => generation === this.generation && this.socket === socket ? this.handleFrame(frame) : undefined).catch(() => {})
-              .finally(() => { this.incomingCount--; this.incomingBytes -= bytes })
+            const peerId = typeof frame.peerId === 'string' ? frame.peerId : ''
+            let budget = this.incoming.get(peerId)
+            if (!budget) { budget = { count: 0, bytes: 0, dropped: false }; this.incoming.set(peerId, budget) }
+            if (budget.dropped) return
+            const totalFull = this.incomingTotal.count >= 1024 || this.incomingTotal.bytes + bytes > 64 * 1024 * 1024
+            if (budget.count >= 128 || budget.bytes + bytes > 16 * 1024 * 1024 || totalFull) {
+              budget.dropped = true
+              this.diagnose(totalFull ? 'incoming-total-queue-limit' : 'incoming-peer-queue-limit')
+              if (peerId) {
+                const known = this.peers.has(peerId) || budget.count > 0 || frame.type === 'peer.joined'
+                this.forgetPeer(peerId)
+                if (known) this.send({ type: 'disconnect', peerId })
+                this.publish()
+              }
+              else socket.close(1008, 'Remote queue limit')
+              if (budget.count === 0 && this.incoming.get(peerId) === budget) this.incoming.delete(peerId)
+              return
+            }
+            const queued = budget
+            const total = this.incomingTotal
+            queued.count++; queued.bytes += bytes
+            total.count++; total.bytes += bytes
+            this.chain = this.chain.catch(() => {}).then(() => !queued.dropped && generation === this.generation && this.socket === socket ? this.handleFrame(frame) : undefined)
+              .catch(() => { this.diagnose('frame-processing-failed') })
+              .finally(() => {
+                queued.count--; queued.bytes -= bytes
+                total.count--; total.bytes -= bytes
+                if (queued.count === 0 && this.incoming.get(peerId) === queued) this.incoming.delete(peerId)
+              })
           }
         }
         socket.onerror = () => { if (!ready) reject(new Error('Remote connection failed')) }
@@ -397,7 +506,8 @@ export class RemoteAccessService {
     this.socket = null
     socket?.close()
     this.peers.clear()
-    for (const buffer of this.eventBuffers.values()) if (buffer.timer) clearTimeout(buffer.timer)
+    this.incoming.clear()
+    for (const buffer of this.eventBuffers.values()) { if (buffer.timer) clearTimeout(buffer.timer); buffer.end() }
     this.eventBuffers.clear()
     for (const waiter of this.waiters.values()) { clearTimeout(waiter.timer); waiter.reject(new Error('Remote connection closed')) }
     this.waiters.clear()
@@ -410,8 +520,8 @@ export class RemoteAccessService {
     if (frame.type === 'peer.joined' && typeof frame.peerId === 'string') {
       const device = this.saved?.devices.find(item => item.deviceId === frame.deviceId)
       const key = device?.key ?? (frame.invited && this.invite && this.invite.expiresAt > Date.now() ? this.invite.key : null)
-      if (!key || this.peers.size >= 8) { this.send({ type: 'disconnect', peerId: frame.peerId }); return }
-      const peer: Peer = { id: frame.peerId, deviceId: device?.deviceId, key, challenge: randomHex(), ready: false, requestedAt: Date.now(), inviteToken: device ? undefined : this.invite?.token, inviteExpiresAt: device ? undefined : this.invite?.expiresAt, seen: new Set() }
+      if (!key || this.peers.size >= 8) { this.diagnose(key ? 'peer-limit' : 'peer-credential-unavailable'); this.send({ type: 'disconnect', peerId: frame.peerId }); return }
+      const peer: Peer = { id: frame.peerId, deviceId: device?.deviceId, key, challenge: randomHex(), ready: false, requestedAt: Date.now(), inviteToken: device ? undefined : this.invite?.token, inviteExpiresAt: device ? undefined : this.invite?.expiresAt, seen: new Set(), filtering: { count: 0, bytes: 0 }, uiSending: { count: 0, bytes: 0 } }
       this.peers.set(peer.id, peer)
       this.send({ type: 'data', peerId: peer.id, payload: { challenge: peer.challenge } })
       this.publish()
@@ -421,7 +531,7 @@ export class RemoteAccessService {
     const peer = this.peers.get(frame.peerId)
     if (!peer) return
     let message: Record<string, unknown>
-    try { message = await open(peer.key, frame.payload) } catch { this.send({ type: 'disconnect', peerId: peer.id }); this.forgetPeer(peer.id); return }
+    try { message = await open(peer.key, frame.payload) } catch { this.dropPeer(peer, 'peer-decrypt-failed'); return }
     if (message.challenge !== peer.challenge) return
     const iv = (frame.payload as { iv?: string })?.iv
     if (iv && peer.seen.has(iv)) return
@@ -440,8 +550,11 @@ export class RemoteAccessService {
       if (!principal?.isActive()) return
       const device = this.saved!.devices.find(item => item.deviceId === peer.deviceId)!
       device.lastSeenAt = Date.now()
-      const bootstrap = { ...await this.dispatcher.bootstrap(principal), platform: process.platform }
-      await this.sendEncrypted(peer, { kind: 'connected', challenge: peer.challenge, bootstrap })
+      let bootstrap: Awaited<ReturnType<typeof this.dispatcher.bootstrap>> & { platform: string }
+      try { bootstrap = { ...await this.dispatcher.bootstrap(principal), platform: process.platform } }
+      catch { this.dropPeer(peer, 'bootstrap-failed'); return }
+      try { await this.sendEncrypted(peer, { kind: 'connected', challenge: peer.challenge, bootstrap }) }
+      catch { this.dropPeer(peer, 'bootstrap-send-failed'); return }
       this.publish()
       return
     }
@@ -452,7 +565,7 @@ export class RemoteAccessService {
   private async handleRequest(peer: Peer, principal: RemotePrincipal, request: RemoteRequest): Promise<void> {
     if (!/^[a-f0-9]{32}$/.test(request.id) || typeof request.method !== 'string' || !Array.isArray(request.args) || !Number.isFinite(request.issuedAt) || Math.abs(Date.now() - request.issuedAt) > 300000) return
     const saved = this.saved!
-    const mutating = ['agent:command', 'dbCreateSession', 'dbUpdateSessionTitle', 'remote:upload.start', 'remote:upload.chunk', 'remote:upload.finish'].includes(request.method)
+    const mutating = !new Set(['remote:bootstrap', 'agent:host-mode', 'agent:snapshot', 'kvGet', 'dbGetAllSessions', 'dbGetMessages', 'dbGetRevision', 'dbGetRecents', 'readFile', 'readFileBase64', 'readImageFileBase64', 'listDir', 'fileExists', 'mcpStatus', 'mcpTools', 'loadApiKeys', 'jouleGetState', 'accountGetStatus', 'accountSyncGetPassphraseStatus', 'gitGetStatus', 'gitGetDiff', 'gitGetBranches', 'gitGetCommitGraph', 'gitGetIdentity', 'scanSkillDirs', 'scanAgents', 'scanMemory', 'readMemoryIndex', 'searchMemoryFiles', 'agentMemoryStatus', 'agentMemorySearch', 'agentMemoryContext', 'skillsSearch', 'fetchSkillMd', 'fetchSkillFromRepo', 'vibeGetWallpaper', 'vibeMediaGetState', 'agentBrowser:ready', 'ptyInput', 'ptyResize']).has(request.method)
     let receipt = mutating ? saved.receipts.find(item => item.id === request.id && item.deviceId === principal.deviceId) : undefined
     if (receipt) {
       await this.sendEncrypted(peer, { kind: 'response', challenge: peer.challenge, id: request.id, result: receipt.result, error: receipt.state === 'pending' ? 'remote-request-outcome-unknown' : receipt.error })
@@ -484,13 +597,19 @@ export class RemoteAccessService {
     }
     if (principal.isActive()) {
       try { await this.sendEncrypted(peer, { kind: 'response', challenge: peer.challenge, id: request.id, result, error }) }
-      catch { await this.sendEncrypted(peer, { kind: 'response', challenge: peer.challenge, id: request.id, error: 'remote-response-too-large' }) }
+      catch {
+        this.diagnose('response-send-failed')
+        try { await this.sendEncrypted(peer, { kind: 'response', challenge: peer.challenge, id: request.id, error: 'remote-response-too-large' }) }
+        catch { this.dropPeer(peer, 'response-send-failed') }
+      }
     }
   }
   dispose(): void {
     ++this.generation
     this.clearConnection()
+    this.options.onDeviceRevoked?.()
     this.unsubscribe()
+    this.unsubscribeUi()
     this.dispatcher.dispose()
   }
 }

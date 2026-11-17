@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { ArrowUpRight, FolderOpen, Search, Store } from 'lucide-react'
+import { ArrowUpRight, FolderOpen, Loader2, Search, Store } from 'lucide-react'
 import { useChatStore, getSessionAbortController } from '../../stores/chat-store'
 import { useAgent } from '../../hooks/use-agent'
 import { useSkillsStore } from '../../stores/skills-store'
@@ -85,7 +85,7 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
     : workingDir ? t('shell.defaultDirectory') : t('shell.autoDirectory')
 
   useEffect(() => {
-    if (workingDir && !cloudRemote) {
+    if (workingDir) {
       ipc.initClerkbox(workingDir).catch((e) => { console.error('initClerkbox failed:', e) })
       useSkillsStore.getState().discoverStandardSkills(workingDir).catch((e) => { console.error('discoverStandardSkills failed:', e) })
     }
@@ -96,7 +96,7 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
   const syncSessionSkills = useSkillsStore((s) => s.syncSessionSkills)
 
   useEffect(() => {
-    if (!workingDir || cloudRemote) return
+    if (!workingDir) return
     void syncSessionSkills(workingDir)
   }, [workingDir, sessionSkillIds, syncSessionSkills, cloudRemote])
 
@@ -129,13 +129,13 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
     !getSessionAbortController(sessionId)
   const handleRetry = useCallback(() => {
     if (!sessionId || !lastUserMessage || !canRetry) return
-    if (isWebUIMode) {
+    if (isWebUIMode && !cloudRemote) {
       // 远程视图不做截断（撤回是本地专属动作），退化成原来的原地重发
       void sendMessage(lastUserMessage.content, lastUserMessage.attachments, lastUserMessage.taskMode, lastUserMessage.skills)
       return
     }
     setRewindRetry({ sessionId, messageId: lastUserMessage.id })
-  }, [sessionId, lastUserMessage, canRetry, sendMessage])
+  }, [sessionId, lastUserMessage, canRetry, sendMessage, cloudRemote])
 
   /** 编辑重发：撤回成功后用既有的发送路径发出新文本（附件/任务档/技能沿用原那条） */
   const handleResend = useCallback((content: string, anchor: Message) => {
@@ -153,6 +153,18 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
       onRetry={handleRetry}
     />
   ) : null
+
+  // Remote history restores asynchronously. A temporary composer with an empty
+  // or unbound session would lose an upload when the restored composer mounts.
+  if (cloudRemote && (!initialized || !sessionId || !currentSession)) {
+    return (
+      <div role="status" aria-live="polite" aria-busy="true" className={`flex h-full min-h-0 flex-col items-center justify-center gap-3 px-6 text-center ${vibe ? 'text-white/70' : 'text-dark-onSurfaceVariant'}`}>
+        <Loader2 size={24} className="animate-spin text-md-primary motion-reduce:animate-none" aria-hidden />
+        <p className="text-ui-sm font-medium">{t('remoteAccess.cloudLoadingWorkbench')}</p>
+        <p className="max-w-sm text-ui-xs leading-relaxed opacity-75">{t('remoteAccess.cloudLoadingWorkbenchNote')}</p>
+      </div>
+    )
+  }
 
   // 空态与消息态共用同一输入契约；欢迎区只提供已有功能的可发现入口。
   if (isEmpty) {
@@ -183,7 +195,7 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
                   </p>
                 </header>
               )}
-              {!modelConfigured && (cloudRemote ? <p role="status" className="mb-4 text-ui-sm leading-relaxed text-dark-onSurfaceVariant">{t('remoteAccess.cloudNeedsModel')}</p> : <ModelSetupGuidance />)}
+              {!modelConfigured && <ModelSetupGuidance />}
               </div>
               <ChatInput key={`composer:${sessionId}`} sessionId={sessionId}
                   onSend={handleSend}
@@ -200,11 +212,11 @@ export default function ChatPage({ vibe = false }: ChatPageProps) {
               {!vibe && (
                 <>
                   <div className="mt-5 flex flex-wrap gap-3">
-                    {!cloudRemote && <button type="button" onClick={() => useUIStore.getState().setShowSkillStore(true)} className="md-focus group flex min-w-0 flex-1 basis-64 items-start gap-3 rounded-md3-md border border-dark-onSurfaceVariant/10 bg-dark-surface/60 p-4 text-left hover:bg-dark-surfaceContainer/60 hover:border-dark-onSurfaceVariant/20 transition-colors">
+                    <button type="button" onClick={() => useUIStore.getState().setShowSkillStore(true)} className="md-focus group flex min-w-0 flex-1 basis-64 items-start gap-3 rounded-md3-md border border-dark-onSurfaceVariant/10 bg-dark-surface/60 p-4 text-left hover:bg-dark-surfaceContainer/60 hover:border-dark-onSurfaceVariant/20 transition-colors">
                       <Store size={17} className="mt-0.5 shrink-0 text-dark-onSurfaceVariant" aria-hidden="true" />
                       <span className="min-w-0 flex-1"><span className="block text-ui-sm font-medium text-dark-onSurface">{t('shell.browseSkills')}</span><span className="mt-1 block text-ui-xs leading-relaxed text-dark-onSurfaceVariant">{t('shell.browseSkillsDescription')}</span></span>
                       <ArrowUpRight size={14} className="mt-0.5 shrink-0 text-dark-onSurfaceVariant/40 group-hover:text-dark-onSurfaceVariant" aria-hidden="true" />
-                    </button>}
+                    </button>
                     <button type="button" onClick={() => useUIStore.getState().setCommandPaletteOpen(true)} className="md-focus group flex min-w-0 flex-1 basis-64 items-start gap-3 rounded-md3-md border border-dark-onSurfaceVariant/10 bg-dark-surface/60 p-4 text-left hover:bg-dark-surfaceContainer/60 hover:border-dark-onSurfaceVariant/20 transition-colors">
                       <Search size={17} className="mt-0.5 shrink-0 text-dark-onSurfaceVariant" aria-hidden="true" />
                       <span className="min-w-0 flex-1"><span className="block text-ui-sm font-medium text-dark-onSurface">{t('shell.viewHistory')}</span><span className="mt-1 block text-ui-xs leading-relaxed text-dark-onSurfaceVariant">{t('shell.viewHistoryDescription')}</span></span>

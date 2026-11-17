@@ -3,6 +3,7 @@ import { Bot, FolderCog, Loader2, Plus, RotateCcw, Trash2, X } from 'lucide-reac
 import { useTranslation } from 'react-i18next'
 import Modal, { useOverlayKeyboardLock } from '../ui/Modal'
 import ConfirmDialog from '../ui/ConfirmDialog'
+import HostFolderPicker from '../ui/HostFolderPicker'
 import BindPanel from './BindPanel'
 import FeishuSetupCard from './FeishuSetupCard'
 import WeixinSetupCard from './WeixinSetupCard'
@@ -10,7 +11,7 @@ import TelegramSetupCard from './TelegramSetupCard'
 import WeComSetupCard from './WeComSetupCard'
 import { ChannelBadge } from './channelIcons'
 import { useBots } from './useBots'
-import { ipc } from '../../lib/ipc-client'
+import { ipc, isWebUIMode } from '../../lib/ipc-client'
 import type { BotListItem, BotProvider } from '../../../electron/im-bots/types'
 
 /** 渠道清单：与主进程 BOT_PROVIDERS 同序。渲染层刻意只做 type import，不引运行时值 */
@@ -107,13 +108,14 @@ export default function BotsDialog({ onClose, entryProvider }: BotsDialogProps) 
   const [detailError, setDetailError] = useState<string | null>(null)
   const [pendingDelete, setPendingDelete] = useState<BotListItem | null>(null)
   const [pendingReset, setPendingReset] = useState<BotListItem | null>(null)
+  const [folderPickerBotId, setFolderPickerBotId] = useState<string | null>(null)
   const selectedIdRef = useRef(selectedId)
   selectedIdRef.current = selectedId
 
   // 删除确认框叠在本弹窗之上：期间让出 Modal 的 Esc / Tab，否则一次按键关掉两层
   // Esc 要一次只关一层：确认框叠在 Modal 上时，锁必须把两个都算进去
   // （只写 pendingDelete 的话，重置确认框开着按 Esc 会把整个弹窗一起关掉）
-  useOverlayKeyboardLock(pendingDelete !== null || pendingReset !== null)
+  useOverlayKeyboardLock(pendingDelete !== null || pendingReset !== null || folderPickerBotId !== null)
 
   const selected = useMemo(() => bots.find((item) => item.id === selectedId) ?? null, [bots, selectedId])
 
@@ -216,6 +218,10 @@ export default function BotsDialog({ onClose, entryProvider }: BotsDialogProps) 
 
   const chooseWorkDir = useCallback(async () => {
     const targetId = selectedIdRef.current
+    if (isWebUIMode) {
+      setFolderPickerBotId(targetId)
+      return
+    }
     const dir = await ipc.selectFolder().catch(() => null)
     // 原生选择器返回前可切换机器人；旧目录不能写入新选中的机器人草稿。
     if (dir && selectedIdRef.current === targetId) setDraft((prev) => ({ ...prev, defaultWorkDir: dir }))
@@ -566,6 +572,15 @@ export default function BotsDialog({ onClose, entryProvider }: BotsDialogProps) 
           onCancel={() => setPendingReset(null)}
         />
       )}
+
+      <HostFolderPicker
+        open={folderPickerBotId !== null}
+        initialPath={draft.defaultWorkDir || undefined}
+        onClose={() => setFolderPickerBotId(null)}
+        onSelect={(path) => {
+          if (selectedIdRef.current === folderPickerBotId) setDraft((prev) => ({ ...prev, defaultWorkDir: path }))
+        }}
+      />
 
       {pendingDelete && (
         <ConfirmDialog

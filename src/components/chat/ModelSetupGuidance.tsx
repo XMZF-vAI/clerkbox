@@ -4,6 +4,7 @@ import { ArrowUpRight, Settings2 } from 'lucide-react'
 import { useJouleStore } from '../../stores/joule-store'
 import { useSettingsStore } from '../../stores/settings-store'
 import { isWebUIMode } from '../../lib/ipc-client'
+import { isCloudRemoteMode } from '../../remote/browser'
 import type { JoulePlan, JouleStatus, JouleSubscription } from '../../types/joule'
 import { canSelectJouleModel } from '../../lib/joule-models'
 import JouleAccountCard from '../settings/JouleAccountCard'
@@ -64,7 +65,8 @@ export default function ModelSetupGuidance() {
   const [open, setOpen] = useState(false)
   const [selectedModelId, setSelectedModelId] = useState('')
   const models = provider?.models ?? []
-  const state = resolveJouleSetupState({ status, loggingIn, userCode, plan, subscription, stale, error }, models.length, isWebUIMode)
+  const desktopOnlyGuidance = isWebUIMode && !isCloudRemoteMode()
+  const state = resolveJouleSetupState({ status, loggingIn, userCode, plan, subscription, stale, error }, models.length, desktopOnlyGuidance)
   const copy = stateCopy[state]
   const selectedModel = models.find((model) => model.id === selectedModelId) ?? models[0]
 
@@ -78,7 +80,7 @@ export default function ModelSetupGuidance() {
     const settings = useSettingsStore.getState()
     const latest = settings.providers.find((item) => item.id === 'joule')
     // Recheck at click time: a subscription or model may have changed while the dialog was open.
-    if (resolveJouleSetupState(account, latest?.models.length ?? 0, isWebUIMode) !== 'ready') return
+    if (resolveJouleSetupState(account, latest?.models.length ?? 0, desktopOnlyGuidance) !== 'ready') return
     if (!selectedModel || !latest?.models.some((model) => model.id === selectedModel.id)) return
     settings.activateModel('joule', selectedModel.id)
     setOpen(false)

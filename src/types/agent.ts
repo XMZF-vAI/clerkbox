@@ -409,6 +409,8 @@ export interface ModelProvider {
   apiCompat: ApiCompat
   baseUrl: string
   apiKey: string
+  /** Paired-browser projection: the host owns a saved key, without returning its value. */
+  apiKeyConfigured?: boolean
   /** 已启用（勾选进来）的模型 */
   models: ProviderModel[]
   /** true = 绕过主进程代理，渲染进程直连（排障退路） */

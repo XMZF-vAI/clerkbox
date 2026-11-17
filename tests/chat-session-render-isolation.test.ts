@@ -6,6 +6,8 @@ const h = vi.hoisted(() => ({
   activeSessionId: 'a',
   sessions: [] as Array<{ id: string; messages: Message[] }>,
   streamingSessionIds: new Set<string>(),
+  initialized: true,
+  cloudRemote: false,
 }))
 
 // Inspect ChatPage's real child identities without mounting Electron-only descendants.
@@ -23,7 +25,7 @@ vi.mock('../src/stores/chat-store', () => ({
     sessions: h.sessions,
     activeSessionId: h.activeSessionId,
     streamingSessionIds: h.streamingSessionIds,
-    initialized: true,
+    initialized: h.initialized,
   }), { getState: () => ({ streamingSessionIds: h.streamingSessionIds }) }),
   getSessionAbortController: () => undefined,
 }))
@@ -36,6 +38,7 @@ vi.mock('../src/stores/skills-store', () => ({ useSkillsStore: (select: (state: 
 vi.mock('../src/stores/ui-store', () => ({ useUIStore: { getState: () => ({}) } }))
 vi.mock('../src/hooks/use-agent', () => ({ useAgent: () => ({ isCompacting: false, isStopping: false }) }))
 vi.mock('../src/lib/ipc-client', () => ({ ipc: {}, isWebUIMode: false }))
+vi.mock('../src/remote/browser', () => ({ isCloudRemoteMode: () => h.cloudRemote, getRemoteConnection: () => ({ state: 'connected' }) }))
 vi.mock('../src/components/chat/MessageList', () => ({ default: () => null }))
 vi.mock('../src/components/chat/ChatInput', () => ({ default: () => null }))
 vi.mock('../src/components/chat/ModelSetupGuidance', () => ({ default: () => null }))
@@ -75,12 +78,52 @@ function identity(view: Element[]) {
 
 beforeEach(() => {
   h.activeSessionId = 'a'
+  h.initialized = true
+  h.cloudRemote = false
   h.streamingSessionIds = new Set()
   h.sessions = [
     { id: 'a', messages: [message('a-user'), message('a-assistant', 'assistant')] },
     { id: 'b', messages: [message('b-user'), message('b-assistant', 'assistant')] },
     { id: 'new', messages: [] },
   ]
+})
+
+describe('remote composer startup ownership', () => {
+  it('keeps uploads and input unavailable while asynchronous history is still loading', async () => {
+    h.cloudRemote = true
+    h.initialized = false
+    h.activeSessionId = ''
+    h.sessions = []
+    let finishHistory!: () => void
+    const history = new Promise<void>((resolve) => { finishHistory = resolve }).then(() => {
+      h.sessions = [{ id: 'restored', messages: [message('history')] }]
+      h.activeSessionId = 'restored'
+      h.initialized = true
+    })
+
+    const pending = render(false)
+    expect(pending.some((node) => node.type === ChatInput)).toBe(false)
+    expect(pending.some((node) => node.props.role === 'status' && node.props['aria-busy'] === 'true')).toBe(true)
+    finishHistory()
+    await history
+
+    const ready = render(false).filter((node) => node.type === ChatInput)
+    expect(ready).toHaveLength(1)
+    expect(ready[0].props.sessionId).toBe('restored')
+  })
+
+  it.each(['', 'missing'])('requires a valid selected session after remote initialization (active=%s)', (active) => {
+    h.cloudRemote = true
+    h.activeSessionId = active
+    expect(render(false).some((node) => node.type === ChatInput)).toBe(false)
+  })
+
+  it('preserves the existing desktop empty composer during local startup', () => {
+    h.initialized = false
+    h.activeSessionId = ''
+    h.sessions = []
+    expect(render(false).some((node) => node.type === ChatInput)).toBe(true)
+  })
 })
 
 describe.each([false, true])('chat render ownership (vibe=%s)', (vibe) => {

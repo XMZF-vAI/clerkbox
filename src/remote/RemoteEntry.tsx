@@ -10,7 +10,10 @@ import '../i18n'
 // then hydrate from the redacted desktop projection, never from unauthenticated KV.
 const Workbench = lazy(async () => {
   const [{ default: App }, { attachAgentEvents }] = await Promise.all([import('../App'), import('../lib/agent-event-apply')])
-  await attachAgentEvents()
+  // Subscription is installed synchronously before start() requests its first
+  // snapshot. That network request may survive a disconnect for minutes; it
+  // must not prevent App's own hydration recovery from mounting meanwhile.
+  void attachAgentEvents().catch(() => {})
   return { default: App }
 })
 export default function RemoteEntry() {
@@ -22,6 +25,12 @@ export default function RemoteEntry() {
   const [everConnected, setEverConnected] = useState(false)
   const workspaceLoaded = useRef(false)
   const reloadPending = useRef(false)
+  const bootstrap = getRemoteBootstrap()
+  const workbenchAvailable = !!bootstrap && (everConnected || connection.state === 'connected')
+  const requiresPairing = connection.state === 'error' && [
+    'remoteAccess.cloudRevoked', 'remoteAccess.cloudAuthorizationRequired', 'remoteAccess.cloudInviteExpired',
+  ].includes(connection.error || '')
+  const pairingNote = connection.error === 'remoteAccess.cloudInviteExpired' ? 'remoteAccess.cloudEntryNote' : 'remoteAccess.cloudPairAgainNote'
   useEffect(() => {
     document.documentElement.classList.add('webui-mode', 'cloud-remote-mode')
     const consumeNavigation = () => {
@@ -76,15 +85,19 @@ export default function RemoteEntry() {
     // A fresh document isolates chat/store memory when changing computers.
     window.location.replace(window.location.pathname)
   }
-  if (everConnected && getRemoteBootstrap()) {
+  if (workbenchAvailable && bootstrap.scope !== 'desktop') {
+    return <main className="remote-entry"><div className="remote-entry-inner"><header className="remote-entry-header"><span className="remote-wordmark">ClerkBox<span>WebUI</span></span></header><section className="remote-entry-card"><ShieldCheck className="remote-entry-mark" size={28} aria-hidden /><h1>{t('remoteAccess.cloudEntryTitle')}</h1><p className="remote-entry-intro">{t('remoteAccess.cloudLegacyBrowser')}</p><button type="button" className="remote-primary" onClick={leave}>{t('remoteAccess.cloudDisconnect')}</button></section></div></main>
+  }
+  if (workbenchAvailable) {
     return <>
-      <Suspense fallback={<div className="remote-entry"><Loader2 className="remote-spinner" aria-label={t('common.loading')} /></div>}><Workbench /></Suspense>
+      <Suspense fallback={<main className="remote-entry"><div className="remote-entry-inner"><header className="remote-entry-header"><span className="remote-wordmark">ClerkBox<span>WebUI</span></span></header><section className="remote-entry-card" role="status" aria-live="polite"><div className="remote-entry-mark"><Loader2 className="remote-spinner" size={28} aria-hidden /></div><h1>{t('remoteAccess.cloudLoadingWorkbench')}</h1><p className="remote-entry-intro">{t('remoteAccess.cloudLoadingWorkbenchNote')}</p></section></div></main>}><Workbench /></Suspense>
       <div className={`remote-connection-bar ${connection.state === 'connected' ? 'is-connected' : ''}`} role="status" aria-live="polite">
         {connection.state === 'connected' ? <ShieldCheck size={13} aria-hidden /> : <WifiOff size={13} aria-hidden />}
         <span>{t(connection.state === 'connected' ? 'remoteAccess.cloudConnected' : connection.state === 'error' ? (connection.error || 'remoteAccess.cloudConnectionError') : 'remoteAccess.cloudReconnecting')}</span>
+        {connection.state === 'error' && !requiresPairing && <button type="button" onClick={remoteBrowser().reconnect}>{t('common.retry')}</button>}
         <button type="button" onClick={leave} aria-label={t('remoteAccess.cloudDisconnect')} title={t('remoteAccess.cloudDisconnect')}><LogOut size={13} /></button>
       </div>
-      {connection.state === 'error' && <div className="remote-recovery"><p>{t(connection.error || 'remoteAccess.cloudConnectionError')}</p><button type="button" onClick={remoteBrowser().reconnect}>{t('common.retry')}</button><button type="button" onClick={leave}>{t('remoteAccess.cloudDisconnect')}</button></div>}
+      {requiresPairing && <div className="remote-recovery" role="alert"><p>{t(pairingNote)}</p><button type="button" onClick={leave}>{t('remoteAccess.cloudReturnToConnections')}</button></div>}
     </>
   }
   const busy = ['connecting', 'reconnecting', 'pairing'].includes(connection.state)
@@ -101,7 +114,8 @@ export default function RemoteEntry() {
           <button className="remote-secondary" type="button" onClick={() => { remoteBrowser().disconnect(); setDevices(readRemoteDevices()) }}>{t('common.cancel')}</button>
         </div> : <>
           {(error || connection.error) && <p className="remote-error" role="alert">{t(error || connection.error || 'remoteAccess.cloudConnectionError')}</p>}
-          {connection.state === 'error' && <button className="remote-secondary" type="button" onClick={remoteBrowser().reconnect}>{t('common.retry')}</button>}
+          {requiresPairing && <p className="remote-entry-intro">{t(pairingNote)}</p>}
+          {connection.state === 'error' && !requiresPairing && <button className="remote-secondary" type="button" onClick={remoteBrowser().reconnect}>{t('common.retry')}</button>}
           {devices.length > 0 && <div className="remote-known-devices"><h2>{t('remoteAccess.cloudKnownDevices')}</h2>{devices.map(device => <div className="remote-known-device" key={`${device.roomId}:${device.deviceId}`}><button type="button" onClick={() => { setError(''); remoteBrowser().connect(device) }}><span className="remote-known-icon"><ShieldCheck size={18} /></span><span>{device.name}<small>{t('remoteAccess.cloudPairedBrowser')}</small></span><ArrowRight size={17} /></button><button type="button" className="remote-forget" onClick={() => { forgetRemoteDevice(device); setDevices(readRemoteDevices()) }} aria-label={t('remoteAccess.cloudForget', { name: device.name })}><Trash2 size={16} /></button></div>)}</div>}
           <form onSubmit={connectLink} className="remote-invite-form"><label htmlFor="remote-invite-link">{t('remoteAccess.cloudPasteInvite')}</label><div className="remote-invite-input"><Link size={17} aria-hidden /><input id="remote-invite-link" type="password" autoComplete="off" spellCheck={false} value={link} onChange={event => setLink(event.target.value)} placeholder={t('remoteAccess.cloudLinkPlaceholder')} required /></div><button className="remote-primary" type="submit" disabled={!link.trim()}>{t('remoteAccess.cloudConnect')}<ArrowRight size={16} /></button></form>
           <div className="remote-entry-steps"><p><span>1</span>{t('remoteAccess.cloudStepDesktop')}</p><p><span>2</span>{t('remoteAccess.cloudStepInvite')}</p><p><Check size={15} />{t('remoteAccess.cloudStepApprove')}</p></div>

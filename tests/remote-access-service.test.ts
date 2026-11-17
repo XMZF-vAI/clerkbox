@@ -26,6 +26,7 @@ vi.mock('../electron/agent-host', () => ({
 
 import { RemoteAccessService } from '../electron/remote-access'
 import { DEFAULT_REMOTE_ORIGIN } from '../src/remote/protocol'
+import { publishRemoteUiEvent } from '../electron/remote-ui-events'
 
 class FakeWebSocket {
   static OPEN = 1
@@ -134,6 +135,20 @@ async function pairedDevice() {
   return { socket, invite, credential, challenge: deviceChallenge }
 }
 
+async function pairAdditionalDevice(socket: FakeWebSocket) {
+  const status = await service.createInvite()
+  const invite = JSON.parse(decodeURIComponent(new URL(status.url!).hash.slice('#invite='.length))) as RemoteInvite
+  const challenge = await join(socket, 'other-pair', { invited: true })
+  await send(socket, 'other-pair', invite.key, { kind: 'pair', challenge, name: 'Other device' })
+  await vi.waitFor(() => expect(service.getStatus().pending.some(peer => peer.id === 'other-pair')).toBe(true))
+  await service.approvePair('other-pair', true)
+  const credential = (await decrypted(socket, 'other-pair', invite.key)).find(message => message.kind === 'paired')!.credential as RemoteDeviceCredential
+  const deviceChallenge = await join(socket, 'other-device', { deviceId: credential.deviceId })
+  await send(socket, 'other-device', credential.key, { kind: 'hello', challenge: deviceChallenge })
+  await vi.waitFor(() => expect(service.getStatus().devices.find(device => device.id === credential.deviceId)?.online).toBe(true))
+  return { credential, challenge: deviceChallenge }
+}
+
 function restartService() {
   service.dispose()
   service = new RemoteAccessService({
@@ -146,6 +161,25 @@ function restartService() {
 }
 
 describe('persisted remote room recovery', () => {
+  it('starts a complete workbench without selecting a project folder', async () => {
+    const status = await service.enable({ approve: true, files: true })
+    expect(status).toMatchObject({ enabled: true, scope: 'desktop', workspace: await fs.realpath(os.homedir()), permissions: { approve: true, files: true } })
+    expect(JSON.parse(saved!).options.scope).toBe('desktop')
+  })
+
+  it('does not silently expand a previously paired directory-only device', async () => {
+    await pairedDevice()
+    const old = JSON.parse(saved!)
+    delete old.options.scope
+    delete old.devices[0].scope
+    saved = JSON.stringify(old)
+    restartService()
+    await service.restore()
+    await vi.waitFor(() => expect(service.getStatus().state).toBe('online'))
+    expect(service.getStatus().scope).toBeUndefined()
+    expect(service.getStatus().devices[0].scope).toBeUndefined()
+  })
+
   it('rotates expired room credentials and clears old devices and receipts on status 410', async () => {
     const { credential } = await pairedDevice()
     const previous = JSON.parse(saved!) as { roomId: string; hostToken: string; devices: unknown[]; receipts: unknown[] }
@@ -209,6 +243,68 @@ describe('persisted remote room recovery', () => {
 })
 
 describe('real-crypto paired remote connector', () => {
+  it('forwards shared UI status and only the paired device own terminal stream', async () => {
+    const { socket, credential, challenge } = await pairedDevice()
+    publishRemoteUiEvent('mcp:statusChanged', [{ id: 'mcp-one', state: 'connected' }])
+    publishRemoteUiEvent('pty:data', `remote-${credential.deviceId}-terminal#1`, 'owned-output')
+    publishRemoteUiEvent('pty:data', 'remote-another-device-terminal#1', 'private-output')
+    await vi.waitFor(async () => {
+      const messages = await decrypted(socket, 'device-peer', credential.key)
+      expect(messages).toContainEqual(expect.objectContaining({ kind: 'ui-event', challenge, channel: 'mcp:statusChanged' }))
+      expect(messages).toContainEqual(expect.objectContaining({ kind: 'ui-event', channel: 'pty:data', args: [`remote-${credential.deviceId}-terminal#1`, 'owned-output'] }))
+      expect(JSON.stringify(messages)).not.toContain('private-output')
+    })
+  })
+
+  it('isolates a stalled device UI queue instead of disconnecting another paired device', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { socket, credential } = await pairedDevice()
+    const other = await pairAdditionalDevice(socket)
+    const internal = service as unknown as { sendEncrypted(peer: { id: string }, value: { kind?: string }): Promise<void> }
+    const original = internal.sendEncrypted.bind(service)
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const sending = vi.spyOn(internal, 'sendEncrypted').mockImplementation(async (peer, value) => {
+      if (peer.id === 'device-peer' && value.kind === 'ui-event') await gate
+      return original(peer, value)
+    })
+    try {
+      for (let index = 0; index < 256; index++) publishRemoteUiEvent('pty:data', `remote-${credential.deviceId}-terminal#1`, 'output')
+      publishRemoteUiEvent('mcp:statusChanged', [{ state: 'connected' }])
+      await vi.waitFor(async () => {
+        expect(socket.sent.some(frame => frame.type === 'disconnect' && frame.peerId === 'device-peer')).toBe(true)
+        expect(socket.sent.some(frame => frame.type === 'disconnect' && frame.peerId === 'other-device')).toBe(false)
+        expect((await decrypted(socket, 'other-device', other.credential.key)).some(message => message.kind === 'ui-event')).toBe(true)
+      })
+      expect(service.getStatus().devices.find(device => device.id === other.credential.deviceId)?.online).toBe(true)
+    } finally { release(); sending.mockRestore() }
+  })
+
+  it('isolates a stalled device event filter while another device keeps receiving events', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { socket, credential } = await pairedDevice()
+    const other = await pairAdditionalDevice(socket)
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    h.filterEvent.mockImplementation(async (principal, payload) => {
+      if (principal.deviceId === credential.deviceId) await gate
+      return payload
+    })
+    try {
+      for (let seq = 1; seq <= 257; seq++) {
+        h.eventSink?.({ seq, event: { type: 'stream.delta', sessionId: 's1', messageId: 'm1', text: 'x' } })
+        await new Promise(resolve => setImmediate(resolve))
+      }
+      await vi.waitFor(async () => {
+        expect(socket.sent.some(frame => frame.type === 'disconnect' && frame.peerId === 'device-peer')).toBe(true)
+        expect(socket.sent.some(frame => frame.type === 'disconnect' && frame.peerId === 'other-device')).toBe(false)
+        const messages = await decrypted(socket, 'other-device', other.credential.key)
+        expect(messages.some(message => message.kind === 'events')).toBe(true)
+      })
+      expect(service.getStatus().devices.find(device => device.id === other.credential.deviceId)?.online).toBe(true)
+    } finally { release() }
+  })
+
   it('restores a previously approved device and reconnects without another desktop pairing request', async () => {
     const { credential } = await pairedDevice()
     restartService()
@@ -466,20 +562,154 @@ describe('real-crypto paired remote connector', () => {
     expect((service as unknown as { eventBuffers: Map<string, unknown> }).eventBuffers.size).toBe(0)
   })
 
-  it('closes the host socket when queued incoming frames exceed the bound behind a blocked RPC', async () => {
+  it('drops only the overflowing device incoming queue behind a blocked RPC', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
     const { socket, credential, challenge } = await pairedDevice()
+    const other = await pairAdditionalDevice(socket)
     let release!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })
     h.invoke.mockImplementationOnce(async () => { await gate; return { ok: true } })
     try {
       await send(socket, 'device-peer', credential.key, { kind: 'request', challenge, id: randomHex(16), issuedAt: Date.now(), method: 'dbGetMessages', args: ['s1'] })
       await vi.waitFor(() => expect(h.invoke).toHaveBeenCalledTimes(1))
+      const otherRequestId = randomHex(16)
+      await send(socket, 'other-device', other.credential.key, { kind: 'request', challenge: other.challenge, id: otherRequestId, issuedAt: Date.now(), method: 'dbGetRevision', args: [] })
       const payload = await seal(credential.key, { kind: 'request', challenge, id: randomHex(16), issuedAt: Date.now(), method: 'dbGetRevision', args: [] })
       for (let index = 0; index < 140; index++) socket.receive({ type: 'data', peerId: 'device-peer', payload })
-      await vi.waitFor(() => expect(socket.readyState).toBe(3))
+      await vi.waitFor(() => expect(socket.sent.some(frame => frame.type === 'disconnect' && frame.peerId === 'device-peer')).toBe(true))
+      expect(socket.readyState).toBe(FakeWebSocket.OPEN)
+      expect(socket.sent.some(frame => frame.type === 'disconnect' && frame.peerId === 'other-device')).toBe(false)
       expect(h.invoke).toHaveBeenCalledTimes(1)
-      expect(service.getStatus().state).toBe('reconnecting')
+      expect(service.getStatus().state).toBe('online')
+      release()
+      await vi.waitFor(async () => {
+        expect(h.invoke).toHaveBeenCalledTimes(2)
+        expect((await decrypted(socket, 'other-device', other.credential.key)).some(message => message.kind === 'response' && message.id === otherRequestId)).toBe(true)
+      })
     } finally { release() }
+  })
+
+  it('processes peer departure immediately and cannot resurrect its older queued join', async () => {
+    const { socket, credential, challenge } = await pairedDevice()
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    h.invoke.mockImplementationOnce(async () => { await gate; return { ok: true } })
+    try {
+      await send(socket, 'device-peer', credential.key, { kind: 'request', challenge, id: randomHex(16), issuedAt: Date.now(), method: 'dbGetMessages', args: ['s1'] })
+      await vi.waitFor(() => expect(h.invoke).toHaveBeenCalledTimes(1))
+      socket.receive({ type: 'peer.joined', peerId: 'departed-before-join', deviceId: credential.deviceId })
+      socket.receive({ type: 'peer.left', peerId: 'departed-before-join' })
+      release()
+      const internal = service as unknown as { incomingTotal: { count: number } }
+      await vi.waitFor(() => expect(internal.incomingTotal.count).toBe(0))
+      expect(socket.sent.some(frame => frame.type === 'data' && frame.peerId === 'departed-before-join')).toBe(false)
+      expect(service.getStatus().devices[0].online).toBe(true)
+    } finally { release() }
+  })
+
+  it.each([
+    { name: 'frame count', peers: 12, frames: 100, dataSize: 2 },
+    { name: 'retained bytes', peers: 9, frames: 10, dataSize: 900_000 },
+  ])('bounds total incoming $name across disconnected peer IDs', async ({ peers, frames, dataSize }) => {
+    const log = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { socket, credential, challenge } = await pairedDevice()
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    h.invoke.mockImplementationOnce(async () => { await gate; return { ok: true } })
+    const internal = service as unknown as {
+      incoming: Map<string, { count: number; bytes: number }>
+      incomingTotal: { count: number; bytes: number }
+    }
+    try {
+      await send(socket, 'device-peer', credential.key, { kind: 'request', challenge, id: randomHex(16), issuedAt: Date.now(), method: 'dbGetMessages', args: ['s1'] })
+      await vi.waitFor(() => expect(h.invoke).toHaveBeenCalledTimes(1))
+      const payload = { v: 1, iv: '0'.repeat(24), data: 'f'.repeat(dataSize) }
+      for (let index = 0; index < peers; index++) {
+        const peerId = `reconnected-${index}`
+        socket.receive({ type: 'peer.joined', peerId, deviceId: credential.deviceId })
+        for (let frame = 0; frame < frames; frame++) socket.receive({ type: 'data', peerId, payload })
+        socket.receive({ type: 'peer.left', peerId })
+      }
+      expect(internal.incomingTotal.count).toBeLessThanOrEqual(1024)
+      expect(internal.incomingTotal.bytes).toBeLessThanOrEqual(64 * 1024 * 1024)
+      expect([...internal.incoming.values()].reduce((sum, budget) => sum + budget.count, 0)).toBe(internal.incomingTotal.count)
+      expect(log).toHaveBeenCalledWith('[remote-access]', 'incoming-total-queue-limit')
+      expect(socket.sent.some(frame => frame.type === 'disconnect' && String(frame.peerId).startsWith('reconnected-'))).toBe(true)
+      expect(socket.sent.some(frame => frame.type === 'disconnect' && frame.peerId === 'device-peer')).toBe(false)
+      expect(socket.readyState).toBe(FakeWebSocket.OPEN)
+      release()
+      await vi.waitFor(() => {
+        expect(internal.incomingTotal).toEqual({ count: 0, bytes: 0 })
+        expect(internal.incoming.size).toBe(0)
+      }, { timeout: 5000 })
+    } finally { release() }
+  })
+
+  it('accounts retained old-socket frames without decrementing a replacement socket budget', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { socket, credential, challenge } = await pairedDevice()
+    let release!: () => void
+    let releaseBootstrap!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const bootstrapGate = new Promise<void>(resolve => { releaseBootstrap = resolve })
+    h.invoke.mockImplementationOnce(async () => { await gate; return { ok: true } })
+    const internal = service as unknown as {
+      incoming: Map<string, { count: number; bytes: number }>
+      incomingTotal: { count: number; bytes: number }
+    }
+    try {
+      await send(socket, 'device-peer', credential.key, { kind: 'request', challenge, id: randomHex(16), issuedAt: Date.now(), method: 'dbGetMessages', args: ['s1'] })
+      await vi.waitFor(() => expect(h.invoke).toHaveBeenCalledTimes(1))
+      for (let index = 0; index < 30; index++) socket.receive({ type: 'data', peerId: 'device-peer', payload: {} })
+      const retained = { ...internal.incomingTotal }
+      socket.close()
+      expect(internal.incomingTotal).toEqual(retained)
+      await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2), { timeout: 2500 })
+      const replacement = FakeWebSocket.instances[1]
+      await vi.waitFor(() => expect(service.getStatus().state).toBe('online'))
+      const joining = join(replacement, 'device-peer', { deviceId: credential.deviceId })
+      expect(internal.incoming.get('device-peer')?.count).toBe(1)
+      expect(internal.incomingTotal.count).toBe(retained.count + 1)
+      release()
+      const replacementChallenge = await joining
+      await vi.waitFor(() => expect(internal.incomingTotal).toEqual({ count: 0, bytes: 0 }))
+      h.bootstrap.mockImplementationOnce(async () => { await bootstrapGate; return { protocolVersion: 1, settings: {} } })
+      await send(replacement, 'device-peer', credential.key, { kind: 'hello', challenge: replacementChallenge })
+      await vi.waitFor(() => expect(h.bootstrap).toHaveBeenCalledTimes(2))
+      expect(internal.incoming.get('device-peer')?.count).toBe(1)
+      expect(internal.incomingTotal.count).toBe(1)
+      expect(internal.incomingTotal.bytes).toBeGreaterThan(0)
+      releaseBootstrap()
+      await vi.waitFor(() => expect(internal.incomingTotal).toEqual({ count: 0, bytes: 0 }))
+      expect(internal.incoming.size).toBe(0)
+      expect(service.getStatus().devices[0].online).toBe(true)
+    } finally { release(); releaseBootstrap() }
+  })
+
+  it.each(['bootstrap', 'send'] as const)('logs only a fixed reason when the %s step fails', async step => {
+    const log = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { socket, credential } = await pairedDevice()
+    const secret = 'private-token-and-message-body'
+    if (step === 'bootstrap') h.bootstrap.mockRejectedValueOnce(new Error(secret))
+    else {
+      const internal = service as unknown as { sendEncrypted(peer: unknown, value: { kind?: string }): Promise<void> }
+      const original = internal.sendEncrypted.bind(service)
+      vi.spyOn(internal, 'sendEncrypted').mockImplementation(async (peer, value) => {
+        if (value.kind === 'connected') throw new Error(secret)
+        return original(peer, value)
+      })
+    }
+    const challenge = await join(socket, 'failed-bootstrap', { deviceId: credential.deviceId })
+    await send(socket, 'failed-bootstrap', credential.key, { kind: 'hello', challenge })
+    await vi.waitFor(() => expect(socket.sent.some(frame => frame.type === 'disconnect' && frame.peerId === 'failed-bootstrap')).toBe(true))
+    expect(log).toHaveBeenCalledWith('[remote-access]', step === 'bootstrap' ? 'bootstrap-failed' : 'bootstrap-send-failed')
+    const logs = JSON.stringify(log.mock.calls)
+    expect(logs).not.toContain(secret)
+    expect(logs).not.toContain(credential.key)
+    expect(logs).not.toContain(credential.token)
+    expect(logs).not.toContain(credential.roomId)
+    expect(service.getStatus().devices[0].id).toBe(credential.deviceId)
+    expect(socket.readyState).toBe(FakeWebSocket.OPEN)
   })
 
   it.each([

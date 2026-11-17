@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import { sharedStorage } from '../lib/shared-storage'
 import type { TodoItem, UserQuestion } from '../types/agent'
 
 export interface PendingQuestion {
@@ -127,6 +128,6 @@ export const useTodoStore = create<TodoState>()(
         return { bySession: next }
       }),
     }),
-    { name: 'clerkbox-todo-store' }
+    { name: 'clerkbox-todo-store', storage: sharedStorage }
   )
 )

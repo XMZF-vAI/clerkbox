@@ -11,6 +11,7 @@ import {
   type ProviderPreset, type ProviderGroup,
 } from '../../lib/provider-catalog'
 import { ipc } from '../../lib/ipc-client'
+import { isCloudRemoteMode } from '../../remote/browser'
 import ConfirmDialog from '../ui/ConfirmDialog'
 import { useModalAccessibility } from '../../hooks/use-modal-accessibility'
 import { useProviderConnectionTest } from '../../hooks/use-provider-connection-test'
@@ -269,7 +270,7 @@ function ProviderCard({ provider, onPickModels }: { provider: ModelProvider; onP
                 aria-label={t('settings.api.apiKeyPlaceholder')}
                 value={provider.apiKey}
                 onChange={(e) => patch({ apiKey: e.target.value })}
-                placeholder={t('settings.api.apiKeyPlaceholder')}
+                placeholder={t(isCloudRemoteMode() && provider.apiKeyConfigured ? 'settings.providers.hostKeySaved' : 'settings.api.apiKeyPlaceholder')}
                 className={`${inputCls} pr-9`}
               />
               <button
@@ -699,6 +700,7 @@ function ModelPickerModal({ provider, onClose }: { provider: ModelProvider; onCl
     setError('')
     try {
       const res = await ipc.apiFetchModels({
+        providerId: provider.id,
         baseUrl: provider.baseUrl,
         apiKey: provider.apiKey,
         apiCompat: provider.apiCompat,

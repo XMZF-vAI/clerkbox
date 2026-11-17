@@ -220,6 +220,35 @@ describe('desktop and paired device concurrency', () => {
 })
 
 describe('paired remote agent source and permissions', () => {
+  it('uses the complete desktop toolset and trusted host selection for an explicitly approved workbench', async () => {
+    principal = { ...principal, scope: 'desktop' }
+    const selected = { ...settings, model: 'selected-host-model', temperature: 0.3 }
+    await manager.handleCommand({ type: 'run', sessionId: 's2', content: 'other project', settings: { ...settings, apiKey: 'browser-must-not-win' } }, { ...paired(), trustedRemoteSettings: selected })
+    await vi.waitFor(() => expect(h.runs).toHaveLength(1))
+    const ports = h.runs[0].ports
+    expect(ports.settings).toMatchObject({ model: 'selected-host-model', apiKey: 'local-secret', approvalMode: 'full', browserUseEnabled: true })
+    expect(ports.tools.definitions('default').map(tool => tool.name)).toContain('mcp__private__query')
+    expect(ports.env.homeDir()).toBe(os.homedir())
+    expect(await ports.env.buildMemoryPrompt(outside, os.homedir())).toBe('private-global-memory')
+    await expect(ports.tools.execute('app_list_sessions', {}, {} as never)).resolves.toBe('ok')
+    await ports.tools.findAgent('custom-agent', outside)
+    expect(h.findAgent).toHaveBeenCalledWith('custom-agent', outside)
+    active = false
+    await expect(ports.tools.execute('read_file', { path: outside }, {} as never)).rejects.toThrow('remote-disconnected')
+    h.runs[0].finish()
+    await idle()
+  })
+
+  it('retains explicit approval restrictions for a full workbench device without approval capability', async () => {
+    principal = { ...principal, scope: 'desktop', approve: false }
+    await manager.handleCommand({ type: 'run', sessionId: 's1', content: 'work' }, paired())
+    await vi.waitFor(() => expect(h.runs).toHaveLength(1))
+    expect(h.runs[0].ports.settings.approvalMode).toBe('manual')
+    expect(await manager.handleCommand({ type: 'permission.resolve', sessionId: 's1', requestId: 'test', approved: true }, paired())).toEqual({ ok: false, error: 'remote-approval-disabled' })
+    h.runs[0].finish()
+    await idle()
+  })
+
   it('starts a new remote session from the trusted desktop configuration and never accepts remote connection settings', async () => {
     const result = await manager.handleCommand({ type: 'run', sessionId: 's1', content: 'hello', settings: { ...settings, apiKey: 'attacker', baseUrl: 'https://attacker.invalid' } }, paired())
     expect(result).toEqual({ ok: true })

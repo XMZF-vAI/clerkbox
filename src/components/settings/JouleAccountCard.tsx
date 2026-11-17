@@ -16,6 +16,7 @@ import {
 } from 'lucide-react'
 import { useJouleStore } from '../../stores/joule-store'
 import { ipc, isWebUIMode } from '../../lib/ipc-client'
+import { isCloudRemoteMode } from '../../remote/browser'
 import JOULE_MARK from '../../assets/joule-mark.png'
 
 const SUBSCRIBE_URL = 'https://joule.xmzf.space/console#subscribe'
@@ -132,7 +133,8 @@ export default function JouleAccountCard() {
   const w5h = quotas?.w5h
   const w5hRatio = w5h && w5h.cap > 0 ? Math.min(1, Math.max(0, w5h.used / w5h.cap)) : 0
   const displayName = user?.username || user?.email || t('joule.userFallback')
-  const showRefresh = !isWebUIMode && status !== 'unlinked' && !loginPending
+  const hostAccountAvailable = !isWebUIMode || isCloudRemoteMode()
+  const showRefresh = hostAccountAvailable && status !== 'unlinked' && !loginPending
   const showAccount = status === 'connected' || status === 'expired'
   const primaryIsSubscribe = !plan
 
@@ -159,7 +161,7 @@ export default function JouleAccountCard() {
         )}
       </div>
 
-      {isWebUIMode ? (
+      {!hostAccountAvailable ? (
         <div className="space-y-2">
           <p className="text-xs text-dark-onSurfaceVariant/70 leading-relaxed">{t('joule.webuiNote')}</p>
           <button

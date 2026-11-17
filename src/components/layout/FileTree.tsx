@@ -19,7 +19,6 @@ import { useTranslation } from 'react-i18next'
 import { ipc, isWebUIMode } from '../../lib/ipc-client'
 import type { FileEntry } from '../../types/ipc'
 import HostFolderPicker from '../ui/HostFolderPicker'
-import { isCloudRemoteMode } from '../../remote/browser'
 
 interface TreeNode {
   name: string
@@ -243,7 +242,6 @@ export default function FileTree({ onFileSelect, initialRoot }: FileTreeProps) {
   }, [])
 
   const handleSelectFolder = async () => {
-    if (isCloudRemoteMode()) return
     if (isWebUIMode) {
       setHostFolderPickerOpen(true)
       return
@@ -322,8 +320,6 @@ export default function FileTree({ onFileSelect, initialRoot }: FileTreeProps) {
         <button
           type="button"
           onClick={handleSelectFolder}
-          disabled={isCloudRemoteMode()}
-          title={isCloudRemoteMode() ? t('remoteAccess.cloudDesktopManaged') : undefined}
           className="px-4 py-2 bg-dark-surfaceContainerHigh hover:bg-dark-surfaceContainer rounded-md3-sm text-sm transition-colors"
         >
           {t('fileTree.selectFolder')}
@@ -347,8 +343,6 @@ export default function FileTree({ onFileSelect, initialRoot }: FileTreeProps) {
         <button
           type="button"
           onClick={handleSelectFolder}
-          disabled={isCloudRemoteMode()}
-          title={isCloudRemoteMode() ? t('remoteAccess.cloudDesktopManaged') : undefined}
           className="text-xs text-md-info hover:underline"
         >
           {t('fileTree.change')}

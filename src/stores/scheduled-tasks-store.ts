@@ -2,6 +2,8 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { sharedStorage } from '../lib/shared-storage'
 import { ipc } from '../lib/ipc-client'
+import { isCloudRemoteMode } from '../remote/browser'
+import { flushSharedStorage } from '../lib/shared-storage'
 import { TRIGGER_TOLERANCE_MS, previousTriggerAt, summarizeAssistantReply } from '../lib/scheduled-task'
 import { DECISION_RETENTION_MS, onProposalsChanged, readPendingProposals } from '../lib/scheduled-task-proposal'
 import { useChatStore } from './chat-store'
@@ -33,6 +35,7 @@ import type {
 
 /** 执行记录上限：避免 KV 无限膨胀 */
 const MAX_RUN_RECORDS = 200
+let scheduledStateHydrated = false
 /** 调度心跳间隔：到点后最多滞后这么久启动 */
 const TICK_INTERVAL_MS = 20_000
 /** 队首卡死判定的宽限期：刚启动的执行（会话已建、尚未流式）不参与判定 */
@@ -216,6 +219,7 @@ export const useScheduledTasksStore = create<ScheduledTasksState>()(
       },
 
       refreshProposals: async () => {
+        await flushSharedStorage().catch(() => {})
         const pending = await readPendingProposals().catch((e) => {
           console.error('[scheduled-tasks] refreshProposals failed:', e)
           return null
@@ -285,6 +289,15 @@ export const useScheduledTasksStore = create<ScheduledTasksState>()(
       },
 
       enqueueRun: (taskId, trigger) => {
+        if (isCloudRemoteMode()) {
+          void flushSharedStorage().then(() => ipc.remoteWorkbenchCommand('scheduled.run', taskId)).then(result => {
+            if (result.error) throw new Error(result.error)
+          }).catch(error => {
+            console.error('[scheduled-tasks] remote run failed:', error)
+            window.dispatchEvent(new CustomEvent('clerkbox-shared-state-error', { detail: { conflict: false } }))
+          })
+          return null
+        }
         const state = get()
         const task = state.tasks.find((item) => item.id === taskId)
         if (!task) return null
@@ -341,6 +354,7 @@ export const useScheduledTasksStore = create<ScheduledTasksState>()(
       name: 'clerkbox-scheduled-tasks',
       storage: sharedStorage,
       version: 1,
+      onRehydrateStorage: () => (_state, error) => { if (!error) scheduledStateHydrated = true },
       partialize: (state) => ({
         tasks: state.tasks,
         runs: state.runs,
@@ -351,8 +365,9 @@ export const useScheduledTasksStore = create<ScheduledTasksState>()(
         const stored = (persisted ?? {}) as Partial<ScheduledTasksState>
         const tasks = Array.isArray(stored.tasks) ? stored.tasks : []
         // 上次运行未收尾的记录（应用退出/崩溃）统一标记为「已中断」，避免永久挂在运行中
+        const alreadyHydrated = scheduledStateHydrated
         const runs = (Array.isArray(stored.runs) ? stored.runs : []).map((run) =>
-          run.status === 'running'
+          !isCloudRemoteMode() && !alreadyHydrated && run.status === 'running'
             ? {
                 ...run,
                 status: 'failed' as TaskRunStatus,
@@ -367,8 +382,8 @@ export const useScheduledTasksStore = create<ScheduledTasksState>()(
           runs,
           keepAwake: stored.keepAwake === true,
           // 队列与提案列表是内存态：提案本体在独立 KV key，水合后由心跳/订阅重读
-          queue: [],
-          proposals: [],
+          queue: alreadyHydrated ? current.queue : [],
+          proposals: alreadyHydrated ? current.proposals : [],
           proposalDecisions: pruneProposalDecisions(
             (stored.proposalDecisions ?? {}) as Record<string, ProposalDecisionRecord>,
             Date.now(),

@@ -34,6 +34,8 @@ export const handlerRegistry = new Map<string, (...args: unknown[]) => unknown>(
 // executeCommandWithShell / cancelSessionCommands / mcpTest 与 executeCommand /
 // mcpSync 同属命令执行、进程控制与按配置拉起子进程的范畴，一并禁止。
 export const REMOTE_INVOKE_BLOCKLIST: readonly string[] = [
+  'remote:state.patch',
+  'remote:ui.command',
   // 凭据 / API Key
   'loadApiKeys',
   'saveApiKey',

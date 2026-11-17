@@ -415,6 +415,13 @@ contextBridge.exposeInMainWorld('clerkbox', {
 
   // 共享 KV 存储（Electron 与 WebUI 双模式同步持久化）
   kvGet: (key: string): Promise<string | null> => ipcRenderer.invoke('kvGet', key),
+  kvPatch: (patch: { name: string; base: string | null; value: string | null }): Promise<{ value: string | null }> => ipcRenderer.invoke('remote:state.patch', patch),
+  onRemoteWorkbenchCommand: (callback: (command: { id: string; action: 'scheduled.run'; taskId: string }) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, command: { id: string; action: 'scheduled.run'; taskId: string }) => callback(command)
+    ipcRenderer.on('remote:workbench-command', listener)
+    return () => ipcRenderer.removeListener('remote:workbench-command', listener)
+  },
+  remoteWorkbenchReply: (id: string, result: { runId?: string | null; error?: string }): void => { ipcRenderer.send('remote:workbench-reply', id, result) },
   kvSet: (key: string, value: string): Promise<void> => ipcRenderer.invoke('kvSet', key, value),
   kvRemove: (key: string): Promise<void> => ipcRenderer.invoke('kvRemove', key),
   // 定时任务：保持系统唤醒（阻止系统休眠）

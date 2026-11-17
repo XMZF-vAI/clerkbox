@@ -52,6 +52,7 @@ vi.mock('../src/lib/ipc-client', () => ({
     platform: () => 'win32',
     homeDir: () => '/test',
     kvGet: async () => null,
+    kvPatch: async ({ value }: { value: string | null }) => ({ value }),
   }, { get: (target, key) => Reflect.get(target, key) ?? (async () => undefined) }),
 }))
 vi.mock('../src/lib/compact', async (importOriginal) => ({

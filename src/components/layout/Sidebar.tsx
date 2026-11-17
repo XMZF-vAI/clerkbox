@@ -19,11 +19,13 @@ import {
   CalendarClock,
   Search,
   CircleHelp,
+  Bot,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useChatStore } from '../../stores/chat-store'
 import ConfirmDialog from '../ui/ConfirmDialog'
 import RemoteAccessDialog from '../remote/RemoteAccessDialog'
+import BotsDialog from '../bots/BotsDialog'
 import ModeToggle from './ModeToggle'
 import { isWebUIMode } from '../../lib/ipc-client'
 import { isCloudRemoteMode } from '../../remote/browser'
@@ -78,6 +80,7 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
 
   // ── 远程访问弹窗（WebUI 与 IM 机器人的入口都搬进了弹窗，侧栏只管开关）──
   const [remoteAccessOpen, setRemoteAccessOpen] = useState(false)
+  const [botsOpen, setBotsOpen] = useState(false)
 
   // 任务列表分组：从 sessions 派生
   //   - 分组键只用 workingDir（用户主动选过的工作目录）
@@ -129,8 +132,8 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
 
   // 账户入口点击：打开设置页并定位到"账户"标签（一次性 transient 标记）
   const handleOpenAccountSettings = () => {
-    // 手机端禁用账户相关操作：登录/同步走云端 OAuth + 本地覆盖流程，统一交给桌面
-    if (isMobile) {
+    // 配对浏览器通过主机完成账户操作；普通移动 WebUI 仍保留原限制。
+    if (isMobile && !cloudRemote) {
       alert(t('sidebar.account.mobileOnlyAlert'))
       return
     }
@@ -164,7 +167,7 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
         >
           <Search size={17} />
         </button>
-        {!cloudRemote && <button
+        <button
           type="button"
           onClick={() => { setShowScheduledTasks(false); setShowSkillStore(!showSkillStore) }}
           className={`md-focus w-9 h-9 flex items-center justify-center rounded-md3-sm transition-colors ${
@@ -175,8 +178,8 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
           aria-expanded={showSkillStore}
         >
           <Store size={18} />
-        </button>}
-        {!cloudRemote && <button
+        </button>
+        <button
           type="button"
           onClick={() => { setShowSkillStore(false); setShowScheduledTasks(!showScheduledTasks) }}
           className={`md-focus relative w-9 h-9 flex items-center justify-center rounded-md3-sm transition-colors ${
@@ -196,8 +199,19 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
               {pendingProposals > 9 ? '9+' : pendingProposals}
             </span>
           )}
-        </button>}
+        </button>
         <div className="flex-1" />
+        {cloudRemote && (
+          <button
+            type="button"
+            onClick={() => setBotsOpen(true)}
+            className="md-focus w-9 h-9 flex items-center justify-center rounded-md3-sm hover:bg-dark-surfaceContainerHigh text-dark-onSurfaceVariant transition-colors"
+            aria-label={t('remoteAccess.botsManage')}
+            title={t('remoteAccess.botsManage')}
+          >
+            <Bot size={18} />
+          </button>
+        )}
         {!isWebUIMode && (
           <button
             type="button"
@@ -219,7 +233,7 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
           <Settings size={18} />
         </button>
         {/* 账户按钮：未登录=用户图标 / 已登录=首字母圆头像 */}
-        {!cloudRemote && <button
+        <button
           type="button"
           onClick={handleOpenAccountSettings}
           className={`md-focus w-9 h-9 mt-1 flex items-center justify-center transition-colors ${
@@ -240,8 +254,9 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
           ) : (
             <User size={18} />
           )}
-        </button>}
+        </button>
         {remoteAccessOpen && <RemoteAccessDialog onClose={() => setRemoteAccessOpen(false)} />}
+        {botsOpen && <BotsDialog onClose={() => setBotsOpen(false)} />}
       </aside>
     )
   }
@@ -292,8 +307,8 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
           <span className="min-w-0 flex-1 truncate text-left">{t('shell.search')}</span>
           <kbd aria-hidden="true" className="shrink-0 font-sans text-dark-onSurfaceVariant/60 max-md:hidden">{formatShortcut({ key: 'k' })}</kbd>
         </button>
-        {!isWebUIMode && <div className="mb-2"><ModeToggle /></div>}
-        {!cloudRemote && <button
+        <div className="mb-2"><ModeToggle /></div>
+        <button
           type="button"
           onClick={() => { setShowScheduledTasks(false); setShowSkillStore(!showSkillStore); onNavigate?.() }}
           aria-pressed={showSkillStore}
@@ -305,8 +320,8 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
         >
           <Store size={16} />
           <span>{t('sidebar.skills')}</span>
-        </button>}
-        {!cloudRemote && <button
+        </button>
+        <button
           type="button"
           onClick={() => { setShowSkillStore(false); setShowScheduledTasks(!showScheduledTasks); onNavigate?.() }}
           aria-pressed={showScheduledTasks}
@@ -323,7 +338,7 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
               {pendingProposals > 9 ? '9+' : pendingProposals}
             </span>
           )}
-        </button>}
+        </button>
       </nav>
 
       {/* 任务列表标题 + 全部折叠/展开 */}
@@ -421,7 +436,7 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
                             {statusLabel && <span className={`mt-0.5 block truncate text-ui-xs ${waitingApproval ? 'text-md-askForeground' : sessionStatus[s.id] === 'error' ? 'text-md-error' : 'text-dark-onSurfaceVariant'}`}>{statusLabel}</span>}
                           </span>
                         </button>
-                        {!cloudRemote && <button
+                        <button
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation()
@@ -432,7 +447,7 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
                           title={t('sidebar.deleteSessionAria')}
                         >
                           <Trash2 size={13} />
-                        </button>}
+                        </button>
                       </div>
                     )})}
                   </div>
@@ -444,6 +459,16 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
       </div>
 
       <div className="shrink-0 border-t border-dark-onSurfaceVariant/10 px-3 py-3 max-md:pb-[calc(0.75rem+env(safe-area-inset-bottom))] flex flex-col gap-1">
+        {cloudRemote && (
+          <button
+            type="button"
+            onClick={() => setBotsOpen(true)}
+            className="md-focus w-full flex min-h-9 items-center gap-2.5 px-3 py-2 max-md:min-h-11 rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-ui-sm text-dark-onSurfaceVariant"
+          >
+            <Bot size={16} />
+            <span>{t('remoteAccess.botsManage')}</span>
+          </button>
+        )}
         {!isWebUIMode && (
           <button
             type="button"
@@ -464,7 +489,7 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
           <span>{t('sidebar.settings')}</span>
         </button>
         {/* 账户按钮（最底）：未登录=用户图标+"未登录" / 已登录=首字母圆头像+用户名 */}
-        {!cloudRemote && <button
+        <button
           type="button"
           onClick={() => { handleOpenAccountSettings(); onNavigate?.() }}
           className="md-focus w-full flex min-h-10 items-center gap-2.5 px-3 py-2 max-md:min-h-11 rounded-md3-sm hover:bg-dark-surfaceContainerHigh transition-colors text-ui-sm text-dark-onSurfaceVariant"
@@ -485,7 +510,7 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
           <span className="truncate">
             {accountLoggedIn && accountUser ? accountUser.username : t('sidebar.notLoggedIn')}
           </span>
-        </button>}
+        </button>
       </div>
 
       {/* Delete confirmation dialog */}
@@ -506,6 +531,7 @@ export default function Sidebar({ collapsed, onToggle, onNavigate }: SidebarProp
 
       {/* 远程访问弹窗：WebUI 的启动/停止/二维码与 IM 机器人管理都搬进了弹窗，侧栏只留开关 */}
       {remoteAccessOpen && <RemoteAccessDialog onClose={() => setRemoteAccessOpen(false)} />}
+      {botsOpen && <BotsDialog onClose={() => setBotsOpen(false)} />}
     </aside>
   )
 }

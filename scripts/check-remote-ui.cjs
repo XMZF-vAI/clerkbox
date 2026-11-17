@@ -1,7 +1,10 @@
 /*
  * Real remote transport/workbench integration. Only the upstream model is a local
  * OpenAI SSE fixture; the SQLite store, agent loop, connector, relay and UI are real.
- * All profiles, credentials, workspace files, relay state and evidence stay in temp.
+ * Account/skill adapters are empty; model/MCP settings and history use synthetic
+ * scale fixtures. KV uses the production merge with isolated in-memory records.
+ * All profiles, credentials, workspace
+ * files, relay state and evidence stay in temp.
  */
 const fs = require('node:fs')
 const fsp = require('node:fs/promises')
@@ -106,9 +109,10 @@ async function runElectron() {
   const output = path.resolve(process.env.REMOTE_UI_OUTPUT)
   const origin = process.env.REMOTE_UI_ORIGIN
   const workspace = path.join(output, 'remote-ui-workspace')
+  const otherWorkspace = path.join(output, 'other-project')
   const userData = path.join(output, 'electron-profile')
   const home = path.join(output, 'home')
-  for (const directory of [workspace, userData, home]) fs.mkdirSync(directory, { recursive: true })
+  for (const directory of [workspace, otherWorkspace, userData, home]) fs.mkdirSync(directory, { recursive: true })
   app.setPath('userData', userData)
   app.setPath('home', home)
   app.commandLine.appendSwitch('disable-background-timer-throttling')
@@ -130,6 +134,9 @@ async function runElectron() {
   const prompt = 'REMOTE_UI_E2E: 请确认浏览器到桌面 Agent 的真实链路。'
   const reply = '真实远程链路已验证。此回复来自隔离的本地 SSE 测试模型，已由桌面 Agent 写入 SQLite。'
   const upstreamCalls = []
+  const statePatches = []
+  const hydrationFault = { settingsReads: 0, interruptedReads: 0, injected: false, released: false, disconnected: false }
+  report.hydrationRecovery = hydrationFault
   const pngBytes = nativeImage.createFromBitmap(Buffer.from([0, 0, 255, 255, 255, 90, 0, 255, 80, 180, 40, 255, 150, 60, 180, 255]), { width: 2, height: 2 }).toPNG()
   const pngBase64 = pngBytes.toString('base64')
   const pngDataUrl = `data:image/png;base64,${pngBase64}`
@@ -137,6 +144,32 @@ async function runElectron() {
   const check = (name, detail = {}) => { report.checks.push({ name, ok: true, ...detail }) }
 
   async function browserEval(code) { return window.webContents.executeJavaScript(code, true) }
+  async function assertNoRunError(label) {
+    const alerts = await browserEval(`[...document.querySelectorAll('.workspace-chat [role="alert"]')].map(element => element.textContent.trim()).filter(Boolean)`)
+    assert.deepEqual(alerts, [], `${label}: the actual conversation displays a runtime error`)
+  }
+  async function verifyVisibleAssistant(label, reveal = false) {
+    await assertNoRunError(label)
+    await waitFor(`${label}: rendered assistant response`, () => browserEval(`[...document.querySelectorAll('.message-action-scope .markdown-body')].some(element => element.textContent.trim() === ${JSON.stringify(reply)})`))
+    if (reveal) await browserEval(`[...document.querySelectorAll('.message-action-scope .markdown-body')].find(element => element.textContent.trim() === ${JSON.stringify(reply)}).scrollIntoView({block:'center'})`)
+    await browserEval(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`)
+    await waitFor(`${label}: assistant response visibly inside the message viewport`, () => browserEval(`(() => {
+      const element = [...document.querySelectorAll('.message-action-scope .markdown-body')].find(node => node.textContent.trim() === ${JSON.stringify(reply)});
+      if (!element || getComputedStyle(element).visibility !== 'visible') return false;
+      const bounds = element.getBoundingClientRect();
+      let top = 0, left = 0, right = innerWidth, bottom = innerHeight;
+      for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+        const style = getComputedStyle(parent);
+        if (style.display === 'none' || style.visibility !== 'visible' || Number(style.opacity) === 0 || parent.hidden || parent.inert || parent.getAttribute('aria-hidden') === 'true') return false;
+        const clip = parent.getBoundingClientRect();
+        if (/(auto|scroll|hidden|clip)/.test(style.overflowY)) { top = Math.max(top, clip.top); bottom = Math.min(bottom, clip.bottom); }
+        if (/(auto|scroll|hidden|clip)/.test(style.overflowX)) { left = Math.max(left, clip.left); right = Math.min(right, clip.right); }
+      }
+      const hit = document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2);
+      return bounds.width > 0 && bounds.height > 0 && bounds.top >= top - 1 && bounds.bottom <= bottom + 1 && bounds.left >= left - 1 && bounds.right <= right + 1 && (hit === element || element.contains(hit));
+    })()`))
+    await assertNoRunError(label)
+  }
   async function verifyHistoryImage(label) {
     await waitFor(`${label}: path attachment reference`, () => browserEval(`[...document.querySelectorAll('.message-action-scope figure')].some(figure => figure.querySelector('figcaption')?.textContent.includes('remote-e2e.png'))`))
     await browserEval(`[...document.querySelectorAll('.message-action-scope figure')].find(figure => figure.querySelector('figcaption')?.textContent.includes('remote-e2e.png')).scrollIntoView({block:'center'})`)
@@ -156,11 +189,13 @@ async function runElectron() {
     window.setContentSize(width, height)
     await browserEval(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`)
     await sleep(450)
+    if (scene === 'conversation') await verifyVisibleAssistant(`${scene}/${width}`, true)
     const dimensions = await browserEval(`(() => {
       const input = document.querySelector('textarea');
       const send = document.querySelector('.chat-toolbar-send');
+      const assistant = [...document.querySelectorAll('.message-action-scope .markdown-body')].find(element => element.textContent.trim() === ${JSON.stringify(reply)});
       const box = element => { if (!element) return null; const r = element.getBoundingClientRect(); return { x:r.x, right:r.right, width:r.width, bottom:r.bottom }; };
-      return { viewport:innerWidth, page:document.documentElement.scrollWidth, body:document.body.scrollWidth, input:box(input), send:box(send) };
+      return { viewport:innerWidth, page:document.documentElement.scrollWidth, body:document.body.scrollWidth, input:box(input), send:box(send), assistant:box(assistant) };
     })()`)
     assert.ok(dimensions.page <= dimensions.viewport + 1, `${scene}/${width}: document horizontal overflow`)
     assert.ok(dimensions.body <= dimensions.viewport + 1, `${scene}/${width}: body horizontal overflow`)
@@ -201,6 +236,9 @@ async function runElectron() {
     const { handlerRegistry } = require(path.join(root, 'dist-electron/electron/webui-server.js'))
     const { AgentSessionManager, installAgentHostBridge, setAgentHostWindowProbeForTest } = require(path.join(root, 'dist-electron/electron/agent-host.js'))
     const { RemoteAccessService } = require(path.join(root, 'dist-electron/electron/remote-access.js'))
+    const { mergeRemoteState } = require(path.join(root, 'dist-electron/electron/remote-state.js'))
+    const { publishRemoteUiEvent } = require(path.join(root, 'dist-electron/electron/remote-ui-events.js'))
+    const { messageToRow } = require(path.join(root, 'dist-electron/src/lib/chat-row.js'))
     const originalHandle = ipcMain.handle.bind(ipcMain)
     ipcMain.handle = (channel, handler) => { handlerRegistry.set(channel, handler); return originalHandle(channel, handler) }
     store = await createChatStore({ userDataDir: userData, wasmBinary: fs.readFileSync(require.resolve('sql.js/dist/sql-wasm.wasm')) })
@@ -208,11 +246,95 @@ async function runElectron() {
     report.database = store.kind
     registerDbIpcHandlers(store)
     installAgentHostBridge()
+    // Sessions deliberately span sibling folders and include an unbound chat.
+    // A full-workbench pairing must see all of them without a selected root.
+    const fixtureSessions = [
+      { id: 'remote-fixture-a', title: 'REMOTE_FIXTURE_PROJECT_A', working_dir: workspace },
+      { id: 'remote-fixture-b', title: 'REMOTE_FIXTURE_PROJECT_B', working_dir: otherWorkspace },
+      { id: 'remote-fixture-unbound', title: 'REMOTE_FIXTURE_NO_FOLDER', working_dir: null },
+      ...Array.from({ length: 100 }, (_, index) => ({
+        id: `remote-scale-${String(index + 1).padStart(3, '0')}`,
+        title: `REMOTE_SCALE_HISTORY_${String(index + 1).padStart(3, '0')}`,
+        working_dir: index % 3 === 0 ? null : index % 3 === 1 ? workspace : otherWorkspace,
+      })),
+    ]
+    const fixtureCreatedAt = Date.now() - 10000
+    for (const fixture of fixtureSessions) {
+      await store.createSession({ ...fixture, created_at: fixtureCreatedAt, updated_at: fixtureCreatedAt, harness_mode: 'default' })
+      // The real sidebar intentionally omits empty drafts on desktop and web.
+      // Seed actual history so these are existing conversations, not empty shells.
+      await store.addMessage(messageToRow({ id: `${fixture.id}-history`, role: 'user', content: `Existing conversation: ${fixture.title}`, timestamp: fixtureCreatedAt }, fixture.id))
+      await store.addMessage(messageToRow({ id: `${fixture.id}-answer`, role: 'assistant', content: `Synthetic history retained for ${fixture.title}.`, timestamp: fixtureCreatedAt + 1 }, fixture.id))
+    }
     // Trusted desktop-only configuration. The remote browser receives a redacted projection.
     const model = { id: 'local-vision-integration-test', label: '本地集成测试模型', maxTokens: 1000, maxInputTokens: 184000, supportsThinking: false, supportsImages: true }
-    const provider = { id: 'local-fixture', name: 'Local integration fixture', baseUrl: modelBase, apiKey: 'local-test-key-not-a-real-credential', apiCompat: 'openai', models: [model] }
-    const settings = { model: model.id, activeModelId: model.id, activeProviderId: provider.id, apiCompat: 'openai', providers: [provider], baseUrl: modelBase, apiKey: provider.apiKey, temperature: 0.2, maxTokens: 1000, maxInputTokens: 184000, enableThinking: false, directFetch: false, approvalMode: 'manual', browserUseEnabled: false, computerUseEnabled: false, agentsMdEnabled: false, claudeMdCompat: false, permissionRules: [] }
-    handlerRegistry.set('kvGet', (_event, key) => key === 'clerkbox-settings' ? JSON.stringify({ state: { theme: 'dark', language: 'zh-CN', interfaceMode: 'coding', hasCompletedOnboarding: true, ...settings }, version: 0 }) : null)
+    const alternateModel = { ...model, id: 'local-vision-alternate-test', label: '远程切换验证模型' }
+    const provider = { id: 'local-fixture', name: 'Local integration fixture', baseUrl: modelBase, apiKey: 'local-test-key-not-a-real-credential', apiCompat: 'openai', models: [model, alternateModel] }
+    const providers = [provider, ...Array.from({ length: 7 }, (_, index) => ({
+      ...provider, id: `remote-scale-provider-${index + 1}`, name: `REMOTE_SCALE_PROVIDER_${index + 1}`,
+      apiKey: `remote-scale-fixture-secret-${index + 1}`,
+      models: Array.from({ length: 12 }, (_, modelIndex) => ({ ...model, id: `remote-scale-model-${index + 1}-${modelIndex + 1}`, label: `Scale model ${index + 1}.${modelIndex + 1}` })),
+    }))]
+    const mcpServers = Array.from({ length: 12 }, (_, index) => ({
+      id: `remote-scale-mcp-${index + 1}`, name: `REMOTE_SCALE_MCP_${index + 1}`, transport: 'http', enabled: false,
+      url: `${modelBase}/mcp/fixture-${index + 1}`,
+      headers: { Authorization: `Bearer remote-scale-mcp-secret-${index + 1}`, 'X-Fixture-Metadata': `isolated-test-only-${'metadata-'.repeat(120)}` },
+    }))
+    const settings = { model: model.id, activeModelId: model.id, activeProviderId: provider.id, apiCompat: 'openai', providers, mcpServers, baseUrl: modelBase, apiKey: provider.apiKey, temperature: 0.2, maxTokens: 1000, maxInputTokens: 184000, enableThinking: false, directFetch: false, approvalMode: 'manual', browserUseEnabled: false, computerUseEnabled: false, agentsMdEnabled: false, claudeMdCompat: false, permissionRules: [] }
+    report.scale = { sessions: fixtureSessions.length, providers: providers.length, models: providers.reduce((sum, item) => sum + item.models.length, 0), mcpServers: mcpServers.length }
+    const kv = new Map([
+      ['clerkbox-settings', JSON.stringify({ state: { theme: 'dark', language: 'zh-CN', interfaceMode: 'coding', hasCompletedOnboarding: true, ...settings }, version: 0 })],
+      ['clerkbox-skills', JSON.stringify({ state: { skills: [], sessionSkillIds: [] }, version: 0 })],
+    ])
+    const savedSettings = () => JSON.parse(kv.get('clerkbox-settings')).state
+    handlerRegistry.set('kvGet', (_event, key) => {
+      if (key === 'clerkbox-settings') {
+        hydrationFault.settingsReads++
+        if (hydrationFault.settingsReads > 1 && !hydrationFault.released) {
+          hydrationFault.interruptedReads++
+          if (!hydrationFault.injected) {
+            hydrationFault.injected = true
+            // The first read built the authenticated bootstrap. Reject the real
+            // persist KV read, then interrupt the actual host transport before
+            // a retry can hydrate settings. Release at that boundary so the
+            // reconnect bootstrap itself can read settings normally.
+            setTimeout(() => {
+              hydrationFault.disconnected = true
+              hydrationFault.released = true
+              service.socket.close()
+            }, 40)
+          }
+          throw new Error('remoteAccess.cloudDisconnected')
+        }
+      }
+      return kv.get(key) ?? null
+    })
+    handlerRegistry.set('kvSet', (_event, key, value) => { kv.set(key, value); publishRemoteUiEvent('shared:changed', key) })
+    handlerRegistry.set('kvRemove', (_event, key) => { kv.delete(key); publishRemoteUiEvent('shared:changed', key) })
+    let patchQueue = Promise.resolve()
+    handlerRegistry.set('remote:state.patch', (_event, input) => {
+      const write = patchQueue.then(() => {
+        const value = mergeRemoteState(input.name, kv.get(input.name) ?? null, input.base, input.value)
+        if (value === null) kv.delete(input.name)
+        else kv.set(input.name, value)
+        statePatches.push({ name: input.name })
+        publishRemoteUiEvent('shared:changed', input.name)
+        return { value }
+      })
+      patchQueue = write.catch(() => {})
+      return write
+    })
+    handlerRegistry.set('loadApiKeys', () => Object.fromEntries(providers.map(item => [item.id, item.apiKey])))
+    handlerRegistry.set('accountGetStatus', () => ({ loggedIn: false, lastSyncAt: {} }))
+    handlerRegistry.set('accountSyncGetPassphraseStatus', () => ({ set: false }))
+    handlerRegistry.set('jouleGetState', () => ({ status: 'unlinked', user: null, subscription: null, expired: null, plan: null, quotas: null, desktop: null, models: [], login: null, lastSyncAt: null, stale: false, error: null, serverNow: null }))
+    handlerRegistry.set('mcpStatus', () => mcpServers.map(item => ({ id: item.id, name: item.name, transport: item.transport, enabled: false, state: 'disabled', toolCount: 0, tools: [] })))
+    handlerRegistry.set('mcpTools', () => [])
+    handlerRegistry.set('scanSkillDirs', () => '[]')
+    handlerRegistry.set('initClerkbox', async (_event, directory) => {
+      assert.ok(!path.relative(output, directory).startsWith('..'), 'Fixture initialization escaped its temp profile')
+      await fsp.mkdir(path.join(directory, '.clerkbox'), { recursive: true })
+    })
     manager = new AgentSessionManager(store)
     manager.noteLocalSettings(settings)
     // A browser is never treated as a trusted local approval window.
@@ -262,9 +384,10 @@ async function runElectron() {
     check('entry renders at desktop and phone widths')
 
     finishStage('real relay pairing')
-    const enabled = await service.enable({ workspace, approve: true, files: true })
+    const enabled = await service.enable({ scope: 'desktop', approve: true, files: true })
     service.socket.addEventListener('message', event => { try { const frame = JSON.parse(event.data); transport.push({ source: 'host', type: frame.type, invited: frame.invited, authorized: frame.authorized, payloadKeys: frame.payload ? Object.keys(frame.payload) : undefined }) } catch {} })
     assert.equal(enabled.state, 'online')
+    assert.equal(enabled.scope, 'desktop', 'Remote access must not require a project folder')
     assert.ok(enabled.url, 'Real service did not generate an invitation')
     window.setContentSize(1280, 900)
     // Exercise the real entry form. A fragment-only navigation in an already
@@ -277,14 +400,84 @@ async function runElectron() {
     assert.equal(code, pair.code, 'Browser and desktop must display the same verification code')
     assert.equal(await browserEval(`location.hash`), '', 'Invitation credentials must be removed from the address bar')
     await service.approvePair(pair.id, true)
+    finishStage('interrupted first settings hydration and automatic recovery')
+    await waitFor('first authenticated settings KV read interrupted', () => hydrationFault.injected && hydrationFault.interruptedReads > 0)
+    await waitFor('actual host transport interrupted during initial hydration', () => hydrationFault.disconnected && statuses.some(status => status.state === 'reconnecting'))
+    // attachAgentEvents can still be replaying history before the lazy App mounts;
+    // both that Suspense card and App's hydration card must clearly explain load.
+    await waitFor('interrupted hydration displays an explicit workbench loading state', () => browserEval(`!document.querySelector('textarea') && [...document.querySelectorAll('main h1')].some(heading => heading.textContent.includes('正在载入桌面工作台')) && !!document.querySelector('main [role="status"]')`))
+    assert.equal(await browserEval(`!!document.querySelector('.remote-recovery') || document.body.innerText.includes('此连接已失去授权')`), false, 'A temporary initial disconnect was presented as revoked access')
+    await capture('initial-hydration-interrupted', 1280)
     await waitFor('authenticated real workbench', () => browserEval(`!!document.querySelector('.remote-connection-bar.is-connected') && !!document.querySelector('textarea')`), 45000)
-    assert.equal(await browserEval(`Object.values(localStorage).some(value => value.includes('local-test-key-not-a-real-credential') || value.includes(${JSON.stringify(modelBase)}))`), false, 'Desktop model secrets leaked into browser storage')
+    await waitFor('all history loaded after interrupted bootstrap hydration', () => browserEval(`${JSON.stringify(fixtureSessions.map(item => item.title))}.every(title => [...document.querySelectorAll('.sidebar-session-row button[title]')].some(button => button.title === title))`), 45000)
+    assert.equal(service.getStatus().devices.length, 1, 'A recoverable initial disconnect lost the paired browser')
+    assert.equal(service.getStatus().pending.length, 0, 'Initial hydration recovery requested a second pairing')
+    assert.ok(service.getStatus().devices[0].online, 'Desktop device status remained offline after initial hydration recovery')
+    assert.equal(await browserEval(`!!document.querySelector('#workbench-loading-title')`), false, 'Recovered browser remained stuck behind the hydration fallback')
+    report.hydrationRecovery = { ...hydrationFault }
+    check('the first post-bootstrap settings KV rejection and real transport interruption recover without reload or re-pairing; 103 historical conversations render')
+    assert.equal(await browserEval(`Object.values(localStorage).some(value => value.includes('local-test-key-not-a-real-credential') || value.includes('remote-scale-fixture-secret-') || value.includes('remote-scale-mcp-secret-') || value.includes(${JSON.stringify(modelBase)}))`), false, 'Desktop model or MCP secrets leaked into browser storage')
     check('real invitation, matching code, desktop approval and redacted bootstrap')
+
+    finishStage('complete workbench and cross-folder conversations')
+    await waitFor('all desktop conversations, including another folder and unbound chat', () => browserEval(`${JSON.stringify(fixtureSessions.map(item => item.title))}.every(title => [...document.querySelectorAll('.sidebar-session-row button[title]')].some(button => button.title === title))`))
+    for (const title of [fixtureSessions[0].title, fixtureSessions[2].title, fixtureSessions[1].title]) {
+      await browserEval(`[...document.querySelectorAll('.sidebar-session-row button[title]')].find(button => button.title === ${JSON.stringify(title)}).click()`)
+      await waitFor(`active desktop session ${title}`, () => browserEval(`[...document.querySelectorAll('.sidebar-session-row button[title]')].some(button => button.title === ${JSON.stringify(title)} && button.getAttribute('aria-current') === 'page')`))
+    }
+    check('full pairing lists and switches conversations from sibling folders and conversations without a folder')
+
+    // Use actual settings controls. A browser must receive the full settings
+    // page and write back through the host merge, rather than browser-only KV.
+    await browserEval(`[...document.querySelectorAll('aside button')].find(button => button.textContent.trim() === '设置').click()`)
+    await waitFor('full desktop settings tabs', () => browserEval(`['api','mcp','general','appearance','account','about'].every(tab => !!document.querySelector('#settings-tab-' + tab))`))
+    await browserEval(`document.querySelector('#settings-tab-api').click()`)
+    await waitFor('all configured providers survived large bootstrap and hydration recovery', () => browserEval(`${JSON.stringify(providers.map(item => item.name))}.every(name => document.querySelector('#settings-tabpanel')?.textContent.includes(name))`))
+    await browserEval(`document.querySelector('#settings-tab-mcp').click()`)
+    await waitFor('all configured MCP servers survived large bootstrap and hydration recovery', () => browserEval(`${JSON.stringify(mcpServers.map(item => item.name))}.every(name => document.querySelector('#settings-tabpanel')?.textContent.includes(name))`))
+    await capture('scaled-mcp-settings', 1280)
+    check('large real startup retains every configured provider and MCP server in the actual desktop settings pages', report.scale)
+    await browserEval(`document.querySelector('#settings-tab-appearance').click()`)
+    await waitFor('appearance controls', () => browserEval(`document.querySelector('#settings-tab-appearance')?.getAttribute('aria-selected') === 'true' && [...document.querySelectorAll('#settings-tabpanel button')].some(button => button.textContent.trim() === '浅色')`))
+    await browserEval(`[...document.querySelectorAll('#settings-tabpanel button')].find(button => button.textContent.trim() === '浅色').click()`)
+    await waitFor('browser appearance setting saved on host', () => savedSettings().theme === 'light')
+    assert.ok(statePatches.some(patch => patch.name === 'clerkbox-settings'), 'Browser settings bypassed the shared state merge')
+    assert.equal(savedSettings().providers[0].apiKey, provider.apiKey, 'A redacted form cleared the desktop credential')
+    await capture('full-settings', 1280)
+    // Simulate a desktop setting change through the same host queue and verify
+    // the open browser consumes the real encrypted shared-state notification.
+    const desktopBase = kv.get('clerkbox-settings')
+    const desktopState = JSON.parse(desktopBase)
+    desktopState.state.theme = 'dark'
+    await handlerRegistry.get('remote:state.patch')(null, { name: 'clerkbox-settings', base: desktopBase, value: JSON.stringify(desktopState) })
+    await waitFor('desktop setting appears in connected browser', () => browserEval(`document.documentElement.classList.contains('dark')`))
+    await browserEval(`document.querySelector('[role=dialog] button[aria-label="关闭"]').click()`)
+    await waitFor('settings closed', () => browserEval(`!document.querySelector('#settings-tabpanel')`))
+    check('the full six-tab settings page persists browser edits to host, preserves credentials and receives desktop edits live')
+
+    finishStage('model switch through actual composer controls')
+    await browserEval(`document.querySelector('button[aria-controls="chat-model-menu"]').click()`)
+    await waitFor('model root menu', () => browserEval(`!!document.querySelector('#chat-model-menu')`))
+    await browserEval(`[...document.querySelectorAll('#chat-model-menu button')].find(button => button.textContent.includes('自定义模型')).click()`)
+    await waitFor('configured host provider in model menu', () => browserEval(`[...document.querySelectorAll('#chat-model-menu button')].some(button => button.textContent.includes(${JSON.stringify(provider.name)}))`))
+    await browserEval(`[...document.querySelectorAll('#chat-model-menu button')].find(button => button.textContent.includes(${JSON.stringify(provider.name)})).click()`)
+    await waitFor('alternate host model in selector', () => browserEval(`[...document.querySelectorAll('#chat-model-menu button')].some(button => button.textContent.includes(${JSON.stringify(alternateModel.label)}))`))
+    await browserEval(`[...document.querySelectorAll('#chat-model-menu button')].find(button => button.textContent.includes(${JSON.stringify(alternateModel.label)})).click()`)
+    await waitFor('model selection committed to actual host settings', () => savedSettings().activeModelId === alternateModel.id && manager.getLocalSettingsSnapshot()?.model === alternateModel.id)
+    await capture('full-workbench', 1280)
+    check('actual browser model selector updates the desktop model while retaining host-only credentials')
 
     finishStage('paired browser reopening an invitation')
     const pairedInvite = await service.createInvite()
     await window.loadURL(pairedInvite.url)
     await waitFor('paired browser enters with persistent credential', () => browserEval(`!!document.querySelector('.remote-connection-bar.is-connected') && !!document.querySelector('textarea')`), 45000)
+    report.pairedReconnectEarlyReady = await browserEval(`({ composerBusy:document.querySelector('input[type=file]')?.closest('[aria-busy]')?.getAttribute('aria-busy'), listedConversations:document.querySelectorAll('.sidebar-session-row').length, activeConversation:document.querySelector('.sidebar-session-row button[aria-current="page"]')?.title || null })`)
+    assert.notEqual(report.pairedReconnectEarlyReady.composerBusy, 'true', 'Remote input/upload was exposed before session initialization')
+    assert.equal(report.pairedReconnectEarlyReady.activeConversation, fixtureSessions[1].title, 'Remote composer became interactive before restoring its actual selected session')
+    // A connected transport and an initial empty composer precede async history
+    // hydration. Wait for the actual selected conversation before uploading into
+    // it, otherwise the fixture targets the short-lived empty-session composer.
+    await waitFor('paired browser restores complete history and selected conversation', () => browserEval(`${JSON.stringify(fixtureSessions.map(item => item.title))}.every(title => [...document.querySelectorAll('.sidebar-session-row button[title]')].some(button => button.title === title)) && !!document.querySelector('.sidebar-session-row button[aria-current="page"][title="${fixtureSessions[1].title}"]') && !document.querySelector('.workspace-chat [aria-busy="true"]')`), 45000)
     assert.equal(service.getStatus().pending.length, 0, 'A paired browser must not create a second desktop pairing request')
     assert.equal(await browserEval(`location.hash`), '', 'A paired browser must still remove invitation credentials')
     check('paired browser reopening an invitation connects directly with its persistent credential and creates no pending request')
@@ -322,6 +515,7 @@ async function runElectron() {
     check('fresh and same-document direct invitations consume their fragment, match desktop codes and display desktop rejection')
 
     finishStage('real browser message and desktop run')
+    report.uploadStart = await browserEval(`({ composerBusy:document.querySelector('input[type=file]')?.closest('[aria-busy]')?.getAttribute('aria-busy'), activeConversation:document.querySelector('.sidebar-session-row button[aria-current="page"]')?.title || null })`)
     await browserEval(`(() => { const input = document.querySelector('input[type=file]'); if (!input) throw new Error('Real upload input missing'); const bytes = Uint8Array.from(atob(${JSON.stringify(pngBase64)}), char => char.charCodeAt(0)); const transfer = new DataTransfer(); transfer.items.add(new File([bytes], 'remote-e2e.png', {type:'image/png'})); input.files = transfer.files; input.dispatchEvent(new Event('change', {bubbles:true})); return true; })()`)
     await waitFor('uploaded image thumbnail', () => browserEval(`!!document.querySelector('img[alt="remote-e2e.png"]')`))
     await browserEval(`(() => { const input = document.querySelector('textarea'); input.focus(); Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, ${JSON.stringify(prompt)}); input.dispatchEvent(new Event('input', {bubbles:true})); return true; })()`)
@@ -336,16 +530,21 @@ async function runElectron() {
       return false
     }, 45000)
     await waitFor('host run idle', () => manager.inspect().every(item => !item.hasRun))
+    const runErrors = manager.peekRing(persisted.sessionId).filter(event => (event.type === 'run.status' && event.error) || (event.type === 'notify' && event.kind === 'error'))
+    assert.deepEqual(runErrors, [], 'The host emitted a runtime error after the model response')
+    await assertNoRunError('completed host run')
     assert.ok(upstreamCalls.some(call => call.stream && call.hasPrompt), 'Real agent loop did not call the local model upstream')
+    assert.ok(upstreamCalls.some(call => call.stream && call.hasPrompt && call.model === alternateModel.id), 'The desktop run ignored the browser-selected model')
     assert.ok(upstreamCalls.some(call => call.stream && call.hasPrompt && call.hasImage), 'Uploaded PNG bytes did not reach the real model request through the host image path fallback')
     const userRow = persisted.messages.find(message => message.role === 'user' && message.content === prompt)
     const uploaded = (typeof userRow.attachments === 'string' ? JSON.parse(userRow.attachments) : userRow.attachments).find(attachment => attachment.name === 'remote-e2e.png')
     assert.ok(uploaded?.path, 'Uploaded image path was not persisted in the user message')
     assert.equal(uploaded.dataUrl, undefined, 'Remote commands must not duplicate the uploaded image as a data URL')
-    assert.ok(!path.relative(workspace, uploaded.path).startsWith('..'), 'Uploaded image escaped the isolated workspace')
+    assert.ok(!path.relative(home, uploaded.path).startsWith('..'), 'Uploaded image escaped the isolated host home')
     assert.deepEqual(await fsp.readFile(uploaded.path), pngBytes, 'Uploaded image bytes changed before host execution')
-    check('real file input uploads a PNG into the isolated workspace and host image path fallback sends identical bytes to the model')
-    await waitFor('streamed reply visible', () => browserEval(`document.body.innerText.includes(${JSON.stringify(reply)})`))
+    assert.equal(persisted.sessionId, fixtureSessions[1].id, 'Sending after cross-folder switching ran in another conversation')
+    check('real file input uploads a PNG to the isolated host and the selected cross-folder conversation runs the selected model with identical image bytes')
+    await verifyVisibleAssistant('completed reply without manual scrolling')
     await verifyHistoryImage('sent message')
     check('path-only sent image displays a decoded preview with identical uploaded PNG bytes in the actual message DOM')
     store.flush()
@@ -355,6 +554,7 @@ async function runElectron() {
     check('browser message executes the actual desktop agent and persists reply in SQLite', { messages: rowsOnDisk.length })
     await capture('conversation', 1280)
     await capture('conversation', 390, 844)
+    check('the host finishes without a runtime error and the real assistant response is visibly rendered at desktop and phone widths')
 
     finishStage('browser refresh and saved-device reconnect')
     window.webContents.reload()
@@ -362,6 +562,7 @@ async function runElectron() {
     await browserEval(`document.querySelector('.remote-known-device > button:first-child').click()`)
     await waitFor('authenticated after refresh', () => browserEval(`!!document.querySelector('.remote-connection-bar.is-connected')`))
     await waitFor('reconnected after refresh', () => browserEval(`!!document.querySelector('.remote-connection-bar.is-connected') && document.body.innerText.includes(${JSON.stringify(reply)})`), 30000)
+    await verifyVisibleAssistant('refreshed history')
     await verifyHistoryImage('refreshed history')
     check('refresh restores and visibly decodes the actual path-only image attachment from desktop history')
     assert.equal(service.getStatus().pending.length, 0)
@@ -411,7 +612,7 @@ async function runElectron() {
     report.failure = redact(error?.message || error)
     if (window && !window.isDestroyed()) {
       try {
-        report.failurePage = await browserEval(`({ title:document.title, hasInput:!!document.querySelector('textarea'), bar:document.querySelector('.remote-connection-bar')?.className, alerts:[...document.querySelectorAll('[role=alert],.remote-error,.remote-recovery')].map(element=>element.textContent.slice(0,400)) })`)
+        report.failurePage = await browserEval(`({ title:document.title, hasInput:!!document.querySelector('textarea'), bar:document.querySelector('.remote-connection-bar')?.className, alerts:[...document.querySelectorAll('[role=alert],.remote-error,.remote-recovery')].map(element=>element.textContent.slice(0,400)), composerInputs:[...document.querySelectorAll('input[type=file]')].map(input => ({ connected:input.isConnected, fileCount:input.files?.length, composer:!!input.closest('.chat-input-box') })), images:[...document.images].map(image => ({alt:image.alt, width:image.naturalWidth, height:image.naturalHeight})) })`)
         await fsp.writeFile(path.join(output, 'failure.png'), (await window.webContents.capturePage()).toPNG())
       } catch {}
     }

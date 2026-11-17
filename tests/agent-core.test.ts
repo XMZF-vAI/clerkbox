@@ -470,6 +470,22 @@ describe('runReactLoop · 黄金序列', () => {
     expect(a.toolCalls).toBeUndefined()
   })
 
+  it('keeps a completed reply when optional memory capture encounters an invalid history timestamp', async () => {
+    const { ports, session, ui } = makePorts({ turns: [textTurn('done')] })
+    await expect(runLoop(ports, { messages: [{ ...userMsg(), timestamp: Number.NaN }] })).resolves.toBeDefined()
+    expect(session.messages.at(-1)?.content).toBe('done')
+    expect(session.messages.at(-1)?._isStreaming).toBeFalsy()
+    expect(ui.agentMemoryCapture).not.toHaveBeenCalled()
+  })
+
+  it('keeps a completed reply when the optional memory port throws synchronously', async () => {
+    const { ports, session, ui } = makePorts({ turns: [textTurn('done')] })
+    ui.agentMemoryCapture.mockImplementation(() => { throw new Error('memory offline') })
+    await expect(runLoop(ports)).resolves.toBeDefined()
+    expect(session.messages.at(-1)?.content).toBe('done')
+    expect(ui.agentMemoryCapture).toHaveBeenCalledOnce()
+  })
+
   it('思考与正文分流：reasoning_content 字段与 <think> 内联标签', async () => {
     const { ports, session } = makePorts({ turns: [[
       sse(thinkDelta('思')),

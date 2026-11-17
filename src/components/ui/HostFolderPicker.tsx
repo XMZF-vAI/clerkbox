@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ChevronDown, FolderOpen, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { ipc } from '../../lib/ipc-client'
 import type { FileEntry } from '../../types/ipc'
+import { useModalAccessibility } from '../../hooks/use-modal-accessibility'
 
 interface HostFolderPickerProps {
   open: boolean
@@ -36,12 +37,16 @@ export default function HostFolderPicker({
 }: HostFolderPickerProps) {
   const { t } = useTranslation()
   const [currentPath, setCurrentPath] = useState('')
+  const [address, setAddress] = useState('')
   const [entries, setEntries] = useState<FileEntry[]>([])
   const [loading, setLoading] = useState(false)
   const [loadFailed, setLoadFailed] = useState(false)
+  const requestId = useRef(0)
+  const dialogRef = useModalAccessibility(onClose, undefined, { active: open })
 
   useEffect(() => {
     if (!open) return
+    const generation = ++requestId.current
     let cancelled = false
     const loadInitial = async () => {
       setLoading(true)
@@ -53,8 +58,9 @@ export default function HostFolderPicker({
       for (const candidate of candidates) {
         try {
           const nextEntries = await ipc.listDir(candidate)
-          if (cancelled) return
+          if (cancelled || generation !== requestId.current) return
           setCurrentPath(candidate)
+          setAddress(candidate)
           setEntries(nextEntries.filter((entry) => entry.isDirectory).sort((a, b) => a.name.localeCompare(b.name)))
           setLoading(false)
           return
@@ -71,6 +77,7 @@ export default function HostFolderPicker({
     void loadInitial()
     return () => {
       cancelled = true
+      requestId.current++
     }
   }, [open, initialPath])
 
@@ -83,16 +90,20 @@ export default function HostFolderPicker({
   const hoverClass = isVibe ? 'hover:bg-white/10' : 'hover:bg-dark-surfaceContainerHigh'
 
   const loadFolder = async (path: string) => {
+    if (!path.trim()) return
+    const generation = ++requestId.current
     setLoading(true)
     setLoadFailed(false)
     try {
       const nextEntries = await ipc.listDir(path)
+      if (generation !== requestId.current) return
       setCurrentPath(path)
+      setAddress(path)
       setEntries(nextEntries.filter((entry) => entry.isDirectory).sort((a, b) => a.name.localeCompare(b.name)))
     } catch {
-      setLoadFailed(true)
+      if (generation === requestId.current) setLoadFailed(true)
     } finally {
-      setLoading(false)
+      if (generation === requestId.current) setLoading(false)
     }
   }
 
@@ -105,10 +116,12 @@ export default function HostFolderPicker({
     <>
       <div className="fixed inset-0 z-[80] bg-black/55 animate-fade-in" onClick={onClose} aria-hidden />
       <div
-        className={`fixed z-[81] inset-x-4 top-1/2 -translate-y-1/2 max-w-lg mx-auto rounded-md3-md border shadow-elevation-3 overflow-hidden animate-fade-in ${panelClass}`}
+        ref={dialogRef}
+        className={`fixed z-[81] inset-x-4 top-1/2 -translate-y-1/2 max-w-lg max-h-[calc(100dvh-2rem)] mx-auto rounded-md3-md border shadow-elevation-3 overflow-y-auto animate-fade-in ${panelClass}`}
         role="dialog"
         aria-modal="true"
         aria-label={t('chat.folderBrowseHost')}
+        tabIndex={-1}
       >
         <div className="flex items-center gap-2 px-3 py-2 border-b border-dark-onSurfaceVariant/10">
           <button
@@ -132,6 +145,18 @@ export default function HostFolderPicker({
             <X size={15} />
           </button>
         </div>
+        <form className="flex items-center gap-2 border-b border-dark-onSurfaceVariant/10 p-3" onSubmit={(event) => { event.preventDefault(); void loadFolder(address.trim()) }}>
+          <input
+            value={address}
+            onChange={(event) => setAddress(event.target.value)}
+            aria-label={t('chat.folderPathLabel')}
+            placeholder={t('chat.folderPathHint')}
+            spellCheck={false}
+            autoComplete="off"
+            className={`md-focus min-h-11 min-w-0 flex-1 rounded-md3-sm border px-3 text-ui-xs ${isVibe ? 'border-white/20 bg-black/20 text-white' : 'border-dark-onSurfaceVariant/20 bg-dark-surface text-dark-onSurface'}`}
+          />
+          <button type="submit" disabled={!address.trim() || loading} className={`md-focus min-h-11 rounded-md3-sm px-3 text-ui-xs ${hoverClass} disabled:opacity-40`}>{t('chat.folderGo')}</button>
+        </form>
         <div className="max-h-72 overflow-y-auto p-1">
           {loading ? (
             <div className="px-3 py-8 text-center text-xs opacity-60">{t('chat.folderLoading')}</div>

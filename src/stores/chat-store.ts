@@ -41,15 +41,14 @@ export async function prepareCloudSession(sessionId: string): Promise<void> {
   const existing = preparingCloudSessions.get(sessionId)
   if (existing) return existing
   const session = useChatStore.getState().sessions.find((item) => item.id === sessionId)
-  const workspace = getRemoteBootstrap()?.workspace
-  if (!session || !workspace) throw new Error('remoteAccess.cloudSessionUnavailable')
+  if (!session) throw new Error('remoteAccess.cloudSessionUnavailable')
   const pending = ipc.dbCreateSession({
     id: session.id,
     title: session.title,
     created_at: session.createdAt,
     updated_at: session.updatedAt,
-    working_dir: workspace,
-    default_work_dir: workspace,
+    working_dir: session.workingDir ?? null,
+    default_work_dir: session.defaultWorkDir ?? null,
     harness_mode: session.harnessMode ?? 'default',
   }).then(() => { preparedCloudSessions.add(sessionId) })
   preparingCloudSessions.set(sessionId, pending)
@@ -282,12 +281,10 @@ function restoreWorkDirs(row: SessionRow): { workingDir?: string; defaultWorkDir
 const createEmptySession = (): Session => {
   const now = Date.now()
   const { base, sep } = getDefaultWorkDirBase()
-  const workspace = isCloudRemoteMode() ? getRemoteBootstrap()?.workspace : undefined
   return {
     id: `sess-${now}-${Math.random().toString(36).slice(2, 8)}`,
     title: NEW_SESSION_TITLE,
-    ...(workspace ? { workingDir: workspace } : {}),
-    defaultWorkDir: workspace || `${base}${sep}${formatTimestamp(now)}`,
+    defaultWorkDir: `${base}${sep}${formatTimestamp(now)}`,
     messages: [],
     createdAt: now,
     updatedAt: now,
@@ -588,7 +585,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           return {
             ...s,
             title: opts.title || s.title,
-            ...(opts.workingDir && !isCloudRemoteMode() ? { workingDir: opts.workingDir } : {}),
+            ...(opts.workingDir ? { workingDir: opts.workingDir } : {}),
           }
         }),
       }))
@@ -753,7 +750,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   updateSessionWorkingDir: (sessionId, dir) => {
-    if (isCloudRemoteMode()) return
+    preparedCloudSessions.delete(sessionId)
     const now = Date.now()
     set((state) => ({
       sessions: state.sessions.map((s) =>
@@ -777,7 +774,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   setSessionHarnessMode: (sessionId, mode) => {
-    if (isCloudRemoteMode()) return
+    preparedCloudSessions.delete(sessionId)
     // 模式锁定：会话已产出消息后不可变更（与 dsh 官方 preset 语义一致，
     // 也保证静态 system 段跨请求字节稳定）。空会话纯内存态，不落库——
     // 首条消息落库时 addMessage 会把 harnessMode 写入会话行。
@@ -789,7 +786,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   pushRecentFolder: async (dir) => {
-    if (isCloudRemoteMode()) return
     // Keep POSIX paths case-sensitive while matching Windows paths case-insensitively.
     const comparableDir = comparableFolderPath(dir)
     const next = [dir, ...get().recentsFolders.filter((path) => comparableFolderPath(path) !== comparableDir)]
@@ -800,7 +796,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   deleteSession: (id) =>
     set((state) => {
-      if (isCloudRemoteMode()) return state
       if (state.rewindingSessionIds.has(id)) return state
       cancelPendingMessageWrites(id)
       const filtered = state.sessions.filter((s) => s.id !== id)

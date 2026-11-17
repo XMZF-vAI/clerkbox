@@ -360,8 +360,8 @@ export function useAgent(sessionId: string) {
             return false
           }
         }
-        if (!cloudRemote && taskMode === 'goal' && content.trim()) useGoalStore.getState().setGoal(sessionId, content.trim())
-        const catalog = cloudRemote ? [] : useSkillsStore.getState().getSkillCatalog()
+        if (taskMode === 'goal' && content.trim()) useGoalStore.getState().setGoal(sessionId, content.trim())
+        const catalog = useSkillsStore.getState().getSkillCatalog()
         try {
           const res = await agentClient.send({
             type: 'run',
@@ -372,9 +372,9 @@ export function useAgent(sessionId: string) {
             skills,
             settings,
             skillCatalog: catalog,
-            skillReminder: cloudRemote ? undefined : buildRelevantSkillReminder(content, catalog) ?? undefined,
-            goal: cloudRemote ? undefined : useGoalStore.getState().bySession[sessionId],
-            todos: cloudRemote ? [] : useTodoStore.getState().bySession[sessionId] ?? [],
+            skillReminder: buildRelevantSkillReminder(content, catalog) ?? undefined,
+            goal: useGoalStore.getState().bySession[sessionId],
+            todos: useTodoStore.getState().bySession[sessionId] ?? [],
           })
           if (!res.ok) setError(hostRejectionText(res.error))
           else setError(null)

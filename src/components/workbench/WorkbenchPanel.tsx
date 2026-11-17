@@ -74,8 +74,12 @@ export default function WorkbenchPanel({ vibe, suspended = false }: { vibe?: boo
     visible, width, tabs: storedTabs, activeTabId: storedActiveTabId,
     setWidth, openFiles, openGit, openTerminal, openBrowser, activateTab, closeTab, toggleVisible,
   } = useWorkbench()
-  const tabs = cloudRemote ? storedTabs.filter(tab => tab.kind === 'subagent' || (cloudFiles && tab.kind === 'files')) : storedTabs
-  const activeTabId = cloudRemote ? (tabs.some(tab => tab.id === storedActiveTabId) ? storedActiveTabId : tabs[0]?.id ?? null) : storedActiveTabId
+  // Git and terminal operate on the paired host. Electron webviews remain native-only.
+  const tabs = storedTabs.filter(tab => !isWebUIMode || (
+    tab.kind === 'subagent' || (cloudFiles && tab.kind === 'files') ||
+    (cloudRemote && (tab.kind === 'git' || tab.kind === 'terminal'))
+  ))
+  const activeTabId = tabs.some(tab => tab.id === storedActiveTabId) ? storedActiveTabId : tabs[0]?.id ?? null
 
   // 当前会话工作目录：作为新建终端的起始路径（用户未选过则用自动生成的默认目录）
   const sessions = useChatStore((s) => s.sessions)
@@ -107,15 +111,15 @@ export default function WorkbenchPanel({ vibe, suspended = false }: { vibe?: boo
     [slices, cloudRemote],
   )
 
-  // WebUI（远程浏览器）无桌面 shell/窗口能力：终端与浏览器入口隐藏，仅保留文件浏览。
+  // Paired cloud clients can use host Git and terminal; embedded webviews need Electron.
   // Git 审查只在编程模式提供入口（通用模式隐藏整个 Git 能力面，对齐界面模式分工）。
   const isCodingMode = useSettingsStore((s) => s.interfaceMode === 'coding')
   const availableEntries = useMemo(
     () =>
       MENU_ENTRIES.filter(
-        (e) => (isWebUIMode ? !e.desktopOnly : true) && (e.kind !== 'files' || cloudFiles) && (e.kind !== 'git' || isCodingMode),
+        (e) => (!isWebUIMode || !e.desktopOnly || (cloudRemote && (e.kind === 'git' || e.kind === 'terminal'))) && (e.kind !== 'files' || cloudFiles) && (e.kind !== 'git' || isCodingMode),
       ),
-    [isCodingMode, cloudFiles],
+    [isCodingMode, cloudFiles, cloudRemote],
   )
 
   const openByKind = (kind: MenuEntry['kind']) => {
@@ -171,7 +175,6 @@ export default function WorkbenchPanel({ vibe, suspended = false }: { vibe?: boo
   // foreignAgentBrowserSessions 也要算进来：别的会话里可能正跑着浏览器任务，
   // 收起本面板不该顺手把那个 guest 也摘掉。
   const keepAlive = tabs.some((t) => t.kind === 'agent-browser') || foreignAgentBrowserSessions.length > 0
-  if (cloudRemote && !cloudFiles && tabs.length === 0) return null
   if (!visible && !keepAlive) return null
 
   const filteredEntries = availableEntries.filter((e) =>
@@ -420,7 +423,7 @@ export default function WorkbenchPanel({ vibe, suspended = false }: { vibe?: boo
           <div className="flex h-full flex-col justify-center gap-2 overflow-y-auto px-5 py-6">
             <span className={`mb-2 flex h-11 w-11 shrink-0 items-center justify-center rounded-md3-md border ${vibe ? 'border-white/15 text-white/70' : 'border-dark-onSurfaceVariant/10 bg-dark-surfaceContainer text-dark-onSurfaceVariant'}`} aria-hidden><PanelRight size={20} /></span>
             <p className={`mb-3 text-ui-lg font-semibold ${vibe ? 'text-white/85' : 'text-dark-onSurface'}`}>
-              {isWebUIMode ? t('workbench.startHereWebUI') : t('workbench.startHere')}
+              {t(cloudRemote ? 'workbench.startHereCloud' : isWebUIMode ? 'workbench.startHereWebUI' : 'workbench.startHere')}
             </p>
             {availableEntries.map((entry) => {
               const Icon = entry.icon
@@ -436,6 +439,7 @@ export default function WorkbenchPanel({ vibe, suspended = false }: { vibe?: boo
                 </button>
               )
             })}
+            {cloudRemote && <p className={`mt-3 text-ui-xs leading-relaxed ${vibe ? 'text-white/50' : 'text-dark-onSurfaceVariant/70'}`}>{t('workbench.remoteHostNote')}</p>}
           </div>
         ) : (
           tabs.map((tab) => {

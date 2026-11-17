@@ -5,6 +5,8 @@ import { REMOTE_MAX_FRAME_BYTES, type RemoteDeviceCredential, type RemoteInvite 
 export interface RemoteBootstrap {
   protocolVersion: 1
   workspace: string
+  homeDir?: string
+  scope?: 'desktop' | 'workspace'
   settings: Record<string, unknown>
   capabilities: { control: boolean; approve: boolean; files: boolean; maxUploadBytes?: number }
   platform?: string
@@ -16,6 +18,7 @@ export interface RemoteConnection {
   deviceName?: string
 }
 type RemoteEvent = { seq: number; event: AgentEvent }
+export interface RemoteUiEvent { channel: string; args: unknown[] }
 type Identity = RemoteInvite | RemoteDeviceCredential
 interface PendingRequest {
   id: string
@@ -32,7 +35,7 @@ const HEX = /^[a-f0-9]{64}$/
 const identifier = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{16,128}$/.test(value)
 
 export function isCloudRemoteMode(): boolean {
-  return typeof document !== 'undefined' && document.querySelector('meta[name="clerkbox-remote"]')?.getAttribute('content') === '1'
+  return typeof document !== 'undefined' && typeof document.querySelector === 'function' && document.querySelector('meta[name="clerkbox-remote"]')?.getAttribute('content') === '1'
 }
 
 export function validRemoteIdentity(value: unknown): value is Identity {
@@ -130,6 +133,7 @@ export class RemoteBrowserClient {
   private bootstrap: RemoteBootstrap | null = null
   private listeners = new Set<() => void>()
   private events = new Set<(event: RemoteEvent) => void>()
+  private uiEvents = new Set<(event: RemoteUiEvent) => void>()
   private pending = new Map<string, PendingRequest>()
   private incoming: Promise<void> = Promise.resolve()
   private transfers = new Map<string, { pieces: Map<number, string>; count: number; bytes: number; startedAt: number; lastUpdated: number }>()
@@ -140,6 +144,7 @@ export class RemoteBrowserClient {
   getStorageScope = (): string => this.identity ? `${this.identity.roomId}:${'deviceId' in this.identity ? this.identity.deviceId : 'invite'}` : 'unpaired'
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
   subscribeEvents = (listener: (event: RemoteEvent) => void): (() => void) => { this.events.add(listener); return () => { this.events.delete(listener) } }
+  subscribeUiEvents = (listener: (event: RemoteUiEvent) => void): (() => void) => { this.uiEvents.add(listener); return () => { this.uiEvents.delete(listener) } }
   private update(connection: RemoteConnection): void {
     this.connection = connection
     for (const listener of this.listeners) listener()
@@ -203,6 +208,11 @@ export class RemoteBrowserClient {
     this.openSocket()
     return true
   }
+  private authorizationError(identity: Identity): string {
+    // A relay refusal can mean an expired invite or stale device credential.
+    // Only an explicit revocation code proves that access was withdrawn.
+    return 'deviceId' in identity ? 'remoteAccess.cloudAuthorizationRequired' : 'remoteAccess.cloudInviteExpired'
+  }
   private openSocket(): void {
     if (this.stopped || !this.identity) return
     this.closeSocket()
@@ -241,7 +251,9 @@ export class RemoteBrowserClient {
       socket.onerror = () => { /* close handles retry; never surface a token-bearing browser exception */ }
       socket.onclose = event => {
         if (socket !== this.socket || generation !== this.generation) return
-        if ([4001, 4003, 4401, 4403].includes(event.code)) { if (!this.tryInvitationFallback()) this.fail('remoteAccess.cloudRevoked') }
+        console.warn('[remote] connection closed', { code: event.code, paired: 'deviceId' in identity, initialized: !!this.bootstrap })
+        if ([4401, 4403].includes(event.code)) { if (!this.tryInvitationFallback()) this.fail('remoteAccess.cloudRevoked') }
+        else if ([4001, 4003].includes(event.code)) { if (!this.tryInvitationFallback()) this.fail(this.authorizationError(identity)) }
         else this.retry()
       }
     } catch { this.retry() }
@@ -260,7 +272,10 @@ export class RemoteBrowserClient {
       if (envelope.type === 'host.online') this.handshakeTimer = setTimeout(() => { if (socket === this.socket) this.retry() }, 20_000)
       return
     }
-    if (envelope.type === 'error') { if (!this.tryInvitationFallback()) this.fail('remoteAccess.cloudConnectionError'); return }
+    if (envelope.type === 'error') {
+      if (!this.tryInvitationFallback()) this.fail(envelope.error === 'Connection unavailable' ? this.authorizationError(identity) : 'remoteAccess.cloudConnectionError')
+      return
+    }
     if (envelope.type !== 'data' || !envelope.payload || typeof envelope.payload !== 'object') return
     const raw = envelope.payload as Record<string, unknown>
     if (typeof raw.challenge === 'string' && identifier(raw.challenge) && raw.kind === undefined && raw.v === undefined) {
@@ -344,6 +359,10 @@ export class RemoteBrowserClient {
       if (typeof message.error === 'string') request.reject(new Error(message.error.slice(0, 300)))
       else request.resolve(message.result)
     }
+    if (message.kind === 'ui-event' && this.connection.state === 'connected' && typeof message.channel === 'string' && Array.isArray(message.args) && message.args.length <= 8) {
+      const event = { channel: message.channel, args: message.args }
+      for (const listener of this.uiEvents) { try { listener(event) } catch { /* Keep other panels connected. */ } }
+    }
     if ((message.kind === 'event' || message.kind === 'events') && this.connection.state === 'connected') {
       const payloads = message.kind === 'events' ? message.payloads : [message.payload]
       if (!Array.isArray(payloads) || payloads.length > 1000) throw new Error('Invalid remote events')
@@ -417,6 +436,7 @@ export function remoteBrowser(): RemoteBrowserClient {
 }
 export const invokeRemote = <T>(method: string, args: unknown[] = []): Promise<T> => remoteBrowser().invoke<T>(method, args)
 export const subscribeRemoteEvents = (listener: (event: RemoteEvent) => void): (() => void) => remoteBrowser().subscribeEvents(listener)
+export const subscribeRemoteUiEvents = (listener: (event: RemoteUiEvent) => void): (() => void) => remoteBrowser().subscribeUiEvents(listener)
 export const subscribeRemoteConnection = (listener: () => void): (() => void) => remoteBrowser().subscribe(listener)
 export const getRemoteConnection = (): RemoteConnection => remoteBrowser().getConnection()
 export const getRemoteBootstrap = (): RemoteBootstrap | null => remoteBrowser().getBootstrap()

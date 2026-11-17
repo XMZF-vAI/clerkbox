@@ -27,7 +27,7 @@ import * as agentMemory from './agent-memory'
 import { mcpManager } from './mcp-manager'
 import { winAcrylic } from './win-acrylic'
 import { systemMedia } from './system-media'
-import { registerTerminalHandlers, disposeAllTerminals } from './terminal'
+import { registerTerminalHandlers, disposeAllTerminals, disposeRemoteTerminals } from './terminal'
 import { initUpdater, isAgentBusyNow } from './updater'
 import { initMainLogger, registerLogIpcHandlers } from './logger'
 import { createChatStore, registerDbIpcHandlers, type ChatStore } from './db'
@@ -37,6 +37,8 @@ import { registerGitIpcHandlers } from './git-service'
 import { registerAgentHostIpc, getAgentSessionManager, registerAgentEventSink, setRuntimeAgentHostMode } from './agent-host'
 import { RemoteAccessService } from './remote-access'
 import { createRemoteCredentialStore } from './remote-credential-store'
+import { mergeRemoteState } from './remote-state'
+import { publishRemoteUiEvent } from './remote-ui-events'
 import type { RemoteEnableOptions } from '../src/remote/protocol'
 import { initImBots, disposeImBots } from './im-bots'
 import {
@@ -2102,6 +2104,7 @@ function registerIpcHandlers(chatStore: ChatStore) {
     readCredential: () => remoteCredentials.read(),
     writeCredential: value => remoteCredentials.write(value),
     deleteCredential: () => remoteCredentials.remove(),
+    onDeviceRevoked: deviceId => disposeRemoteTerminals(deviceId),
     notify: status => {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('remote:status', status)
     },
@@ -2517,12 +2520,50 @@ function registerIpcHandlers(chatStore: ChatStore) {
     return Object.prototype.hasOwnProperty.call(data, key) ? data[key] : null
   })
 
+  // Local and paired clients share the same atomic write queue and three-way merge.
+  ipcMain.handle('remote:state.patch', (_event, input: { name: string; base: string | null; value: string | null }) => {
+    if (!input || typeof input.name !== 'string' || !(input.base === null || typeof input.base === 'string') || !(input.value === null || typeof input.value === 'string')) throw new Error('remote-invalid-state')
+    const write = kvWriteQueue.then(() => {
+      const data = readKvStore()
+      const value = mergeRemoteState(input.name, data[input.name] ?? null, input.base, input.value)
+      if (value === null) delete data[input.name]
+      else data[input.name] = value
+      writeKvStore(data)
+      publishRemoteUiEvent('shared:changed', input.name)
+      return { value }
+    })
+    kvWriteQueue = write.then(() => {}, (error) => console.warn('[kv] shared state update failed:', error.message))
+    return write
+  })
+
+  const workbenchRequests = new Map<string, { resolve(value: { runId?: string | null; error?: string }): void; timer: ReturnType<typeof setTimeout> }>()
+  ipcMain.handle('remote:ui.command', (_event, input: { action: string; taskId: string }) => {
+    if (!input || input.action !== 'scheduled.run' || typeof input.taskId !== 'string' || !/^[A-Za-z0-9_-]{1,160}$/.test(input.taskId)) throw new Error('remote-invalid-command')
+    if (!mainWindow || mainWindow.isDestroyed()) throw new Error('remote-desktop-unavailable')
+    if (workbenchRequests.size >= 16) throw new Error('remote-too-many-commands')
+    const id = `workbench-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    return new Promise<{ runId?: string | null; error?: string }>((resolve, reject) => {
+      const timer = setTimeout(() => { workbenchRequests.delete(id); reject(new Error('remote-desktop-timeout')) }, 15000)
+      workbenchRequests.set(id, { resolve, timer })
+      mainWindow!.webContents.send('remote:workbench-command', { id, action: 'scheduled.run', taskId: input.taskId })
+    })
+  })
+  ipcMain.on('remote:workbench-reply', (event, id: string, result: { runId?: string | null; error?: string }) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents || !result || typeof result !== 'object') return
+    const pending = workbenchRequests.get(id)
+    if (!pending) return
+    workbenchRequests.delete(id)
+    clearTimeout(pending.timer)
+    pending.resolve({ runId: typeof result.runId === 'string' ? result.runId : null, error: typeof result.error === 'string' ? result.error.slice(0, 300) : undefined })
+  })
+
   ipcMain.handle('kvSet', (_event, key: unknown, value: unknown): Promise<void> => {
     if (typeof key !== 'string' || typeof value !== 'string') return Promise.resolve()
     const write = kvWriteQueue.then(() => {
       const data = readKvStore()
       data[key] = value
       writeKvStore(data)
+      publishRemoteUiEvent('shared:changed', key)
     })
     kvWriteQueue = write.catch((err) => console.error('[kv] write failed:', err))
     return write
@@ -2535,6 +2576,7 @@ function registerIpcHandlers(chatStore: ChatStore) {
       if (Object.prototype.hasOwnProperty.call(data, key)) {
         delete data[key]
         writeKvStore(data)
+        publishRemoteUiEvent('shared:changed', key)
       }
     })
     kvWriteQueue = write.catch((err) => console.error('[kv] remove failed:', err))
@@ -3922,6 +3964,7 @@ app.whenReady().then(async () => {
     writeInstall: (value) => secretWrite('joule-install', value),
     clearInstall: () => secretRemove('joule-install'),
     notify: (snapshot) => {
+      publishRemoteUiEvent('joule:state', snapshot)
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('joule:state', snapshot)
       }

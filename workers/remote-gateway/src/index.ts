@@ -324,12 +324,14 @@ export class RelayRoom extends DurableObject<Env> {
     if (!validOrigin(peer.origin, this.env)) return this.fail(socket)
     if (input.deviceId !== undefined && !validDeviceId(input.deviceId)) return this.fail(socket)
     const browsers = this.browsers()
-    if (browsers.length >= MAX_PEERS) return this.fail(socket)
+    // Capacity is temporary. It must not invalidate a saved device credential.
+    if (browsers.length >= MAX_PEERS) return this.close(socket, 1013)
     const deviceId = typeof input.deviceId === 'string' ? input.deviceId : undefined
     const device = deviceId && Object.hasOwn(room.devices, deviceId) ? room.devices[deviceId] : undefined
     const authorized = Boolean(device && equalHash(tokenHash, device.tokenHash))
     const invited = !authorized && Boolean(room.invites[tokenHash] && room.invites[tokenHash] > Date.now())
-    if (!authorized && (!invited || browsers.filter(ws => !this.attachment(ws)?.authorized).length >= MAX_PENDING)) return this.fail(socket)
+    if (!authorized && !invited) return this.fail(socket)
+    if (!authorized && browsers.filter(ws => !this.attachment(ws)?.authorized).length >= MAX_PENDING) return this.close(socket, 1013)
     if (invited) {
       delete room.invites[tokenHash]
       await this.persist()
@@ -384,13 +386,14 @@ export class RelayRoom extends DurableObject<Env> {
     if (input.type === 'revoke' && validDeviceId(input.deviceId)) {
       delete room.devices[input.deviceId]
       await this.persist()
-      for (const browser of this.browsers()) if (this.attachment(browser)?.deviceId === input.deviceId) this.close(browser, 4003)
+      for (const browser of this.browsers()) if (this.attachment(browser)?.deviceId === input.deviceId) this.close(browser, 4403)
       this.send(host, { type: 'revoked', deviceId: input.deviceId })
       return
     }
     if (input.type === 'disconnect' && typeof input.peerId === 'string') {
       const peer = this.findPeer(input.peerId)
-      if (peer && this.attachment(peer)?.role === 'browser') this.close(peer, 4003)
+      // A host may shed an overloaded or failed transport without revoking the device.
+      if (peer && this.attachment(peer)?.role === 'browser') this.close(peer, 1013)
       this.send(host, { type: 'disconnected', peerId: input.peerId })
       return
     }
@@ -402,7 +405,7 @@ export class RelayRoom extends DurableObject<Env> {
       room.invites = {}
       room.activeHostPeerId = undefined
       await this.persist()
-      for (const socket of this.ctx.getWebSockets()) { this.send(socket, { type: 'stopped' }); this.close(socket, 4003) }
+      for (const socket of this.ctx.getWebSockets()) { this.send(socket, { type: 'stopped' }); this.close(socket, 4403) }
       return
     }
     this.controlError(host)

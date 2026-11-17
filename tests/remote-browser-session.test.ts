@@ -15,6 +15,7 @@ vi.mock('../src/lib/ipc-client', () => ({ ipc: {
   platform: () => 'win32', homeDir: () => 'C:\\browser-user',
   dbCreateSession: h.create, dbDeleteSession: h.remove, dbGetAllSessions: h.all,
   dbGetMessages: h.messages, dbGetRecents: async () => [], dbGetRevision: h.revision,
+  cancelSessionCommands: async () => ({ killed: 0 }), agentDropSession: () => {}, ckptRemoveSession: async () => {},
 } }))
 import { prepareCloudSession, useChatStore } from '../src/stores/chat-store'
 import { NEW_SESSION_TITLE } from '../src/lib/chat-row'
@@ -36,14 +37,15 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 describe('host-owned cloud session preparation', () => {
-  it('creates new sessions inside the approved workspace and admits only one first-run preparation', async () => {
+  it('keeps the selected host directory and admits only one first-run preparation', async () => {
     const id = useChatStore.getState().createSession({ workingDir: 'C:\\outside' })
     const session = useChatStore.getState().sessions.find(item => item.id === id)!
-    expect(session).toMatchObject({ workingDir: h.workspace, defaultWorkDir: h.workspace })
+    expect(session).toMatchObject({ workingDir: 'C:\\outside' })
+    expect(session.defaultWorkDir).toContain('clerkbox-work')
     expect(h.create).not.toHaveBeenCalled()
     await Promise.all([prepareCloudSession(id), prepareCloudSession(id)])
     expect(h.create).toHaveBeenCalledTimes(1)
-    expect(h.create).toHaveBeenCalledWith(expect.objectContaining({ id, working_dir: h.workspace, default_work_dir: h.workspace }))
+    expect(h.create).toHaveBeenCalledWith(expect.objectContaining({ id, working_dir: 'C:\\outside', default_work_dir: session.defaultWorkDir }))
     await prepareCloudSession(id)
     expect(h.create).toHaveBeenCalledTimes(1)
   })
@@ -54,16 +56,17 @@ describe('host-owned cloud session preparation', () => {
     await prepareCloudSession(id)
     expect(h.create).toHaveBeenCalledTimes(2)
   })
-  it('does not delete desktop history or run local workspace mutations from browser cleanup', async () => {
+  it('supports choosing host directories, harness modes and explicitly deleting a conversation', async () => {
     const first = useChatStore.getState().createSession()
     const second = useChatStore.getState().createSession()
     useChatStore.getState().setActiveSession(second)
     useChatStore.getState().updateSessionWorkingDir(second, 'C:\\outside')
     useChatStore.getState().setSessionHarnessMode(second, 'codex')
+    expect(useChatStore.getState().sessions.find(item => item.id === second)).toMatchObject({ workingDir: 'C:\\outside', harnessMode: 'codex' })
     useChatStore.getState().deleteSession(second)
     expect(useChatStore.getState().sessions.find(item => item.id === first)).toBeUndefined()
-    expect(useChatStore.getState().sessions.find(item => item.id === second)).toMatchObject({ workingDir: h.workspace, harnessMode: 'default' })
-    expect(h.remove).not.toHaveBeenCalled()
+    expect(useChatStore.getState().sessions.find(item => item.id === second)).toBeUndefined()
+    expect(h.remove).toHaveBeenCalledWith(second)
     expect(h.create).not.toHaveBeenCalled()
   })
   it('loads scoped history without deleting an empty desktop session and preserves live run state', async () => {
@@ -72,7 +75,7 @@ describe('host-owned cloud session preparation', () => {
     await useChatStore.getState().loadFromDb()
     expect(h.remove).not.toHaveBeenCalled()
     expect(useChatStore.getState().streamingSessionIds.has('host-running-session')).toBe(true)
-    expect(useChatStore.getState().sessions[0]).toMatchObject({ workingDir: h.workspace })
+    expect(useChatStore.getState().sessions[0].defaultWorkDir).toContain('clerkbox-work')
   })
   it('restores the selected conversation on reload only from this device scoped history', async () => {
     h.all.mockResolvedValue([{ id: 'history-one', title: 'Earlier task', created_at: 1, updated_at: 1 }, { id: 'history-two', title: 'Current task', created_at: 2, updated_at: 2 }])

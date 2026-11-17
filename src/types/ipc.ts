@@ -651,6 +651,9 @@ export interface ClerkBoxAPI {
   onBotsWeixinQr: (callback: (event: WeixinQrEvent) => void) => () => void
   // 共享 KV 存储（Electron 与 WebUI 双模式同步持久化）
   kvGet: (key: string) => Promise<string | null>
+  kvPatch: (patch: { name: string; base: string | null; value: string | null }) => Promise<{ value: string | null }>
+  onRemoteWorkbenchCommand: (callback: (command: { id: string; action: 'scheduled.run'; taskId: string }) => void) => () => void
+  remoteWorkbenchReply: (id: string, result: { runId?: string | null; error?: string }) => void
   kvSet: (key: string, value: string) => Promise<void>
   kvRemove: (key: string) => Promise<void>
   /** 定时任务：保持系统唤醒（true=阻止系统休眠；false=恢复默认） */
@@ -728,6 +731,8 @@ export interface ClerkBoxAPI {
 
 /** 模型 API 连接配置（主进程代理入参） */
 export interface ApiConnConfig {
+  /** Select the correct host-owned credential when a paired browser uses a saved provider. */
+  providerId?: string
   baseUrl: string
   apiKey: string
   apiCompat: ApiCompat

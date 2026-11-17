@@ -22,7 +22,7 @@ export function useProviderConnectionTest(providerId: string) {
     if (pending.current) return
     const snapshot = useSettingsStore.getState().providers.find((p) => p.id === providerId)
     if (!snapshot) return
-    const cfg = { baseUrl: snapshot.baseUrl, apiKey: snapshot.apiKey, apiCompat: snapshot.apiCompat }
+    const cfg = { providerId: snapshot.id, baseUrl: snapshot.baseUrl, apiKey: snapshot.apiKey, apiCompat: snapshot.apiCompat }
     const models = [...snapshot.models]
     const eligible = new Set(models)
     let unsubscribe = () => {}

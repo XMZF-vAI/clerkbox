@@ -8,6 +8,7 @@ const { kv, ipcStub } = vi.hoisted(() => {
   const kv = new Map<string, string>()
   const ipcStub = {
     kvGet: vi.fn(async (key: string) => kv.get(key) ?? null),
+    kvPatch: vi.fn(async ({ name, value }: { name: string; value: string | null }) => { if (value === null) kv.delete(name); else kv.set(name, value); return { value } }),
     kvSet: vi.fn(async (key: string, value: string) => {
       kv.set(key, value)
     }),

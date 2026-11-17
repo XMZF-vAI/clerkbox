@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { ipc } from '../lib/ipc-client'
+import { isCloudRemoteMode } from '../remote/browser'
 import { toolRegistry } from '../lib/tool-registry'
 import { useSettingsStore } from './settings-store'
 import type { McpServerConfig, McpServerStatus, McpToolInfo } from '../types/ipc'
@@ -55,6 +56,11 @@ export async function syncMcpServers(servers: McpServerConfig[]): Promise<void> 
  * 返回清理函数。
  */
 export function initMcp(): () => void {
+  if (isCloudRemoteMode()) {
+    // Pairing projects redacted configs. Never restart host servers using that projection.
+    void ipc.mcpStatus().then(applyStatuses).catch((error) => console.error('[mcp-store] status failed:', error))
+    return ipc.onMcpStatus(applyStatuses)
+  }
   void syncMcpServers(useSettingsStore.getState().mcpServers ?? [])
 
   const unsubSettings = useSettingsStore.subscribe((state, prev) => {

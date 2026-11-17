@@ -17,6 +17,7 @@
  *    表现为「改了凭据之后机器人再也起不来」。
  */
 import { BrowserWindow, ipcMain, net } from 'electron'
+import { publishRemoteUiEvent } from '../remote-ui-events'
 import os from 'os'
 import { promises as fsp } from 'node:fs'
 import i18n from '../../src/i18n'
@@ -188,6 +189,7 @@ function stopApprovalHeartbeat(): void {
 
 /** 发给所有存活窗口；单个窗口正在销毁不影响其余窗口 */
 function sendToWindows(channel: string, payload?: unknown): void {
+  publishRemoteUiEvent(channel, payload)
   for (const win of BrowserWindow.getAllWindows()) {
     if (win.isDestroyed() || win.webContents.isDestroyed()) continue
     try {

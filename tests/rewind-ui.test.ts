@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const h = vi.hoisted(() => ({
   webUI: false,
+  cloud: false,
   chat: {} as Record<string, any>,
   scope: '', cursor: 0,
   slots: {} as Record<string, any[]>,
@@ -63,6 +64,7 @@ vi.mock('react-dom', () => ({ createPortal: h.portal }))
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }))
 vi.mock('../src/i18n', () => ({ default: { t: (key: string) => key } }))
 vi.mock('../src/lib/ipc-client', () => ({ get isWebUIMode() { return h.webUI } }))
+vi.mock('../src/remote/browser', () => ({ isCloudRemoteMode: () => h.cloud }))
 vi.mock('../src/lib/rewind-action', () => ({ previewRewind: h.preview, applyRewind: h.apply }))
 vi.mock('../src/stores/chat-store', () => ({
   useChatStore: Object.assign((select: (state: any) => unknown) => select(h.chat), { getState: () => h.chat }),
@@ -162,6 +164,7 @@ function deferred<T>() {
 beforeEach(() => {
   vi.clearAllMocks()
   h.webUI = false
+  h.cloud = false
   h.slots = {}
   h.effects = {}
   h.pending = []
@@ -210,9 +213,20 @@ describe('rewind action ownership and availability', () => {
     expect(actionView({ anchor: { ...anchor, ...overrides } as Message })).toEqual([])
   })
 
-  it('keeps destructive actions unavailable in WebUI', () => {
+  it('keeps destructive actions unavailable to unpaired LAN clients', () => {
     h.webUI = true
     expect(actionView()).toEqual([])
+  })
+
+  it('offers the same host-validated rewind actions to paired browsers', () => {
+    h.webUI = true
+    h.cloud = true
+    const view = actionView()
+    for (const label of ['chat.rewind.edit', 'chat.rewind.recall', 'chat.rewind.undoFiles']) {
+      expect(button(view, label).props.disabled).toBeFalsy()
+    }
+    button(view, 'chat.rewind.recall').props.onClick()
+    expect(actionView().find((node) => node.type === RewindDialog)?.props).toMatchObject({ sessionId, anchor, mode: 'recall' })
   })
 
   it.each(['streamingSessionIds', 'compactingSessionIds', 'stoppingSessionIds', 'rewindingSessionIds', 'draftSubmitting'])

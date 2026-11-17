@@ -6,6 +6,7 @@
  * - 状态变化通过 'mcp:statusChanged' 事件推送给渲染进程
  */
 import { app, BrowserWindow } from 'electron'
+import { publishRemoteUiEvent } from './remote-ui-events'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
@@ -327,6 +328,7 @@ export class McpManager {
   }
 
   private broadcast(): void {
+    publishRemoteUiEvent('mcp:statusChanged', this.statuses())
     const win = this.mainWindow
     if (win && !win.isDestroyed()) {
       win.webContents.send('mcp:statusChanged', this.statuses())

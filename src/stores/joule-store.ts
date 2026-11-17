@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { ipc, isWebUIMode } from '../lib/ipc-client'
+import { isCloudRemoteMode } from '../remote/browser'
 import { sharedStorage } from '../lib/shared-storage'
 import { defaultJouleModelId, mergeJouleModels } from '../lib/joule-models'
 import { useSettingsStore } from './settings-store'
@@ -222,7 +223,7 @@ export const useJouleStore = create<JouleStoreState>()(
 
       init: () => {
         set({ initialized: true })
-        if (isWebUIMode) return () => {}
+        if (isWebUIMode && !isCloudRemoteMode()) return () => {}
         // StrictMode 开发模式会「挂载 → 清理 → 再挂载」：不因 initialized 提前返回，
         // 否则第一次清理退订后第二次不会再订阅。
         if (!unsubscribeState) {
@@ -246,7 +247,7 @@ export const useJouleStore = create<JouleStoreState>()(
         try {
           const result = await ipc.jouleStartLogin()
           if (result.cancelled) return
-          if (result.error || !result.key) {
+          if (result.error || (!result.key && !isCloudRemoteMode())) {
             set({ error: result.error || '登录失败，请重试' })
             return
           }
@@ -254,7 +255,7 @@ export const useJouleStore = create<JouleStoreState>()(
           const existingModels = settings.providers.find((item) => item.id === JOULE_PROVIDER_ID)?.models ?? []
           const models = mergeJouleModels(existingModels, result.models ?? [])
           if (!settings.model) activateWhenReady = true
-          settings.upsertProvider(jouleProviderFrom(models, result.key))
+          settings.upsertProvider({ ...jouleProviderFrom(models, result.key || ''), ...(isCloudRemoteMode() ? { apiKeyConfigured: true } : {}) })
           if (result.account) {
             applySnapshot(result.account)
           } else {
@@ -290,7 +291,7 @@ export const useJouleStore = create<JouleStoreState>()(
       },
 
       refresh: async () => {
-        if (isWebUIMode) return
+        if (isWebUIMode && !isCloudRemoteMode()) return
         try {
           const snapshot = await ipc.jouleRefresh()
           applySnapshot(snapshot)

@@ -5,8 +5,17 @@
  * 只有「发送被受理」才清，本地错误也按来源会话回流——一旦这三点回退，
  * 表现就是切会话串草稿、发送失败丢字、后台会话的报错挂到当前会话上。
  */
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
+
+vi.mock('../src/lib/ipc-client', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/lib/ipc-client')>()
+  return { ...actual, ipc: { ...actual.ipc,
+    dbDeleteSession: vi.fn(async () => undefined),
+    ckptRemoveSession: vi.fn(async () => undefined),
+    cancelSessionCommands: vi.fn(async () => undefined),
+  } }
+})
 import { EMPTY_CHAT_DRAFT, hasChatDraft, useChatStore } from '../src/stores/chat-store'
 
 const chatInputSource = readFileSync(new URL('../src/components/chat/ChatInput.tsx', import.meta.url), 'utf8')

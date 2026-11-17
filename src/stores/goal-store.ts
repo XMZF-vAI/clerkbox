@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import { sharedStorage } from '../lib/shared-storage'
 import type { SessionGoal } from '../types/agent'
 
 /**
@@ -55,6 +56,6 @@ export const useGoalStore = create<GoalState>()(
         return { bySession: next }
       }),
     }),
-    { name: 'clerkbox-goal-store' }
+    { name: 'clerkbox-goal-store', storage: sharedStorage }
   )
 )

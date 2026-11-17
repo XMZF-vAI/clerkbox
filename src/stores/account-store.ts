@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import { ipc } from '../lib/ipc-client'
+import { isCloudRemoteMode } from '../remote/browser'
 import { sharedStorage } from '../lib/shared-storage'
 import { useSettingsStore } from './settings-store'
 // 账号系统 IPC 契约类型统一从 types/ipc 引入（主进程 / preload / ipc-client 同源）
@@ -227,11 +228,10 @@ export const useAccountStore = create<AccountState>()(
         } catch {
           // 查询失败按未设置处理（不影响同步，仅明文/密文差异）
         }
-        mountProvidersAutoUpload()
-        mountMcpAutoUpload()
+        if (!isCloudRemoteMode()) { mountProvidersAutoUpload(); mountMcpAutoUpload() }
         // 自动同步：启动后静默下载一次（新者比较在主进程，被 skip 的项静默）
         const s = get()
-        if (s.autoSync && s.loggedIn) void s.autoDownload()
+        if (!isCloudRemoteMode() && s.autoSync && s.loggedIn) void s.autoDownload()
       },
 
       login: async () => {

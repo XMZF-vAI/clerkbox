@@ -4,6 +4,7 @@ import * as os from 'os'
 import * as pty from 'node-pty'
 import type { IPty } from 'node-pty'
 import type { PtyCreateInfo } from '../src/types/ipc'
+import { publishRemoteUiEvent } from './remote-ui-events'
 
 /**
  * 内置工作台终端（node-pty 真 TTY）。
@@ -22,6 +23,15 @@ const debugLog = (...args: unknown[]) => {
 }
 
 const terminals = new Map<string, IPty>()
+const pendingOutput = new Map<string, { text: string; timer: ReturnType<typeof setTimeout> }>()
+
+function flushRemoteOutput(id: string): void {
+  const pending = pendingOutput.get(id)
+  if (!pending) return
+  clearTimeout(pending.timer)
+  pendingOutput.delete(id)
+  publishRemoteUiEvent('pty:data', id, pending.text)
+}
 
 function pickShell(): { file: string; args: string[] } {
   if (process.platform === 'win32') return { file: 'powershell.exe', args: [] }
@@ -34,12 +44,22 @@ function broadcast(channel: string, ...args: unknown[]) {
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed()) win.webContents.send(channel, ...args)
   }
+  const id = args[0] as string
+  if (channel === 'pty:data' && id.startsWith('remote-')) {
+    const pending = pendingOutput.get(id)
+    if (pending) pending.text += args[1] as string
+    else pendingOutput.set(id, { text: args[1] as string, timer: setTimeout(() => flushRemoteOutput(id), 40) })
+    if ((pendingOutput.get(id)?.text.length ?? 0) >= 32 * 1024) flushRemoteOutput(id)
+  } else if (channel === 'pty:exit') {
+    flushRemoteOutput(id)
+    publishRemoteUiEvent(channel, ...args)
+  }
 }
 
 export function registerTerminalHandlers() {
   ipcMain.handle('ptyCreate', (_event, info: PtyCreateInfo) => {
     if (!info || typeof info.id !== 'string' || !info.id) throw new Error('Invalid terminal id')
-    if (terminals.size >= MAX_TERMINALS) throw new Error('Too many terminals')
+    if (!terminals.has(info.id) && terminals.size >= MAX_TERMINALS) throw new Error('Too many terminals')
 
     // 同 id 重复创建（React 严格模式双挂载等）：先回收旧会话再重建
     terminals.get(info.id)?.kill()
@@ -66,6 +86,7 @@ export function registerTerminalHandlers() {
     debugLog('spawn', info.id, 'cwd=', cwd)
     proc.onData((data) => broadcast('pty:data', info.id, data))
     proc.onExit(({ exitCode }) => {
+      if (terminals.get(info.id) !== proc) return
       terminals.delete(info.id)
       debugLog('exit', info.id, 'code=', exitCode)
       broadcast('pty:exit', info.id, exitCode)
@@ -74,14 +95,17 @@ export function registerTerminalHandlers() {
     return { ok: true }
   })
 
-  ipcMain.on('ptyInput', (_event, id: unknown, data: unknown) => {
+  const input = (_event: unknown, id: unknown, data: unknown) => {
     if (typeof id !== 'string' || typeof data !== 'string') return
+    if (data.length > 64 * 1024) throw new Error('Terminal input too large')
     const proc = terminals.get(id)
     debugLog('input', id, 'alive=', !!proc, 'len=', data.length)
     proc?.write(data)
-  })
+  }
+  ipcMain.on('ptyInput', input)
+  ipcMain.handle('ptyInput', input)
 
-  ipcMain.on('ptyResize', (_event, id: unknown, cols: unknown, rows: unknown) => {
+  const resize = (_event: unknown, id: unknown, cols: unknown, rows: unknown) => {
     if (typeof id !== 'string') return
     try {
       terminals.get(id)?.resize(
@@ -91,7 +115,9 @@ export function registerTerminalHandlers() {
     } catch {
       // 会话可能已退出，忽略 resize 失败
     }
-  })
+  }
+  ipcMain.on('ptyResize', resize)
+  ipcMain.handle('ptyResize', resize)
 
   ipcMain.handle('ptyKill', (_event, id: string) => {
     if (typeof id !== 'string') return
@@ -107,8 +133,20 @@ export function registerTerminalHandlers() {
   })
 }
 
+/** A revoked device must not leave interactive shells running on the host. */
+export function disposeRemoteTerminals(deviceId?: string): void {
+  const prefix = deviceId ? `remote-${deviceId}-` : 'remote-'
+  for (const [id, proc] of terminals) {
+    if (!id.startsWith(prefix)) continue
+    terminals.delete(id)
+    try { proc.kill() } catch { /* Already exited. */ }
+    broadcast('pty:exit', id, 0)
+  }
+}
+
 /** 应用退出前回收全部终端进程（main.ts before-quit 调用） */
 export function disposeAllTerminals() {
+  for (const id of pendingOutput.keys()) flushRemoteOutput(id)
   for (const [, proc] of terminals) {
     try {
       proc.kill()

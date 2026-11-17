@@ -5,6 +5,7 @@ import { normalizeEffort } from '../types/agent'
 import { guessApiCompat, guessPresetByBaseUrl, fallbackNameFromBaseUrl } from '../lib/provider-catalog'
 import { ipc } from '../lib/ipc-client'
 import { sharedStorage } from '../lib/shared-storage'
+import { isCloudRemoteMode } from '../remote/browser'
 import {
   upsertPermissionRule as upsertRule,
   removePermissionRule as removeRule,
@@ -76,6 +77,9 @@ const defaultSettings: AppSettings = {
 
 const apiKeyWriteQueues = new Map<string, Promise<void>>()
 const apiKeyRevisions = new Map<string, number>()
+export async function flushProviderApiKeyWrites(): Promise<void> {
+  while (apiKeyWriteQueues.size) await Promise.all([...apiKeyWriteQueues.values()])
+}
 let credentialStorageReady = false
 let credentialHydrationEpoch = 0
 
@@ -237,7 +241,7 @@ export const useSettingsStore = create<SettingsState>()(
       partialize: (state) => {
         // Keep credentials only in Electron's OS-backed safeStorage.
         const { showSettings: _, pendingSettingsTab: _pst, apiKey: _apiKey, providers, customModels, ...rest } = state
-        const keepBrowserCredentials = !credentialStorageReady
+        const keepBrowserCredentials = !credentialStorageReady && !isCloudRemoteMode()
         return {
           ...rest,
           apiKey: keepBrowserCredentials ? state.apiKey : '',

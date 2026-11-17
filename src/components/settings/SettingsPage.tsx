@@ -79,6 +79,7 @@ export default function SettingsPage({ onClose }: { onClose: () => void }) {
     setTestError('')
     try {
       const res = await ipc.apiTestConnection({
+        providerId: settings.activeProviderId,
         baseUrl: settings.baseUrl,
         apiKey: settings.apiKey,
         apiCompat: settings.apiCompat || 'openai',

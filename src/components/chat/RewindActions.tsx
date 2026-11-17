@@ -8,6 +8,7 @@ import { useState } from 'react'
 import { Pencil, RotateCcw, Undo2 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { isWebUIMode } from '../../lib/ipc-client'
+import { isCloudRemoteMode } from '../../remote/browser'
 import { isRewindableUserMessage } from '../../lib/rewind'
 import { useChatStore } from '../../stores/chat-store'
 import { MessageActionButton } from './MessageActions'
@@ -50,9 +51,8 @@ export default function RewindActions({
     : queued ? t('chat.rewind.busy.queued')
     : undefined
 
-  // WebUI 远程视图不给这三个动作：撤回要删本机文件、截断本机对话，能力面本来就不在远程。
-  // 压缩边界/子 agent 卡片等合成出来的「类用户消息」也不能当锚点（与 rewind.isRewindableUserMessage 同一条判断）。
-  if (isWebUIMode || !isRewindableUserMessage(anchor)) return null
+  // The paired host validates and serializes rewinds; plain LAN clients lack that grant.
+  if ((isWebUIMode && !isCloudRemoteMode()) || !isRewindableUserMessage(anchor)) return null
 
   return (
     <>

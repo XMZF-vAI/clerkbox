@@ -18,6 +18,7 @@ const { kv, ipcStub, swallow } = vi.hoisted(() => {
   const swallow = { count: 0 }
   const ipcStub = {
     kvGet: vi.fn(async (key: string) => kv.get(key) ?? null),
+    kvPatch: vi.fn(async ({ name, value }: { name: string; value: string | null }) => { if (value === null) kv.delete(name); else kv.set(name, value); return { value } }),
     kvSet: vi.fn(async (key: string, value: string) => {
       if (key === 'clerkbox-scheduled-task-proposals' && swallow.count > 0) {
         swallow.count--
